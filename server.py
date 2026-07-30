@@ -16,6 +16,7 @@ import math
 import mimetypes
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -54,6 +55,55 @@ DEFAULT_COLORS = {
 }
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
+FOLDER_PICKER_LOCK = threading.Lock()
+
+FOLDER_PICKER_SCRIPT = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$owner = $null
+$dialog = $null
+try {
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+    $owner.ShowInTaskbar = $false
+    $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $owner.Location = New-Object System.Drawing.Point(
+        [int]($area.Left + ($area.Width / 2)),
+        [int]($area.Top + ($area.Height / 2))
+    )
+    $owner.Size = New-Object System.Drawing.Size(1, 1)
+    $owner.Opacity = 0
+    $owner.TopMost = $true
+    $owner.Show()
+    $owner.Activate()
+
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = '画像フォルダを選択してください'
+    $dialog.ShowNewFolderButton = $true
+    $initialPath = [Environment]::GetEnvironmentVariable('MOSAIC_STUDIO_INITIAL_FOLDER', 'Process')
+    if ($initialPath -and (Test-Path -LiteralPath $initialPath -PathType Container)) {
+        $dialog.SelectedPath = [System.IO.Path]::GetFullPath($initialPath)
+    }
+
+    $result = $dialog.ShowDialog($owner)
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write($dialog.SelectedPath)
+    }
+}
+finally {
+    if ($null -ne $dialog) {
+        $dialog.Dispose()
+    }
+    if ($null -ne $owner) {
+        $owner.Close()
+        $owner.Dispose()
+    }
+}
+"""
 
 
 class ClientError(ValueError):
@@ -436,6 +486,52 @@ def inference_device_name() -> str | None:
     return torch.cuda.get_device_name(0)
 
 
+def pick_windows_folder(initial_path: str) -> dict[str, Any]:
+    if not FOLDER_PICKER_LOCK.acquire(blocking=False):
+        raise ClientError("フォルダ参照ダイアログは既に開いています。")
+    try:
+        initial = ""
+        if initial_path:
+            candidate = Path(initial_path).expanduser()
+            if candidate.is_dir():
+                initial = str(candidate.resolve())
+        environment = os.environ.copy()
+        environment["MOSAIC_STUDIO_INITIAL_FOLDER"] = initial
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-STA",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    FOLDER_PICKER_SCRIPT,
+                ],
+                capture_output=True,
+                check=False,
+                env=environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            raise ClientError("Windowsフォルダ参照ダイアログを開けませんでした。") from exc
+        if completed.returncode != 0:
+            raise ClientError("Windowsフォルダ参照ダイアログを開けませんでした。")
+        try:
+            selected_text = completed.stdout.decode("utf-8-sig").strip("\r\n")
+        except UnicodeDecodeError as exc:
+            raise ClientError("フォルダ参照結果をUTF-8で読み取れませんでした。") from exc
+        if not selected_text:
+            return {"cancelled": True}
+        selected = Path(selected_text).resolve()
+        if not selected.is_dir():
+            raise ClientError("選択されたフォルダが見つかりません。")
+        return {"cancelled": False, "path": str(selected)}
+    finally:
+        FOLDER_PICKER_LOCK.release()
+
+
 def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     if not raw.startswith(PNG_SIGNATURE):
         raise ClientError("PNGファイルではありません。")
@@ -761,7 +857,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             payload = self._read_json_body()
-            if path == "/api/folder":
+            if path == "/api/pick-folder":
+                self._json(pick_windows_folder(str(payload.get("path", ""))))
+            elif path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images})
             elif path == "/api/detect":

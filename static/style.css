@@ -46,7 +46,7 @@ input[type="text"], input[type="number"] {
   background: #22262b;
 }
 .brand { color: #d5f2e9; font-size: 17px; font-weight: 700; white-space: nowrap; }
-.folder-control { min-width: 0; display: grid; grid-template-columns: auto minmax(140px, 1fr) auto; align-items: center; gap: 7px; }
+.folder-control { min-width: 0; display: grid; grid-template-columns: auto minmax(110px, 1fr) auto auto; align-items: center; gap: 6px; }
 .folder-control label, .numeric-control { color: #bdc4cd; white-space: nowrap; }
 .top-actions { display: flex; gap: 6px; white-space: nowrap; }
 .job-status { min-width: 0; display: grid; gap: 3px; }

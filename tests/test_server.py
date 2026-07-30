@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import numpy as np
@@ -14,6 +15,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import (  # noqa: E402
     ClientError,
+    FOLDER_PICKER_LOCK,
     ImageRecord,
     MosaicHandler,
     StudioState,
@@ -22,6 +24,7 @@ from server import (  # noqa: E402
     jpeg_metadata_manifest,
     mask_iou,
     merge_segment,
+    pick_windows_folder,
     png_ancillary_manifest,
     restore_tile_mask,
     save_with_mask,
@@ -194,6 +197,55 @@ class MosaicStudioTests(unittest.TestCase):
                 connection.close()
             httpd.shutdown()
             httpd.server_close()
+
+    def test_pick_folder_api_uses_sta_powershell_and_handles_cancel(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            initial = Path(directory).resolve()
+            selected = initial / "日本語フォルダ"
+            selected.mkdir()
+            completed = [
+                CompletedProcess([], 0, str(selected).encode("utf-8"), b""),
+                CompletedProcess([], 0, b"", b""),
+            ]
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                with patch("server.subprocess.run", side_effect=completed) as run:
+                    body = json.dumps({"path": str(initial)}).encode("utf-8")
+                    connection.request("POST", "/api/pick-folder", body, {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(payload, {"cancelled": False, "path": str(selected.resolve())})
+                    command = run.call_args_list[0].args[0]
+                    self.assertIn("-NoProfile", command)
+                    self.assertIn("-STA", command)
+                    self.assertEqual(
+                        run.call_args_list[0].kwargs["env"]["MOSAIC_STUDIO_INITIAL_FOLDER"],
+                        str(initial),
+                    )
+
+                    connection.request("POST", "/api/pick-folder", body, {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(payload, {"cancelled": True})
+            finally:
+                connection.close()
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_pick_folder_rejects_parallel_dialog(self):
+        FOLDER_PICKER_LOCK.acquire()
+        try:
+            with self.assertRaisesRegex(ClientError, "既に開いています"):
+                pick_windows_folder("")
+        finally:
+            FOLDER_PICKER_LOCK.release()
 
 
 if __name__ == "__main__":

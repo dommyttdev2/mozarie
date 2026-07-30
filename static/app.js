@@ -91,6 +91,28 @@ async function loadFolder() {
   }
 }
 
+async function pickFolder() {
+  const button = $("#pickFolder");
+  button.disabled = true;
+  setStatus("フォルダ参照を開いています...", "running");
+  try {
+    const data = await api("/api/pick-folder", {
+      method: "POST",
+      body: JSON.stringify({ path: $("#folderPath").value.trim() }),
+    });
+    if (data.cancelled) {
+      setStatus("フォルダ選択をキャンセルしました");
+      return;
+    }
+    $("#folderPath").value = data.path;
+    await loadFolder();
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderGallery() {
   const gallery = $("#gallery");
   gallery.textContent = "";
@@ -499,6 +521,7 @@ async function pollJob() {
 }
 
 $("#loadFolder").addEventListener("click", loadFolder);
+$("#pickFolder").addEventListener("click", pickFolder);
 $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
 $("#detectButton").addEventListener("click", runDetection);
 $("#applyButton").addEventListener("click", applyDetection);
