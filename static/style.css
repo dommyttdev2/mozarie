@@ -90,14 +90,14 @@ h2 { font-size: 14px; margin: 0 0 2px; }
 .gallery-check input { accent-color: #3fa58c; margin: 0; }
 
 .editor-pane { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
-.editor-toolbar { min-height: 47px; display: flex; gap: 11px; align-items: center; padding: 7px 10px; border-bottom: 1px solid #3c424a; background: #24282d; overflow-x: auto; }
-.tool-group { display: flex; gap: 4px; }
-.tool { min-width: 52px; padding-inline: 8px; }
+.editor-toolbar { min-height: 47px; display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid #3c424a; background: #24282d; overflow-x: auto; }
+.tool-group { display: flex; gap: 3px; }
+.tool { min-width: 48px; padding-inline: 6px; }
 .tool.active { background: #335d55; border-color: #57a993; }
-.numeric-control { display: flex; align-items: center; gap: 6px; min-width: 145px; }
-.numeric-control input[type="range"] { width: 80px; accent-color: #4bb99d; }
-.numeric-control input[type="number"] { width: 58px; }
-.numeric-control output { color: #d8dee6; min-width: 25px; }
+.numeric-control { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; }
+.numeric-control input[type="range"] { width: 52px; accent-color: #4bb99d; }
+.numeric-control input[type="number"] { width: 44px; }
+.numeric-control output { color: #d8dee6; min-width: 18px; }
 .save { margin-left: auto; }
 .canvas-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: repeating-conic-gradient(#292e34 0% 25%, #24282d 0% 50%) 50% / 22px 22px; }
 #editorCanvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
