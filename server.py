@@ -59,49 +59,130 @@ FOLDER_PICKER_LOCK = threading.Lock()
 
 FOLDER_PICKER_SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
+$source = @'
+using System;
+using System.Runtime.InteropServices;
 
-$owner = $null
-$dialog = $null
-try {
-    $owner = New-Object System.Windows.Forms.Form
-    $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
-    $owner.ShowInTaskbar = $false
-    $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $owner.Location = New-Object System.Drawing.Point(
-        [int]($area.Left + ($area.Width / 2)),
-        [int]($area.Top + ($area.Height / 2))
-    )
-    $owner.Size = New-Object System.Drawing.Size(1, 1)
-    $owner.Opacity = 0
-    $owner.TopMost = $true
-    $owner.Show()
-    $owner.Activate()
-
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = '画像フォルダを選択してください'
-    $dialog.ShowNewFolderButton = $true
-    $initialPath = [Environment]::GetEnvironmentVariable('MOSAIC_STUDIO_INITIAL_FOLDER', 'Process')
-    if ($initialPath -and (Test-Path -LiteralPath $initialPath -PathType Container)) {
-        $dialog.SelectedPath = [System.IO.Path]::GetFullPath($initialPath)
+namespace MosaicStudio {
+    [Flags]
+    internal enum FOS : uint {
+        FOS_PICKFOLDERS = 0x00000020,
+        FOS_FORCEFILESYSTEM = 0x00000040,
+        FOS_PATHMUSTEXIST = 0x00000800,
     }
 
-    $result = $dialog.ShowDialog($owner)
-    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-        [Console]::Out.Write($dialog.SelectedPath)
+    internal enum SigDn : uint {
+        FileSystemPath = 0x80058000,
+    }
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellItem {
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        void GetParent(out IShellItem parent);
+        void GetDisplayName(SigDn sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+        void GetAttributes(uint mask, out uint attributes);
+        void Compare(IShellItem other, uint hint, out int order);
+    }
+
+    [ComImport, Guid("B63EA76D-1F85-456F-A19C-48159EFA858B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellItemArray { }
+
+    // This is deliberately flat: COM interface inheritance must retain the
+    // complete native IFileOpenDialog vtable order in its managed definition.
+    [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IFileOpenDialog {
+        [PreserveSig] int Show(IntPtr parent);
+        void SetFileTypes(uint count, IntPtr filters);
+        void SetFileTypeIndex(uint index);
+        void GetFileTypeIndex(out uint index);
+        void Advise(IntPtr events, out uint cookie);
+        void Unadvise(uint cookie);
+        void SetOptions(FOS options);
+        void GetOptions(out FOS options);
+        void SetDefaultFolder(IShellItem folder);
+        void SetFolder(IShellItem folder);
+        void GetFolder(out IShellItem folder);
+        void GetCurrentSelection(out IShellItem item);
+        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+        void GetResult(out IShellItem item);
+        void AddPlace(IShellItem item, int alignment);
+        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
+        void Close(int result);
+        void SetClientGuid(ref Guid guid);
+        void ClearClientData();
+        void SetFilter(IntPtr filter);
+        void GetResults(out IShellItemArray results);
+        void GetSelectedItems(out IShellItemArray items);
+    }
+
+    [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+    internal class FileOpenDialogClass { }
+
+    internal static class Native {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        internal static extern void SHCreateItemFromParsingName(
+            string path, IntPtr bindContext, ref Guid riid, out IShellItem shellItem);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetForegroundWindow(IntPtr window);
+    }
+
+    public static class FolderPicker {
+        private const int ErrorCancelled = unchecked((int)0x800704C7);
+        private static readonly Guid ShellItemIid = new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+        public static string Pick(string initialPath) {
+            IFileOpenDialog dialog = null;
+            IShellItem defaultFolder = null;
+            IShellItem result = null;
+            try {
+                dialog = (IFileOpenDialog)new FileOpenDialogClass();
+                FOS options;
+                dialog.GetOptions(out options);
+                dialog.SetOptions(options | FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM | FOS.FOS_PATHMUSTEXIST);
+                dialog.SetTitle("画像フォルダを選択してください");
+                dialog.SetOkButtonLabel("選択");
+
+                if (!String.IsNullOrWhiteSpace(initialPath)) {
+                    Guid shellItemIid = ShellItemIid;
+                    Native.SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref shellItemIid, out defaultFolder);
+                    dialog.SetDefaultFolder(defaultFolder);
+                }
+
+                IntPtr owner = Native.GetForegroundWindow();
+                if (owner != IntPtr.Zero) Native.SetForegroundWindow(owner);
+                int showResult = dialog.Show(owner);
+                if (showResult == ErrorCancelled) return null;
+                if (showResult < 0) Marshal.ThrowExceptionForHR(showResult);
+
+                dialog.GetResult(out result);
+                string path;
+                result.GetDisplayName(SigDn.FileSystemPath, out path);
+                return path;
+            }
+            finally {
+                if (result != null) Marshal.FinalReleaseComObject(result);
+                if (defaultFolder != null) Marshal.FinalReleaseComObject(defaultFolder);
+                if (dialog != null) Marshal.FinalReleaseComObject(dialog);
+            }
+        }
     }
 }
-finally {
-    if ($null -ne $dialog) {
-        $dialog.Dispose()
-    }
-    if ($null -ne $owner) {
-        $owner.Close()
-        $owner.Dispose()
-    }
+'@
+
+Add-Type -TypeDefinition $source -Language CSharp
+$initialPath = [Environment]::GetEnvironmentVariable('MOSAIC_STUDIO_INITIAL_FOLDER', 'Process')
+$selectedPath = [MosaicStudio.FolderPicker]::Pick($initialPath)
+if ($null -ne $selectedPath) {
+    [Console]::Out.Write($selectedPath)
 }
 """
 

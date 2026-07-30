@@ -198,7 +198,7 @@ class MosaicStudioTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
-    def test_pick_folder_api_uses_sta_powershell_and_handles_cancel(self):
+    def test_pick_folder_api_uses_sta_common_item_dialog_and_handles_cancel(self):
         from http.server import ThreadingHTTPServer
 
         with tempfile.TemporaryDirectory() as directory:
@@ -224,6 +224,7 @@ class MosaicStudioTests(unittest.TestCase):
                     command = run.call_args_list[0].args[0]
                     self.assertIn("-NoProfile", command)
                     self.assertIn("-STA", command)
+                    self.assertIn("-NonInteractive", command)
                     self.assertEqual(
                         run.call_args_list[0].kwargs["env"]["MOSAIC_STUDIO_INITIAL_FOLDER"],
                         str(initial),
@@ -246,6 +247,54 @@ class MosaicStudioTests(unittest.TestCase):
                 pick_windows_folder("")
         finally:
             FOLDER_PICKER_LOCK.release()
+
+    def test_folder_picker_script_uses_common_item_dialog_contract(self):
+        from server import FOLDER_PICKER_SCRIPT
+
+        self.assertIn("IFileOpenDialog", FOLDER_PICKER_SCRIPT)
+        self.assertIn("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7", FOLDER_PICKER_SCRIPT)
+        self.assertIn("D57C7288-D4AD-4768-BE02-9D969532D960", FOLDER_PICKER_SCRIPT)
+        self.assertIn("FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM | FOS.FOS_PATHMUSTEXIST", FOLDER_PICKER_SCRIPT)
+        self.assertIn("SetDefaultFolder(defaultFolder)", FOLDER_PICKER_SCRIPT)
+        self.assertNotIn("dialog.SetFolder(", FOLDER_PICKER_SCRIPT)
+        self.assertIn("Marshal.FinalReleaseComObject", FOLDER_PICKER_SCRIPT)
+        self.assertNotIn("FolderBrowserDialog", FOLDER_PICKER_SCRIPT)
+        self.assertNotIn("System.Windows.Forms", FOLDER_PICKER_SCRIPT)
+
+        interface_start = FOLDER_PICKER_SCRIPT.index("internal interface IFileOpenDialog {")
+        interface_end = FOLDER_PICKER_SCRIPT.index("    }", interface_start)
+        interface_block = FOLDER_PICKER_SCRIPT[interface_start:interface_end]
+        method_order = [
+            "Show(",
+            "SetFileTypes(",
+            "SetFileTypeIndex(",
+            "GetFileTypeIndex(",
+            "Advise(",
+            "Unadvise(",
+            "SetOptions(",
+            "GetOptions(",
+            "SetDefaultFolder(",
+            "SetFolder(",
+            "GetFolder(",
+            "GetCurrentSelection(",
+            "SetFileName(",
+            "GetFileName(",
+            "SetTitle(",
+            "SetOkButtonLabel(",
+            "SetFileNameLabel(",
+            "GetResult(",
+            "AddPlace(",
+            "SetDefaultExtension(",
+            "Close(",
+            "SetClientGuid(",
+            "ClearClientData(",
+            "SetFilter(",
+            "GetResults(",
+            "GetSelectedItems(",
+        ]
+        positions = [interface_block.index(method) for method in method_order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("IFileOpenDialog :", FOLDER_PICKER_SCRIPT)
 
 
 if __name__ == "__main__":
