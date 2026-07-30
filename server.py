@@ -79,7 +79,7 @@ namespace MosaicStudio {
     internal interface IShellItem {
         void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
         void GetParent(out IShellItem parent);
-        void GetDisplayName(SigDn sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+        void GetDisplayName(SigDn sigdnName, out IntPtr name);
         void GetAttributes(uint mask, out uint attributes);
         void Compare(IShellItem other, uint hint, out int order);
     }
@@ -164,9 +164,16 @@ namespace MosaicStudio {
                 if (showResult < 0) Marshal.ThrowExceptionForHR(showResult);
 
                 dialog.GetResult(out result);
-                string path;
-                result.GetDisplayName(SigDn.FileSystemPath, out path);
-                return path;
+                IntPtr pathPointer = IntPtr.Zero;
+                try {
+                    result.GetDisplayName(SigDn.FileSystemPath, out pathPointer);
+                    string path = Marshal.PtrToStringUni(pathPointer);
+                    if (String.IsNullOrWhiteSpace(path)) throw new COMException("Folder path was not returned.");
+                    return path;
+                }
+                finally {
+                    if (pathPointer != IntPtr.Zero) Marshal.FreeCoTaskMem(pathPointer);
+                }
             }
             finally {
                 if (result != null) Marshal.FinalReleaseComObject(result);

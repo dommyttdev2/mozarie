@@ -258,6 +258,7 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn("SetDefaultFolder(defaultFolder)", FOLDER_PICKER_SCRIPT)
         self.assertNotIn("dialog.SetFolder(", FOLDER_PICKER_SCRIPT)
         self.assertIn("Marshal.FinalReleaseComObject", FOLDER_PICKER_SCRIPT)
+        self.assertIn("Marshal.FreeCoTaskMem(pathPointer)", FOLDER_PICKER_SCRIPT)
         self.assertNotIn("FolderBrowserDialog", FOLDER_PICKER_SCRIPT)
         self.assertNotIn("System.Windows.Forms", FOLDER_PICKER_SCRIPT)
 
