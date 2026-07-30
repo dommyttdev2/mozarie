@@ -494,6 +494,140 @@ def _png_with_original_chunks(source: bytes, image: Image.Image) -> bytes:
     return output
 
 
+def _parse_jpeg_header(raw: bytes) -> tuple[list[tuple[int, bytes]], bytes]:
+    if not raw.startswith(b"\xff\xd8"):
+        raise ClientError("JPEGファイルではありません。")
+    position = 2
+    segments: list[tuple[int, bytes]] = []
+    while position < len(raw):
+        marker_start = position
+        if raw[position] != 0xFF:
+            raise ClientError("JPEGヘッダ構造を安全に解析できません。")
+        while position < len(raw) and raw[position] == 0xFF:
+            position += 1
+        if position >= len(raw):
+            raise ClientError("JPEGヘッダが壊れています。")
+        marker = raw[position]
+        position += 1
+        if marker == 0xDA:  # Start of Scan: the remaining bytes are compressed image data.
+            if position + 2 > len(raw):
+                raise ClientError("JPEGスキャンヘッダが壊れています。")
+            length = int.from_bytes(raw[position:position + 2], "big")
+            if length < 2 or position + length > len(raw):
+                raise ClientError("JPEGスキャンヘッダが壊れています。")
+            return segments, raw[marker_start:]
+        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7 or marker == 0x01:
+            raise ClientError("対応外のJPEGヘッダ構造です。")
+        if position + 2 > len(raw):
+            raise ClientError("JPEGヘッダが壊れています。")
+        length = int.from_bytes(raw[position:position + 2], "big")
+        end = position + length
+        if length < 2 or end > len(raw):
+            raise ClientError("JPEGヘッダが壊れています。")
+        segments.append((marker, raw[marker_start:end]))
+        position = end
+    raise ClientError("JPEG画像データが見つかりません。")
+
+
+def _is_jpeg_metadata_marker(marker: int) -> bool:
+    return 0xE0 <= marker <= 0xEF or marker == 0xFE
+
+
+def jpeg_metadata_manifest(raw: bytes) -> list[str]:
+    segments, _scan = _parse_jpeg_header(raw)
+    return [
+        f"FF{marker:02X}:{hashlib.sha256(segment).hexdigest()}"
+        for marker, segment in segments
+        if _is_jpeg_metadata_marker(marker)
+    ]
+
+
+def _verify_decodable_image(raw: bytes) -> None:
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+    except UnidentifiedImageError as exc:
+        raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
+
+
+def _jpeg_with_original_metadata(source: bytes, image: Image.Image) -> bytes:
+    source_segments, _source_scan = _parse_jpeg_header(source)
+    source_manifest = jpeg_metadata_manifest(source)
+    encoded = io.BytesIO()
+    image.save(encoded, format="JPEG", quality=95)
+    encoded_segments, encoded_scan = _parse_jpeg_header(encoded.getvalue())
+    output = b"\xff\xd8" + b"".join(
+        segment for marker, segment in source_segments if _is_jpeg_metadata_marker(marker)
+    ) + b"".join(
+        segment for marker, segment in encoded_segments if not _is_jpeg_metadata_marker(marker)
+    ) + encoded_scan
+    if source_manifest != jpeg_metadata_manifest(output):
+        raise ClientError("JPEGメタデータ検証に失敗したため保存を中止しました。")
+    _verify_decodable_image(output)
+    return output
+
+
+WEBP_METADATA_CHUNKS = {b"ICCP", b"EXIF", b"XMP "}
+WEBP_SUPPORTED_CHUNKS = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", *WEBP_METADATA_CHUNKS}
+
+
+def _parse_webp_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
+    if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+        raise ClientError("WebPファイルではありません。")
+    if int.from_bytes(raw[4:8], "little") + 8 != len(raw):
+        raise ClientError("WebPコンテナサイズを安全に検証できません。")
+    chunks: list[tuple[bytes, bytes]] = []
+    position = 12
+    while position < len(raw):
+        if position + 8 > len(raw):
+            raise ClientError("WebPチャンクが壊れています。")
+        chunk_type = raw[position:position + 4]
+        size = int.from_bytes(raw[position + 4:position + 8], "little")
+        end = position + 8 + size
+        padded_end = end + (size % 2)
+        if padded_end > len(raw):
+            raise ClientError("WebPチャンクが壊れています。")
+        chunks.append((chunk_type, raw[position:padded_end]))
+        position = padded_end
+    return chunks
+
+
+def _validate_safe_webp_structure(raw: bytes) -> None:
+    chunks = _parse_webp_chunks(raw)
+    chunk_types = [chunk_type for chunk_type, _chunk in chunks]
+    if any(chunk_type in {b"ANIM", b"ANMF"} for chunk_type in chunk_types):
+        raise ClientError("アニメーションWebPは安全保証できないため保存対象外です。")
+    if any(chunk_type not in WEBP_SUPPORTED_CHUNKS for chunk_type in chunk_types):
+        raise ClientError("対応外のWebPチャンクがあるため保存を中止しました。")
+    if sum(chunk_type in {b"VP8 ", b"VP8L"} for chunk_type in chunk_types) != 1:
+        raise ClientError("WebP画像データを安全に検証できません。")
+
+
+def webp_metadata_manifest(raw: bytes) -> list[str]:
+    _validate_safe_webp_structure(raw)
+    return [
+        f"{chunk_type.decode('ascii')}:{hashlib.sha256(chunk).hexdigest()}"
+        for chunk_type, chunk in _parse_webp_chunks(raw)
+        if chunk_type in WEBP_METADATA_CHUNKS
+    ]
+
+
+def _webp_with_original_metadata(source: bytes, image: Image.Image, source_info: dict[str, Any]) -> bytes:
+    source_manifest = webp_metadata_manifest(source)
+    save_args = {
+        key: source_info[key]
+        for key in ("icc_profile", "exif", "xmp")
+        if key in source_info
+    }
+    encoded = io.BytesIO()
+    image.save(encoded, format="WEBP", quality=95, **save_args)
+    output = encoded.getvalue()
+    if source_manifest != webp_metadata_manifest(output):
+        raise ClientError("WebPメタデータ検証に失敗したため保存を中止しました。")
+    _verify_decodable_image(output)
+    return output
+
+
 def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int) -> Image.Image:
     if block_size < 1:
         raise ClientError("モザイク粗さが正しくありません。")
@@ -550,20 +684,12 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
         modified = _apply_mosaic_to_image(source_image, mask, block_size)
         if suffix == ".png":
             output = _png_with_original_chunks(source, modified)
+        elif suffix in {".jpg", ".jpeg"}:
+            output = _jpeg_with_original_metadata(source, modified)
+        elif suffix == ".webp":
+            output = _webp_with_original_metadata(source, modified, source_image.info)
         else:
-            encoded = io.BytesIO()
-            save_args: dict[str, Any] = {}
-            if "exif" in source_image.info:
-                save_args["exif"] = source_image.info["exif"]
-            if "icc_profile" in source_image.info:
-                save_args["icc_profile"] = source_image.info["icc_profile"]
-            if suffix in {".jpg", ".jpeg"}:
-                modified.save(encoded, format="JPEG", quality=95, subsampling="keep", **save_args)
-            else:
-                if "xmp" in source_image.info:
-                    save_args["xmp"] = source_image.info["xmp"]
-                modified.save(encoded, format="WEBP", quality=95, **save_args)
-            output = encoded.getvalue()
+            raise ClientError("この画像形式は安全保存に対応していません。")
 
     temporary_path: Path | None = None
     try:
@@ -572,8 +698,14 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
-        if suffix == ".png" and png_ancillary_manifest(source) != png_ancillary_manifest(temporary_path.read_bytes()):
+        temporary_bytes = temporary_path.read_bytes()
+        if suffix == ".png" and png_ancillary_manifest(source) != png_ancillary_manifest(temporary_bytes):
             raise ClientError("PNGメタデータ検証に失敗したため置換しませんでした。")
+        if suffix in {".jpg", ".jpeg"} and jpeg_metadata_manifest(source) != jpeg_metadata_manifest(temporary_bytes):
+            raise ClientError("JPEGメタデータ検証に失敗したため置換しませんでした。")
+        if suffix == ".webp" and webp_metadata_manifest(source) != webp_metadata_manifest(temporary_bytes):
+            raise ClientError("WebPメタデータ検証に失敗したため置換しませんでした。")
+        _verify_decodable_image(temporary_bytes)
         os.replace(temporary_path, record.path)
         temporary_path = None
         os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))

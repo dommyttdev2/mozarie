@@ -20,9 +20,15 @@ No packages are installed by MosaicStudio.
 - PNG files are rebuilt by replacing only IDAT image-data chunks. Every
   ancillary chunk, including ComfyUI `prompt` and `workflow` chunks, is copied
   byte-for-byte and verified before an atomic replacement occurs.
+- JPEG files retain every original APP0-APP15 and COM segment byte-for-byte.
+  Their manifest and Pillow re-read are verified before replacement.
+- WebP files are saved only when they have a supported still-image structure.
+  ICCP, EXIF, and XMP chunks must match byte-for-byte after Pillow writes the
+  image. Animated or unknown WebP chunk structures are rejected without
+  changing the original file.
 - Original file timestamps are retained after saving.
-- JPEG and WebP preserve Exif/ICC metadata through Pillow, but the strict
-  byte-for-byte manifest guarantee applies to PNG ancillary chunks.
+- Any metadata mismatch or decode failure aborts before atomic replacement, so
+  the original image remains unchanged.
 
 ## Tests
 
