@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlparse
 import cv2
 import numpy as np
 from PIL import Image, UnidentifiedImageError
+import torch
 from ultralytics import YOLO
 
 
@@ -329,6 +330,7 @@ class StudioState:
                 crop = rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height))
                 results = model.predict(
                     crop,
+                    device=0,
                     conf=0.05,
                     imgsz=1024,
                     retina_masks=True,
@@ -426,6 +428,12 @@ def _valid_color(value: str) -> bool:
 
 def calculate_block_size(width: int, height: int) -> int:
     return max(4, math.ceil(max(width, height) / 100))
+
+
+def inference_device_name() -> str | None:
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_name(0)
 
 
 def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
@@ -586,7 +594,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             if path == "/api/health":
-                self._json({"ok": True, "modelExists": MODEL_PATH.is_file()})
+                self._json({"ok": True, "modelExists": MODEL_PATH.is_file(), "device": inference_device_name()})
             elif path == "/api/images":
                 self._json({"root": str(STATE.root) if STATE.root else "", "images": STATE.list_images()})
             elif path == "/api/job":
