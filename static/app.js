@@ -23,11 +23,11 @@ const canvas = $("#editorCanvas");
 const stage = $("#canvasStage");
 const ctx = canvas.getContext("2d");
 const addCanvas = document.createElement("canvas");
-const eraseCanvas = document.createElement("canvas");
+const exclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
-const eraseCtx = eraseCanvas.getContext("2d");
+const exclusionCtx = exclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
 const layerCtx = layerCanvas.getContext("2d");
 let renderedWidth = 0;
@@ -50,12 +50,24 @@ function setStatus(message, kind = "") {
   element.className = `status ${kind}`;
 }
 
-function currentRecord() {
-  return state.images.find((image) => image.id === state.currentId) || null;
+function setJobControls(running) {
+  $("#detectButton").disabled = running;
+  $("#applyButton").disabled = running;
 }
 
-function selectedOrAll() {
-  return state.selectedIds.size ? [...state.selectedIds] : state.images.map((image) => image.id);
+function updateProgress(job) {
+  const progress = $("#jobProgress");
+  const running = job?.state === "running";
+  progress.hidden = !running;
+  if (running) {
+    progress.max = Math.max(1, Number(job.total) || 1);
+    progress.value = Math.min(progress.max, Number(job.completed) || 0);
+  }
+  setJobControls(running);
+}
+
+function currentRecord() {
+  return state.images.find((image) => image.id === state.currentId) || null;
 }
 
 async function loadFolder() {
@@ -112,19 +124,19 @@ function updateSelectAllButton() {
 }
 
 function canvasSizeForImage(image) {
-  for (const target of [addCanvas, eraseCanvas, combinedCanvas]) {
+  for (const target of [addCanvas, exclusionCanvas, combinedCanvas]) {
     target.width = image.width;
     target.height = image.height;
   }
   addCtx.clearRect(0, 0, image.width, image.height);
-  eraseCtx.clearRect(0, 0, image.width, image.height);
+  exclusionCtx.clearRect(0, 0, image.width, image.height);
 }
 
 function clearEditor() {
   state.history = [];
   state.historyIndex = -1;
-  addCanvas.width = eraseCanvas.width = combinedCanvas.width = 1;
-  addCanvas.height = eraseCanvas.height = combinedCanvas.height = 1;
+  addCanvas.width = exclusionCanvas.width = combinedCanvas.width = 1;
+  addCanvas.height = exclusionCanvas.height = combinedCanvas.height = 1;
   $("#emptyState").hidden = false;
   $("#saveButton").disabled = true;
   $("#imageInfo").textContent = "画像未選択";
@@ -180,7 +192,7 @@ function saveDraft() {
   if (!state.currentId || !state.currentImage) return;
   state.drafts.set(state.currentId, {
     add: addCanvas.toDataURL("image/png"),
-    erase: eraseCanvas.toDataURL("image/png"),
+    exclusion: exclusionCanvas.toDataURL("image/png"),
   });
 }
 
@@ -192,9 +204,9 @@ function restoreDraft(imageId) {
     pushHistory();
     return;
   }
-  Promise.all([loadImage(draft.add), loadImage(draft.erase)]).then(([addImage, eraseImage]) => {
+  Promise.all([loadImage(draft.add), loadImage(draft.exclusion)]).then(([addImage, exclusionImage]) => {
     addCtx.drawImage(addImage, 0, 0);
-    eraseCtx.drawImage(eraseImage, 0, 0);
+    exclusionCtx.drawImage(exclusionImage, 0, 0);
     pushHistory();
     render();
   });
@@ -230,7 +242,7 @@ function setCssTransform(context) {
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function paintMask(maskImage, color, alpha) {
+function paintMask(maskImage, color, alpha, subtractImage = null) {
   if (!maskImage || !state.currentImage) return;
   const width = stage.clientWidth;
   const height = stage.clientHeight;
@@ -240,6 +252,10 @@ function paintMask(maskImage, color, alpha) {
   layerCtx.translate(state.view.x, state.view.y);
   layerCtx.scale(state.view.scale, state.view.scale);
   layerCtx.drawImage(maskImage, 0, 0, state.currentImage.width, state.currentImage.height);
+  if (subtractImage) {
+    layerCtx.globalCompositeOperation = "destination-out";
+    layerCtx.drawImage(subtractImage, 0, 0, state.currentImage.width, state.currentImage.height);
+  }
   layerCtx.globalCompositeOperation = "source-in";
   layerCtx.fillStyle = color;
   layerCtx.fillRect(0, 0, state.currentImage.width, state.currentImage.height);
@@ -264,10 +280,10 @@ function render() {
 
   const pulse = 0.36 + (Math.sin(Date.now() / 440) + 1) * 0.12;
   for (const candidate of state.candidates) {
-    if (candidate.enabled) paintMask(state.candidateImages.get(candidate.id), candidate.color, pulse);
+    if (candidate.enabled) paintMask(state.candidateImages.get(candidate.id), candidate.color, pulse, exclusionCanvas);
   }
-  paintMask(addCanvas, "#58d7be", 0.40);
-  paintMask(eraseCanvas, "#f17373", 0.27);
+  paintMask(addCanvas, "#58d7be", 0.40, exclusionCanvas);
+  paintMask(exclusionCanvas, "#f17373", 0.27);
 }
 
 function renderCandidates() {
@@ -330,7 +346,7 @@ function pointFromEvent(event) {
 }
 
 function snapshot() {
-  return { add: addCanvas.toDataURL("image/png"), erase: eraseCanvas.toDataURL("image/png") };
+  return { add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png") };
 }
 
 function pushHistory() {
@@ -350,19 +366,19 @@ function updateHistoryButtons() {
 async function restoreSnapshot(index) {
   const entry = state.history[index];
   if (!entry) return;
-  const [addImage, eraseImage] = await Promise.all([loadImage(entry.add), loadImage(entry.erase)]);
+  const [addImage, exclusionImage] = await Promise.all([loadImage(entry.add), loadImage(entry.exclusion)]);
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
-  eraseCtx.clearRect(0, 0, eraseCanvas.width, eraseCanvas.height);
+  exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   addCtx.drawImage(addImage, 0, 0);
-  eraseCtx.drawImage(eraseImage, 0, 0);
+  exclusionCtx.drawImage(exclusionImage, 0, 0);
   state.historyIndex = index;
   updateHistoryButtons();
   render();
 }
 
 function drawStroke(from, to, erase) {
-  const target = erase ? eraseCtx : addCtx;
-  const opposite = erase ? addCtx : eraseCtx;
+  const target = erase ? exclusionCtx : addCtx;
+  const opposite = erase ? addCtx : exclusionCtx;
   const size = Number($("#brushSize").value);
   opposite.save();
   opposite.globalCompositeOperation = "destination-out";
@@ -397,7 +413,7 @@ function buildCombinedMask() {
   }
   combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  combinedCtx.drawImage(eraseCanvas, 0, 0);
+  combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
   return combinedCanvas.toDataURL("image/png");
 }
@@ -414,7 +430,7 @@ async function saveCurrent() {
     });
     state.drafts.delete(state.currentId);
     addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
-    eraseCtx.clearRect(0, 0, eraseCanvas.width, eraseCanvas.height);
+    exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
     state.history = [];
     state.historyIndex = -1;
     state.currentImage = await loadImage(`/api/image/${encodeURIComponent(state.currentId)}?t=${Date.now()}`);
@@ -431,22 +447,30 @@ async function saveCurrent() {
 async function runDetection() {
   if (!state.images.length) return;
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds: selectedOrAll() }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds: state.images.map((image) => image.id) }) });
+    updateProgress({ state: "running", total: state.images.length, completed: 0 });
     setStatus("自動検出を開始しました", "running");
   } catch (error) {
+    updateProgress({ state: "idle" });
     setStatus(error.message, "error");
   }
 }
 
 async function applyDetection() {
   if (!state.images.length) return;
+  if (!state.selectedIds.size) {
+    setStatus("一括適用する画像を左のチェックで選択してください。", "error");
+    return;
+  }
   try {
     await api("/api/apply", {
       method: "POST",
-      body: JSON.stringify({ imageIds: selectedOrAll(), blockSize: Number($("#blockSize").value) }),
+      body: JSON.stringify({ imageIds: [...state.selectedIds], blockSize: Number($("#blockSize").value) }),
     });
+    updateProgress({ state: "running", total: state.selectedIds.size, completed: 0 });
     setStatus("検出候補を一括適用しています", "running");
   } catch (error) {
+    updateProgress({ state: "idle" });
     setStatus(error.message, "error");
   }
 }
@@ -456,6 +480,7 @@ async function pollJob() {
     const job = await api("/api/job");
     const previous = state.job;
     state.job = job;
+    updateProgress(job);
     if (job.state === "running") {
       setStatus(`${job.kind === "detect" ? "自動検出" : "一括適用"} ${job.completed} / ${job.total} ${job.current}`, "running");
     } else if (job.state === "complete" && previous?.state === "running") {

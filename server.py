@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import argparse
 import hashlib
 import io
 import json
@@ -38,6 +39,9 @@ STATIC_DIR = APP_DIR / "static"
 CACHE_DIR = APP_DIR / ".mosaicstudio-cache"
 MODEL_PATH = Path(
     r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt"
+)
+SECOND_MODEL_PATH = Path(
+    r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt"
 )
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis", "anus", "testicles"}
@@ -97,6 +101,55 @@ class Job:
         }
 
 
+def detection_tiles(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """Full image plus 65%-sized overlapping horizontal, vertical, and corner tiles."""
+    tile_width = min(width, max(1, math.ceil(width * 0.65)))
+    tile_height = min(height, max(1, math.ceil(height * 0.65)))
+    x_offsets = (0, max(0, width - tile_width))
+    y_offsets = (0, max(0, height - tile_height))
+    specs = [(0, 0, width, height)]
+    specs.extend((x, 0, tile_width, height) for x in x_offsets)
+    specs.extend((0, y, width, tile_height) for y in y_offsets)
+    specs.extend((x, y, tile_width, tile_height) for x in x_offsets for y in y_offsets)
+    unique_specs: list[tuple[int, int, int, int]] = []
+    for spec in specs:
+        if spec not in unique_specs:
+            unique_specs.append(spec)
+    return unique_specs
+
+
+def restore_tile_mask(mask: np.ndarray, full_width: int, full_height: int, x_offset: int, y_offset: int) -> np.ndarray:
+    """Place a tile-local binary mask in its exact original-image coordinates."""
+    tile_height, tile_width = mask.shape[:2]
+    restored = np.zeros((full_height, full_width), dtype=np.uint8)
+    restored[y_offset:y_offset + tile_height, x_offset:x_offset + tile_width] = mask
+    return restored
+
+
+def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    left_bool = left > 0
+    right_bool = right > 0
+    union = np.count_nonzero(left_bool | right_bool)
+    if union == 0:
+        return 0.0
+    return float(np.count_nonzero(left_bool & right_bool) / union)
+
+
+def merge_segment(segments: list[dict[str, Any]], class_name: str, confidence: float, mask: np.ndarray, iou_threshold: float = 0.5) -> None:
+    """Union overlapping duplicates from full-frame and tiled inference only."""
+    matching = [segment for segment in segments if segment["class_name"] == class_name and mask_iou(segment["mask"], mask) >= iou_threshold]
+    if not matching:
+        segments.append({"class_name": class_name, "confidence": confidence, "mask": mask})
+        return
+    destination = matching[0]
+    destination["mask"] = np.maximum(destination["mask"], mask)
+    destination["confidence"] = max(destination["confidence"], confidence)
+    for duplicate in matching[1:]:
+        destination["mask"] = np.maximum(destination["mask"], duplicate["mask"])
+        destination["confidence"] = max(destination["confidence"], duplicate["confidence"])
+        segments.remove(duplicate)
+
+
 class StudioState:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -105,7 +158,7 @@ class StudioState:
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
         self.job = Job()
-        self.model: YOLO | None = None
+        self.models: list[tuple[str, YOLO]] | None = None
 
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -240,23 +293,25 @@ class StudioState:
         thread = threading.Thread(target=worker, args=(records, *args), daemon=True)
         thread.start()
 
-    def _ensure_model(self) -> YOLO:
+    def _ensure_models(self) -> list[tuple[str, YOLO]]:
         with self.lock:
-            if self.model is not None:
-                return self.model
+            if self.models is not None:
+                return self.models
         if not MODEL_PATH.is_file():
             raise RuntimeError(f"検出モデルが見つかりません: {MODEL_PATH}")
-        model = YOLO(str(MODEL_PATH))
+        models = [(MODEL_PATH.name, YOLO(str(MODEL_PATH)))]
+        if SECOND_MODEL_PATH.is_file():
+            models.append((SECOND_MODEL_PATH.name, YOLO(str(SECOND_MODEL_PATH))))
         with self.lock:
-            self.model = model
-        return model
+            self.models = models
+        return models
 
     def _detect_worker(self, records: list[ImageRecord]) -> None:
         try:
-            model = self._ensure_model()
+            models = self._ensure_models()
             for index, record in enumerate(records, start=1):
                 self._set_job_current(record.relative_path, index - 1)
-                candidates = self._detect_image(model, record)
+                candidates = self._detect_image(models, record)
                 with self.lock:
                     self.candidates[record.image_id] = candidates
                 self._set_job_current(record.relative_path, index)
@@ -264,51 +319,57 @@ class StudioState:
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc)
 
-    def _detect_image(self, model: YOLO, record: ImageRecord) -> list[Candidate]:
+    def _detect_image(self, models: list[tuple[str, YOLO]], record: ImageRecord) -> list[Candidate]:
         with Image.open(record.path) as image:
             rgb = image.convert("RGB")
             width, height = rgb.size
-            results = model.predict(
-                rgb,
-                conf=0.05,
-                imgsz=1024,
-                retina_masks=True,
-                verbose=False,
-                max_det=300,
-            )
-
+        segments: list[dict[str, Any]] = []
+        for _model_name, model in models:
+            for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
+                crop = rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height))
+                results = model.predict(
+                    crop,
+                    conf=0.05,
+                    imgsz=1024,
+                    retina_masks=True,
+                    verbose=False,
+                    max_det=300,
+                )
+                for result in results:
+                    if result.boxes is None or result.masks is None:
+                        continue
+                    masks = result.masks.data.cpu().numpy()
+                    boxes = result.boxes.cpu()
+                    names = result.names
+                    for mask, box in zip(masks, boxes):
+                        class_id = int(box.cls[0].item())
+                        class_name = str(names[class_id])
+                        if class_name not in TARGET_CLASSES:
+                            continue
+                        if mask.shape[:2] != (tile_height, tile_width):
+                            mask = cv2.resize(mask, (tile_width, tile_height), interpolation=cv2.INTER_NEAREST)
+                        local_mask = (np.asarray(mask) > 0.5).astype(np.uint8) * 255
+                        if not local_mask.any():
+                            continue
+                        full_mask = restore_tile_mask(local_mask, width, height, x_offset, y_offset)
+                        merge_segment(segments, class_name, float(box.conf[0].item()), full_mask)
         candidates: list[Candidate] = []
         destination = CACHE_DIR / record.image_id
         shutil.rmtree(destination, ignore_errors=True)
         destination.mkdir(parents=True, exist_ok=True)
-        for result in results:
-            if result.boxes is None or result.masks is None:
-                continue
-            masks = result.masks.data.cpu().numpy()
-            boxes = result.boxes.cpu()
-            names = result.names
-            for mask, box in zip(masks, boxes):
-                class_id = int(box.cls[0].item())
-                class_name = str(names[class_id])
-                if class_name not in TARGET_CLASSES:
-                    continue
-                if mask.shape[:2] != (height, width):
-                    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
-                binary_mask = (np.asarray(mask) > 0.5).astype(np.uint8) * 255
-                if not binary_mask.any():
-                    continue
-                candidate_id = uuid.uuid4().hex
-                mask_path = destination / f"{candidate_id}.png"
-                Image.fromarray(binary_mask, mode="L").save(mask_path, format="PNG")
-                candidates.append(
-                    Candidate(
-                        candidate_id=candidate_id,
-                        class_name=class_name,
-                        confidence=float(box.conf[0].item()),
-                        mask_path=mask_path,
-                        color=DEFAULT_COLORS.get(class_name, "#5bb6d5"),
-                    )
+        for segment in segments:
+            candidate_id = uuid.uuid4().hex
+            mask_path = destination / f"{candidate_id}.png"
+            Image.fromarray(segment["mask"], mode="L").save(mask_path, format="PNG")
+            candidates.append(
+                Candidate(
+                    candidate_id=candidate_id,
+                    class_name=segment["class_name"],
+                    confidence=segment["confidence"],
+                    mask_path=mask_path,
+                    color=DEFAULT_COLORS.get(segment["class_name"], "#5bb6d5"),
                 )
+            )
         return candidates
 
     def _apply_worker(self, records: list[ImageRecord], block_size: int) -> None:
@@ -518,6 +579,7 @@ STATE = StudioState()
 
 class MosaicHandler(BaseHTTPRequestHandler):
     server_version = "MosaicStudio/1.0"
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -649,9 +711,12 @@ def _read_block_size(value: Any) -> int:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run MosaicStudio locally.")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), MosaicHandler)
-    print("MosaicStudio: http://127.0.0.1:8765")
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
+    print(f"MosaicStudio: http://127.0.0.1:{args.port}")
     print("ComfyUI is not started or modified by this application.")
     try:
         server.serve_forever()

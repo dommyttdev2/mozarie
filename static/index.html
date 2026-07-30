@@ -19,7 +19,10 @@
       <button id="detectButton">自動検出</button>
       <button id="applyButton">選択を一括適用</button>
     </div>
-    <div id="status" class="status" aria-live="polite">フォルダを指定してください</div>
+    <div class="job-status">
+      <div id="status" class="status" aria-live="polite">フォルダを指定してください</div>
+      <progress id="jobProgress" value="0" max="1" hidden aria-label="処理進捗"></progress>
+    </div>
   </header>
 
   <main class="studio-grid">
