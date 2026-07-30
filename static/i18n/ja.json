@@ -54,7 +54,6 @@
   "candidates.unselected": "画像を選択してください",
   "candidates.count": "{count}件の候補",
   "candidates.none": "候補はありません",
-  "candidates.noAuto": "自動検出の候補はまだありません。",
   "candidates.color": "候補表示色",
   "error.requestFailed": "処理に失敗しました。",
   "error.imageLoad": "画像を読み込めません。",

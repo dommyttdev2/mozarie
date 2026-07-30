@@ -259,7 +259,7 @@ function renderCandidates() {
   const list = $("#candidateList"); list.textContent = "";
   if (!state.currentId) return;
   if (!state.candidates.length) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.noAuto"); list.append(empty); return;
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); list.append(empty); return;
   }
   for (const candidate of state.candidates) {
     const row = document.createElement("label"); row.className = "candidate-row";
@@ -345,8 +345,8 @@ async function pollJob() {
     const job = await api("/api/job"); const previous = state.job; state.job = job; updateProgress(job);
     if (job.state === "running") setStatus(t(job.kind === "detect" ? "status.detectProgress" : "status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
     else if (job.state === "complete" && previous?.state === "running") {
-      setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
       const keepCurrent = state.currentId; const data = await api("/api/images"); state.images = data.images; renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
+      setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
     } else if (job.state === "error" && previous?.state === "running") setStatus(job.error || t("error.background"), "error");
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
 }
