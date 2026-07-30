@@ -1,3 +1,4 @@
 .mosaicstudio-cache/
+.ui-fixture/
 __pycache__/
 tests/__pycache__/
