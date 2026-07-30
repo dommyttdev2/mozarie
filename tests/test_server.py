@@ -15,11 +15,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import (  # noqa: E402
     ClientError,
+    DEFAULT_DETECTION_CONFIDENCE,
     FOLDER_PICKER_LOCK,
     ImageRecord,
     MosaicHandler,
     StudioState,
     calculate_block_size,
+    confidence_for_source,
     detection_tiles,
     jpeg_metadata_manifest,
     mask_iou,
@@ -27,6 +29,7 @@ from server import (  # noqa: E402
     pick_windows_folder,
     png_ancillary_manifest,
     restore_tile_mask,
+    read_detection_confidence,
     save_with_mask,
     webp_metadata_manifest,
 )
@@ -161,7 +164,7 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertTrue(np.all(restored[35:40, 44:50] == 255))
         self.assertEqual(np.count_nonzero(restored), 30)
 
-    def test_iou_merge_unions_tiled_duplicates_but_keeps_separate_objects(self):
+    def test_iou_merge_keeps_the_best_precise_duplicate_mask(self):
         first = np.zeros((12, 12), dtype=np.uint8)
         first[2:8, 2:8] = 255
         duplicate = np.zeros((12, 12), dtype=np.uint8)
@@ -170,12 +173,65 @@ class MosaicStudioTests(unittest.TestCase):
         separate[9:11, 9:11] = 255
         self.assertGreater(mask_iou(first, duplicate), 0.5)
         segments = []
-        merge_segment(segments, "penis", 0.4, first)
-        merge_segment(segments, "penis", 0.9, duplicate)
+        merge_segment(segments, "penis", 0.4, first, "primary")
+        merge_segment(segments, "penis", 0.9, duplicate, "primary")
         merge_segment(segments, "penis", 0.7, separate)
         self.assertEqual(len(segments), 2)
         self.assertEqual(segments[0]["confidence"], 0.9)
-        self.assertTrue(np.all(segments[0]["mask"][2:8, 2:9] == 255))
+        self.assertTrue(np.array_equal(segments[0]["mask"], duplicate))
+
+    def test_primary_segment_wins_over_secondary_duplicate(self):
+        first = np.zeros((12, 12), dtype=np.uint8)
+        first[2:8, 2:8] = 255
+        secondary = np.zeros((12, 12), dtype=np.uint8)
+        secondary[2:8, 3:9] = 255
+        segments = []
+        merge_segment(segments, "penis", 0.62, first, "primary")
+        merge_segment(segments, "penis", 0.91, secondary, "secondary")
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["source"], "primary")
+        self.assertTrue(np.array_equal(segments[0]["mask"], first))
+
+    def test_detection_confidence_validation_and_secondary_floor(self):
+        self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.60)
+        self.assertEqual(read_detection_confidence("0.60"), 0.60)
+        self.assertEqual(confidence_for_source("primary", 0.60), 0.60)
+        self.assertEqual(confidence_for_source("secondary", 0.60), 0.75)
+        self.assertEqual(confidence_for_source("secondary", 0.85), 0.85)
+        with self.assertRaises(ClientError):
+            read_detection_confidence(0.29)
+        with self.assertRaises(ClientError):
+            read_detection_confidence(0.91)
+
+    def test_start_detection_propagates_ui_confidence(self):
+        state = StudioState()
+        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        with patch.object(state, "_records_for_ids", return_value=[record]), patch.object(state, "_start_job") as start:
+            state.start_detection(["test"], 0.65)
+        self.assertEqual(start.call_args.args[0], "detect")
+        self.assertEqual(start.call_args.args[-1], 0.65)
+        with patch.object(state, "_records_for_ids", return_value=[record]), patch.object(state, "_start_job") as start:
+            state.start_detection(["test"])
+        self.assertEqual(start.call_args.args[-1], DEFAULT_DETECTION_CONFIDENCE)
+
+    def test_frontend_contract_has_safe_mouse_and_localized_controls(self):
+        root = Path(__file__).resolve().parents[1]
+        app = (root / "static" / "app.js").read_text(encoding="utf-8")
+        page = (root / "static" / "index.html").read_text(encoding="utf-8")
+        styles = (root / "static" / "style.css").read_text(encoding="utf-8")
+        dictionary = json.loads((root / "static" / "i18n" / "ja.json").read_text(encoding="utf-8"))
+        self.assertIn('event.button !== 0', app)
+        self.assertIn('event.buttons & 1', app)
+        self.assertIn('event.shiftKey', app)
+        self.assertIn('canvas.addEventListener("contextmenu"', app)
+        self.assertIn('confidence: detectionConfidence()', app)
+        self.assertIn('data-i18n="editor.undo"', page)
+        self.assertIn('id="detectCurrentButton"', page)
+        self.assertIn('id="detectAllButton"', page)
+        self.assertIn('id="saveButton"', page)
+        self.assertIn('grid-auto-rows: max-content', styles)
+        self.assertIn('object-fit: contain', styles)
+        self.assertIn('gallery.detectAll', dictionary)
 
     def test_api_returns_utf8_japanese_client_error(self):
         from http.server import ThreadingHTTPServer

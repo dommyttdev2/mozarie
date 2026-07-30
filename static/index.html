@@ -3,75 +3,92 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MosaicStudio</title>
+  <title data-i18n="app.title">Lets Censoring</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">MosaicStudio</div>
+    <div class="brand" data-i18n="app.brand">Lets Censoring</div>
     <div class="folder-control">
-      <label for="folderPath">画像フォルダ</label>
-      <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\\Images\\work">
-      <button id="pickFolder">参照...</button>
-      <button id="loadFolder" class="primary">読込</button>
-    </div>
-    <div class="top-actions">
-      <button id="detectButton">自動検出</button>
-      <button id="applyButton">選択を一括適用</button>
+      <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
+      <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
+      <button id="pickFolder" data-i18n="folder.browse">参照...</button>
+      <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
     </div>
     <div class="job-status">
-      <div id="status" class="status" aria-live="polite">フォルダを指定してください</div>
-      <progress id="jobProgress" value="0" max="1" hidden aria-label="処理進捗"></progress>
+      <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
+      <progress id="jobProgress" value="0" max="1" hidden data-i18n-aria-label="status.progress" aria-label="処理状況"></progress>
     </div>
   </header>
 
   <main class="studio-grid">
-    <aside class="gallery-pane" aria-label="画像ギャラリー">
-      <div class="pane-heading">
+    <aside class="gallery-pane" data-i18n-aria-label="gallery.aria">
+      <div class="pane-heading gallery-heading">
         <div>
-          <h2>画像</h2>
+          <h2 data-i18n="gallery.title">画像</h2>
           <span id="imageCount" class="muted">0件</span>
         </div>
-        <button id="selectAllButton" class="text-button">全選択</button>
+        <button id="selectAllButton" class="text-button" data-i18n="gallery.selectAll">全選択</button>
+      </div>
+      <div class="gallery-actions">
+        <button id="detectAllButton" class="primary wide" data-i18n="gallery.detectAll">全画像を自動検出</button>
       </div>
       <div id="gallery" class="gallery"></div>
+      <div class="gallery-footer">
+        <span id="selectedCount" class="muted">選択中 0件</span>
+        <button id="applyButton" class="primary wide" disabled data-i18n="gallery.applySelected">選択画像にモザイクを適用</button>
+      </div>
     </aside>
 
-    <section class="editor-pane" aria-label="モザイク編集">
+    <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div class="editor-toolbar">
-        <div class="tool-group" role="group" aria-label="編集ツール">
-          <button id="brushTool" class="tool active" title="追加ブラシ">ブラシ</button>
-          <button id="eraserTool" class="tool" title="消しゴム">消しゴム</button>
-          <button id="fitButton" class="tool" title="画面に合わせる">Fit</button>
-          <button id="undoButton" class="tool" title="元に戻す">Undo</button>
-          <button id="redoButton" class="tool" title="やり直す">Redo</button>
+        <div class="tool-group" role="group" data-i18n-aria-label="editor.tools" aria-label="編集ツール">
+          <button id="brushTool" class="tool active" data-i18n="editor.brush" data-i18n-title="editor.brush">ブラシ</button>
+          <button id="eraserTool" class="tool" data-i18n="editor.eraser" data-i18n-title="editor.eraser">消しゴム</button>
+          <button id="fitButton" class="tool" data-i18n="editor.fit" data-i18n-title="editor.fit">全体表示</button>
+          <button id="undoButton" class="tool" data-i18n="editor.undo" data-i18n-title="editor.undo">元に戻す</button>
+          <button id="redoButton" class="tool" data-i18n="editor.redo" data-i18n-title="editor.redo">やり直す</button>
+          <button id="detectCurrentButton" class="tool detect-current" disabled data-i18n="editor.detectCurrent">この画像を自動検出</button>
         </div>
-        <label class="numeric-control" for="brushSize">ブラシ径
-          <input id="brushSize" type="range" min="2" max="500" value="48">
-          <output id="brushSizeValue">48</output>
-        </label>
-        <label class="numeric-control" for="blockSize">粗さ
-          <input id="blockSize" type="number" min="1" max="2048" value="4">
-          <output id="blockSizeHint">px</output>
-        </label>
-        <button id="saveButton" class="primary save" disabled>保存</button>
+        <div class="numeric-controls">
+          <label class="numeric-control" for="brushSize">
+            <span data-i18n="editor.brushSize">ブラシ径</span>
+            <input id="brushSize" type="range" min="2" max="500" value="48">
+            <output id="brushSizeValue">48 px</output>
+          </label>
+          <label class="numeric-control block-control" for="blockSize">
+            <span data-i18n="editor.blockSize">モザイク粗さ</span>
+            <input id="blockSize" type="number" min="1" max="2048" value="4">
+            <output>px</output>
+          </label>
+        </div>
+        <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">モザイクを適用</button>
       </div>
       <div id="canvasStage" class="canvas-stage">
-        <canvas id="editorCanvas" aria-label="画像編集キャンバス"></canvas>
-        <div id="emptyState" class="empty-state">左の画像を選択</div>
+        <canvas id="editorCanvas" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
+        <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
       <div class="editor-footer">
-        <span id="imageInfo">画像未選択</span>
-        <span>Space: 移動 / ホイール: 拡大・縮小</span>
+        <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
+        <span data-i18n="editor.shortcuts">Space: 移動 / ホイール: 拡大・縮小 / Shift+ホイール: ブラシ径</span>
       </div>
     </section>
 
-    <aside class="candidate-pane" aria-label="検出候補">
-      <div class="pane-heading">
+    <aside class="candidate-pane" data-i18n-aria-label="candidates.aria">
+      <section class="detection-settings">
+        <h2 data-i18n="detection.title">検出設定</h2>
+        <label class="threshold-control" for="confidence">
+          <span data-i18n="detection.confidence">判定しきい値</span>
+          <output id="confidenceValue">0.60</output>
+        </label>
+        <input id="confidence" type="range" min="0.30" max="0.90" step="0.05" value="0.60">
+        <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
+      </section>
+      <div class="pane-heading candidates-heading">
         <div>
-          <h2>検出候補</h2>
-          <span id="candidateStatus" class="muted">画像を選択してください</span>
+          <h2 data-i18n="candidates.title">検出候補</h2>
+          <span id="candidateStatus" class="muted" data-i18n="candidates.unselected">画像を選択してください</span>
         </div>
       </div>
       <div id="candidateList" class="candidate-list"></div>

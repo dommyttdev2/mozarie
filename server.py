@@ -1,4 +1,4 @@
-"""MosaicStudio local image-review and mosaic editor.
+"""Lets Censoring local image-review and mosaic editor.
 
 The server never accepts a client supplied file path.  Files are first found
 under a user-selected root, then addressed through opaque catalogue ids.
@@ -53,6 +53,8 @@ DEFAULT_COLORS = {
     "anus": "#a8c256",
     "testicles": "#5bb6d5",
 }
+DEFAULT_DETECTION_CONFIDENCE = 0.60
+SECONDARY_MIN_CONFIDENCE = 0.75
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
 FOLDER_PICKER_LOCK = threading.Lock()
@@ -274,19 +276,61 @@ def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.count_nonzero(left_bool & right_bool) / union)
 
 
-def merge_segment(segments: list[dict[str, Any]], class_name: str, confidence: float, mask: np.ndarray, iou_threshold: float = 0.5) -> None:
-    """Union overlapping duplicates from full-frame and tiled inference only."""
-    matching = [segment for segment in segments if segment["class_name"] == class_name and mask_iou(segment["mask"], mask) >= iou_threshold]
+def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
+    """Return overlap relative to the smaller non-empty mask."""
+    left_bool = left > 0
+    right_bool = right > 0
+    smallest = min(np.count_nonzero(left_bool), np.count_nonzero(right_bool))
+    if smallest == 0:
+        return 0.0
+    return float(np.count_nonzero(left_bool & right_bool) / smallest)
+
+
+def _segment_rank(segment: dict[str, Any]) -> tuple[int, float]:
+    return (1 if segment["source"] == "primary" else 0, float(segment["confidence"]))
+
+
+def merge_segment(
+    segments: list[dict[str, Any]],
+    class_name: str,
+    confidence: float,
+    mask: np.ndarray,
+    source: str = "primary",
+    iou_threshold: float = 0.5,
+    containment_threshold: float = 0.85,
+) -> None:
+    """Keep one precise representative for overlapping tile/model duplicates."""
+    matching = [
+        segment
+        for segment in segments
+        if segment["class_name"] == class_name
+        and (
+            mask_iou(segment["mask"], mask) >= iou_threshold
+            or mask_containment(segment["mask"], mask) >= containment_threshold
+        )
+    ]
     if not matching:
-        segments.append({"class_name": class_name, "confidence": confidence, "mask": mask})
+        segments.append({"class_name": class_name, "confidence": confidence, "mask": mask, "source": source})
         return
-    destination = matching[0]
-    destination["mask"] = np.maximum(destination["mask"], mask)
-    destination["confidence"] = max(destination["confidence"], confidence)
-    for duplicate in matching[1:]:
-        destination["mask"] = np.maximum(destination["mask"], duplicate["mask"])
-        destination["confidence"] = max(destination["confidence"], duplicate["confidence"])
+    candidate = {"class_name": class_name, "confidence": confidence, "mask": mask, "source": source}
+    winner = max([*matching, candidate], key=_segment_rank)
+    for duplicate in matching:
         segments.remove(duplicate)
+    segments.append(winner)
+
+
+def read_detection_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ClientError("判定しきい値が正しくありません。") from exc
+    if not 0.30 <= confidence <= 0.90:
+        raise ClientError("判定しきい値は0.30から0.90の範囲で指定してください。")
+    return confidence
+
+
+def confidence_for_source(source: str, confidence: float) -> float:
+    return confidence if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
 
 
 class StudioState:
@@ -407,9 +451,9 @@ class StudioState:
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
 
-    def start_detection(self, image_ids: list[str]) -> None:
+    def start_detection(self, image_ids: list[str], confidence: float = DEFAULT_DETECTION_CONFIDENCE) -> None:
         records = self._records_for_ids(image_ids)
-        self._start_job("detect", records, self._detect_worker)
+        self._start_job("detect", records, self._detect_worker, confidence)
 
     def start_apply(self, image_ids: list[str], block_size: int) -> None:
         records = self._records_for_ids(image_ids)
@@ -438,19 +482,19 @@ class StudioState:
                 return self.models
         if not MODEL_PATH.is_file():
             raise RuntimeError(f"検出モデルが見つかりません: {MODEL_PATH}")
-        models = [(MODEL_PATH.name, YOLO(str(MODEL_PATH)))]
+        models = [("primary", YOLO(str(MODEL_PATH)))]
         if SECOND_MODEL_PATH.is_file():
-            models.append((SECOND_MODEL_PATH.name, YOLO(str(SECOND_MODEL_PATH))))
+            models.append(("secondary", YOLO(str(SECOND_MODEL_PATH))))
         with self.lock:
             self.models = models
         return models
 
-    def _detect_worker(self, records: list[ImageRecord]) -> None:
+    def _detect_worker(self, records: list[ImageRecord], confidence: float) -> None:
         try:
             models = self._ensure_models()
             for index, record in enumerate(records, start=1):
                 self._set_job_current(record.relative_path, index - 1)
-                candidates = self._detect_image(models, record)
+                candidates = self._detect_image(models, record, confidence)
                 with self.lock:
                     self.candidates[record.image_id] = candidates
                 self._set_job_current(record.relative_path, index)
@@ -458,18 +502,18 @@ class StudioState:
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc)
 
-    def _detect_image(self, models: list[tuple[str, YOLO]], record: ImageRecord) -> list[Candidate]:
+    def _detect_image(self, models: list[tuple[str, YOLO]], record: ImageRecord, confidence: float) -> list[Candidate]:
         with Image.open(record.path) as image:
             rgb = image.convert("RGB")
             width, height = rgb.size
         segments: list[dict[str, Any]] = []
-        for _model_name, model in models:
+        for source, model in models:
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
                 crop = rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height))
                 results = model.predict(
                     crop,
                     device=0,
-                    conf=0.05,
+                    conf=confidence_for_source(source, confidence),
                     imgsz=1024,
                     retina_masks=True,
                     verbose=False,
@@ -492,7 +536,7 @@ class StudioState:
                         if not local_mask.any():
                             continue
                         full_mask = restore_tile_mask(local_mask, width, height, x_offset, y_offset)
-                        merge_segment(segments, class_name, float(box.conf[0].item()), full_mask)
+                        merge_segment(segments, class_name, float(box.conf[0].item()), full_mask, source)
         candidates: list[Candidate] = []
         destination = CACHE_DIR / record.image_id
         shutil.rmtree(destination, ignore_errors=True)
@@ -902,7 +946,7 @@ STATE = StudioState()
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
-    server_version = "MosaicStudio/1.0"
+    server_version = "LetsCensoring/1.0"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
@@ -951,7 +995,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images})
             elif path == "/api/detect":
-                STATE.start_detection(payload.get("imageIds", []))
+                STATE.start_detection(
+                    payload.get("imageIds", []),
+                    read_detection_confidence(payload.get("confidence", DEFAULT_DETECTION_CONFIDENCE)),
+                )
                 self._json({"ok": True})
             elif path == "/api/apply":
                 block_size = _read_block_size(payload.get("blockSize"))
@@ -1037,17 +1084,17 @@ def _read_block_size(value: Any) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run MosaicStudio locally.")
+    parser = argparse.ArgumentParser(description="Run Lets Censoring locally.")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
-    print(f"MosaicStudio: http://127.0.0.1:{args.port}")
+    print(f"Lets Censoring: http://127.0.0.1:{args.port}")
     print("ComfyUI is not started or modified by this application.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nMosaicStudio stopped.")
+        print("\nLets Censoring stopped.")
     finally:
         server.server_close()
 
