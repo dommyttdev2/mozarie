@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MosaicStudio</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">MosaicStudio</div>
+    <div class="folder-control">
+      <label for="folderPath">画像フォルダ</label>
+      <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\\Images\\work">
+      <button id="loadFolder" class="primary">読込</button>
+    </div>
+    <div class="top-actions">
+      <button id="detectButton">自動検出</button>
+      <button id="applyButton">選択を一括適用</button>
+    </div>
+    <div id="status" class="status" aria-live="polite">フォルダを指定してください</div>
+  </header>
+
+  <main class="studio-grid">
+    <aside class="gallery-pane" aria-label="画像ギャラリー">
+      <div class="pane-heading">
+        <div>
+          <h2>画像</h2>
+          <span id="imageCount" class="muted">0件</span>
+        </div>
+        <button id="selectAllButton" class="text-button">全選択</button>
+      </div>
+      <div id="gallery" class="gallery"></div>
+    </aside>
+
+    <section class="editor-pane" aria-label="モザイク編集">
+      <div class="editor-toolbar">
+        <div class="tool-group" role="group" aria-label="編集ツール">
+          <button id="brushTool" class="tool active" title="追加ブラシ">ブラシ</button>
+          <button id="eraserTool" class="tool" title="消しゴム">消しゴム</button>
+          <button id="fitButton" class="tool" title="画面に合わせる">Fit</button>
+          <button id="undoButton" class="tool" title="元に戻す">Undo</button>
+          <button id="redoButton" class="tool" title="やり直す">Redo</button>
+        </div>
+        <label class="numeric-control" for="brushSize">ブラシ径
+          <input id="brushSize" type="range" min="2" max="500" value="48">
+          <output id="brushSizeValue">48</output>
+        </label>
+        <label class="numeric-control" for="blockSize">粗さ
+          <input id="blockSize" type="number" min="1" max="2048" value="4">
+          <output id="blockSizeHint">px</output>
+        </label>
+        <button id="saveButton" class="primary save" disabled>保存</button>
+      </div>
+      <div id="canvasStage" class="canvas-stage">
+        <canvas id="editorCanvas" aria-label="画像編集キャンバス"></canvas>
+        <div id="emptyState" class="empty-state">左の画像を選択</div>
+      </div>
+      <div class="editor-footer">
+        <span id="imageInfo">画像未選択</span>
+        <span>Space: 移動 / ホイール: 拡大・縮小</span>
+      </div>
+    </section>
+
+    <aside class="candidate-pane" aria-label="検出候補">
+      <div class="pane-heading">
+        <div>
+          <h2>検出候補</h2>
+          <span id="candidateStatus" class="muted">画像を選択してください</span>
+        </div>
+      </div>
+      <div id="candidateList" class="candidate-list"></div>
+    </aside>
+  </main>
+
+  <template id="galleryItemTemplate">
+    <article class="gallery-item">
+      <label class="gallery-check"><input type="checkbox"><span></span></label>
+      <img loading="lazy" alt="">
+      <div class="gallery-name"></div>
+      <div class="gallery-meta"></div>
+    </article>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -539,7 +539,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 candidate = STATE.candidate_for_id(image_id, candidate_id)
-                self._binary(candidate.mask_path.read_bytes(), "image/png")
+                with Image.open(candidate.mask_path) as mask_image:
+                    alpha = mask_image.convert("L")
+                    rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+                    rgba.putalpha(alpha)
+                    output = io.BytesIO()
+                    rgba.save(output, format="PNG")
+                self._binary(output.getvalue(), "image/png")
             else:
                 self._send_static(path)
         except ClientError as exc:
