@@ -44,7 +44,7 @@
   "editor.canvas": "画像編集キャンバス",
   "editor.empty": "左の画像を選択してください",
   "editor.none": "画像未選択",
-  "editor.shortcuts": "Space: 移動 / ホイール: 拡大・縮小 / Shift+ホイール: ブラシ径",
+  "editor.shortcuts": "スペースキー: 移動 / ホイール: 拡大・縮小 / Shiftキー+ホイール: ブラシ径",
   "editor.pixels": "{value} px",
   "detection.title": "検出設定",
   "detection.confidence": "判定しきい値",

@@ -1,5 +1,6 @@
 import http.client
 import json
+import re
 import tempfile
 import threading
 import unittest
@@ -232,6 +233,10 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('grid-auto-rows: max-content', styles)
         self.assertIn('object-fit: contain', styles)
         self.assertIn('gallery.detectAll', dictionary)
+
+        referenced_keys = set(re.findall(r'data-i18n(?:-title|-aria-label)?="([^"]+)"', page))
+        referenced_keys.update(re.findall(r'\bt\("([^"]+)"', app))
+        self.assertEqual(referenced_keys - dictionary.keys(), set())
 
     def test_api_returns_utf8_japanese_client_error(self):
         from http.server import ThreadingHTTPServer
