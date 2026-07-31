@@ -216,13 +216,79 @@ class MosaicStudioTests(unittest.TestCase):
             20,
         )
         self.assertEqual(roi, (2, 3, 13, 16))
-        self.assertEqual(point, (7, 9))
+        self.assertEqual(point, (7.0, 9.0))
+        _, fractional_point = read_boundary_request(
+            {"roi": {"left": 1, "top": 1, "right": 10.4, "bottom": 10.4}, "point": {"x": 9.6, "y": 8.4}},
+            20,
+            20,
+        )
+        self.assertEqual(fractional_point, (9.6, 8.4))
         with self.assertRaises(ClientError):
             read_boundary_request(
                 {"roi": {"left": 2, "top": 3, "right": 12, "bottom": 15}, "point": {"x": 12, "y": 9}},
                 20,
                 20,
             )
+
+    def test_boundary_candidate_does_not_start_during_a_background_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = StudioState()
+            state.root = Path(directory)
+            state.images = {record.image_id: record}
+            state.order = [record.image_id]
+            state.job.state = "running"
+            with patch.object(state, "_sam_predictor_for") as predictor:
+                with self.assertRaises(ClientError):
+                    state.add_boundary_candidate(
+                        record.image_id,
+                        {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}},
+                    )
+            predictor.assert_not_called()
+
+    def test_yolo_detection_uses_the_shared_inference_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = StudioState()
+            state.root = Path(directory)
+            state.images = {record.image_id: record}
+            state.order = [record.image_id]
+
+            def detect_image(*_args):
+                self.assertTrue(state.inference_lock.locked())
+                return []
+
+            with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+    def test_boundary_result_is_discarded_after_folder_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = StudioState()
+            state.root = Path(directory)
+            state.images = {record.image_id: record}
+            state.order = [record.image_id]
+
+            class ReloadingPredictor:
+                def predict(self, **_kwargs):
+                    state.set_root(directory)
+                    masks = np.zeros((3, 12, 12), dtype=bool)
+                    masks[0, 2:10, 2:10] = True
+                    return masks, np.asarray([0.9, 0.4, 0.2]), None
+
+            with patch.object(state, "_sam_predictor_for", return_value=ReloadingPredictor()):
+                with self.assertRaisesRegex(ClientError, "再読み込み"):
+                    state.add_boundary_candidate(
+                        record.image_id,
+                        {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}},
+                    )
+            self.assertFalse(state.candidates)
 
     def test_sam_mask_selection_and_roi_clip_are_deterministic(self):
         masks = np.zeros((3, 8, 8), dtype=bool)
@@ -240,6 +306,7 @@ class MosaicStudioTests(unittest.TestCase):
     def test_boundary_candidate_uses_the_normal_candidate_mask_path(self):
         class FakePredictor:
             def predict(self, **_kwargs):
+                self_outer.assertTrue(state.inference_lock.locked())
                 masks = np.zeros((3, 12, 12), dtype=bool)
                 masks[1, 1:11, 1:11] = True
                 return masks, np.asarray([0.2, 0.9, 0.4]), None
@@ -249,6 +316,7 @@ class MosaicStudioTests(unittest.TestCase):
             Image.new("RGB", (12, 12), "white").save(image_path)
             record = self._record(image_path, 12, 12)
             state = StudioState()
+            self_outer = self
             state.root = Path(directory)
             state.images = {record.image_id: record}
             state.order = [record.image_id]

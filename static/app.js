@@ -4,9 +4,9 @@ const state = {
   images: [], selectedIds: new Set(), currentId: null, currentImage: null,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
-  boundaryRoi: null, boundaryStart: null, boundaryPoint: null, boundaryDragging: false,
+  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
-  view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, translations: {},
+  view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, translations: {},
 };
 
 const canvas = $("#editorCanvas");
@@ -57,9 +57,10 @@ function setStatus(message, kind = "") {
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
 function detectionConfidence() { return Number($("#confidence").value); }
+function isBusy() { return state.job?.state === "running" || state.saving || state.boundaryPending; }
 
 function updateActionButtons() {
-  const running = state.job?.state === "running" || state.saving || state.boundaryPending;
+  const running = isBusy();
   const hasImage = Boolean(state.currentId && state.currentImage);
   $("#detectAllButton").disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
@@ -85,6 +86,7 @@ async function loadFolder() {
   try {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     state.images = data.images;
+    state.imageGeneration += 1;
     state.selectedIds.clear(); state.currentId = null; state.currentImage = null;
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
     renderGallery(); clearEditor();
@@ -146,7 +148,7 @@ function canvasSizeForImage(image) {
 }
 
 function clearEditor() {
-  state.history = []; state.historyIndex = -1; state.hover = null; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryPoint = null;
+  state.history = []; state.historyIndex = -1; state.hover = null; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -157,7 +159,9 @@ function clearEditor() {
 
 async function selectImage(imageId, force = false) {
   if (state.currentId === imageId && !force) return;
-  saveDraft(); state.currentId = imageId; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryPoint = null;
+  saveDraft(); state.currentId = imageId;
+  const generation = ++state.imageGeneration;
+  state.boundaryRoi = null; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null;
   const record = currentRecord(); renderGallery();
   setStatus(t("status.loadingImages"), "running");
   try {
@@ -165,19 +169,21 @@ async function selectImage(imageId, force = false) {
       loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`),
       api(`/api/candidates/${encodeURIComponent(imageId)}`),
     ]);
+    const candidateImages = new Map();
+    await Promise.all(candidateData.candidates.map(async (candidate) => {
+      candidateImages.set(candidate.id, await loadImage(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
+    }));
+    if (state.currentId !== imageId || state.imageGeneration !== generation) return;
     state.currentImage = image;
     state.candidates = candidateData.candidates;
-    state.candidateImages.clear();
-    await Promise.all(state.candidates.map(async (candidate) => {
-      state.candidateImages.set(candidate.id, await loadImage(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
-    }));
-    canvasSizeForImage(record); restoreDraft(imageId); fitImage();
+    state.candidateImages = candidateImages;
+    canvasSizeForImage(record); restoreDraft(imageId, generation); fitImage();
     $("#blockSize").value = Math.max(4, Math.ceil(Math.max(record.width, record.height) / 100));
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
     renderCandidates(); updateActionButtons(); setStatus(t("status.editReady"));
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { if (state.currentId === imageId && state.imageGeneration === generation) setStatus(error.message, "error"); }
 }
 
 function loadImage(source) {
@@ -194,11 +200,12 @@ function saveDraft() {
   state.drafts.set(state.currentId, { add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png") });
 }
 
-function restoreDraft(imageId) {
+function restoreDraft(imageId, generation) {
   const draft = state.drafts.get(imageId);
   state.history = []; state.historyIndex = -1;
   if (!draft) return pushHistory();
   Promise.all([loadImage(draft.add), loadImage(draft.exclusion)]).then(([addImage, exclusionImage]) => {
+    if (state.currentId !== imageId || state.imageGeneration !== generation) return;
     addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); pushHistory(); render();
   });
 }
@@ -301,25 +308,49 @@ async function updateCandidate(candidate) {
 }
 
 async function addBoundaryCandidate(point) {
-  if (!state.currentId || !state.boundaryRoi || state.boundaryPending) return;
+  if (!state.currentId || !state.boundaryRoi || isBusy()) return;
+  const imageId = state.currentId;
+  const viewGeneration = state.imageGeneration;
+  const roi = { ...state.boundaryRoi };
+  const targetPoint = { ...point };
   state.boundaryPending = true; updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
   try {
     const data = await api("/api/boundary", {
       method: "POST",
-      body: JSON.stringify({ imageId: state.currentId, roi: state.boundaryRoi, point }),
+      body: JSON.stringify({ imageId, roi, point: targetPoint }),
     });
     const candidate = data.candidate;
+    const record = state.images.find((image) => image.id === imageId);
+    if (record) record.candidateCount = Number(record.candidateCount || 0) + 1;
+    renderGallery();
+    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
+
+    const maskImage = await loadImage(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`);
+    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
+    if (state.candidates.some((item) => item.id === candidate.id)) return;
     state.candidates.push(candidate);
-    state.candidateImages.set(candidate.id, await loadImage(`/api/mask/${encodeURIComponent(state.currentId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
-    const record = currentRecord(); if (record) record.candidateCount = state.candidates.length;
+    state.candidateImages.set(candidate.id, maskImage);
     $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
-    renderGallery(); renderCandidates(); render(); setStatus(t("status.boundaryDone"));
-  } catch (error) { setStatus(error.message, "error"); }
+    renderCandidates(); render(); setStatus(t("status.boundaryDone"));
+  } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
   finally { state.boundaryPending = false; updateActionButtons(); }
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
 function pointFromEvent(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left - state.view.x) / state.view.scale, y: (event.clientY - rect.top - state.view.y) / state.view.scale }; }
+function clampPoint(point) {
+  if (!state.currentImage) return point;
+  return {
+    x: Math.min(state.currentImage.width, Math.max(0, point.x)),
+    y: Math.min(state.currentImage.height, Math.max(0, point.y)),
+  };
+}
+function boundaryDragStarted(event) {
+  return Boolean(state.boundaryStartClient) && Math.hypot(
+    event.clientX - state.boundaryStartClient.x,
+    event.clientY - state.boundaryStartClient.y,
+  ) >= 3;
+}
 function snapshot() { return { add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png") }; }
 
 function pushHistory() {
@@ -353,14 +384,22 @@ function buildCombinedMask() {
 
 async function saveCurrent() {
   if (!state.currentId || !state.currentImage) return;
+  const imageId = state.currentId;
+  const viewGeneration = state.imageGeneration;
+  const mask = buildCombinedMask();
+  const blockSize = Number($("#blockSize").value);
   state.saving = true;
   updateActionButtons(); setStatus(t("status.saving"), "running");
   try {
-    await api(`/api/images/${encodeURIComponent(state.currentId)}/save`, { method: "POST", body: JSON.stringify({ mask: buildCombinedMask(), blockSize: Number($("#blockSize").value) }) });
-    state.drafts.delete(state.currentId); addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-    state.history = []; state.historyIndex = -1; state.currentImage = await loadImage(`/api/image/${encodeURIComponent(state.currentId)}?t=${Date.now()}`); render();
+    await api(`/api/images/${encodeURIComponent(imageId)}/save`, { method: "POST", body: JSON.stringify({ mask, blockSize }) });
+    state.drafts.delete(imageId);
+    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
+    const updatedImage = await loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`);
+    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
+    addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+    state.history = []; state.historyIndex = -1; state.currentImage = updatedImage; render();
     setStatus(t("status.saved"));
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
   finally { state.saving = false; updateHistoryButtons(); updateActionButtons(); }
 }
 
@@ -368,7 +407,8 @@ async function runDetection(imageIds) {
   if (!imageIds.length) return;
   try {
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence: detectionConfidence() }) });
-    updateProgress({ state: "running", total: imageIds.length, completed: 0 }); setStatus(t("status.detectStarted"), "running");
+    state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
+    updateProgress(state.job); setStatus(t("status.detectStarted"), "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
 }
 
@@ -376,7 +416,8 @@ async function applyDetection() {
   if (!state.selectedIds.size) return setStatus(t("status.chooseApplyImages"), "error");
   try {
     await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds: [...state.selectedIds], blockSize: Number($("#blockSize").value) }) });
-    updateProgress({ state: "running", total: state.selectedIds.size, completed: 0 }); setStatus(t("status.applyStarted"), "running");
+    state.job = { kind: "apply", state: "running", total: state.selectedIds.size, completed: 0, current: "" };
+    updateProgress(state.job); setStatus(t("status.applyStarted"), "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
 }
 
@@ -421,10 +462,11 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
+    if (isBusy()) return;
     canvas.setPointerCapture(event.pointerId);
     const point = clampPoint(pointFromEvent(event));
     state.drawing = true; state.pointer = point; state.hover = point;
-    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     drawStroke(point, point, state.tool === "eraser");
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -436,7 +478,7 @@ function bindEvents() {
       const point = state.hover;
       if (state.tool === "boundary") {
         state.boundaryPoint = point;
-        state.boundaryDragging ||= Math.hypot(point.x - state.boundaryStart.x, point.y - state.boundaryStart.y) >= 3;
+        state.boundaryDragging ||= boundaryDragStarted(event);
       } else { drawStroke(state.pointer, point, state.tool === "eraser"); state.pointer = point; }
     }
     render();
@@ -447,11 +489,11 @@ function bindEvents() {
       const roi = roiFromPoints(state.boundaryStart, point);
       if (state.boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
       else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
-      state.boundaryStart = null; state.boundaryPoint = null; state.boundaryDragging = false;
+      state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
     } else if (state.drawing && event.button === 0) pushHistory();
     state.drawing = false; state.panning = false; if (!state.spacePressed) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
-  canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
+  canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
   canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage) return;

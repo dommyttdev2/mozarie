@@ -331,7 +331,7 @@ def read_detection_confidence(value: Any) -> float:
     return confidence
 
 
-def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[float, float]]:
     """Validate a SAM point prompt and its limiting ROI in image coordinates."""
     try:
         roi_data = payload["roi"]
@@ -340,10 +340,12 @@ def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> t
         top = int(round(float(roi_data["top"])))
         right = int(round(float(roi_data["right"])))
         bottom = int(round(float(roi_data["bottom"])))
-        point = (int(round(float(point_data["x"]))), int(round(float(point_data["y"]))))
+        point = (float(point_data["x"]), float(point_data["y"]))
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ClientError("境界の範囲またはクリック位置が正しくありません。") from exc
 
+    if not all(math.isfinite(value) for value in (*point,)):
+        raise ClientError("境界のクリック座標が正しくありません。")
     if not (0 <= left < right <= width and 0 <= top < bottom <= height):
         raise ClientError("境界の範囲は画像内にドラッグしてください。")
     if not (left <= point[0] < right and top <= point[1] < bottom):
@@ -383,6 +385,7 @@ class StudioState:
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
+        self.inference_lock = threading.Lock()
 
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -568,7 +571,8 @@ class StudioState:
             models = self._ensure_models()
             for index, record in enumerate(records, start=1):
                 self._set_job_current(record.relative_path, index - 1)
-                candidates = self._detect_image(models, record, confidence)
+                with self.inference_lock:
+                    candidates = self._detect_image(models, record, confidence)
                 with self.lock:
                     boundary_candidates = [
                         candidate for candidate in self.candidates.get(record.image_id, [])
@@ -639,32 +643,37 @@ class StudioState:
     def add_boundary_candidate(self, image_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self.image_for_id(image_id)
         roi, point = read_boundary_request(payload, record.width, record.height)
-        with self.sam_lock:
-            predictor = self._sam_predictor_for(record)
-            masks, scores, _logits = predictor.predict(
-                point_coords=np.asarray([point], dtype=np.float32),
-                point_labels=np.asarray([1], dtype=np.int32),
-                box=np.asarray(roi, dtype=np.float32),
-                multimask_output=True,
-            )
+        with self.inference_lock:
+            with self.lock:
+                if self.job.state == "running":
+                    raise ClientError("既存の処理が完了してから境界を検出してください。")
+            with self.sam_lock:
+                predictor = self._sam_predictor_for(record)
+                masks, scores, _logits = predictor.predict(
+                    point_coords=np.asarray([point], dtype=np.float32),
+                    point_labels=np.asarray([1], dtype=np.int32),
+                    box=np.asarray(roi, dtype=np.float32),
+                    multimask_output=True,
+                )
         mask, confidence = select_best_sam_mask(masks, scores)
         clipped = clip_mask_to_roi(mask, roi)
         if not np.any(clipped):
             raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
 
         candidate_id = uuid.uuid4().hex
-        destination = CACHE_DIR / record.image_id
-        destination.mkdir(parents=True, exist_ok=True)
         candidate = Candidate(
             candidate_id=candidate_id,
             class_name="境界",
             confidence=confidence,
-            mask_path=destination / f"{candidate_id}.png",
+            mask_path=CACHE_DIR / record.image_id / f"{candidate_id}.png",
             color="#ffffff",
             source="boundary",
         )
-        Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
         with self.lock:
+            if self.images.get(image_id) is not record:
+                raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+            candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
             self.candidates.setdefault(image_id, []).append(candidate)
         return {
             "id": candidate.candidate_id,
