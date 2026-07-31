@@ -14,6 +14,25 @@ model:
 
 No packages are installed by Lets Censoring.
 
+## Boundary selection (SAM)
+
+Select `Boundary`, drag a white ROI around the object, then click the object
+inside that ROI. The resulting mask is added to the regular candidate list, so
+its preview, enable/disable switch, and saved mosaic are handled exactly like
+an automatically detected candidate. The ROI is only used to constrain that
+one boundary detection; it is not mosaicked by itself.
+
+Download Meta's official ViT-B checkpoint from:
+
+`https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth`
+
+Place it at:
+
+`G:\AI\doujin-ai-lab\tools\MosaicStudio\models\sam_vit_b_01ec64.pth`
+
+The checkpoint source and model documentation are available at
+`https://github.com/facebookresearch/segment-anything#model-checkpoints`.
+
 ## 操作
 
 - ホイール: カーソル位置を中心に拡大・縮小します。

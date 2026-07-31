@@ -2,3 +2,4 @@
 .ui-fixture/
 __pycache__/
 tests/__pycache__/
+models/

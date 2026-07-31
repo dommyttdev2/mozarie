@@ -14,7 +14,9 @@ from PIL import Image, PngImagePlugin
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import server as server_module  # noqa: E402
 from server import (  # noqa: E402
+    Candidate,
     ClientError,
     DEFAULT_DETECTION_CONFIDENCE,
     FOLDER_PICKER_LOCK,
@@ -22,6 +24,7 @@ from server import (  # noqa: E402
     MosaicHandler,
     StudioState,
     calculate_block_size,
+    clip_mask_to_roi,
     confidence_for_source,
     detection_tiles,
     jpeg_metadata_manifest,
@@ -30,8 +33,10 @@ from server import (  # noqa: E402
     pick_windows_folder,
     png_ancillary_manifest,
     restore_tile_mask,
+    read_boundary_request,
     read_detection_confidence,
     save_with_mask,
+    select_best_sam_mask,
     webp_metadata_manifest,
 )
 
@@ -204,6 +209,115 @@ class MosaicStudioTests(unittest.TestCase):
         with self.assertRaises(ClientError):
             read_detection_confidence(0.91)
 
+    def test_boundary_request_requires_a_valid_roi_and_click(self):
+        roi, point = read_boundary_request(
+            {"roi": {"left": 2.2, "top": 3.1, "right": 12.6, "bottom": 15.8}, "point": {"x": 7, "y": 9}},
+            20,
+            20,
+        )
+        self.assertEqual(roi, (2, 3, 13, 16))
+        self.assertEqual(point, (7, 9))
+        with self.assertRaises(ClientError):
+            read_boundary_request(
+                {"roi": {"left": 2, "top": 3, "right": 12, "bottom": 15}, "point": {"x": 12, "y": 9}},
+                20,
+                20,
+            )
+
+    def test_sam_mask_selection_and_roi_clip_are_deterministic(self):
+        masks = np.zeros((3, 8, 8), dtype=bool)
+        masks[0, 1:5, 1:5] = True
+        masks[1, 0:7, 0:7] = True
+        masks[2, 3:8, 3:8] = True
+        selected, score = select_best_sam_mask(masks, np.asarray([0.31, 0.95, 0.71]))
+        clipped = clip_mask_to_roi(selected, (2, 2, 6, 6))
+        self.assertEqual(score, 0.95)
+        self.assertTrue(np.all(clipped[:2] == 0))
+        self.assertTrue(np.all(clipped[:, :2] == 0))
+        self.assertTrue(np.all(clipped[6:] == 0))
+        self.assertTrue(np.all(clipped[:, 6:] == 0))
+
+    def test_boundary_candidate_uses_the_normal_candidate_mask_path(self):
+        class FakePredictor:
+            def predict(self, **_kwargs):
+                masks = np.zeros((3, 12, 12), dtype=bool)
+                masks[1, 1:11, 1:11] = True
+                return masks, np.asarray([0.2, 0.9, 0.4]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = StudioState()
+            state.root = Path(directory)
+            state.images = {record.image_id: record}
+            state.order = [record.image_id]
+            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
+                created = state.add_boundary_candidate(
+                    record.image_id,
+                    {"roi": {"left": 3, "top": 3, "right": 9, "bottom": 9}, "point": {"x": 5, "y": 5}},
+                )
+
+            self.assertEqual(created["source"], "boundary")
+            self.assertEqual(created["className"], "境界")
+            self.assertEqual(state.list_candidates(record.image_id), [created])
+            combined = state.combined_candidate_mask(record.image_id)
+            self.assertTrue(np.any(combined[3:9, 3:9]))
+            self.assertFalse(np.any(combined[:3]))
+            self.assertFalse(np.any(combined[:, :3]))
+
+    def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            cache = root / "cache"
+            cache.mkdir()
+            boundary_path = cache / "boundary.png"
+            old_auto_path = cache / "old-auto.png"
+            new_auto_path = cache / "new-auto.png"
+            Image.fromarray(self._mask(12, 12), mode="L").save(boundary_path)
+            Image.fromarray(self._mask(12, 12), mode="L").save(old_auto_path)
+            Image.fromarray(self._mask(12, 12), mode="L").save(new_auto_path)
+            boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary")
+            old_auto = Candidate("old-auto", "penis", 0.8, old_auto_path)
+            new_auto = Candidate("new-auto", "penis", 0.7, new_auto_path)
+            state = StudioState()
+            state.root = root
+            state.images = {record.image_id: record}
+            state.order = [record.image_id]
+            state.candidates = {record.image_id: [boundary, old_auto]}
+            with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", return_value=[new_auto]):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+            self.assertEqual(state.candidates[record.image_id], [boundary, new_auto])
+            self.assertTrue(boundary_path.is_file())
+            self.assertFalse(old_auto_path.exists())
+            self.assertTrue(new_auto_path.is_file())
+
+    def test_boundary_api_returns_the_created_candidate(self):
+        from http.server import ThreadingHTTPServer
+
+        expected = {"id": "boundary", "className": "境界", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary"}
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(server_module.STATE, "add_boundary_candidate", return_value=expected) as add_candidate:
+                body = json.dumps({"imageId": "image", "roi": {"left": 1, "top": 2, "right": 3, "bottom": 4}, "point": {"x": 2, "y": 3}}).encode("utf-8")
+                connection.request("POST", "/api/boundary", body, {"Content-Type": "application/json"})
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"candidate": expected})
+            self.assertEqual(add_candidate.call_args.args[0], "image")
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_start_detection_propagates_ui_confidence(self):
         state = StudioState()
         record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
@@ -230,6 +344,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="detectCurrentButton"', page)
         self.assertIn('id="detectAllButton"', page)
         self.assertIn('id="saveButton"', page)
+        self.assertIn('id="boundaryTool"', page)
+        self.assertIn('path == "/api/boundary"', (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn('drawBoundaryRoi()', app)
+        self.assertIn('pointInBoundaryRoi(point)', app)
+        self.assertIn("status.boundaryReady", dictionary)
         self.assertIn('grid-auto-rows: max-content', styles)
         self.assertIn('object-fit: contain', styles)
         self.assertIn('gallery.detectAll', dictionary)

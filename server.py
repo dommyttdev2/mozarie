@@ -45,6 +45,7 @@ MODEL_PATH = Path(
 SECOND_MODEL_PATH = Path(
     r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt"
 )
+SAM_MODEL_PATH = APP_DIR / "models" / "sam_vit_b_01ec64.pth"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis", "anus", "testicles"}
 DEFAULT_COLORS = {
@@ -218,6 +219,7 @@ class Candidate:
     mask_path: Path
     enabled: bool = True
     color: str = "#5bb6d5"
+    source: str = "auto"
 
 
 @dataclass
@@ -329,6 +331,42 @@ def read_detection_confidence(value: Any) -> float:
     return confidence
 
 
+def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+    """Validate a SAM point prompt and its limiting ROI in image coordinates."""
+    try:
+        roi_data = payload["roi"]
+        point_data = payload["point"]
+        left = int(round(float(roi_data["left"])))
+        top = int(round(float(roi_data["top"])))
+        right = int(round(float(roi_data["right"])))
+        bottom = int(round(float(roi_data["bottom"])))
+        point = (int(round(float(point_data["x"]))), int(round(float(point_data["y"]))))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ClientError("境界の範囲またはクリック位置が正しくありません。") from exc
+
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        raise ClientError("境界の範囲は画像内にドラッグしてください。")
+    if not (left <= point[0] < right and top <= point[1] < bottom):
+        raise ClientError("クリック位置は選択範囲の内側にしてください。")
+    return (left, top, right, bottom), point
+
+
+def clip_mask_to_roi(mask: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
+    """Keep only the part of a SAM mask inside the user-selected ROI."""
+    left, top, right, bottom = roi
+    clipped = np.zeros_like(mask, dtype=np.uint8)
+    clipped[top:bottom, left:right] = np.asarray(mask[top:bottom, left:right] > 0, dtype=np.uint8) * 255
+    return clipped
+
+
+def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, float]:
+    """Select SAM's highest-scoring proposed object mask."""
+    if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+    index = int(np.argmax(scores))
+    return np.asarray(masks[index]), float(scores[index])
+
+
 def confidence_for_source(source: str, confidence: float) -> float:
     return confidence if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
 
@@ -342,6 +380,9 @@ class StudioState:
         self.candidates: dict[str, list[Candidate]] = {}
         self.job = Job()
         self.models: list[tuple[str, YOLO]] | None = None
+        self.sam_predictor: Any | None = None
+        self.sam_image_id: str | None = None
+        self.sam_lock = threading.RLock()
 
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -380,12 +421,44 @@ class StudioState:
             self.order = [record.image_id for record in records]
             self.candidates = {}
             self._clear_cache()
+            self._invalidate_sam_cache()
             self.job = Job()
         return self.list_images()
 
     def _clear_cache(self) -> None:
         shutil.rmtree(CACHE_DIR, ignore_errors=True)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _invalidate_sam_cache(self) -> None:
+        with self.sam_lock:
+            self.sam_image_id = None
+
+    def invalidate_sam_image(self, image_id: str) -> None:
+        with self.sam_lock:
+            if self.sam_image_id == image_id:
+                self.sam_image_id = None
+
+    def _sam_predictor_for(self, record: ImageRecord) -> Any:
+        with self.sam_lock:
+            if self.sam_predictor is None:
+                if not SAM_MODEL_PATH.is_file():
+                    raise ClientError(
+                        f"SAMモデルが見つかりません: {SAM_MODEL_PATH}。"
+                        "READMEの案内に従って配置してください。"
+                    )
+                try:
+                    from segment_anything import SamPredictor, sam_model_registry
+                except ImportError as exc:
+                    raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
+                model = sam_model_registry["vit_b"](checkpoint=str(SAM_MODEL_PATH))
+                model.to(device="cuda" if torch.cuda.is_available() else "cpu")
+                self.sam_predictor = SamPredictor(model)
+
+            if self.sam_image_id != record.image_id:
+                with Image.open(record.path) as image:
+                    self.sam_predictor.set_image(np.asarray(image.convert("RGB")))
+                self.sam_image_id = record.image_id
+            return self.sam_predictor
 
     def image_for_id(self, image_id: str) -> ImageRecord:
         with self.lock:
@@ -428,6 +501,7 @@ class StudioState:
                 "confidence": candidate.confidence,
                 "enabled": candidate.enabled,
                 "color": candidate.color,
+                "source": candidate.source,
             }
             for candidate in candidates
         ]
@@ -496,7 +570,14 @@ class StudioState:
                 self._set_job_current(record.relative_path, index - 1)
                 candidates = self._detect_image(models, record, confidence)
                 with self.lock:
-                    self.candidates[record.image_id] = candidates
+                    boundary_candidates = [
+                        candidate for candidate in self.candidates.get(record.image_id, [])
+                        if candidate.source == "boundary"
+                    ]
+                    for candidate in self.candidates.get(record.image_id, []):
+                        if candidate.source != "boundary":
+                            candidate.mask_path.unlink(missing_ok=True)
+                    self.candidates[record.image_id] = [*boundary_candidates, *candidates]
                 self._set_job_current(record.relative_path, index)
             self._finish_job()
         except Exception as exc:  # A background job must not kill the HTTP server.
@@ -539,7 +620,6 @@ class StudioState:
                         merge_segment(segments, class_name, float(box.conf[0].item()), full_mask, source)
         candidates: list[Candidate] = []
         destination = CACHE_DIR / record.image_id
-        shutil.rmtree(destination, ignore_errors=True)
         destination.mkdir(parents=True, exist_ok=True)
         for segment in segments:
             candidate_id = uuid.uuid4().hex
@@ -556,6 +636,45 @@ class StudioState:
             )
         return candidates
 
+    def add_boundary_candidate(self, image_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        record = self.image_for_id(image_id)
+        roi, point = read_boundary_request(payload, record.width, record.height)
+        with self.sam_lock:
+            predictor = self._sam_predictor_for(record)
+            masks, scores, _logits = predictor.predict(
+                point_coords=np.asarray([point], dtype=np.float32),
+                point_labels=np.asarray([1], dtype=np.int32),
+                box=np.asarray(roi, dtype=np.float32),
+                multimask_output=True,
+            )
+        mask, confidence = select_best_sam_mask(masks, scores)
+        clipped = clip_mask_to_roi(mask, roi)
+        if not np.any(clipped):
+            raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+
+        candidate_id = uuid.uuid4().hex
+        destination = CACHE_DIR / record.image_id
+        destination.mkdir(parents=True, exist_ok=True)
+        candidate = Candidate(
+            candidate_id=candidate_id,
+            class_name="境界",
+            confidence=confidence,
+            mask_path=destination / f"{candidate_id}.png",
+            color="#ffffff",
+            source="boundary",
+        )
+        Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
+        with self.lock:
+            self.candidates.setdefault(image_id, []).append(candidate)
+        return {
+            "id": candidate.candidate_id,
+            "className": candidate.class_name,
+            "confidence": candidate.confidence,
+            "enabled": candidate.enabled,
+            "color": candidate.color,
+            "source": candidate.source,
+        }
+
     def _apply_worker(self, records: list[ImageRecord], block_size: int) -> None:
         try:
             for index, record in enumerate(records, start=1):
@@ -563,6 +682,7 @@ class StudioState:
                 mask = self.combined_candidate_mask(record.image_id)
                 if mask is not None and np.any(mask):
                     save_with_mask(record, mask, block_size)
+                    self.invalidate_sam_image(record.image_id)
                 self._set_job_current(record.relative_path, index)
             self._finish_job()
         except Exception as exc:
@@ -1000,6 +1120,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", DEFAULT_DETECTION_CONFIDENCE)),
                 )
                 self._json({"ok": True})
+            elif path == "/api/boundary":
+                image_id = str(payload.get("imageId", ""))
+                self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
             elif path == "/api/apply":
                 block_size = _read_block_size(payload.get("blockSize"))
                 STATE.start_apply(payload.get("imageIds", []), block_size)
@@ -1009,6 +1132,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 record = STATE.image_for_id(image_id)
                 mask = _decode_mask(str(payload.get("mask", "")), record.width, record.height)
                 save_with_mask(record, mask, _read_block_size(payload.get("blockSize")))
+                STATE.invalidate_sam_image(image_id)
                 self._json({"ok": True})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)

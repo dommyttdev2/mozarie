@@ -3,7 +3,8 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   images: [], selectedIds: new Set(), currentId: null, currentImage: null,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
-  tool: "brush", spacePressed: false, panning: false, drawing: false,
+  tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
+  boundaryRoi: null, boundaryStart: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, translations: {},
 };
@@ -58,7 +59,7 @@ function currentRecord() { return state.images.find((image) => image.id === stat
 function detectionConfidence() { return Number($("#confidence").value); }
 
 function updateActionButtons() {
-  const running = state.job?.state === "running" || state.saving;
+  const running = state.job?.state === "running" || state.saving || state.boundaryPending;
   const hasImage = Boolean(state.currentId && state.currentImage);
   $("#detectAllButton").disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
@@ -85,7 +86,7 @@ async function loadFolder() {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     state.images = data.images;
     state.selectedIds.clear(); state.currentId = null; state.currentImage = null;
-    state.candidates = []; state.candidateImages.clear(); state.drafts.clear();
+    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
     renderGallery(); clearEditor();
     setStatus(t("status.imagesLoaded", { count: state.images.length }));
   } catch (error) { setStatus(error.message, "error"); }
@@ -145,7 +146,7 @@ function canvasSizeForImage(image) {
 }
 
 function clearEditor() {
-  state.history = []; state.historyIndex = -1; state.hover = null;
+  state.history = []; state.historyIndex = -1; state.hover = null; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryPoint = null;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -156,7 +157,7 @@ function clearEditor() {
 
 async function selectImage(imageId, force = false) {
   if (state.currentId === imageId && !force) return;
-  saveDraft(); state.currentId = imageId;
+  saveDraft(); state.currentId = imageId; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryPoint = null;
   const record = currentRecord(); renderGallery();
   setStatus(t("status.loadingImages"), "running");
   try {
@@ -233,7 +234,7 @@ function paintMask(maskImage, color, alpha, subtractImage = null) {
 }
 
 function drawBrushCursor() {
-  if (!state.hover || !state.currentImage) return;
+  if (!state.hover || !state.currentImage || !["brush", "eraser"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
@@ -244,6 +245,26 @@ function drawBrushCursor() {
   ctx.restore();
 }
 
+function roiFromPoints(start, end) {
+  const left = Math.floor(Math.min(start.x, end.x)); const top = Math.floor(Math.min(start.y, end.y));
+  const right = Math.ceil(Math.max(start.x, end.x)); const bottom = Math.ceil(Math.max(start.y, end.y));
+  return right - left >= 2 && bottom - top >= 2 ? { left, top, right, bottom } : null;
+}
+
+function pointInBoundaryRoi(point) {
+  const roi = state.boundaryRoi;
+  return Boolean(roi && point.x >= roi.left && point.x < roi.right && point.y >= roi.top && point.y < roi.bottom);
+}
+
+function drawBoundaryRoi() {
+  const roi = state.boundaryDragging ? roiFromPoints(state.boundaryStart, state.boundaryPoint) : state.boundaryRoi;
+  if (!roi) return;
+  const x = state.view.x + roi.left * state.view.scale; const y = state.view.y + roi.top * state.view.scale;
+  const width = (roi.right - roi.left) * state.view.scale; const height = (roi.bottom - roi.top) * state.view.scale;
+  ctx.save(); ctx.fillStyle = "rgba(255, 255, 255, 0.24)"; ctx.fillRect(x, y, width, height);
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(x, y, width, height); ctx.restore();
+}
+
 function render() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
@@ -252,6 +273,7 @@ function render() {
   const pulse = 0.40 + Math.sin(Date.now() / 127) * 0.15;
   for (const candidate of state.candidates) if (candidate.enabled) paintMask(state.candidateImages.get(candidate.id), candidate.color, pulse, exclusionCanvas);
   paintMask(addCanvas, "#58d7be", 0.40, exclusionCanvas);
+  drawBoundaryRoi();
   drawBrushCursor();
 }
 
@@ -276,6 +298,24 @@ function renderCandidates() {
 async function updateCandidate(candidate) {
   try { await api(`/api/candidate/${encodeURIComponent(state.currentId)}/${encodeURIComponent(candidate.id)}`, { method: "POST", body: JSON.stringify({ enabled: candidate.enabled, color: candidate.color }) }); }
   catch (error) { setStatus(error.message, "error"); }
+}
+
+async function addBoundaryCandidate(point) {
+  if (!state.currentId || !state.boundaryRoi || state.boundaryPending) return;
+  state.boundaryPending = true; updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
+  try {
+    const data = await api("/api/boundary", {
+      method: "POST",
+      body: JSON.stringify({ imageId: state.currentId, roi: state.boundaryRoi, point }),
+    });
+    const candidate = data.candidate;
+    state.candidates.push(candidate);
+    state.candidateImages.set(candidate.id, await loadImage(`/api/mask/${encodeURIComponent(state.currentId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
+    const record = currentRecord(); if (record) record.candidateCount = state.candidates.length;
+    $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
+    renderGallery(); renderCandidates(); render(); setStatus(t("status.boundaryDone"));
+  } catch (error) { setStatus(error.message, "error"); }
+  finally { state.boundaryPending = false; updateActionButtons(); }
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
@@ -352,8 +392,10 @@ async function pollJob() {
 }
 
 function setTool(tool) {
-  state.tool = tool; $("#brushTool").classList.toggle("active", tool === "brush"); $("#eraserTool").classList.toggle("active", tool === "eraser");
-  canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair"; render();
+  state.tool = tool; $("#brushTool").classList.toggle("active", tool === "brush"); $("#eraserTool").classList.toggle("active", tool === "eraser"); $("#boundaryTool").classList.toggle("active", tool === "boundary");
+  canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
+  if (tool === "boundary" && state.boundaryRoi) setStatus(t("status.boundaryReady"));
+  render();
 }
 function updateBrushSize(value) {
   const input = $("#brushSize"); input.value = Math.min(500, Math.max(2, Math.round(value)));
@@ -367,7 +409,7 @@ function bindEvents() {
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
   $("#applyButton").addEventListener("click", applyDetection); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", fitImage);
   $("#selectAllButton").addEventListener("click", () => { if (state.selectedIds.size === state.images.length) state.selectedIds.clear(); else state.images.forEach((image) => state.selectedIds.add(image.id)); renderGallery(); });
-  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
   $("#confidence").addEventListener("input", () => { $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
@@ -379,21 +421,37 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
-    canvas.setPointerCapture(event.pointerId); state.drawing = true; state.pointer = pointFromEvent(event); state.hover = state.pointer; drawStroke(state.pointer, state.pointer, state.tool === "eraser");
+    canvas.setPointerCapture(event.pointerId);
+    const point = clampPoint(pointFromEvent(event));
+    state.drawing = true; state.pointer = point; state.hover = point;
+    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    drawStroke(point, point, state.tool === "eraser");
   });
   canvas.addEventListener("pointermove", (event) => {
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
     }
-    state.hover = pointFromEvent(event);
-    if (state.drawing && (event.buttons & 1)) { const point = state.hover; drawStroke(state.pointer, point, state.tool === "eraser"); state.pointer = point; }
+    state.hover = clampPoint(pointFromEvent(event));
+    if (state.drawing && (event.buttons & 1)) {
+      const point = state.hover;
+      if (state.tool === "boundary") {
+        state.boundaryPoint = point;
+        state.boundaryDragging ||= Math.hypot(point.x - state.boundaryStart.x, point.y - state.boundaryStart.y) >= 3;
+      } else { drawStroke(state.pointer, point, state.tool === "eraser"); state.pointer = point; }
+    }
     render();
   });
   canvas.addEventListener("pointerup", (event) => {
-    if (state.drawing && event.button === 0) pushHistory();
+    if (state.drawing && event.button === 0 && state.tool === "boundary") {
+      const point = clampPoint(pointFromEvent(event));
+      const roi = roiFromPoints(state.boundaryStart, point);
+      if (state.boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
+      else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
+      state.boundaryStart = null; state.boundaryPoint = null; state.boundaryDragging = false;
+    } else if (state.drawing && event.button === 0) pushHistory();
     state.drawing = false; state.panning = false; if (!state.spacePressed) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
-  canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; render(); });
+  canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
   canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage) return;
