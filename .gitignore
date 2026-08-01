@@ -1,5 +1,17 @@
+# アプリ実行時の一時データと取り込み画像
 .mosaicstudio-cache/
+.mosaicstudio_imports/
 .ui-fixture/
-__pycache__/
-tests/__pycache__/
+
+# 大容量のローカルモデル
 models/
+
+# Python の生成物と仮想環境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# ログと Windows のサムネイル情報
+*.log
+Thumbs.db
