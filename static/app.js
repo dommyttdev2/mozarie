@@ -7,6 +7,7 @@ const state = {
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, translations: {},
+  applyTargetIds: [], applyRunning: false,
 };
 
 const canvas = $("#editorCanvas");
@@ -57,20 +58,24 @@ function setStatus(message, kind = "") {
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
 function detectionConfidence() { return Number($("#confidence").value); }
-function isBusy() { return state.job?.state === "running" || state.saving || state.boundaryPending; }
+function isBusy() { return ["running", "paused"].includes(state.job?.state) || state.saving || state.boundaryPending; }
 
 function updateActionButtons() {
   const running = isBusy();
   const hasImage = Boolean(state.currentId && state.currentImage);
   $("#detectAllButton").disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
+  $("#clearCurrentMasksButton").disabled = running || !hasImage;
+  $("#clearAllMasksButton").disabled = running || state.images.length === 0;
+  $("#clearCatalogButton").disabled = running || state.images.length === 0;
+  $("#selectAllButton").disabled = running || state.images.length === 0;
   $("#applyButton").disabled = running || state.selectedIds.size === 0;
   $("#saveButton").disabled = running || !hasImage;
 }
 
 function updateProgress(job) {
   const progress = $("#jobProgress");
-  const running = job?.state === "running";
+  const running = ["running", "paused"].includes(job?.state);
   progress.hidden = !running;
   if (running) {
     progress.max = Math.max(1, Number(job.total) || 1);
@@ -382,27 +387,6 @@ function buildCombinedMask() {
   return combinedCanvas.toDataURL("image/png");
 }
 
-async function saveCurrent() {
-  if (!state.currentId || !state.currentImage) return;
-  const imageId = state.currentId;
-  const viewGeneration = state.imageGeneration;
-  const mask = buildCombinedMask();
-  const blockSize = Number($("#blockSize").value);
-  state.saving = true;
-  updateActionButtons(); setStatus(t("status.saving"), "running");
-  try {
-    await api(`/api/images/${encodeURIComponent(imageId)}/save`, { method: "POST", body: JSON.stringify({ mask, blockSize }) });
-    state.drafts.delete(imageId);
-    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
-    const updatedImage = await loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`);
-    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
-    addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-    state.history = []; state.historyIndex = -1; state.currentImage = updatedImage; render();
-    setStatus(t("status.saved"));
-  } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
-  finally { state.saving = false; updateHistoryButtons(); updateActionButtons(); }
-}
-
 async function runDetection(imageIds) {
   if (!imageIds.length) return;
   try {
@@ -412,23 +396,127 @@ async function runDetection(imageIds) {
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
 }
 
-async function applyDetection() {
+function saveCurrent() {
+  if (state.currentId) openApplyDialog([state.currentId]);
+}
+
+function applyDetection() {
   if (!state.selectedIds.size) return setStatus(t("status.chooseApplyImages"), "error");
+  openApplyDialog([...state.selectedIds]);
+}
+
+function setApplyResult(message, error = false) {
+  const result = $("#applyResult"); result.textContent = message; result.classList.toggle("error", error);
+}
+
+function isTerminalApply(job) {
+  return job.kind === "apply" && state.applyRunning && ["complete", "cancelled", "error"].includes(job.state);
+}
+
+function selectedSaveMode() { return document.querySelector('input[name="saveMode"]:checked').value; }
+
+function syncApplyMode() {
+  const copying = selectedSaveMode() === "copy";
+  $("#applyPrefix").disabled = !copying || state.applyRunning;
+  $("#deleteOriginalRow").hidden = !copying;
+  $("#deleteOriginal").disabled = !copying || state.applyRunning;
+}
+
+function openApplyDialog(imageIds) {
+  if (!imageIds.length || isBusy()) return;
+  saveDraft();
+  state.applyTargetIds = imageIds;
+  state.applyRunning = false;
+  $("#applyTargetCount").textContent = t("apply.target", { count: imageIds.length });
+  $("#applyBlockSize").value = $("#blockSize").value;
+  $("#applyProgressPanel").hidden = true;
+  $("#applyStartButton").hidden = false;
+  $("#applyCloseButton").hidden = false;
+  $("#applyPauseButton").hidden = true;
+  $("#applyCancelButton").hidden = true;
+  $("#applySettings").disabled = false;
+  setApplyResult(""); syncApplyMode();
+  $("#applyDialog").showModal();
+}
+
+function draftPayload(imageIds) {
+  const drafts = {};
+  for (const imageId of imageIds) {
+    const draft = state.drafts.get(imageId);
+    if (draft) drafts[imageId] = draft;
+  }
+  return drafts;
+}
+
+async function startApplyFromDialog(event) {
+  event.preventDefault();
+  const imageIds = state.applyTargetIds;
+  if (!imageIds.length) return;
+  const copy = selectedSaveMode() === "copy";
+  const prefix = $("#applyPrefix").value.trim();
+  if (copy && !prefix) return setApplyResult(t("error.requestFailed"), true);
   try {
-    await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds: [...state.selectedIds], blockSize: Number($("#blockSize").value) }) });
-    state.job = { kind: "apply", state: "running", total: state.selectedIds.size, completed: 0, current: "" };
+    await api("/api/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        imageIds, blockSize: Number($("#applyBlockSize").value), mode: copy ? "copy" : "overwrite",
+        prefix: copy ? prefix : "censored_", deleteOriginal: copy && $("#deleteOriginal").checked,
+        drafts: draftPayload(imageIds),
+      }),
+    });
+    state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" };
+    state.applyRunning = true;
+    $("#applySettings").disabled = true;
+    $("#applyProgressPanel").hidden = false;
+    $("#applyStartButton").hidden = true;
+    $("#applyCloseButton").hidden = true;
+    $("#applyPauseButton").hidden = false;
+    $("#applyCancelButton").hidden = false;
     updateProgress(state.job); setStatus(t("status.applyStarted"), "running");
-  } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
+  } catch (error) { setApplyResult(error.message, true); }
+}
+
+async function controlApply(action) {
+  try { await api(`/api/job/${action}`, { method: "POST", body: JSON.stringify({}) }); }
+  catch (error) { setApplyResult(error.message, true); }
+}
+
+async function finishApplyJob(job) {
+  const keepCurrent = state.currentId;
+  const data = await api("/api/images");
+  state.images = data.images;
+  for (const imageId of state.applyTargetIds) state.drafts.delete(imageId);
+  state.candidates = []; state.candidateImages.clear();
+  renderGallery();
+  if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) await selectImage(keepCurrent, true);
+  else { state.currentId = null; state.currentImage = null; clearEditor(); }
+  state.applyRunning = false;
+  $("#applyPauseButton").hidden = true;
+  $("#applyCancelButton").hidden = true;
+  $("#applyCloseButton").hidden = false;
+  if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
+  else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
+  else setApplyResult(t("apply.error", { error: job.error || t("error.background") }), true);
 }
 
 async function pollJob() {
   try {
     const job = await api("/api/job"); const previous = state.job; state.job = job; updateProgress(job);
-    if (job.state === "running") setStatus(t(job.kind === "detect" ? "status.detectProgress" : "status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
-    else if (job.state === "complete" && previous?.state === "running") {
+    const terminalApply = isTerminalApply(job);
+    if (terminalApply) {
+      await finishApplyJob(job);
+      setStatus(job.state === "complete" ? t("status.applyDone") : (job.state === "cancelled" ? t("status.applyCancelled") : (job.error || t("error.background"))), job.state === "error" ? "error" : "");
+    } else if (job.kind === "apply" && state.applyRunning) {
+      $("#applyProgress").max = Math.max(1, Number(job.total) || 1);
+      $("#applyProgress").value = Math.min(Number(job.total) || 1, Number(job.completed) || 0);
+      $("#applyCurrentName").textContent = job.current || "";
+      $("#applyProgressText").textContent = t("apply.progress", { completed: job.completed, total: job.total });
+      $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
+      if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
+    } else if (job.state === "complete" && previous?.state === "running") {
       const keepCurrent = state.currentId; const data = await api("/api/images"); state.images = data.images; renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
       setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
-    } else if (job.state === "error" && previous?.state === "running") setStatus(job.error || t("error.background"), "error");
+    }
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
 }
 
@@ -443,17 +531,135 @@ function updateBrushSize(value) {
   $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render();
 }
 
+function confirmAction(title, message) {
+  const dialog = $("#confirmDialog");
+  $("#confirmTitle").textContent = title;
+  $("#confirmMessage").textContent = message;
+  return new Promise((resolve) => {
+    const finish = () => resolve(dialog.returnValue === "confirm");
+    dialog.addEventListener("close", finish, { once: true });
+    dialog.showModal();
+  });
+}
+
+function resetCurrentDraft() {
+  if (!state.currentImage) return;
+  addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
+  exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+  state.history = []; state.historyIndex = -1; updateHistoryButtons(); render();
+}
+
+async function clearMasks(imageIds, titleKey, messageKey) {
+  if (!imageIds.length || isBusy()) return;
+  if (!await confirmAction(t(titleKey), t(messageKey))) return;
+  try {
+    await api("/api/masks/clear", { method: "POST", body: JSON.stringify({ imageIds }) });
+    for (const imageId of imageIds) state.drafts.delete(imageId);
+    if (imageIds.includes(state.currentId)) {
+      state.candidates = []; state.candidateImages.clear(); resetCurrentDraft();
+      $("#candidateStatus").textContent = t("candidates.none"); renderCandidates();
+    }
+    state.images.forEach((image) => { if (imageIds.includes(image.id)) image.candidateCount = 0; });
+    renderGallery(); setStatus(t("status.editReady"));
+  } catch (error) { setStatus(error.message, "error"); }
+}
+
+async function clearCatalog() {
+  if (!state.images.length || isBusy()) return;
+  if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"))) return;
+  try {
+    await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
+    state.images = []; state.selectedIds.clear(); state.currentId = null; state.currentImage = null;
+    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearEditor(); renderGallery();
+    setStatus(t("status.chooseFolder"));
+  } catch (error) { setStatus(error.message, "error"); }
+}
+
+function bytesToBase64(buffer) {
+  const bytes = new Uint8Array(buffer); let value = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) value += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return btoa(value);
+}
+
+async function directFilesFromDrop(dataTransfer) {
+  const handles = [...dataTransfer.items]
+    .map((item) => item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null)
+    .filter(Boolean);
+  if (handles.length) {
+    const files = [];
+    for (const handlePromise of handles) {
+      const handle = await handlePromise;
+      if (handle.kind === "file") files.push(await handle.getFile());
+      else if (handle.kind === "directory") {
+        for await (const entry of handle.values()) if (entry.kind === "file") files.push(await entry.getFile());
+      }
+    }
+    return files;
+  }
+  const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+  if (entries.length) {
+    const files = [];
+    for (const entry of entries) {
+      if (entry.isFile) files.push(await new Promise((resolve, reject) => entry.file(resolve, reject)));
+      else if (entry.isDirectory) {
+        const reader = entry.createReader(); const children = [];
+        while (true) {
+          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (!batch.length) break;
+          children.push(...batch);
+        }
+        for (const child of children) if (child.isFile) files.push(await new Promise((resolve, reject) => child.file(resolve, reject)));
+      }
+    }
+    return files;
+  }
+  return [...dataTransfer.files];
+}
+
+async function importDroppedFiles(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  $("#gallery").classList.remove("drag-over");
+  if (isBusy()) return;
+  try {
+    const files = (await directFilesFromDrop(event.dataTransfer)).filter((file) => /\.(png|jpe?g|webp)$/i.test(file.name));
+    if (!files.length) return;
+    let data = null;
+    for (const [index, file] of files.entries()) {
+      setStatus(t("gallery.importProgress", { completed: index + 1, total: files.length }), "running");
+      data = await api("/api/import", {
+        method: "POST",
+        body: JSON.stringify({ files: [{ name: file.name, data: bytesToBase64(await file.arrayBuffer()) }] }),
+      });
+    }
+    state.images = data.images; renderGallery(); setStatus(t("gallery.imported", { count: files.length }));
+  } catch (error) { setStatus(error.message, "error"); }
+}
+
 function bindEvents() {
   $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", pickFolder);
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
   $("#applyButton").addEventListener("click", applyDetection); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", fitImage);
+  $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
+  $("#clearAllMasksButton").addEventListener("click", () => clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"));
+  $("#clearCatalogButton").addEventListener("click", clearCatalog);
   $("#selectAllButton").addEventListener("click", () => { if (state.selectedIds.size === state.images.length) state.selectedIds.clear(); else state.images.forEach((image) => state.selectedIds.add(image.id)); renderGallery(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
   $("#confidence").addEventListener("input", () => { $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
+  $("#applyForm").addEventListener("submit", startApplyFromDialog);
+  document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
+  $("#applyPauseButton").addEventListener("click", () => controlApply(state.job?.state === "paused" ? "resume" : "pause"));
+  $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
+  $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
+  $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });
+  $("#gallery").addEventListener("dragover", (event) => { event.preventDefault(); $("#gallery").classList.add("drag-over"); });
+  $("#gallery").addEventListener("dragleave", () => $("#gallery").classList.remove("drag-over"));
+  $("#gallery").addEventListener("drop", importDroppedFiles);
 
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointerdown", (event) => {

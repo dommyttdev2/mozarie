@@ -236,6 +236,7 @@ class Job:
     current: str = ""
     error: str = ""
     started_at: float | None = None
+    outputs: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +247,7 @@ class Job:
             "current": self.current,
             "error": self.error,
             "startedAt": self.started_at,
+            "outputs": self.outputs,
         }
 
 
@@ -391,6 +393,8 @@ class StudioState:
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
         self.inference_lock = threading.Lock()
+        self.pause_requested = threading.Event()
+        self.cancel_requested = threading.Event()
 
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -431,6 +435,77 @@ class StudioState:
             self._clear_cache()
             self._invalidate_sam_cache()
             self.job = Job()
+            self.pause_requested.clear()
+            self.cancel_requested.clear()
+        return self.list_images()
+
+    def clear_catalog(self) -> None:
+        with self.lock:
+            if self.job.state in {"running", "paused"}:
+                raise ClientError("処理中は画像一覧をクリアできません。")
+            self.images = {}
+            self.order = []
+            self.candidates = {}
+            self._clear_cache()
+            self._invalidate_sam_cache()
+
+    def clear_masks(self, image_ids: list[str]) -> int:
+        records = self._records_for_ids(image_ids)
+        with self.lock:
+            if self.job.state in {"running", "paused"}:
+                raise ClientError("処理中はモザイク候補をクリアできません。")
+            self._clear_masks_unchecked(records)
+        return len(records)
+
+    def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
+        for record in records:
+            for candidate in self.candidates.pop(record.image_id, []):
+                candidate.mask_path.unlink(missing_ok=True)
+            shutil.rmtree(CACHE_DIR / record.image_id, ignore_errors=True)
+
+    def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        with self.lock:
+            root = self.root
+            if self.job.state in {"running", "paused"}:
+                raise ClientError("処理中は画像を追加できません。")
+        if root is None:
+            raise ClientError("画像を追加する前に画像フォルダを読み込んでください。")
+        if not isinstance(files, list) or not files:
+            raise ClientError("追加する画像がありません。")
+
+        destination_dir = root / ".mosaicstudio_imports"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        added: list[ImageRecord] = []
+        for file_data in files:
+            if not isinstance(file_data, dict):
+                raise ClientError("画像データの形式が正しくありません。")
+            name = Path(str(file_data.get("name", ""))).name
+            if not name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            try:
+                raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ClientError("追加画像を読み込めません。") from exc
+            if not raw:
+                continue
+            _verify_decodable_image(raw)
+            destination = unique_destination(destination_dir / name)
+            temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_bytes(raw)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+            with Image.open(io.BytesIO(raw)) as image:
+                width, height = image.size
+            stat = destination.stat()
+            added.append(ImageRecord(uuid.uuid4().hex, destination, destination.relative_to(root).as_posix(), width, height, stat.st_mtime_ns))
+
+        with self.lock:
+            for record in added:
+                self.images[record.image_id] = record
+                self.order.append(record.image_id)
+            self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
         return self.list_images()
 
     def _clear_cache(self) -> None:
@@ -537,9 +612,56 @@ class StudioState:
         records = self._records_for_ids(image_ids)
         self._start_job("detect", records, self._detect_worker, confidence)
 
-    def start_apply(self, image_ids: list[str], block_size: int) -> None:
+    def start_apply(
+        self,
+        image_ids: list[str],
+        block_size: int,
+        mode: str,
+        prefix: str,
+        delete_original: bool,
+        drafts: dict[str, dict[str, Any]],
+    ) -> None:
         records = self._records_for_ids(image_ids)
-        self._start_job("apply", records, self._apply_worker, block_size)
+        if mode not in {"copy", "overwrite"}:
+            raise ClientError("保存方法が正しくありません。")
+        if not isinstance(prefix, str) or not prefix or Path(prefix).name != prefix:
+            raise ClientError("ファイル名の先頭が正しくありません。")
+        if not isinstance(drafts, dict):
+            raise ClientError("手描きマスクの形式が正しくありません。")
+        decoded_drafts = {
+            record.image_id: decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
+            for record in records
+        }
+        self._start_job(
+            "apply", records, self._apply_worker, block_size, mode, prefix,
+            bool(delete_original and mode == "copy"), decoded_drafts,
+        )
+
+    def request_pause(self) -> Job:
+        with self.lock:
+            if self.job.kind != "apply" or self.job.state != "running":
+                raise ClientError("一時停止できるモザイク適用はありません。")
+            self.pause_requested.set()
+            return self.job
+
+    def resume_apply(self) -> Job:
+        with self.lock:
+            if self.job.kind != "apply" or self.job.state != "paused":
+                raise ClientError("再開できるモザイク適用はありません。")
+            self.pause_requested.clear()
+            self.job.state = "running"
+            return self.job
+
+    def request_cancel(self) -> Job:
+        with self.lock:
+            if self.job.kind != "apply" or self.job.state not in {"running", "paused"}:
+                raise ClientError("キャンセルできるモザイク適用はありません。")
+            self.cancel_requested.set()
+            self.pause_requested.clear()
+            if self.job.state == "paused":
+                self.job.state = "cancelled"
+                self.job.current = ""
+            return self.job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
         if not isinstance(image_ids, list):
@@ -552,9 +674,11 @@ class StudioState:
 
     def _start_job(self, kind: str, records: list[ImageRecord], worker: Any, *args: Any) -> None:
         with self.lock:
-            if self.job.state == "running":
+            if self.job.state in {"running", "paused"}:
                 raise ClientError("別の処理が進行中です。")
             self.job = Job(kind=kind, state="running", total=len(records), started_at=time.time())
+            self.pause_requested.clear()
+            self.cancel_requested.clear()
         LOGGER.info("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
         thread = threading.Thread(target=worker, args=(records, *args), daemon=True)
         thread.start()
@@ -690,24 +814,86 @@ class StudioState:
             "source": candidate.source,
         }
 
-    def _apply_worker(self, records: list[ImageRecord], block_size: int) -> None:
+    def _apply_worker(
+        self,
+        records: list[ImageRecord],
+        block_size: int,
+        mode: str,
+        prefix: str,
+        delete_original: bool,
+        drafts: dict[str, tuple[np.ndarray | None, np.ndarray | None]],
+    ) -> None:
         try:
             for index, record in enumerate(records, start=1):
+                if self.cancel_requested.is_set():
+                    self._cancel_job()
+                    return
+                self._wait_while_paused()
+                if self.cancel_requested.is_set():
+                    self._cancel_job()
+                    return
                 self._set_job_current(record.relative_path, index - 1)
-                mask = self.combined_candidate_mask(record.image_id)
+                mask = self.combined_candidate_mask(record.image_id, drafts.get(record.image_id))
                 if mask is not None and np.any(mask):
-                    save_with_mask(record, mask, block_size)
+                    output = record.path if mode == "overwrite" else unique_destination(record.path.with_name(f"{prefix}{record.path.name}"))
+                    save_with_mask(record, mask, block_size, output)
+                    if mode == "copy" and delete_original:
+                        record.path.unlink()
+                        record.path = output
+                        record.relative_path = output.relative_to(self.root).as_posix() if self.root else output.name
+                        record.mtime_ns = output.stat().st_mtime_ns
+                    elif mode == "copy":
+                        copied_stat = output.stat()
+                        copied = ImageRecord(
+                            uuid.uuid4().hex, output,
+                            output.relative_to(self.root).as_posix() if self.root else output.name,
+                            record.width, record.height, copied_stat.st_mtime_ns,
+                        )
+                        with self.lock:
+                            self.images[copied.image_id] = copied
+                            self.order.append(copied.image_id)
+                            self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
+                    with self.lock:
+                        self.job.outputs.append(str(output))
                     self.invalidate_sam_image(record.image_id)
+                with self.lock:
+                    self._clear_masks_unchecked([record])
                 self._set_job_current(record.relative_path, index)
+                if self.pause_requested.is_set():
+                    with self.lock:
+                        self.job.state = "paused"
+                        self.job.current = ""
+                    while self.pause_requested.is_set() and not self.cancel_requested.is_set():
+                        time.sleep(0.1)
+                    if self.cancel_requested.is_set():
+                        self._cancel_job()
+                        return
             self._finish_job()
         except Exception as exc:
             self._fail_job(exc)
 
-    def combined_candidate_mask(self, image_id: str) -> np.ndarray | None:
+    def _wait_while_paused(self) -> None:
+        while self.pause_requested.is_set() and not self.cancel_requested.is_set():
+            with self.lock:
+                self.job.state = "paused"
+                self.job.current = ""
+            time.sleep(0.1)
+
+    def _cancel_job(self) -> None:
+        with self.lock:
+            self.job.state = "cancelled"
+            self.job.current = ""
+
+    def combined_candidate_mask(
+        self,
+        image_id: str,
+        draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
+    ) -> np.ndarray | None:
         record = self.image_for_id(image_id)
         with self.lock:
             candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.enabled]
-        if not candidates:
+        add_mask, exclusion_mask = draft or (None, None)
+        if not candidates and add_mask is None:
             return None
         combined = np.zeros((record.height, record.width), dtype=np.uint8)
         for candidate in candidates:
@@ -718,6 +904,10 @@ class StudioState:
             if mask.shape != combined.shape:
                 raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
             combined = np.maximum(combined, mask)
+        if add_mask is not None:
+            combined = np.maximum(combined, add_mask)
+        if exclusion_mask is not None:
+            combined[exclusion_mask > 0] = 0
         return combined
 
     def _set_job_current(self, current: str, completed: int) -> None:
@@ -1042,7 +1232,31 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raise ClientError("編集マスクは有効なPNGではありません。") from exc
 
 
-def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
+def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if raw_draft is None:
+        return None, None
+    if not isinstance(raw_draft, dict):
+        raise ClientError("手描きマスクの形式が正しくありません。")
+    add = raw_draft.get("add")
+    exclusion = raw_draft.get("exclusion")
+    return (
+        _decode_mask(str(add), width, height) if add else None,
+        _decode_mask(str(exclusion), width, height) if exclusion else None,
+    )
+
+
+def unique_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for number in range(2, 10000):
+        candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
+
+
+def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int, destination: Path | None = None) -> None:
+    destination = destination or record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
     suffix = record.path.suffix.lower()
@@ -1060,7 +1274,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
 
     temporary_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mosaicstudio.tmp", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mosaicstudio.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)
             handle.flush()
@@ -1073,9 +1287,9 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
         if suffix == ".webp" and webp_metadata_manifest(source) != webp_metadata_manifest(temporary_bytes):
             raise ClientError("WebPメタデータ検証に失敗したため置換しませんでした。")
         _verify_decodable_image(temporary_bytes)
-        os.replace(temporary_path, record.path)
+        os.replace(temporary_path, destination)
         temporary_path = None
-        os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -1133,6 +1347,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images})
+            elif path == "/api/catalog/clear":
+                STATE.clear_catalog()
+                self._json({"images": []})
+            elif path == "/api/import":
+                self._json({"images": STATE.import_images(payload.get("files", []))})
+            elif path == "/api/masks/clear":
+                self._json({"cleared": STATE.clear_masks(payload.get("imageIds", []))})
             elif path == "/api/detect":
                 STATE.start_detection(
                     payload.get("imageIds", []),
@@ -1144,8 +1365,18 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
             elif path == "/api/apply":
                 block_size = _read_block_size(payload.get("blockSize"))
-                STATE.start_apply(payload.get("imageIds", []), block_size)
+                STATE.start_apply(
+                    payload.get("imageIds", []), block_size,
+                    str(payload.get("mode", "copy")), str(payload.get("prefix", "censored_")),
+                    bool(payload.get("deleteOriginal", False)), payload.get("drafts", {}),
+                )
                 self._json({"ok": True})
+            elif path == "/api/job/pause":
+                self._json(STATE.request_pause().as_dict())
+            elif path == "/api/job/resume":
+                self._json(STATE.resume_apply().as_dict())
+            elif path == "/api/job/cancel":
+                self._json(STATE.request_cancel().as_dict())
             elif path.endswith("/save") and path.startswith("/api/images/"):
                 image_id = path.split("/")[3]
                 record = STATE.image_for_id(image_id)

@@ -1,4 +1,6 @@
 import http.client
+import base64
+import io
 import json
 import logging
 import re
@@ -18,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as server_module  # noqa: E402
 from server import (  # noqa: E402
     Candidate,
+    CACHE_DIR,
     ClientError,
     DEFAULT_DETECTION_CONFIDENCE,
     FOLDER_PICKER_LOCK,
@@ -257,6 +260,113 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(state.image_for_id(images[0]["id"]).path, (nested / "one.png").resolve())
             with self.assertRaises(ClientError):
                 state.image_for_id("..%2foutside")
+
+    def test_import_keeps_original_bytes_under_the_hidden_import_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = io.BytesIO()
+            Image.new("RGB", (10, 8), "white").save(source, format="PNG")
+            raw = source.getvalue()
+            state = StudioState()
+            state.set_root(str(root))
+            images = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            self.assertEqual(len(images), 1)
+            imported = root / ".mosaicstudio_imports" / "dropped.png"
+            self.assertEqual(imported.read_bytes(), raw)
+            state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            self.assertTrue((root / ".mosaicstudio_imports" / "dropped_2.png").is_file())
+
+    def test_clear_masks_removes_candidates_without_touching_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            original = path.read_bytes()
+            state = StudioState()
+            images = state.set_root(directory)
+            image_id = images[0]["id"]
+            mask_path = CACHE_DIR / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            self.assertEqual(state.clear_masks([image_id]), 1)
+            self.assertEqual(state.list_candidates(image_id), [])
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_clear_catalog_only_removes_images_from_the_screen_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            original = path.read_bytes()
+            state = StudioState()
+            state.set_root(directory)
+
+            state.clear_catalog()
+
+            self.assertEqual(state.list_images(), [])
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(state.root, Path(directory).resolve())
+
+    def test_copy_save_preserves_png_metadata_and_leaves_source_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("workflow", '{"nodes":[]}')
+            Image.new("RGB", (16, 16), "#6688aa").save(source, pnginfo=metadata)
+            original = source.read_bytes()
+            source_mtime_ns = source.stat().st_mtime_ns
+            destination = Path(directory) / "censored_source.png"
+            save_with_mask(self._record(source, 16, 16), self._mask(16, 16), 4, destination)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(png_ancillary_manifest(original), png_ancillary_manifest(destination.read_bytes()))
+            self.assertEqual(destination.stat().st_mtime_ns, source_mtime_ns)
+
+    def test_copy_apply_adds_the_output_to_the_catalogue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "#6688aa").save(source)
+            state = StudioState()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="apply", state="running", total=1)
+            state._apply_worker([record], 4, "copy", "censored_", False, {image_id: (self._mask(16, 16), None)})
+            names = [image["relativePath"] for image in state.list_images()]
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(names, ["censored_source.png", "source.png"])
+            self.assertEqual((Path(directory) / "censored_source.png").stat().st_mtime_ns, source.stat().st_mtime_ns)
+
+    def test_apply_pause_resume_and_cancel_state_transitions(self):
+        state = StudioState()
+        state.job = server_module.Job(kind="apply", state="running", total=2)
+
+        state.request_pause()
+        self.assertTrue(state.pause_requested.is_set())
+
+        state.job.state = "paused"
+        state.resume_apply()
+        self.assertEqual(state.job.state, "running")
+        self.assertFalse(state.pause_requested.is_set())
+
+        state.request_cancel()
+        self.assertTrue(state.cancel_requested.is_set())
+        self.assertFalse(state.pause_requested.is_set())
+
+        state.job.state = "paused"
+        state.request_cancel()
+        self.assertEqual(state.job.state, "cancelled")
+
+    def test_combined_mask_includes_draft_add_and_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = StudioState()
+            image_id = state.set_root(directory)[0]["id"]
+            add = np.zeros((16, 16), dtype=np.uint8)
+            add[2:10, 2:10] = 255
+            exclusion = np.zeros((16, 16), dtype=np.uint8)
+            exclusion[4:6, 4:6] = 255
+            combined = state.combined_candidate_mask(image_id, (add, exclusion))
+            self.assertEqual(combined[3, 3], 255)
+            self.assertEqual(combined[4, 4], 0)
 
     def test_tile_layout_restores_masks_to_original_coordinates(self):
         specs = detection_tiles(100, 80)
@@ -509,6 +619,10 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('confidence: detectionConfidence()', app)
         self.assertIn('data-i18n="editor.undo"', page)
         self.assertIn('id="detectCurrentButton"', page)
+        self.assertIn('id="clearCurrentMasksButton"', page)
+        self.assertIn('id="clearAllMasksButton"', page)
+        self.assertIn('id="clearCatalogButton"', page)
+        self.assertIn('id="applyDialog"', page)
         self.assertIn('id="detectAllButton"', page)
         self.assertIn('id="saveButton"', page)
         self.assertIn('id="boundaryTool"', page)
@@ -518,7 +632,17 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn("status.boundaryReady", dictionary)
         self.assertIn('grid-auto-rows: max-content', styles)
         self.assertIn('object-fit: contain', styles)
+        self.assertIn('#applyProgressPanel[hidden] { display: none; }', styles)
         self.assertIn('gallery.detectAll', dictionary)
+        self.assertIn('editor.clearMasks', dictionary)
+        self.assertIn('confirm.clearCurrent.message', dictionary)
+        self.assertIn('getAsFileSystemHandle', app)
+        self.assertIn('webkitGetAsEntry', app)
+        self.assertIn('event.preventDefault(); if (!state.applyRunning)', app)
+        backend = (root / "server.py").read_text(encoding="utf-8")
+        self.assertIn('path == "/api/import"', backend)
+        self.assertIn('path == "/api/masks/clear"', backend)
+        self.assertIn('path == "/api/job/pause"', backend)
 
         referenced_keys = set(re.findall(r'data-i18n(?:-title|-aria-label)?="([^"]+)"', page))
         referenced_keys.update(re.findall(r'\bt\("([^"]+)"', app))
