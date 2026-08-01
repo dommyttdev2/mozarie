@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import io
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -20,8 +21,8 @@ import subprocess
 import tempfile
 import threading
 import time
-import traceback
 import uuid
+import webbrowser
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +60,10 @@ SECONDARY_MIN_CONFIDENCE = 0.75
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
 FOLDER_PICKER_LOCK = threading.Lock()
+LOGGER = logging.getLogger(__name__)
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+JOB_LABELS = {"detect": "自動検出", "apply": "モザイク適用"}
 
 FOLDER_PICKER_SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -550,6 +555,7 @@ class StudioState:
             if self.job.state == "running":
                 raise ClientError("別の処理が進行中です。")
             self.job = Job(kind=kind, state="running", total=len(records), started_at=time.time())
+        LOGGER.info("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
         thread = threading.Thread(target=worker, args=(records, *args), daemon=True)
         thread.start()
 
@@ -724,13 +730,17 @@ class StudioState:
             self.job.state = "complete"
             self.job.completed = self.job.total
             self.job.current = ""
+            kind = self.job.kind
+            total = self.job.total
+        LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception) -> None:
-        traceback.print_exc()
         with self.lock:
+            kind = self.job.kind
             self.job.state = "error"
             self.job.error = str(exc)
             self.job.current = ""
+        LOGGER.exception("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind))
 
 
 def _valid_color(value: str) -> bool:
@@ -1110,7 +1120,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ClientError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # Keep tracebacks in the terminal, not in browser.
-            traceback.print_exc()
+            LOGGER.exception("GET リクエストの処理に失敗: %s", self.path)
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1152,7 +1162,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ClientError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
-            traceback.print_exc()
+            LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -1203,7 +1213,18 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"[{self.log_date_time_string()}] {format % args}")
+        try:
+            status = int(args[1])
+        except (IndexError, TypeError, ValueError):
+            LOGGER.warning("HTTP %s", format % args)
+            return
+
+        path = urlparse(self.path).path
+        if 200 <= status < 400:
+            if path.startswith("/api/") and self.command == "POST":
+                LOGGER.info("API %s %s -> %d", self.command, path, status)
+            return
+        LOGGER.warning("HTTP %s %s -> %d", self.command, path, status)
 
 
 def _read_block_size(value: Any) -> int:
@@ -1216,20 +1237,44 @@ def _read_block_size(value: Any) -> int:
     return block_size
 
 
+def _open_browser(url: str) -> None:
+    try:
+        if webbrowser.open(url):
+            LOGGER.info("既定ブラウザを開きました: %s", url)
+        else:
+            LOGGER.warning("既定ブラウザを開けませんでした: %s", url)
+    except Exception:
+        LOGGER.warning("既定ブラウザを開けませんでした: %s", url, exc_info=True)
+
+
+def _schedule_browser_open(url: str) -> threading.Timer:
+    timer = threading.Timer(0.1, _open_browser, args=(url,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
     parser = argparse.ArgumentParser(description="Run Lets Censoring locally.")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
-    print(f"Lets Censoring: http://127.0.0.1:{args.port}")
-    print("ComfyUI is not started or modified by this application.")
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
+    except OSError:
+        LOGGER.exception("サーバーを起動できません")
+        raise SystemExit(1) from None
+    url = f"http://127.0.0.1:{args.port}"
+    LOGGER.info("Lets Censoring を起動しました: %s", url)
+    _schedule_browser_open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nLets Censoring stopped.")
+        LOGGER.info("Lets Censoring を停止します")
     finally:
         server.server_close()
+        LOGGER.info("Lets Censoring を停止しました")
 
 
 if __name__ == "__main__":

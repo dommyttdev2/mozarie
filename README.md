@@ -5,7 +5,8 @@ ComfyUI: it neither starts, stops, nor modifies ComfyUI or `custom_nodes`.
 
 ## Start
 
-Run `run.bat`, then open `http://127.0.0.1:8765`.
+Run `run.bat`. Once the local server is ready, Lets Censoring automatically
+opens `http://127.0.0.1:8765` in your default browser.
 
 It uses the existing ComfyUI Portable Python and the existing segmentation
 model:

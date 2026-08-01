@@ -1,12 +1,13 @@
 import http.client
 import json
+import logging
 import re
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image, PngImagePlugin
@@ -21,6 +22,7 @@ from server import (  # noqa: E402
     DEFAULT_DETECTION_CONFIDENCE,
     FOLDER_PICKER_LOCK,
     ImageRecord,
+    JOB_LABELS,
     MosaicHandler,
     StudioState,
     calculate_block_size,
@@ -38,6 +40,10 @@ from server import (  # noqa: E402
     save_with_mask,
     select_best_sam_mask,
     webp_metadata_manifest,
+    LOG_DATE_FORMAT,
+    LOG_FORMAT,
+    _open_browser,
+    _schedule_browser_open,
 )
 
 
@@ -60,6 +66,99 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(calculate_block_size(300, 200), 4)
         self.assertEqual(calculate_block_size(401, 220), 5)
         self.assertEqual(calculate_block_size(1000, 999), 10)
+
+    def test_standard_log_format_has_timestamp_level_and_message(self):
+        record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
+        output = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT).format(record)
+        self.assertRegex(output, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| 起動: OK$")
+
+    def test_browser_opener_logs_result_without_raising(self):
+        with patch("server.webbrowser.open", return_value=True) as open_browser:
+            with self.assertLogs(server_module.LOGGER, "INFO") as logs:
+                _open_browser("http://127.0.0.1:8765")
+        open_browser.assert_called_once_with("http://127.0.0.1:8765")
+        self.assertIn("既定ブラウザを開きました", "\n".join(logs.output))
+
+        with patch("server.webbrowser.open", return_value=False):
+            with self.assertLogs(server_module.LOGGER, "WARNING") as logs:
+                _open_browser("http://127.0.0.1:8765")
+        self.assertIn("既定ブラウザを開けませんでした", "\n".join(logs.output))
+
+    def test_browser_open_is_scheduled_once_as_daemon(self):
+        with patch("server.threading.Timer") as timer_class:
+            timer = timer_class.return_value
+            _schedule_browser_open("http://127.0.0.1:8765")
+        timer_class.assert_called_once_with(0.1, _open_browser, args=("http://127.0.0.1:8765",))
+        self.assertTrue(timer.daemon)
+        timer.start.assert_called_once_with()
+
+    def test_main_configures_logging_and_schedules_one_browser_open(self):
+        fake_server = Mock()
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        with patch("server.logging.basicConfig") as basic_config, \
+             patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
+             patch("server._schedule_browser_open") as schedule_browser, \
+             patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            server_module.main()
+
+        basic_config.assert_called_once_with(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        server_class.assert_called_once_with(("127.0.0.1", 9876), MosaicHandler)
+        schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
+        fake_server.server_close.assert_called_once_with()
+
+    def test_http_log_message_logs_successful_api_posts_and_errors_only(self):
+        handler = object.__new__(MosaicHandler)
+        handler.command = "GET"
+        with patch.object(server_module.LOGGER, "info") as info, patch.object(server_module.LOGGER, "warning") as warning:
+            handler.path = "/api/health"
+            handler.log_message('"%s" %s %s', "GET /api/health HTTP/1.1", "200", "10")
+            info.assert_not_called()
+            warning.assert_not_called()
+
+            handler.path = "/static/style.css"
+            handler.log_message('"%s" %s %s', "GET /static/style.css HTTP/1.1", "200", "10")
+            info.assert_not_called()
+            warning.assert_not_called()
+
+            handler.command = "POST"
+            handler.path = "/api/detect"
+            handler.log_message('"%s" %s %s', "POST /api/detect HTTP/1.1", "200", "10")
+            info.assert_called_once()
+
+            handler.command = "GET"
+            handler.path = "/missing"
+            handler.log_message('"%s" %s %s', "GET /missing HTTP/1.1", "404", "10")
+            warning.assert_called_once()
+
+    def test_job_lifecycle_logs_start_completion_and_failure(self):
+        state = StudioState()
+        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        with patch("server.threading.Thread"):
+            with self.assertLogs(server_module.LOGGER, "INFO") as logs:
+                state._start_job("detect", [record], lambda *_args: None)
+        self.assertIn("バックグラウンド処理を開始", "\n".join(logs.output))
+        self.assertIn(JOB_LABELS["detect"], "\n".join(logs.output))
+
+        with self.assertLogs(server_module.LOGGER, "INFO") as logs:
+            state._finish_job()
+        self.assertIn("バックグラウンド処理が完了", "\n".join(logs.output))
+
+        try:
+            raise RuntimeError("test failure")
+        except RuntimeError as exc:
+            with self.assertLogs(server_module.LOGGER, "ERROR") as logs:
+                state._fail_job(exc)
+        self.assertIn("バックグラウンド処理に失敗", "\n".join(logs.output))
+
+    def test_main_logs_bind_failure_and_exits(self):
+        with patch("server.logging.basicConfig"), \
+             patch("server.ThreadingHTTPServer", side_effect=OSError("port in use")), \
+             patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            with self.assertLogs(server_module.LOGGER, "ERROR") as logs:
+                with self.assertRaises(SystemExit) as raised:
+                    server_module.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("サーバーを起動できません", "\n".join(logs.output))
 
     def test_png_ancillary_metadata_is_byte_identical_after_save(self):
         with tempfile.TemporaryDirectory() as directory:

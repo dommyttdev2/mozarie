@@ -1,10 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal
 set "APP_DIR=%~dp0"
 set "PYTHON=G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\python_embeded\python.exe"
 
 if not exist "%PYTHON%" (
-  echo Portable Python was not found:
+  echo Portable Python が見つかりません:
   echo %PYTHON%
   pause
   exit /b 1
