@@ -12,4 +12,9 @@ if not exist "%PYTHON%" (
 )
 
 "%PYTHON%" "%APP_DIR%server.py"
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" (
+  echo 起動または実行中にエラーが発生しました。終了コード: %EXIT_CODE%
+)
 pause
+exit /b %EXIT_CODE%
