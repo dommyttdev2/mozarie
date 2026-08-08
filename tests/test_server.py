@@ -30,6 +30,7 @@ from server import (  # noqa: E402
     StudioState,
     calculate_block_size,
     clip_mask_to_roi,
+    confidence_for_class,
     confidence_for_source,
     detection_tiles,
     jpeg_metadata_manifest,
@@ -40,6 +41,7 @@ from server import (  # noqa: E402
     restore_tile_mask,
     read_boundary_request,
     read_detection_confidence,
+    _read_mosaic_divisor,
     save_with_mask,
     select_best_sam_mask,
     webp_metadata_manifest,
@@ -65,13 +67,17 @@ class MosaicStudioTests(unittest.TestCase):
     def _jpeg_segment(marker: int, payload: bytes) -> bytes:
         return b"\xff" + bytes([marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
 
-    def test_block_size_uses_long_edge_and_minimum(self):
-        self.assertEqual(calculate_block_size(300, 200), 4)
-        self.assertEqual(calculate_block_size(400, 220), 4)
-        self.assertEqual(calculate_block_size(401, 220), 5)
-        self.assertEqual(calculate_block_size(1000, 999), 10)
-        self.assertEqual(calculate_block_size(1216, 832), 13)
-        self.assertEqual(calculate_block_size(1301, 832), 14)
+    def test_block_size_uses_image_specific_divisor_and_minimum(self):
+        self.assertEqual(calculate_block_size(300, 200, 100), 4)
+        self.assertEqual(calculate_block_size(400, 220, 100), 4)
+        self.assertEqual(calculate_block_size(401, 220, 100), 5)
+        self.assertEqual(calculate_block_size(1000, 999, 100), 10)
+        self.assertEqual(calculate_block_size(1216, 832, 100), 13)
+        self.assertEqual(calculate_block_size(1301, 832, 100), 14)
+        self.assertEqual(calculate_block_size(1301, 832, 200), 7)
+        self.assertEqual(_read_mosaic_divisor("100"), 100)
+        with self.assertRaises(ClientError):
+            _read_mosaic_divisor(0)
 
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
@@ -295,6 +301,23 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(state.list_candidates(image_id), [])
             self.assertEqual(path.read_bytes(), original)
 
+    def test_image_listing_reports_enabled_candidates_for_gallery_filtering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = StudioState()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = CACHE_DIR / image_id / "candidate-enabled.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [
+                Candidate("enabled", "penis", 0.9, mask_path, enabled=True),
+                Candidate("disabled", "penis", 0.9, mask_path, enabled=False),
+            ]
+            listed = state.list_images()[0]
+            self.assertEqual(listed["candidateCount"], 2)
+            self.assertEqual(listed["enabledCandidateCount"], 1)
+
     def test_clear_catalog_only_removes_images_from_the_screen_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
@@ -331,9 +354,9 @@ class MosaicStudioTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             record = state.image_for_id(image_id)
             state.job = server_module.Job(kind="apply", state="running", total=1)
-            state._apply_worker([record], 4, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
+            state._apply_worker([record], 100, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
             state.job = server_module.Job(kind="apply", state="running", total=1)
-            state._apply_worker([record], 4, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
+            state._apply_worker([record], 100, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
             names = [image["relativePath"] for image in state.list_images()]
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(names, ["source.image.png", "source.image_censored.png", "source.image_censored_2.png"])
@@ -345,11 +368,11 @@ class MosaicStudioTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "#6688aa").save(source)
             state = StudioState()
             image_id = state.set_root(directory)[0]["id"]
-            with patch.object(state, "_start_job") as start_job:
-                state.start_apply([image_id], 4, "overwrite", "../ignored", False, {})
+            with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), patch.object(state, "_start_job") as start_job:
+                state.start_apply([image_id], 100, "overwrite", "../ignored", False, {})
             self.assertEqual(start_job.call_args.args[5], "")
-            with self.assertRaisesRegex(ClientError, "ファイル名の末尾"):
-                state.start_apply([image_id], 4, "copy", "../invalid", False, {})
+            with self.assertRaisesRegex(ClientError, "ファイル名の末尾"), patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)):
+                state.start_apply([image_id], 100, "copy", "../invalid", False, {})
 
     def test_apply_pause_resume_and_cancel_state_transitions(self):
         state = StudioState()
@@ -400,7 +423,7 @@ class MosaicStudioTests(unittest.TestCase):
         first = np.zeros((12, 12), dtype=np.uint8)
         first[2:8, 2:8] = 255
         duplicate = np.zeros((12, 12), dtype=np.uint8)
-        duplicate[2:8, 3:9] = 255
+        duplicate[2:8, 2:8] = 255
         separate = np.zeros((12, 12), dtype=np.uint8)
         separate[9:11, 9:11] = 255
         self.assertGreater(mask_iou(first, duplicate), 0.5)
@@ -416,7 +439,7 @@ class MosaicStudioTests(unittest.TestCase):
         first = np.zeros((12, 12), dtype=np.uint8)
         first[2:8, 2:8] = 255
         secondary = np.zeros((12, 12), dtype=np.uint8)
-        secondary[2:8, 3:9] = 255
+        secondary[2:8, 2:8] = 255
         segments = []
         merge_segment(segments, "penis", 0.62, first, "primary")
         merge_segment(segments, "penis", 0.91, secondary, "secondary")
@@ -425,13 +448,16 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertTrue(np.array_equal(segments[0]["mask"], first))
 
     def test_detection_confidence_validation_and_secondary_floor(self):
-        self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.60)
-        self.assertEqual(read_detection_confidence("0.60"), 0.60)
-        self.assertEqual(confidence_for_source("primary", 0.60), 0.60)
-        self.assertEqual(confidence_for_source("secondary", 0.60), 0.75)
+        self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.50)
+        self.assertEqual(read_detection_confidence("0.10"), 0.10)
+        self.assertAlmostEqual(confidence_for_source("primary", 0.60), 0.45)
+        self.assertEqual(confidence_for_source("secondary", 0.10), 0.50)
         self.assertEqual(confidence_for_source("secondary", 0.85), 0.85)
+        self.assertAlmostEqual(confidence_for_class("primary", "testicles", 0.60), 0.45)
+        self.assertEqual(confidence_for_class("primary", "penis", 0.60), 0.60)
+        self.assertEqual(confidence_for_class("secondary", "testicles", 0.10), 0.50)
         with self.assertRaises(ClientError):
-            read_detection_confidence(0.29)
+            read_detection_confidence(0.09)
         with self.assertRaises(ClientError):
             read_detection_confidence(0.91)
 
@@ -642,6 +668,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="applyDialog"', page)
         self.assertIn('id="detectAllButton"', page)
         self.assertIn('id="saveButton"', page)
+        self.assertIn('id="galleryMaskedTab"', page)
+        self.assertIn('id="saveAllButton"', page)
+        self.assertIn('id="divisor"', page)
+        self.assertNotIn('id="selectAllButton"', page)
+        self.assertNotIn('id="applyButton"', page)
         self.assertIn('id="boundaryTool"', page)
         self.assertIn('path == "/api/boundary"', (root / "server.py").read_text(encoding="utf-8"))
         self.assertIn('drawBoundaryRoi()', app)
@@ -656,8 +687,14 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('getAsFileSystemHandle', app)
         self.assertIn('webkitGetAsEntry', app)
         self.assertIn('event.preventDefault(); if (!state.applyRunning)', app)
+        self.assertIn('paintMosaicPreview()', app)
+        self.assertIn('saveTargets()', app)
+        self.assertNotIn('Math.sin(Date.now()', app)
         backend = (root / "server.py").read_text(encoding="utf-8")
         self.assertIn('path == "/api/import"', backend)
+        self.assertIn('payload.get("divisor")', backend)
+        self.assertNotIn('payload.get("blockSize")', backend)
+        self.assertIn('iou=0.85', backend)
         self.assertIn('path == "/api/masks/clear"', backend)
         self.assertIn('path == "/api/job/pause"', backend)
 

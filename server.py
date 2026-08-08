@@ -55,15 +55,15 @@ DEFAULT_COLORS = {
     "anus": "#a8c256",
     "testicles": "#5bb6d5",
 }
-DEFAULT_DETECTION_CONFIDENCE = 0.60
-SECONDARY_MIN_CONFIDENCE = 0.75
+DEFAULT_DETECTION_CONFIDENCE = 0.50
+SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
 FOLDER_PICKER_LOCK = threading.Lock()
 LOGGER = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-JOB_LABELS = {"detect": "自動検出", "apply": "モザイク適用"}
+JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
 
 FOLDER_PICKER_SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -305,8 +305,8 @@ def merge_segment(
     confidence: float,
     mask: np.ndarray,
     source: str = "primary",
-    iou_threshold: float = 0.5,
-    containment_threshold: float = 0.85,
+    iou_threshold: float = 0.75,
+    containment_threshold: float = 0.95,
 ) -> None:
     """Keep one precise representative for overlapping tile/model duplicates."""
     matching = [
@@ -333,8 +333,8 @@ def read_detection_confidence(value: Any) -> float:
         confidence = float(value)
     except (TypeError, ValueError) as exc:
         raise ClientError("判定しきい値が正しくありません。") from exc
-    if not 0.30 <= confidence <= 0.90:
-        raise ClientError("判定しきい値は0.30から0.90の範囲で指定してください。")
+    if not 0.10 <= confidence <= 0.90:
+        raise ClientError("判定しきい値は0.10から0.90の範囲で指定してください。")
     return confidence
 
 
@@ -377,6 +377,12 @@ def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndar
 
 
 def confidence_for_source(source: str, confidence: float) -> float:
+    return max(0.10, confidence - 0.15) if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
+
+
+def confidence_for_class(source: str, class_name: str, confidence: float) -> float:
+    if source == "primary" and class_name == "testicles":
+        return max(0.10, confidence - 0.15)
     return confidence if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
 
 
@@ -569,6 +575,7 @@ class StudioState:
                         "width": record.width,
                         "height": record.height,
                         "candidateCount": len(self.candidates.get(image_id, [])),
+                        "enabledCandidateCount": sum(candidate.enabled for candidate in self.candidates.get(image_id, [])),
                     }
                 )
             return output
@@ -615,7 +622,7 @@ class StudioState:
     def start_apply(
         self,
         image_ids: list[str],
-        block_size: int,
+        divisor: int,
         mode: str,
         suffix: str,
         delete_original: bool,
@@ -632,8 +639,14 @@ class StudioState:
             record.image_id: decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
             for record in records
         }
+        records = [
+            record for record in records
+            if (mask := self.combined_candidate_mask(record.image_id, decoded_drafts[record.image_id])) is not None and np.any(mask)
+        ]
+        if not records:
+            raise ClientError("保存するモザイク範囲がありません。")
         self._start_job(
-            "apply", records, self._apply_worker, block_size, mode, suffix if mode == "copy" else "",
+            "apply", records, self._apply_worker, divisor, mode, suffix if mode == "copy" else "",
             bool(delete_original and mode == "copy"), decoded_drafts,
         )
 
@@ -733,6 +746,7 @@ class StudioState:
                     retina_masks=True,
                     verbose=False,
                     max_det=300,
+                    iou=0.85,
                 )
                 for result in results:
                     if result.boxes is None or result.masks is None:
@@ -744,6 +758,8 @@ class StudioState:
                         class_id = int(box.cls[0].item())
                         class_name = str(names[class_id])
                         if class_name not in TARGET_CLASSES:
+                            continue
+                        if float(box.conf[0].item()) < confidence_for_class(source, class_name, confidence):
                             continue
                         if mask.shape[:2] != (tile_height, tile_width):
                             mask = cv2.resize(mask, (tile_width, tile_height), interpolation=cv2.INTER_NEAREST)
@@ -817,7 +833,7 @@ class StudioState:
     def _apply_worker(
         self,
         records: list[ImageRecord],
-        block_size: int,
+        divisor: int,
         mode: str,
         suffix: str,
         delete_original: bool,
@@ -838,7 +854,7 @@ class StudioState:
                     output = record.path if mode == "overwrite" else unique_destination(
                         record.path.with_name(f"{record.path.stem}{suffix}{record.path.suffix}")
                     )
-                    save_with_mask(record, mask, block_size, output)
+                    save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), output)
                     if mode == "copy" and delete_original:
                         record.path.unlink()
                         record.path = output
@@ -939,8 +955,8 @@ def _valid_color(value: str) -> bool:
     return len(value) == 7 and value.startswith("#") and all(char in "0123456789abcdefABCDEF" for char in value[1:])
 
 
-def calculate_block_size(width: int, height: int) -> int:
-    return max(4, math.ceil(max(width, height) / 100))
+def calculate_block_size(width: int, height: int, divisor: int = 100) -> int:
+    return max(4, math.ceil(max(width, height) / divisor))
 
 
 def inference_device_name() -> str | None:
@@ -1366,9 +1382,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 image_id = str(payload.get("imageId", ""))
                 self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
             elif path == "/api/apply":
-                block_size = _read_block_size(payload.get("blockSize"))
+                divisor = _read_mosaic_divisor(payload.get("divisor"))
                 STATE.start_apply(
-                    payload.get("imageIds", []), block_size,
+                    payload.get("imageIds", []), divisor,
                     str(payload.get("mode", "copy")), str(payload.get("suffix", "_censored")),
                     bool(payload.get("deleteOriginal", False)), payload.get("drafts", {}),
                 )
@@ -1383,7 +1399,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 image_id = path.split("/")[3]
                 record = STATE.image_for_id(image_id)
                 mask = _decode_mask(str(payload.get("mask", "")), record.width, record.height)
-                save_with_mask(record, mask, _read_block_size(payload.get("blockSize")))
+                save_with_mask(record, mask, calculate_block_size(record.width, record.height, _read_mosaic_divisor(payload.get("divisor"))))
                 STATE.invalidate_sam_image(image_id)
                 self._json({"ok": True})
             elif path.startswith("/api/candidate/"):
@@ -1460,14 +1476,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
         LOGGER.warning("HTTP %s %s -> %d", self.command, path, status)
 
 
-def _read_block_size(value: Any) -> int:
+def _read_mosaic_divisor(value: Any) -> int:
     try:
-        block_size = int(value)
+        divisor = int(value)
     except (TypeError, ValueError) as exc:
         raise ClientError("モザイク粗さが正しくありません。") from exc
-    if not 1 <= block_size <= 2048:
-        raise ClientError("モザイク粗さは1から2048の範囲で指定してください。")
-    return block_size
+    if not 1 <= divisor <= 10000:
+        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
+    return divisor
 
 
 def _open_browser(url: str) -> None:

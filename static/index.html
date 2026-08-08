@@ -31,18 +31,18 @@
         </div>
         <div class="gallery-heading-actions">
           <button id="clearAllMasksButton" class="text-button" data-i18n="gallery.clearAllMasks">全画像のモザイククリア</button>
-          <button id="selectAllButton" class="text-button" data-i18n="gallery.selectAll">全選択</button>
         </div>
       </div>
       <div class="gallery-actions">
         <button id="detectAllButton" class="primary wide" data-i18n="gallery.detectAll">全画像を自動検出</button>
         <button id="clearCatalogButton" class="text-button wide" data-i18n="gallery.clearCatalog">画像一覧をクリア</button>
       </div>
-      <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">画像をドロップして追加</div>
-      <div class="gallery-footer">
-        <span id="selectedCount" class="muted">選択中 0件</span>
-        <button id="applyButton" class="primary wide" disabled data-i18n="gallery.applySelected">選択画像にモザイクを適用</button>
+      <div class="gallery-tabs" role="tablist" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
+        <button id="galleryAllTab" class="gallery-tab active" role="tab" aria-selected="true" data-i18n="gallery.tabAll">全体</button>
+        <button id="galleryMaskedTab" class="gallery-tab" role="tab" aria-selected="false" data-i18n="gallery.tabMasked">モザイク適用済</button>
+        <button id="saveAllButton" class="primary gallery-save" data-i18n="gallery.saveAll">全画像保存</button>
       </div>
+      <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">画像をドロップして追加</div>
     </aside>
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
@@ -63,13 +63,14 @@
             <input id="brushSize" type="range" min="2" max="500" value="48">
             <output id="brushSizeValue">48 px</output>
           </label>
-          <label class="numeric-control block-control" for="blockSize">
+          <label class="numeric-control block-control" for="divisor">
             <span data-i18n="editor.blockSize">モザイク粗さ</span>
-            <input id="blockSize" type="number" min="1" max="2048" value="4">
-            <output>px</output>
+            <span class="ratio-prefix">1 /</span>
+            <input id="divisor" type="number" min="1" max="10000" value="100">
+            <output id="blockSizeValue">-</output>
           </label>
         </div>
-        <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">モザイクを適用</button>
+        <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">ファイル保存</button>
       </div>
       <div id="canvasStage" class="canvas-stage">
         <canvas id="editorCanvas" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
@@ -86,9 +87,9 @@
         <h2 data-i18n="detection.title">検出設定</h2>
         <label class="threshold-control" for="confidence">
           <span data-i18n="detection.confidence">判定しきい値</span>
-          <output id="confidenceValue">0.60</output>
+          <output id="confidenceValue">0.50</output>
         </label>
-        <input id="confidence" type="range" min="0.30" max="0.90" step="0.05" value="0.60">
+        <input id="confidence" type="range" min="0.10" max="0.90" step="0.05" value="0.50">
         <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
       </section>
       <div class="pane-heading candidates-heading">
@@ -103,7 +104,6 @@
 
   <template id="galleryItemTemplate">
     <article class="gallery-item">
-      <label class="gallery-check"><input type="checkbox"><span></span></label>
       <img loading="lazy" alt="">
       <div class="gallery-name"></div>
       <div class="gallery-meta"></div>
@@ -123,14 +123,14 @@
 
   <dialog id="applyDialog" class="modal-dialog apply-dialog">
     <form id="applyForm" class="dialog-body">
-      <h2 data-i18n="apply.title">モザイクを適用</h2>
+      <h2 data-i18n="apply.title">ファイルを保存</h2>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
         <label class="choice-row"><input type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
         <label class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
-        <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><input id="applyBlockSize" type="number" min="1" max="2048" value="4" required></label>
+        <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize">-</output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>
       <section id="applyProgressPanel" hidden>
@@ -143,7 +143,7 @@
         <button id="applyCloseButton" type="button" data-i18n="dialog.close">閉じる</button>
         <button id="applyPauseButton" type="button" hidden data-i18n="apply.pause">一時停止</button>
         <button id="applyCancelButton" type="button" hidden class="danger" data-i18n="dialog.cancelJob">キャンセル</button>
-        <button id="applyStartButton" type="submit" class="primary" data-i18n="apply.start">適用</button>
+        <button id="applyStartButton" type="submit" class="primary" data-i18n="apply.start">保存</button>
       </div>
     </form>
   </dialog>

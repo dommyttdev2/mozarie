@@ -1,7 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 
 const state = {
-  images: [], selectedIds: new Set(), currentId: null, currentImage: null,
+  images: [], currentId: null, currentImage: null, galleryFilter: "all", maskStatus: new Map(),
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
@@ -16,10 +16,14 @@ const ctx = canvas.getContext("2d");
 const addCanvas = document.createElement("canvas");
 const exclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
+const mosaicCanvas = document.createElement("canvas");
+const mosaicSourceCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
 const exclusionCtx = exclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
+const mosaicCtx = mosaicCanvas.getContext("2d");
+const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
 const layerCtx = layerCanvas.getContext("2d");
 let renderedWidth = 0;
 let renderedHeight = 0;
@@ -58,7 +62,14 @@ function setStatus(message, kind = "") {
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
 function detectionConfidence() { return Number($("#confidence").value); }
+function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
+function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
+function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
+  return image ? Math.max(4, Math.ceil(Math.max(image.width, image.height) / divisor)) : 0;
+}
 function isBusy() { return ["running", "paused"].includes(state.job?.state) || state.saving || state.boundaryPending; }
+function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
+function saveTargets() { return state.images.filter(imageHasMask).map((image) => image.id); }
 
 function updateActionButtons() {
   const running = isBusy();
@@ -68,9 +79,10 @@ function updateActionButtons() {
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
   $("#clearAllMasksButton").disabled = running || state.images.length === 0;
   $("#clearCatalogButton").disabled = running || state.images.length === 0;
-  $("#selectAllButton").disabled = running || state.images.length === 0;
-  $("#applyButton").disabled = running || state.selectedIds.size === 0;
-  $("#saveButton").disabled = running || !hasImage;
+  $("#galleryAllTab").disabled = running;
+  $("#galleryMaskedTab").disabled = running;
+  $("#saveAllButton").disabled = running || saveTargets().length === 0;
+  $("#saveButton").disabled = running || !hasImage || !imageHasMask(currentRecord());
 }
 
 function updateProgress(job) {
@@ -92,7 +104,7 @@ async function loadFolder() {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     state.images = data.images;
     state.imageGeneration += 1;
-    state.selectedIds.clear(); state.currentId = null; state.currentImage = null;
+    state.currentId = null; state.currentImage = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
     renderGallery(); clearEditor();
     setStatus(t("status.imagesLoaded", { count: state.images.length }));
@@ -115,19 +127,17 @@ async function pickFolder() {
 function renderGallery() {
   const gallery = $("#gallery");
   gallery.textContent = "";
-  $("#imageCount").textContent = t("gallery.count", { count: state.images.length });
+  const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
+  $("#imageCount").textContent = t("gallery.count", { count: visibleImages.length });
+  $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
+  $("#galleryAllTab").setAttribute("aria-selected", String(state.galleryFilter === "all"));
+  $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
+  $("#galleryMaskedTab").setAttribute("aria-selected", String(state.galleryFilter === "masked"));
   const template = $("#galleryItemTemplate");
-  for (const image of state.images) {
+  for (const image of visibleImages) {
     const item = template.content.firstElementChild.cloneNode(true);
     item.dataset.id = image.id;
     item.classList.toggle("selected", image.id === state.currentId);
-    const checkbox = item.querySelector("input");
-    checkbox.checked = state.selectedIds.has(image.id);
-    checkbox.addEventListener("click", (event) => event.stopPropagation());
-    checkbox.addEventListener("change", () => {
-      checkbox.checked ? state.selectedIds.add(image.id) : state.selectedIds.delete(image.id);
-      updateSelectionUi();
-    });
     const preview = item.querySelector("img");
     preview.src = `/api/thumbnail/${encodeURIComponent(image.id)}`;
     preview.alt = image.relativePath;
@@ -136,26 +146,19 @@ function renderGallery() {
     item.addEventListener("click", () => selectImage(image.id));
     gallery.append(item);
   }
-  updateSelectionUi();
-}
-
-function updateSelectionUi() {
-  const allSelected = state.images.length > 0 && state.selectedIds.size === state.images.length;
-  $("#selectAllButton").textContent = t(allSelected ? "gallery.clearAll" : "gallery.selectAll");
-  $("#selectedCount").textContent = t("gallery.selected", { count: state.selectedIds.size });
   updateActionButtons();
 }
 
 function canvasSizeForImage(image) {
-  for (const target of [addCanvas, exclusionCanvas, combinedCanvas]) { target.width = image.width; target.height = image.height; }
+  for (const target of [addCanvas, exclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
 }
 
 function clearEditor() {
   state.history = []; state.historyIndex = -1; state.hover = null; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null;
-  addCanvas.width = exclusionCanvas.width = combinedCanvas.width = 1;
-  addCanvas.height = exclusionCanvas.height = combinedCanvas.height = 1;
+  addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
+  addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
   $("#emptyState").hidden = false;
   $("#imageInfo").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
@@ -182,8 +185,8 @@ async function selectImage(imageId, force = false) {
     state.currentImage = image;
     state.candidates = candidateData.candidates;
     state.candidateImages = candidateImages;
-    canvasSizeForImage(record); restoreDraft(imageId, generation); fitImage();
-    $("#blockSize").value = Math.max(4, Math.ceil(Math.max(record.width, record.height) / 100));
+    canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
+    updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
@@ -211,7 +214,7 @@ function restoreDraft(imageId, generation) {
   if (!draft) return pushHistory();
   Promise.all([loadImage(draft.add), loadImage(draft.exclusion)]).then(([addImage, exclusionImage]) => {
     if (state.currentId !== imageId || state.imageGeneration !== generation) return;
-    addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); pushHistory(); render();
+    addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); pushHistory(); refreshMaskStatus(true); render();
   });
 }
 
@@ -234,15 +237,46 @@ function resizeRenderCanvas() {
 
 function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; context.setTransform(dpr, 0, 0, dpr, 0, 0); }
 
-function paintMask(maskImage, color, alpha, subtractImage = null) {
-  if (!maskImage || !state.currentImage) return;
+function rebuildMosaicPreview() {
+  if (!state.currentImage) return;
+  const blockSize = calculatedBlockSize();
+  mosaicSourceCanvas.width = Math.max(1, Math.ceil(state.currentImage.width / blockSize));
+  mosaicSourceCanvas.height = Math.max(1, Math.ceil(state.currentImage.height / blockSize));
+  mosaicSourceCtx.imageSmoothingEnabled = true;
+  mosaicSourceCtx.clearRect(0, 0, mosaicSourceCanvas.width, mosaicSourceCanvas.height);
+  mosaicSourceCtx.drawImage(state.currentImage, 0, 0, mosaicSourceCanvas.width, mosaicSourceCanvas.height);
+  mosaicCtx.imageSmoothingEnabled = false;
+  mosaicCtx.clearRect(0, 0, mosaicCanvas.width, mosaicCanvas.height);
+  mosaicCtx.drawImage(mosaicSourceCanvas, 0, 0, mosaicCanvas.width, mosaicCanvas.height);
+}
+
+function composeCurrentMask() {
+  if (!state.currentImage) return;
+  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  for (const candidate of state.candidates) if (candidate.enabled) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  combinedCtx.drawImage(addCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "destination-out";
+  combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
+}
+
+function refreshMaskStatus(renderGalleryAfter = false) {
+  if (!state.currentId || !state.currentImage) return;
+  composeCurrentMask();
+  state.maskStatus.set(state.currentId, combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0));
+  if (renderGalleryAfter) renderGallery();
+  else updateActionButtons();
+}
+
+function paintMosaicPreview() {
+  if (!state.currentImage) return;
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(layerCtx); layerCtx.clearRect(0, 0, width, height);
   layerCtx.save(); layerCtx.translate(state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
-  layerCtx.drawImage(maskImage, 0, 0, state.currentImage.width, state.currentImage.height);
-  if (subtractImage) { layerCtx.globalCompositeOperation = "destination-out"; layerCtx.drawImage(subtractImage, 0, 0, state.currentImage.width, state.currentImage.height); }
-  layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color; layerCtx.fillRect(0, 0, state.currentImage.width, state.currentImage.height);
-  layerCtx.restore(); setCssTransform(ctx); ctx.globalAlpha = alpha; ctx.drawImage(layerCanvas, 0, 0, width, height); ctx.globalAlpha = 1;
+  layerCtx.drawImage(mosaicCanvas, 0, 0);
+  layerCtx.globalCompositeOperation = "destination-in";
+  layerCtx.drawImage(combinedCanvas, 0, 0);
+  layerCtx.restore(); setCssTransform(ctx); ctx.drawImage(layerCanvas, 0, 0, width, height);
 }
 
 function drawBrushCursor() {
@@ -282,9 +316,7 @@ function render() {
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) return;
   ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
-  const pulse = 0.40 + Math.sin(Date.now() / 127) * 0.15;
-  for (const candidate of state.candidates) if (candidate.enabled) paintMask(state.candidateImages.get(candidate.id), candidate.color, pulse, exclusionCanvas);
-  paintMask(addCanvas, "#58d7be", 0.40, exclusionCanvas);
+  paintMosaicPreview();
   drawBoundaryRoi();
   drawBrushCursor();
 }
@@ -298,12 +330,13 @@ function renderCandidates() {
   for (const candidate of state.candidates) {
     const row = document.createElement("label"); row.className = "candidate-row";
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled;
-    enabled.addEventListener("change", async () => { candidate.enabled = enabled.checked; render(); await updateCandidate(candidate); });
-    const color = document.createElement("input"); color.type = "color"; color.value = candidate.color; color.title = t("candidates.color");
-    color.addEventListener("input", () => { candidate.color = color.value; render(); }); color.addEventListener("change", () => updateCandidate(candidate));
+    enabled.addEventListener("change", async () => {
+      candidate.enabled = enabled.checked;
+      refreshMaskStatus(true); render(); await updateCandidate(candidate);
+    });
     const label = document.createElement("span"); label.className = "candidate-label";
     label.innerHTML = `<span class="candidate-class">${escapeHtml(candidate.className)}</span><span class="candidate-conf">${Math.round(candidate.confidence * 100)}%</span>`;
-    row.append(enabled, color, label); list.append(row);
+    row.append(enabled, label); list.append(row);
   }
 }
 
@@ -326,7 +359,10 @@ async function addBoundaryCandidate(point) {
     });
     const candidate = data.candidate;
     const record = state.images.find((image) => image.id === imageId);
-    if (record) record.candidateCount = Number(record.candidateCount || 0) + 1;
+    if (record) {
+      record.candidateCount = Number(record.candidateCount || 0) + 1;
+      record.enabledCandidateCount = Number(record.enabledCandidateCount || 0) + 1;
+    }
     renderGallery();
     if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
 
@@ -336,7 +372,7 @@ async function addBoundaryCandidate(point) {
     state.candidates.push(candidate);
     state.candidateImages.set(candidate.id, maskImage);
     $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
-    renderCandidates(); render(); setStatus(t("status.boundaryDone"));
+    refreshMaskStatus(true); renderCandidates(); render(); setStatus(t("status.boundaryDone"));
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
   finally { state.boundaryPending = false; updateActionButtons(); }
 }
@@ -369,21 +405,18 @@ async function restoreSnapshot(index) {
   const entry = state.history[index]; if (!entry) return;
   const [addImage, exclusionImage] = await Promise.all([loadImage(entry.add), loadImage(entry.exclusion)]);
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); state.historyIndex = index; updateHistoryButtons(); render();
+  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); state.historyIndex = index; updateHistoryButtons(); refreshMaskStatus(true); render();
 }
 
 function drawStroke(from, to, erase) {
   const target = erase ? exclusionCtx : addCtx; const opposite = erase ? addCtx : exclusionCtx; const size = Number($("#brushSize").value);
   opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore();
-  target.save(); target.globalCompositeOperation = "source-over"; target.strokeStyle = "#ffffff"; target.lineWidth = size; target.lineCap = "round"; target.beginPath(); target.moveTo(from.x, from.y); target.lineTo(to.x, to.y); target.stroke(); target.restore(); render();
+  target.save(); target.globalCompositeOperation = "source-over"; target.strokeStyle = "#ffffff"; target.lineWidth = size; target.lineCap = "round"; target.beginPath(); target.moveTo(from.x, from.y); target.lineTo(to.x, to.y); target.stroke(); target.restore(); composeCurrentMask();
 }
 
 function buildCombinedMask() {
   if (!state.currentImage) return null;
-  combinedCanvas.width = state.currentImage.width; combinedCanvas.height = state.currentImage.height;
-  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
-  for (const candidate of state.candidates) if (candidate.enabled) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  combinedCtx.drawImage(addCanvas, 0, 0); combinedCtx.globalCompositeOperation = "destination-out"; combinedCtx.drawImage(exclusionCanvas, 0, 0); combinedCtx.globalCompositeOperation = "source-over";
+  composeCurrentMask();
   return combinedCanvas.toDataURL("image/png");
 }
 
@@ -397,12 +430,13 @@ async function runDetection(imageIds) {
 }
 
 function saveCurrent() {
-  if (state.currentId) openApplyDialog([state.currentId]);
+  if (state.currentId && imageHasMask(currentRecord())) openApplyDialog([state.currentId]);
 }
 
-function applyDetection() {
-  if (!state.selectedIds.size) return setStatus(t("status.chooseApplyImages"), "error");
-  openApplyDialog([...state.selectedIds]);
+function saveAll() {
+  saveDraft(); refreshMaskStatus();
+  const imageIds = saveTargets();
+  if (imageIds.length) openApplyDialog(imageIds);
 }
 
 function setApplyResult(message, error = false) {
@@ -428,7 +462,8 @@ function openApplyDialog(imageIds) {
   state.applyTargetIds = imageIds;
   state.applyRunning = false;
   $("#applyTargetCount").textContent = t("apply.target", { count: imageIds.length });
-  $("#applyBlockSize").value = $("#blockSize").value;
+  $("#applyDivisor").value = $("#divisor").value;
+  updateBlockSizeDisplay();
   $("#applyProgressPanel").hidden = true;
   $("#applyStartButton").hidden = false;
   $("#applyCloseButton").hidden = false;
@@ -459,7 +494,7 @@ async function startApplyFromDialog(event) {
     await api("/api/apply", {
       method: "POST",
       body: JSON.stringify({
-        imageIds, blockSize: Number($("#applyBlockSize").value), mode: copy ? "copy" : "overwrite",
+        imageIds, divisor: Number($("#applyDivisor").value), mode: copy ? "copy" : "overwrite",
         suffix: copy ? suffix : "_censored", deleteOriginal: copy && $("#deleteOriginal").checked,
         drafts: draftPayload(imageIds),
       }),
@@ -485,6 +520,7 @@ async function finishApplyJob(job) {
   const keepCurrent = state.currentId;
   const data = await api("/api/images");
   state.images = data.images;
+  state.maskStatus.clear();
   for (const imageId of state.applyTargetIds) state.drafts.delete(imageId);
   state.candidates = []; state.candidateImages.clear();
   renderGallery();
@@ -514,7 +550,7 @@ async function pollJob() {
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
       if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
     } else if (job.state === "complete" && previous?.state === "running") {
-      const keepCurrent = state.currentId; const data = await api("/api/images"); state.images = data.images; renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
+      const keepCurrent = state.currentId; const data = await api("/api/images"); state.images = data.images; state.maskStatus.clear(); renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
       setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
     }
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
@@ -529,6 +565,12 @@ function setTool(tool) {
 function updateBrushSize(value) {
   const input = $("#brushSize"); input.value = Math.min(500, Math.max(2, Math.round(value)));
   $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render();
+}
+function updateBlockSizeDisplay() {
+  const currentBlockSize = calculatedBlockSize(currentRecord(), mosaicDivisor());
+  const applyBlockSize = calculatedBlockSize(currentRecord(), normaliseDivisor($("#applyDivisor").value));
+  $("#blockSizeValue").textContent = currentBlockSize ? t("editor.calculatedPixels", { value: currentBlockSize }) : "-";
+  $("#applyBlockSize").textContent = applyBlockSize ? t("editor.calculatedPixels", { value: applyBlockSize }) : "-";
 }
 
 function confirmAction(title, message) {
@@ -546,7 +588,7 @@ function resetCurrentDraft() {
   if (!state.currentImage) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  state.history = []; state.historyIndex = -1; updateHistoryButtons(); render();
+  state.history = []; state.historyIndex = -1; updateHistoryButtons(); refreshMaskStatus(true); render();
 }
 
 async function clearMasks(imageIds, titleKey, messageKey) {
@@ -559,7 +601,13 @@ async function clearMasks(imageIds, titleKey, messageKey) {
       state.candidates = []; state.candidateImages.clear(); resetCurrentDraft();
       $("#candidateStatus").textContent = t("candidates.none"); renderCandidates();
     }
-    state.images.forEach((image) => { if (imageIds.includes(image.id)) image.candidateCount = 0; });
+    state.images.forEach((image) => {
+      if (imageIds.includes(image.id)) {
+        image.candidateCount = 0;
+        image.enabledCandidateCount = 0;
+      }
+    });
+    imageIds.forEach((imageId) => state.maskStatus.delete(imageId));
     renderGallery(); setStatus(t("status.editReady"));
   } catch (error) { setStatus(error.message, "error"); }
 }
@@ -569,7 +617,7 @@ async function clearCatalog() {
   if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"))) return;
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
-    state.images = []; state.selectedIds.clear(); state.currentId = null; state.currentImage = null;
+    state.images = []; state.currentId = null; state.currentImage = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearEditor(); renderGallery();
     setStatus(t("status.chooseFolder"));
   } catch (error) { setStatus(error.message, "error"); }
@@ -641,13 +689,20 @@ function bindEvents() {
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
-  $("#applyButton").addEventListener("click", applyDetection); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", fitImage);
+  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", fitImage);
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"));
   $("#clearCatalogButton").addEventListener("click", clearCatalog);
-  $("#selectAllButton").addEventListener("click", () => { if (state.selectedIds.size === state.images.length) state.selectedIds.clear(); else state.images.forEach((image) => state.selectedIds.add(image.id)); renderGallery(); });
+  $("#galleryAllTab").addEventListener("click", () => { state.galleryFilter = "all"; renderGallery(); });
+  $("#galleryMaskedTab").addEventListener("click", () => { state.galleryFilter = "masked"; renderGallery(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
+  $("#divisor").addEventListener("input", () => {
+    const divisor = normaliseDivisor($("#divisor").value);
+    $("#divisor").value = divisor;
+    rebuildMosaicPreview(); updateBlockSizeDisplay(); render();
+  });
+  $("#applyDivisor").addEventListener("input", () => updateBlockSizeDisplay());
   $("#confidence").addEventListener("input", () => { $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
@@ -673,7 +728,7 @@ function bindEvents() {
     const point = clampPoint(pointFromEvent(event));
     state.drawing = true; state.pointer = point; state.hover = point;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
-    drawStroke(point, point, state.tool === "eraser");
+    drawStroke(point, point, state.tool === "eraser"); render();
   });
   canvas.addEventListener("pointermove", (event) => {
     if (state.panning) {
@@ -696,7 +751,7 @@ function bindEvents() {
       if (state.boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
       else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
       state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    } else if (state.drawing && event.button === 0) pushHistory();
+    } else if (state.drawing && event.button === 0) { pushHistory(); refreshMaskStatus(true); }
     state.drawing = false; state.panning = false; if (!state.spacePressed) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
   canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });

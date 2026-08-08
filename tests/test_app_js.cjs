@@ -11,27 +11,26 @@ function element() {
 }
 
 function galleryItem() {
-  const checkbox = element();
   const preview = element();
   const name = element();
   const meta = element();
   return {
     ...element(),
     querySelector(selector) {
-      return { input: checkbox, img: preview, ".gallery-name": name, ".gallery-meta": meta }[selector];
+      return { img: preview, ".gallery-name": name, ".gallery-meta": meta }[selector];
     },
   };
 }
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "applyButton", "saveButton",
-  "status", "jobProgress", "gallery", "imageCount", "selectAllButton", "selectedCount", "candidateList", "candidateStatus",
-  "applyTargetCount", "applyBlockSize", "blockSize", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab",
+  "status", "jobProgress", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
 ]) elements.set(`#${id}`, element());
 elements.get("#applySuffix").value = "_censored";
-elements.get("#applyBlockSize").value = "4";
-elements.get("#blockSize").value = "4";
+elements.get("#applyDivisor").value = "100";
+elements.get("#divisor").value = "100";
 const gallery = elements.get("#gallery");
 gallery.children = [];
 gallery.append = function append(child) { this.children.push(child); };
@@ -39,7 +38,7 @@ Object.defineProperty(gallery, "textContent", {
   get() { return this._textContent || ""; },
   set(value) { this._textContent = value; this.children = []; },
 });
-elements.get("#editorCanvas").getContext = () => ({ });
+elements.get("#editorCanvas").getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
 elements.get("#canvasStage").clientWidth = 600;
 elements.get("#canvasStage").clientHeight = 400;
 elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode: galleryItem } } });
@@ -49,7 +48,7 @@ const document = {
   querySelectorAll: () => [],
   createElement: (tag) => tag === "canvas" ? {
     width: 1, height: 1,
-    getContext: () => ({ clearRect() {}, drawImage() {} }),
+    getContext: () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, getImageData() { return { data: new Uint8ClampedArray(4) }; } }),
     toDataURL: () => "data:image/png;base64,test",
   } : element(),
 };
@@ -57,14 +56,14 @@ let resolveFetch;
 let fetchCalls = 0;
 const requests = [];
 const context = {
-  console, document, Date, Math, Promise, setInterval() {}, ResizeObserver: class {},
+  console, document, Date, Math, Promise, window: { devicePixelRatio: 1 }, setInterval() {}, ResizeObserver: class {},
   fetch: (path, options) => { fetchCalls += 1; requests.push({ path, options }); return new Promise((resolve) => { resolveFetch = resolve; }); },
 };
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, renderGallery };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, renderGallery } = context.__mosaicTest;
 
 (async () => {
   state.currentImage = { width: 100, height: 80 };
@@ -85,8 +84,8 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   assert.equal(boundaryDragStarted({ clientX: 123, clientY: 140 }), true);
 
   state.images = [
-    { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0 },
-    { id: "second", relativePath: "second.png", width: 100, height: 80, candidateCount: 4 },
+    { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "second", relativePath: "second.png", width: 100, height: 80, candidateCount: 4, enabledCandidateCount: 2 },
   ];
   state.currentId = "first";
   state.imageGeneration = 1;
@@ -101,6 +100,7 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   resolveFetch({ ok: true, json: async () => ({ candidate: { id: "boundary", enabled: true, confidence: 0.9, color: "#fff" } }) });
   await pending;
   assert.equal(state.images[0].candidateCount, 1);
+  assert.equal(state.images[0].enabledCandidateCount, 1);
   assert.equal(state.images[1].candidateCount, 4);
   assert.equal(state.candidates.length, 0);
   assert.equal(state.candidateImages.size, 0);
@@ -124,6 +124,7 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   state.job = null;
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
+  state.maskStatus.set("first", true);
   state.drafts = new Map([["first", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }]]);
   saveCurrent();
   state.currentId = "second";
@@ -136,6 +137,8 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   const applyPayload = JSON.parse(applyRequest.options.body);
   assert.deepEqual(applyPayload.imageIds, ["first"]);
   assert.equal(applyPayload.suffix, "_censored");
+  assert.equal(applyPayload.divisor, 100);
+  assert.equal("blockSize" in applyPayload, false);
   assert.equal("prefix" in applyPayload, false);
   assert.equal(state.currentId, "second");
 
@@ -151,6 +154,18 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   assert.equal(isTerminalApply({ kind: "apply", state: "cancelled" }), true);
   assert.equal(isTerminalApply({ kind: "apply", state: "error" }), true);
   assert.equal(isTerminalApply({ kind: "apply", state: "running" }), false);
+
+  assert.equal(calculatedBlockSize({ width: 832, height: 1216 }, 100), 13);
+  assert.equal(calculatedBlockSize({ width: 832, height: 1216 }, 200), 7);
+  state.maskStatus = new Map([["first", true], ["second", false]]);
+  assert.equal(imageHasMask(state.images[0]), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(saveTargets())), ["first"]);
+  state.galleryFilter = "masked";
+  renderGallery();
+  assert.equal(gallery.children.length, 1);
+  rebuildMosaicPreview();
+  paintMosaicPreview();
+  saveAll();
 
   console.log("test_app_js: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
