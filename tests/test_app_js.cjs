@@ -61,6 +61,7 @@ const context = {
 };
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
+assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
 source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, renderGallery };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
 const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, renderGallery } = context.__mosaicTest;

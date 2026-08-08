@@ -774,7 +774,7 @@ function bindEvents() {
 
 async function initialise() {
   await loadTranslations(); bindEvents();
-  new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(render, 80); setInterval(pollJob, 700);
+  new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateActionButtons();
 }
 
