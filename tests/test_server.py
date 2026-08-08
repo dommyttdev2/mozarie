@@ -67,8 +67,11 @@ class MosaicStudioTests(unittest.TestCase):
 
     def test_block_size_uses_long_edge_and_minimum(self):
         self.assertEqual(calculate_block_size(300, 200), 4)
+        self.assertEqual(calculate_block_size(400, 220), 4)
         self.assertEqual(calculate_block_size(401, 220), 5)
         self.assertEqual(calculate_block_size(1000, 999), 10)
+        self.assertEqual(calculate_block_size(1216, 832), 13)
+        self.assertEqual(calculate_block_size(1301, 832), 14)
 
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
@@ -308,31 +311,45 @@ class MosaicStudioTests(unittest.TestCase):
 
     def test_copy_save_preserves_png_metadata_and_leaves_source_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.png"
+            source = Path(directory) / "source.image.png"
             metadata = PngImagePlugin.PngInfo()
             metadata.add_text("workflow", '{"nodes":[]}')
             Image.new("RGB", (16, 16), "#6688aa").save(source, pnginfo=metadata)
             original = source.read_bytes()
             source_mtime_ns = source.stat().st_mtime_ns
-            destination = Path(directory) / "censored_source.png"
+            destination = Path(directory) / "source.image_censored.png"
             save_with_mask(self._record(source, 16, 16), self._mask(16, 16), 4, destination)
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual(png_ancillary_manifest(original), png_ancillary_manifest(destination.read_bytes()))
             self.assertEqual(destination.stat().st_mtime_ns, source_mtime_ns)
 
-    def test_copy_apply_adds_the_output_to_the_catalogue(self):
+    def test_copy_apply_adds_a_suffix_before_the_extension_and_resolves_collisions(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.png"
+            source = Path(directory) / "source.image.png"
             Image.new("RGB", (16, 16), "#6688aa").save(source)
             state = StudioState()
             image_id = state.set_root(directory)[0]["id"]
             record = state.image_for_id(image_id)
             state.job = server_module.Job(kind="apply", state="running", total=1)
-            state._apply_worker([record], 4, "copy", "censored_", False, {image_id: (self._mask(16, 16), None)})
+            state._apply_worker([record], 4, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
+            state.job = server_module.Job(kind="apply", state="running", total=1)
+            state._apply_worker([record], 4, "copy", "_censored", False, {image_id: (self._mask(16, 16), None)})
             names = [image["relativePath"] for image in state.list_images()]
             self.assertEqual(state.job.state, "complete")
-            self.assertEqual(names, ["censored_source.png", "source.png"])
-            self.assertEqual((Path(directory) / "censored_source.png").stat().st_mtime_ns, source.stat().st_mtime_ns)
+            self.assertEqual(names, ["source.image.png", "source.image_censored.png", "source.image_censored_2.png"])
+            self.assertEqual((Path(directory) / "source.image_censored.png").stat().st_mtime_ns, source.stat().st_mtime_ns)
+
+    def test_overwrite_ignores_suffix_and_copy_rejects_invalid_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "#6688aa").save(source)
+            state = StudioState()
+            image_id = state.set_root(directory)[0]["id"]
+            with patch.object(state, "_start_job") as start_job:
+                state.start_apply([image_id], 4, "overwrite", "../ignored", False, {})
+            self.assertEqual(start_job.call_args.args[5], "")
+            with self.assertRaisesRegex(ClientError, "ファイル名の末尾"):
+                state.start_apply([image_id], 4, "copy", "../invalid", False, {})
 
     def test_apply_pause_resume_and_cancel_state_transitions(self):
         state = StudioState()

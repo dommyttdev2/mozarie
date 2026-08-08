@@ -83,7 +83,7 @@
   "apply.target": "対象: {count}件",
   "apply.copy": "コピー保存",
   "apply.overwrite": "元画像を上書き",
-  "apply.prefix": "ファイル名の先頭",
+  "apply.suffix": "ファイル名の末尾",
   "apply.deleteOriginal": "コピー成功後に元画像を削除",
   "apply.metadata": "メタデータは保持・検証します。同名時は自動連番です。",
   "apply.start": "適用",

@@ -617,15 +617,15 @@ class StudioState:
         image_ids: list[str],
         block_size: int,
         mode: str,
-        prefix: str,
+        suffix: str,
         delete_original: bool,
         drafts: dict[str, dict[str, Any]],
     ) -> None:
         records = self._records_for_ids(image_ids)
         if mode not in {"copy", "overwrite"}:
             raise ClientError("保存方法が正しくありません。")
-        if not isinstance(prefix, str) or not prefix or Path(prefix).name != prefix:
-            raise ClientError("ファイル名の先頭が正しくありません。")
+        if mode == "copy" and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
+            raise ClientError("ファイル名の末尾が正しくありません。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
         decoded_drafts = {
@@ -633,7 +633,7 @@ class StudioState:
             for record in records
         }
         self._start_job(
-            "apply", records, self._apply_worker, block_size, mode, prefix,
+            "apply", records, self._apply_worker, block_size, mode, suffix if mode == "copy" else "",
             bool(delete_original and mode == "copy"), decoded_drafts,
         )
 
@@ -819,7 +819,7 @@ class StudioState:
         records: list[ImageRecord],
         block_size: int,
         mode: str,
-        prefix: str,
+        suffix: str,
         delete_original: bool,
         drafts: dict[str, tuple[np.ndarray | None, np.ndarray | None]],
     ) -> None:
@@ -835,7 +835,9 @@ class StudioState:
                 self._set_job_current(record.relative_path, index - 1)
                 mask = self.combined_candidate_mask(record.image_id, drafts.get(record.image_id))
                 if mask is not None and np.any(mask):
-                    output = record.path if mode == "overwrite" else unique_destination(record.path.with_name(f"{prefix}{record.path.name}"))
+                    output = record.path if mode == "overwrite" else unique_destination(
+                        record.path.with_name(f"{record.path.stem}{suffix}{record.path.suffix}")
+                    )
                     save_with_mask(record, mask, block_size, output)
                     if mode == "copy" and delete_original:
                         record.path.unlink()
@@ -1367,7 +1369,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 block_size = _read_block_size(payload.get("blockSize"))
                 STATE.start_apply(
                     payload.get("imageIds", []), block_size,
-                    str(payload.get("mode", "copy")), str(payload.get("prefix", "censored_")),
+                    str(payload.get("mode", "copy")), str(payload.get("suffix", "_censored")),
                     bool(payload.get("deleteOriginal", False)), payload.get("drafts", {}),
                 )
                 self._json({"ok": True})

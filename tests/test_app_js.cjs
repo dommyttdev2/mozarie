@@ -27,9 +27,9 @@ const elements = new Map();
 for (const id of [
   "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "applyButton", "saveButton",
   "status", "jobProgress", "gallery", "imageCount", "selectAllButton", "selectedCount", "candidateList", "candidateStatus",
-  "applyTargetCount", "applyBlockSize", "blockSize", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applyPrefix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
+  "applyTargetCount", "applyBlockSize", "blockSize", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
 ]) elements.set(`#${id}`, element());
-elements.get("#applyPrefix").value = "censored_";
+elements.get("#applySuffix").value = "_censored";
 elements.get("#applyBlockSize").value = "4";
 elements.get("#blockSize").value = "4";
 const gallery = elements.get("#gallery");
@@ -133,7 +133,10 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   await applying;
   const applyRequest = requests.at(-1);
   assert.equal(applyRequest.path, "/api/apply");
-  assert.deepEqual(JSON.parse(applyRequest.options.body).imageIds, ["first"]);
+  const applyPayload = JSON.parse(applyRequest.options.body);
+  assert.deepEqual(applyPayload.imageIds, ["first"]);
+  assert.equal(applyPayload.suffix, "_censored");
+  assert.equal("prefix" in applyPayload, false);
   assert.equal(state.currentId, "second");
 
   state.job = { state: "paused" };

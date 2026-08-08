@@ -417,7 +417,7 @@ function selectedSaveMode() { return document.querySelector('input[name="saveMod
 
 function syncApplyMode() {
   const copying = selectedSaveMode() === "copy";
-  $("#applyPrefix").disabled = !copying || state.applyRunning;
+  $("#applySuffix").disabled = !copying || state.applyRunning;
   $("#deleteOriginalRow").hidden = !copying;
   $("#deleteOriginal").disabled = !copying || state.applyRunning;
 }
@@ -453,14 +453,14 @@ async function startApplyFromDialog(event) {
   const imageIds = state.applyTargetIds;
   if (!imageIds.length) return;
   const copy = selectedSaveMode() === "copy";
-  const prefix = $("#applyPrefix").value.trim();
-  if (copy && !prefix) return setApplyResult(t("error.requestFailed"), true);
+  const suffix = $("#applySuffix").value.trim();
+  if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
   try {
     await api("/api/apply", {
       method: "POST",
       body: JSON.stringify({
         imageIds, blockSize: Number($("#applyBlockSize").value), mode: copy ? "copy" : "overwrite",
-        prefix: copy ? prefix : "censored_", deleteOriginal: copy && $("#deleteOriginal").checked,
+        suffix: copy ? suffix : "_censored", deleteOriginal: copy && $("#deleteOriginal").checked,
         drafts: draftPayload(imageIds),
       }),
     });
