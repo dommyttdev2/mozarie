@@ -62,15 +62,16 @@ const requests = [];
 const context = {
   console, document, Date, Math, Promise, window: { devicePixelRatio: 1 }, setInterval() {}, ResizeObserver: class {},
   Image: class { set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); } },
+  URL: { createObjectURL() { return "blob:test"; }, revokeObjectURL() {} },
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   fetch: (path, options) => { fetchCalls += 1; requests.push({ path, options }); return new Promise((resolve) => { resolveFetch = resolve; }); },
 };
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate } = context.__mosaicTest;
 
 (async () => {
   state.translations["status.progressCount"] = "{completed} / {total}";
@@ -133,6 +134,8 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
   const boundarySuccess = addBoundaryCandidate({ x: 8, y: 7 });
   resolveFetch({ ok: true, json: async () => ({ candidate: { id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff" } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, blob: async () => ({}) });
   await boundarySuccess;
   assert.equal(state.boundaryRoi, null);
 
@@ -195,6 +198,48 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   assert.equal(state.mosaicPreviewEnabled, false);
   assert.equal(state.maskStatus.get("first"), maskBeforeToggle);
   setMosaicPreviewEnabled(true);
+
+  // A stale mask is reconciled by exactly one fresh candidate-list request.
+  state.imageGeneration = 30;
+  const staleMask = loadCandidateBundle("first", 30);
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "stale" }] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, status: 404 });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
+  const reconciled = await staleMask;
+  assert.equal(reconciled.candidates.length, 0);
+
+  // A failed selection leaves the previously coherent editor state untouched.
+  state.images = [
+    { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "second", relativePath: "second.png", width: 50, height: 40, candidateCount: 0, enabledCandidateCount: 0 },
+  ];
+  state.currentId = "first";
+  state.currentImage = { width: 100, height: 80 };
+  state.candidates = [{ id: "first-candidate", enabled: true }];
+  state.imageGeneration = 50;
+  const failedSelection = selectImage("second");
+  resolveFetch({ ok: false, status: 500, json: async () => ({ error: "candidate request failed" }) });
+  await failedSelection;
+  assert.equal(state.currentId, "first");
+  assert.equal(state.currentImage.width, 100);
+  assert.equal(state.candidates[0].id, "first-candidate");
+
+  // Rapid clicks for one candidate are sent in order, never concurrently.
+  state.currentId = "first";
+  state.imageGeneration = 60;
+  const toggled = { id: "serialized", enabled: true, color: "#ffffff" };
+  const firstUpdate = updateCandidate(toggled, false);
+  toggled.enabled = false;
+  const secondUpdate = updateCandidate(toggled, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await Promise.all([firstUpdate, secondUpdate]);
+  const updateRequests = requests.filter((request) => request.path.endsWith("/serialized"));
+  assert.deepEqual(updateRequests.map((request) => JSON.parse(request.options.body).enabled), [true, false]);
 
   state.currentId = null;
   state.currentImage = null;

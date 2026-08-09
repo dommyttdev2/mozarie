@@ -1,13 +1,14 @@
 const $ = (selector) => document.querySelector(selector);
 
 const state = {
-  images: [], currentId: null, currentImage: null, galleryFilter: "all", maskStatus: new Map(),
+  images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
-  view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, translations: {},
-  applyTargetIds: [], applyRunning: false, importing: false, mosaicPreviewEnabled: true,
+  view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, catalogGeneration: 0, translations: {},
+  applyTargetIds: [], applyRunning: false, applyFinishing: false, importing: false, mosaicPreviewEnabled: true,
+  candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
 };
 
 const canvas = $("#editorCanvas");
@@ -49,7 +50,11 @@ function api(path, options = {}) {
   return fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options })
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || t("error.requestFailed"));
+      if (!response.ok) {
+        const error = new Error(data.error || t("error.requestFailed"));
+        error.status = response.status;
+        throw error;
+      }
       return data;
     });
 }
@@ -61,6 +66,7 @@ function setStatus(message, kind = "") {
 }
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
+function isCurrentGeneration(generation) { return state.imageGeneration === generation; }
 function detectionConfidence() { return Number($("#confidence").value); }
 function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
@@ -152,12 +158,14 @@ async function loadFolder() {
   if (isBusy() || state.importing) return;
   const path = $("#folderPath").value.trim();
   if (!path) return setStatus(t("status.enterFolder"), "error");
+  const catalogGeneration = ++state.catalogGeneration;
+  ++state.imageGeneration;
   setStatus(t("status.loadingImages"), "running");
   try {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
+    if (state.catalogGeneration !== catalogGeneration) return;
     state.images = data.images;
-    state.imageGeneration += 1;
-    state.currentId = null; state.currentImage = null; state.maskStatus.clear();
+    state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
     renderGallery(); clearEditor();
     setStatus(t("status.imagesLoaded", { count: state.images.length }));
@@ -223,32 +231,37 @@ function clearEditor() {
 
 async function selectImage(imageId, force = false) {
   if ((isBusy() || state.importing) && !force) return;
-  if (state.currentId === imageId && !force) return;
-  saveDraft(); state.currentId = imageId;
+  if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
+  saveDraft();
   const generation = ++state.imageGeneration;
-  clearBoundaryInteraction();
-  const record = currentRecord(); renderGallery();
+  state.pendingImageId = imageId;
+  const record = state.images.find((image) => image.id === imageId);
+  if (!record) return;
   setStatus(t("status.loadingImages"), "running");
   try {
-    const [image, candidateData] = await Promise.all([
+    const [image, candidateBundle] = await Promise.all([
       loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`),
-      api(`/api/candidates/${encodeURIComponent(imageId)}`),
+      loadCandidateBundle(imageId, generation),
     ]);
-    const candidateImages = new Map();
-    await Promise.all(candidateData.candidates.map(async (candidate) => {
-      candidateImages.set(candidate.id, await loadImage(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
-    }));
-    if (state.currentId !== imageId || state.imageGeneration !== generation) return;
+    if (!isCurrentGeneration(generation)) return;
+    state.currentId = imageId;
+    state.pendingImageId = null;
     state.currentImage = image;
-    state.candidates = candidateData.candidates;
-    state.candidateImages = candidateImages;
+    state.candidates = candidateBundle.candidates;
+    state.candidateImages = candidateBundle.candidateImages;
+    clearBoundaryInteraction();
     canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
     renderCandidates(); updateActionButtons(); render(); setStatus(t("status.editReady"));
-  } catch (error) { if (state.currentId === imageId && state.imageGeneration === generation) setStatus(error.message, "error"); }
+  } catch (error) {
+    if (isCurrentGeneration(generation)) {
+      state.pendingImageId = null;
+      setStatus(error.message, "error");
+    }
+  }
 }
 
 function loadImage(source) {
@@ -258,6 +271,48 @@ function loadImage(source) {
     image.onerror = () => reject(new Error(t("error.imageLoad")));
     image.src = source;
   });
+}
+
+async function loadCandidateMask(source) {
+  const response = await fetch(source);
+  if (!response.ok) {
+    const error = new Error(t("error.imageLoad"));
+    error.status = response.status;
+    throw error;
+  }
+  const objectUrl = URL.createObjectURL(await response.blob());
+  try { return await loadImage(objectUrl); }
+  finally { URL.revokeObjectURL(objectUrl); }
+}
+
+async function loadCandidateBundle(imageId, generation, reconciled = false) {
+  const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
+  try {
+    const candidateImages = new Map();
+    await Promise.all(candidateData.candidates.map(async (candidate) => {
+      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
+    }));
+    return { candidates: candidateData.candidates, candidateImages };
+  } catch (error) {
+    if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
+      return loadCandidateBundle(imageId, generation, true);
+    }
+    throw error;
+  }
+}
+
+async function reconcileCurrentCandidates(imageId, generation) {
+  const bundle = await loadCandidateBundle(imageId, generation);
+  if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
+  state.candidates = bundle.candidates;
+  state.candidateImages = bundle.candidateImages;
+  const record = state.images.find((image) => image.id === imageId);
+  if (record) {
+    record.candidateCount = bundle.candidates.length;
+    record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled).length;
+  }
+  refreshMaskStatus(true); renderCandidates(); render();
+  return true;
 }
 
 function saveDraft() {
@@ -389,8 +444,9 @@ function renderCandidates() {
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled;
     enabled.addEventListener("change", async () => {
       if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
+      const previousEnabled = candidate.enabled;
       candidate.enabled = enabled.checked;
-      refreshMaskStatus(true); render(); await updateCandidate(candidate);
+      refreshMaskStatus(true); render(); await updateCandidate(candidate, previousEnabled);
     });
     const label = document.createElement("span"); label.className = "candidate-label";
     label.innerHTML = `<span class="candidate-class">${escapeHtml(candidate.className)}</span><span class="candidate-conf">${Math.round(candidate.confidence * 100)}%</span>`;
@@ -398,9 +454,33 @@ function renderCandidates() {
   }
 }
 
-async function updateCandidate(candidate) {
-  try { await api(`/api/candidate/${encodeURIComponent(state.currentId)}/${encodeURIComponent(candidate.id)}`, { method: "POST", body: JSON.stringify({ enabled: candidate.enabled, color: candidate.color }) }); }
-  catch (error) { setStatus(error.message, "error"); }
+async function updateCandidate(candidate, previousEnabled) {
+  const imageId = state.currentId;
+  const generation = state.imageGeneration;
+  const key = `${imageId}:${candidate.id}`;
+  const version = (state.candidateUpdateVersions.get(key) || 0) + 1;
+  const desired = candidate.enabled;
+  state.candidateUpdateVersions.set(key, version);
+  const send = async () => {
+    try {
+      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
+        method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
+      });
+    } catch (error) {
+      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
+        try { await reconcileCurrentCandidates(imageId, generation); }
+        catch { candidate.enabled = previousEnabled; refreshMaskStatus(true); renderCandidates(); render(); }
+      }
+      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) setStatus(error.message, "error");
+    }
+  };
+  const previous = state.candidateUpdateChains.get(key) || Promise.resolve();
+  const queued = previous.then(send, send);
+  const tracked = queued.finally(() => {
+    if (state.candidateUpdateChains.get(key) === tracked) state.candidateUpdateChains.delete(key);
+  });
+  state.candidateUpdateChains.set(key, tracked);
+  return tracked;
 }
 
 async function addBoundaryCandidate(point) {
@@ -424,7 +504,7 @@ async function addBoundaryCandidate(point) {
     renderGallery();
     if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
 
-    const maskImage = await loadImage(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`);
+    const maskImage = await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`);
     if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
     if (state.candidates.some((item) => item.id === candidate.id)) return;
     state.candidates.push(candidate);
@@ -577,23 +657,41 @@ async function controlApply(action) {
   catch (error) { setApplyResult(error.message, true); }
 }
 
+function showRunningApply(job) {
+  state.applyRunning = true;
+  $("#applySettings").disabled = true;
+  $("#applyProgressPanel").hidden = false;
+  $("#applyStartButton").hidden = true;
+  $("#applyCloseButton").hidden = true;
+  $("#applyPauseButton").hidden = false;
+  $("#applyCancelButton").hidden = false;
+  const dialog = $("#applyDialog");
+  if (!dialog.open) dialog.showModal();
+}
+
 async function finishApplyJob(job) {
-  const keepCurrent = state.currentId;
-  const data = await api("/api/images");
-  state.images = data.images;
-  state.maskStatus.clear();
-  for (const imageId of state.applyTargetIds) state.drafts.delete(imageId);
-  state.candidates = []; state.candidateImages.clear();
-  renderGallery();
-  if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) await selectImage(keepCurrent, true);
-  else { state.currentId = null; state.currentImage = null; clearEditor(); }
-  state.applyRunning = false;
-  $("#applyPauseButton").hidden = true;
-  $("#applyCancelButton").hidden = true;
-  $("#applyCloseButton").hidden = false;
-  if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
-  else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
-  else setApplyResult(t("apply.error", { error: job.error || t("error.background") }), true);
+  if (state.applyFinishing) return;
+  state.applyFinishing = true;
+  const generation = ++state.imageGeneration;
+  try {
+    const keepCurrent = state.currentId;
+    const data = await api("/api/images");
+    if (!isCurrentGeneration(generation)) return;
+    state.images = data.images;
+    state.maskStatus.clear();
+    for (const imageId of state.applyTargetIds) state.drafts.delete(imageId);
+    state.candidates = []; state.candidateImages.clear();
+    renderGallery();
+    if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) await selectImage(keepCurrent, true);
+    else { state.currentId = null; state.currentImage = null; clearEditor(); }
+    state.applyRunning = false;
+    $("#applyPauseButton").hidden = true;
+    $("#applyCancelButton").hidden = true;
+    $("#applyCloseButton").hidden = false;
+    if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
+    else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
+    else setApplyResult(t("apply.error", { error: job.error || t("error.background") }), true);
+  } finally { state.applyFinishing = false; }
 }
 
 async function pollJob() {
@@ -603,15 +701,21 @@ async function pollJob() {
     if (terminalApply) {
       await finishApplyJob(job);
       setStatus(job.state === "complete" ? t("status.applyDone") : (job.state === "cancelled" ? t("status.applyCancelled") : (job.error || t("error.background"))), job.state === "error" ? "error" : "");
-    } else if (job.kind === "apply" && state.applyRunning) {
+    } else if (job.kind === "apply" && ["running", "paused"].includes(job.state)) {
+      if (!state.applyRunning) showRunningApply(job);
       $("#applyProgress").max = Math.max(1, Number(job.total) || 1);
       $("#applyProgress").value = Math.min(Number(job.total) || 1, Number(job.completed) || 0);
       $("#applyCurrentName").textContent = job.current || "";
       $("#applyProgressText").textContent = t("apply.progress", { completed: job.completed, total: job.total });
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
       if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
-    } else if (job.state === "complete" && previous?.state === "running") {
-      const keepCurrent = state.currentId; const data = await api("/api/images"); state.images = data.images; state.maskStatus.clear(); renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
+    } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
+      setStatus(job.error || t("error.background"), "error");
+    } else if (job.kind === "detect" && job.state === "complete" && previous?.state === "running") {
+      const generation = ++state.imageGeneration;
+      const keepCurrent = state.currentId; const data = await api("/api/images");
+      if (!isCurrentGeneration(generation)) return;
+      state.images = data.images; state.maskStatus.clear(); renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
       setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
     }
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
@@ -658,6 +762,7 @@ function resetCurrentDraft() {
 async function clearMasks(imageIds, titleKey, messageKey) {
   if (!imageIds.length || isBusy() || state.importing) return;
   if (!await confirmAction(t(titleKey), t(messageKey))) return;
+  ++state.imageGeneration;
   try {
     await api("/api/masks/clear", { method: "POST", body: JSON.stringify({ imageIds }) });
     for (const imageId of imageIds) state.drafts.delete(imageId);
@@ -679,9 +784,12 @@ async function clearMasks(imageIds, titleKey, messageKey) {
 async function clearCatalog() {
   if (!state.images.length || isBusy() || state.importing) return;
   if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"))) return;
+  const catalogGeneration = ++state.catalogGeneration;
+  ++state.imageGeneration;
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
-    state.images = []; state.currentId = null; state.currentImage = null; state.maskStatus.clear();
+    if (state.catalogGeneration !== catalogGeneration) return;
+    state.images = []; state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearEditor(); renderGallery();
     setStatus(t("status.chooseFolder"));
   } catch (error) { setStatus(error.message, "error"); }
