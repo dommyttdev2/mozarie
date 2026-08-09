@@ -242,6 +242,7 @@ class Job:
     started_at: float | None = None
     outputs: list[str] = field(default_factory=list)
     image_ids: tuple[str, ...] = ()
+    completed_image_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -254,6 +255,7 @@ class Job:
             "startedAt": self.started_at,
             "outputs": self.outputs,
             "imageIds": list(self.image_ids),
+            "completedImageIds": list(self.completed_image_ids),
         }
 
 
@@ -401,6 +403,7 @@ def confidence_for_class(source: str, class_name: str, confidence: float) -> flo
 class StudioState:
     def __init__(self, cache_dir: Path | None = None) -> None:
         self.lock = threading.RLock()
+        self.import_lock = threading.Lock()
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
         self.root: Path | None = None
         self.images: dict[str, ImageRecord] = {}
@@ -431,6 +434,10 @@ class StudioState:
         )
 
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
+        with self.import_lock:
+            return self._set_root(raw_path)
+
+    def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
             raise ClientError("Windowsフォルダを入力してください。")
         root = Path(raw_path).expanduser().resolve()
@@ -476,14 +483,15 @@ class StudioState:
         return self.list_images()
 
     def clear_catalog(self) -> None:
-        with self.lock:
-            self._assert_catalog_mutable()
-            self.images = {}
-            self.order = []
-            self.candidates = {}
-            self._clear_cache()
-            self._invalidate_sam_cache()
-            self.catalog_generation += 1
+        with self.import_lock:
+            with self.lock:
+                self._assert_catalog_mutable()
+                self.images = {}
+                self.order = []
+                self.candidates = {}
+                self._clear_cache()
+                self._invalidate_sam_cache()
+                self.catalog_generation += 1
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
@@ -500,65 +508,78 @@ class StudioState:
             shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
 
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        with self.lock:
-            root = self.root
-            catalog_generation = self.catalog_generation
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
-                raise ClientError("処理中は画像を追加できません。")
-        if root is None:
-            raise ClientError("画像を追加する前に画像フォルダを読み込んでください。")
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
+        with self.import_lock:
+            with self.lock:
+                root = self.root
+                catalog_generation = self.catalog_generation
+                if self.job.state in {"running", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中は画像を追加できません。")
+            if root is None:
+                raise ClientError("画像を追加する前に画像フォルダを読み込んでください。")
 
-        destination_dir = root / ".mosaicstudio_imports"
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        added: list[ImageRecord] = []
-        created_files: list[tuple[Path, tuple[int, int, int, int]]] = []
-        for file_data in files:
-            if not isinstance(file_data, dict):
-                raise ClientError("画像データの形式が正しくありません。")
-            name = Path(str(file_data.get("name", ""))).name
-            if not name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
-                continue
+            destination_dir = root / ".mosaicstudio_imports"
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            pending: list[tuple[Path, str, int, int]] = []
             try:
-                raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise ClientError("追加画像を読み込めません。") from exc
-            if not raw:
-                continue
-            _verify_decodable_image(raw)
-            destination = unique_destination(destination_dir / name)
-            temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-            try:
-                temporary.write_bytes(raw)
-                os.replace(temporary, destination)
-            finally:
-                temporary.unlink(missing_ok=True)
-            with Image.open(io.BytesIO(raw)) as image:
-                width, height = image.size
-            stat = destination.stat()
-            created_files.append((destination, (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)))
-            added.append(ImageRecord(uuid.uuid4().hex, destination, destination.relative_to(root).as_posix(), width, height, stat.st_mtime_ns))
-
-        with self.lock:
-            if self.root != root or self.catalog_generation != catalog_generation:
-                for destination, identity in created_files:
-                    try:
-                        stat = destination.stat()
-                    except FileNotFoundError:
+                for file_data in files:
+                    if not isinstance(file_data, dict):
+                        raise ClientError("画像データの形式が正しくありません。")
+                    name = Path(str(file_data.get("name", ""))).name
+                    if not name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
                         continue
-                    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) == identity:
-                        destination.unlink()
-                try:
-                    destination_dir.rmdir()
-                except OSError:
-                    pass
-                raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
-            for record in added:
-                self.images[record.image_id] = record
-                self.order.append(record.image_id)
-            self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
-        return self.list_images()
+                    try:
+                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ClientError("追加画像を読み込めません。") from exc
+                    if not raw:
+                        continue
+                    _verify_decodable_image(raw)
+                    with Image.open(io.BytesIO(raw)) as image:
+                        width, height = image.size
+                    temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
+                    pending.append((temporary, name, width, height))
+                    temporary.write_bytes(raw)
+
+                with self.lock:
+                    if (
+                        self.root != root
+                        or self.catalog_generation != catalog_generation
+                        or self.job.state in {"running", "paused"}
+                        or self._has_active_worker()
+                    ):
+                        raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
+                    added: list[ImageRecord] = []
+                    final_paths: list[Path] = []
+                    try:
+                        for temporary, name, width, height in pending:
+                            destination = unique_destination(destination_dir / name)
+                            os.replace(temporary, destination)
+                            final_paths.append(destination)
+                            stat = destination.stat()
+                            added.append(
+                                ImageRecord(
+                                    uuid.uuid4().hex,
+                                    destination,
+                                    destination.relative_to(root).as_posix(),
+                                    width,
+                                    height,
+                                    stat.st_mtime_ns,
+                                )
+                            )
+                    except Exception:
+                        for destination in final_paths:
+                            destination.unlink(missing_ok=True)
+                        raise
+                    for record in added:
+                        self.images[record.image_id] = record
+                        self.order.append(record.image_id)
+                    self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
+                    return self.list_images()
+            finally:
+                for temporary, _name, _width, _height in pending:
+                    temporary.unlink(missing_ok=True)
 
     def _clear_cache(self) -> None:
         shutil.rmtree(self.cache_dir, ignore_errors=True)
@@ -780,6 +801,27 @@ class StudioState:
         return verified_records, catalog_generation
 
     def _start_job(
+        self,
+        kind: str,
+        records: list[ImageRecord],
+        worker: Any,
+        *args: Any,
+        expected_catalog_generation: int | None = None,
+    ) -> None:
+        if not self.import_lock.acquire(blocking=False):
+            raise ClientError("画像の追加中です。完了後にもう一度実行してください。")
+        try:
+            self._start_job_unlocked(
+                kind,
+                records,
+                worker,
+                *args,
+                expected_catalog_generation=expected_catalog_generation,
+            )
+        finally:
+            self.import_lock.release()
+
+    def _start_job_unlocked(
         self,
         kind: str,
         records: list[ImageRecord],
@@ -1019,6 +1061,7 @@ class StudioState:
                 self.invalidate_sam_image(record.image_id)
                 with self.lock:
                     self._clear_masks_unchecked([record])
+                self._mark_image_completed(record.image_id, job_generation, catalog_generation)
                 self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
                 if control is not None and control.pause_requested.is_set():
                     with self.lock:
@@ -1080,6 +1123,16 @@ class StudioState:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.current = current
                 self.job.completed = completed
+
+    def _mark_image_completed(
+        self,
+        image_id: str,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation) and image_id not in self.job.completed_image_ids:
+                self.job.completed_image_ids = (*self.job.completed_image_ids, image_id)
 
     def _finish_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         with self.lock:

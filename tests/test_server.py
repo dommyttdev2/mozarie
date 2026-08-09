@@ -366,9 +366,10 @@ class MosaicStudioTests(unittest.TestCase):
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
             record = state.image_for_id(image_id)
-            state.job = server_module.Job(kind="apply", state="running", total=1)
+            state.job = server_module.Job(kind="apply", state="running", total=1, image_ids=(image_id,))
             state._apply_worker([record], 100, "copy", "_censored", False, {image_id: self._mask(16, 16)})
-            state.job = server_module.Job(kind="apply", state="running", total=1)
+            self.assertEqual(state.job.completed_image_ids, (image_id,))
+            state.job = server_module.Job(kind="apply", state="running", total=1, image_ids=(image_id,))
             state._apply_worker([record], 100, "copy", "_censored", False, {image_id: self._mask(16, 16)})
             names = [image["relativePath"] for image in state.list_images()]
             self.assertEqual(state.job.state, "complete")
@@ -407,6 +408,45 @@ class MosaicStudioTests(unittest.TestCase):
         state.job.state = "paused"
         state.request_cancel()
         self.assertEqual(state.job.state, "cancelled")
+
+    def test_cancelled_or_failed_apply_reports_only_successfully_completed_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            Image.new("RGB", (16, 16), "#6688aa").save(first)
+            Image.new("RGB", (16, 16), "#aa8866").save(second)
+            state = self.new_state()
+            first_id, second_id = (image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(first_id), state.image_for_id(second_id)]
+            masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
+            control = server_module.JobControl()
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            original_save = server_module.save_with_mask
+
+            def save_then_cancel(*args, **kwargs):
+                original_save(*args, **kwargs)
+                control.cancel_requested.set()
+
+            with patch.object(server_module, "save_with_mask", side_effect=save_then_cancel):
+                state._apply_worker(records, 100, "overwrite", "", False, masks, control=control)
+            self.assertEqual(state.job.state, "cancelled")
+            self.assertEqual(state.job.completed_image_ids, (first_id,))
+
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            call_count = 0
+
+            def save_then_fail(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise RuntimeError("second image failed")
+                original_save(*args, **kwargs)
+
+            with patch.object(server_module, "save_with_mask", side_effect=save_then_fail):
+                state._apply_worker(records, 100, "overwrite", "", False, masks)
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.completed_image_ids, (first_id,))
 
     def test_combined_mask_includes_draft_add_and_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -715,36 +755,158 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertFalse((first_root / "first_censored.png").exists())
             self.assertEqual(state.root, second_root.resolve())
 
-    def test_import_aborts_and_removes_only_its_copy_after_a_catalog_switch(self):
+    def test_same_root_reload_waits_for_import_commit_without_losing_the_image(self):
         with tempfile.TemporaryDirectory() as directory:
-            first_root = Path(directory) / "first"
-            second_root = Path(directory) / "second"
-            first_root.mkdir()
-            second_root.mkdir()
-            Image.new("RGB", (16, 16), "white").save(first_root / "first.png")
-            Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
             raw_buffer = io.BytesIO()
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
             state = self.new_state()
-            state.set_root(str(first_root))
-            original_replace = server_module.os.replace
-            switched = False
+            state.set_root(str(root))
+            entered = threading.Event()
+            release = threading.Event()
+            imported = threading.Event()
+            reloaded = threading.Event()
+            errors: list[Exception] = []
+            original_verify = server_module._verify_decodable_image
 
-            def replace_then_switch(source, destination):
-                nonlocal switched
-                original_replace(source, destination)
-                if not switched and Path(destination).parent == first_root / ".mosaicstudio_imports":
-                    switched = True
-                    state.set_root(str(second_root))
+            def blocked_verify(raw):
+                original_verify(raw)
+                entered.set()
+                self.assertTrue(release.wait(2))
 
-            with patch.object(server_module.os, "replace", side_effect=replace_then_switch):
-                with self.assertRaisesRegex(ClientError, "画像一覧が更新されたため"):
+            def import_worker():
+                try:
                     state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+                finally:
+                    imported.set()
 
-            self.assertTrue(switched)
-            self.assertFalse((first_root / ".mosaicstudio_imports" / "imported.png").exists())
-            self.assertEqual(state.root, second_root.resolve())
-            self.assertEqual([image["relativePath"] for image in state.list_images()], ["second.png"])
+            def reload_worker():
+                try:
+                    state.set_root(str(root))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+                finally:
+                    reloaded.set()
+
+            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+                importer = threading.Thread(target=import_worker)
+                importer.start()
+                self.assertTrue(entered.wait(2))
+                reloader = threading.Thread(target=reload_worker)
+                reloader.start()
+                self.assertFalse(reloaded.wait(0.1))
+                release.set()
+                importer.join(2)
+                reloader.join(2)
+
+            self.assertEqual(errors, [])
+            self.assertTrue(imported.is_set())
+            self.assertTrue(reloaded.is_set())
+            self.assertTrue((root / ".mosaicstudio_imports" / "imported.png").is_file())
+            self.assertEqual(
+                [image["relativePath"] for image in state.list_images()],
+                [".mosaicstudio_imports/imported.png", "source.png"],
+            )
+            self.assertEqual(list((root / ".mosaicstudio_imports").glob("*.tmp")), [])
+
+    def test_concurrent_same_name_imports_commit_to_two_unique_intact_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            raw = raw_buffer.getvalue()
+            state = self.new_state()
+            state.set_root(str(root))
+            barrier = threading.Barrier(3)
+            errors: list[Exception] = []
+
+            def import_worker():
+                try:
+                    barrier.wait()
+                    state.import_images([{"name": "same.png", "data": base64.b64encode(raw).decode("ascii")}])
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            first = threading.Thread(target=import_worker)
+            second = threading.Thread(target=import_worker)
+            first.start()
+            second.start()
+            barrier.wait()
+            first.join(2)
+            second.join(2)
+
+            self.assertEqual(errors, [])
+            destination_dir = root / ".mosaicstudio_imports"
+            self.assertEqual((destination_dir / "same.png").read_bytes(), raw)
+            self.assertEqual((destination_dir / "same_2.png").read_bytes(), raw)
+            self.assertEqual(len(state.list_images()), 2)
+
+    def test_import_rejects_when_a_job_has_already_started(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            entered = threading.Event()
+            release = threading.Event()
+
+            def worker(_records, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(2))
+                state._finish_job(kwargs["job_generation"], kwargs["catalog_generation"])
+
+            state._start_job("detect", [record], worker)
+            self.assertTrue(entered.wait(2))
+            with self.assertRaisesRegex(ClientError, "処理中は画像を追加できません"):
+                state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+            release.set()
+            assert state.worker_thread is not None
+            state.worker_thread.join(2)
+
+    def test_job_start_rejects_while_import_is_still_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            entered = threading.Event()
+            release = threading.Event()
+            errors: list[Exception] = []
+            original_verify = server_module._verify_decodable_image
+
+            def blocked_verify(raw):
+                original_verify(raw)
+                entered.set()
+                self.assertTrue(release.wait(2))
+
+            def import_worker():
+                try:
+                    state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+                importer = threading.Thread(target=import_worker)
+                importer.start()
+                self.assertTrue(entered.wait(2))
+                with self.assertRaisesRegex(ClientError, "画像の追加中"):
+                    state._start_job("detect", [record], lambda *_args, **_kwargs: None)
+                release.set()
+                importer.join(2)
+
+            self.assertEqual(errors, [])
+            self.assertTrue((root / ".mosaicstudio_imports" / "imported.png").is_file())
 
     def test_job_api_exposes_immutable_target_image_ids(self):
         state = self.new_state()
@@ -756,6 +918,7 @@ class MosaicStudioTests(unittest.TestCase):
             state._start_job("apply", records, lambda *_args, **_kwargs: None)
         payload = state.job.as_dict()
         self.assertEqual(payload["imageIds"], ["first", "second"])
+        self.assertEqual(payload["completedImageIds"], [])
         payload["imageIds"].append("other")
         self.assertEqual(state.job.image_ids, ("first", "second"))
 

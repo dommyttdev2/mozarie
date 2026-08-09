@@ -677,17 +677,28 @@ async function finishApplyJob(job) {
   const generation = ++state.imageGeneration;
   try {
     const keepCurrent = state.currentId;
-    const affectedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
+    const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
+    const completedImageIds = Array.isArray(job.completedImageIds)
+      ? job.completedImageIds
+      : (job.state === "complete" ? requestedImageIds : []);
+    const reloadCurrent = Boolean(keepCurrent && completedImageIds.includes(keepCurrent));
     const data = await api("/api/images");
     if (!isCurrentGeneration(generation)) return;
     state.images = data.images;
     state.maskStatus.clear();
-    for (const imageId of affectedImageIds) state.drafts.delete(imageId);
-    state.applyTargetIds = affectedImageIds;
-    state.candidates = []; state.candidateImages.clear();
+    for (const imageId of completedImageIds) state.drafts.delete(imageId);
+    state.applyTargetIds = requestedImageIds;
+    if (reloadCurrent) {
+      state.candidates = [];
+      state.candidateImages.clear();
+    }
     renderGallery();
-    if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
-      await selectImage(keepCurrent, true, { saveCurrentDraft: !affectedImageIds.includes(keepCurrent) });
+    if (reloadCurrent && state.images.some((image) => image.id === keepCurrent)) {
+      await selectImage(keepCurrent, true, { saveCurrentDraft: false });
+    } else if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
+      refreshMaskStatus(true);
+      renderCandidates();
+      render();
     }
     else { state.currentId = null; state.currentImage = null; clearEditor(); }
     state.applyRunning = false;

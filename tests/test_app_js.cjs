@@ -286,6 +286,59 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   assert.deepEqual(JSON.parse(JSON.stringify(state.applyTargetIds)), ["target"]);
   assert.equal(state.handledApplyStartedAt, 201);
 
+  // A cancelled same-tab job only clears drafts for already completed images;
+  // the current unprocessed image remains editable without a reload.
+  const completedTarget = { id: "completed", relativePath: "completed.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  const pendingTarget = { id: "pending", relativePath: "pending.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 };
+  state.images = [completedTarget, pendingTarget];
+  state.currentId = "pending";
+  state.currentImage = { width: 100, height: 80, preserved: true };
+  state.candidates = [{ id: "pending-candidate", enabled: true }];
+  state.candidateImages = new Map([["pending-candidate", { width: 100, height: 80 }]]);
+  state.drafts = new Map([
+    ["completed", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }],
+    ["pending", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }],
+  ]);
+  state.applyTargetIds = ["completed", "pending"];
+  state.applyRunning = true;
+  state.applyFinishing = false;
+  state.imageGeneration += 1;
+  const cancelledCompletion = finishApplyJob({ kind: "apply", state: "cancelled", completed: 1, imageIds: ["completed", "pending"], completedImageIds: ["completed"], startedAt: 300 });
+  resolveFetch({ ok: true, json: async () => ({ images: [completedTarget, pendingTarget] }) });
+  await cancelledCompletion;
+  assert.equal(state.drafts.has("completed"), false);
+  assert.equal(state.drafts.has("pending"), true);
+  assert.equal(state.currentId, "pending");
+  assert.equal(state.currentImage.preserved, true);
+  assert.equal(state.candidates[0].id, "pending-candidate");
+
+  // A tab observing a terminal error from elsewhere follows the same rule.
+  state.images = [completedTarget, pendingTarget];
+  state.currentId = "pending";
+  state.currentImage = { width: 100, height: 80, preserved: true };
+  state.candidates = [{ id: "pending-candidate", enabled: true }];
+  state.candidateImages = new Map([["pending-candidate", { width: 100, height: 80 }]]);
+  state.drafts = new Map([
+    ["completed", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }],
+    ["pending", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }],
+  ]);
+  state.applyTargetIds = [];
+  state.applyRunning = false;
+  state.applyFinishing = false;
+  state.handledApplyStartedAt = null;
+  state.job = { kind: "idle", state: "idle" };
+  state.imageGeneration += 1;
+  const errorPoll = pollJob();
+  resolveFetch({ ok: true, json: async () => ({ kind: "apply", state: "error", completed: 1, total: 2, imageIds: ["completed", "pending"], completedImageIds: ["completed"], startedAt: 301, error: "failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: [completedTarget, pendingTarget] }) });
+  await errorPoll;
+  assert.equal(state.drafts.has("completed"), false);
+  assert.equal(state.drafts.has("pending"), true);
+  assert.equal(state.currentId, "pending");
+  assert.equal(state.currentImage.preserved, true);
+  assert.equal(state.candidates[0].id, "pending-candidate");
+
   state.currentId = null;
   state.currentImage = null;
   state.job = { kind: "detect", state: "running", total: 3, completed: 0 };
