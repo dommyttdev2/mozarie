@@ -78,12 +78,20 @@
         <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">ファイル保存</button>
       </div>
       <div id="canvasStage" class="canvas-stage">
-        <canvas id="editorCanvas" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
+        <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
         <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
       <div class="editor-footer">
         <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
-        <span data-i18n="editor.shortcuts">スペースキー: 移動 / ホイール: 拡大・縮小 / Shiftキー+ホイール: ブラシ径</span>
+        <div class="navigation-controls" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
+          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧</button>
+          <button id="previousImageButton" class="icon-button" type="button" title="前へ" aria-label="前へ" data-i18n-title="navigation.previous" data-i18n-aria-label="navigation.previous">‹</button>
+          <output id="imagePosition" class="image-position">- / -</output>
+          <button id="nextImageButton" class="icon-button" type="button" title="次へ" aria-label="次へ" data-i18n-title="navigation.next" data-i18n-aria-label="navigation.next">›</button>
+          <button id="nextUnreviewedButton" class="text-button" type="button" data-i18n="navigation.nextUnreviewed">次の未確認</button>
+          <button id="reviewAndNextButton" class="text-button" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
+          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span data-i18n="navigation.shortcuts">ナビゲーションショートカット</span></label>
+        </div>
       </div>
     </section>
 
@@ -105,6 +113,27 @@
       </div>
       <div id="candidateList" class="candidate-list"></div>
     </aside>
+
+    <section id="overviewPane" class="overview-pane" tabindex="-1" hidden data-i18n-aria-label="overview.aria" aria-label="画像一覧">
+      <header class="overview-toolbar">
+        <div class="overview-heading">
+          <button id="closeOverviewButton" class="text-button" type="button" data-i18n="overview.back">編集に戻る</button>
+          <h2 data-i18n="overview.title">画像一覧</h2>
+          <output id="overviewCount" class="muted">0 / 0</output>
+        </div>
+        <div class="overview-filters" role="tablist" data-i18n-aria-label="overview.filters" aria-label="一覧の絞り込み">
+          <button class="overview-filter active" type="button" data-overview-filter="all" role="tab" aria-selected="true" data-i18n="overview.filterAll">全体</button>
+          <button class="overview-filter" type="button" data-overview-filter="unreviewed" role="tab" aria-selected="false" data-i18n="overview.filterUnreviewed">未確認</button>
+          <button class="overview-filter" type="button" data-overview-filter="reviewed" role="tab" aria-selected="false" data-i18n="overview.filterReviewed">確認済み</button>
+          <button class="overview-filter" type="button" data-overview-filter="masked" role="tab" aria-selected="false" data-i18n="overview.filterMasked">モザイク適用済</button>
+        </div>
+        <div class="overview-search-controls">
+          <input id="overviewQuery" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="overview.searchPlaceholder" placeholder="ファイル名・相対パスを検索">
+          <select id="overviewFolder" data-i18n-aria-label="overview.folder" aria-label="フォルダで絞り込み"></select>
+        </div>
+      </header>
+      <div id="overviewGrid" class="overview-grid"></div>
+    </section>
   </main>
 
   <template id="galleryItemTemplate">
@@ -113,6 +142,15 @@
       <div class="gallery-name"></div>
       <div class="gallery-meta"></div>
     </article>
+  </template>
+
+  <template id="overviewItemTemplate">
+    <button class="overview-item" type="button">
+      <img loading="lazy" alt="">
+      <span class="overview-item-name"></span>
+      <span class="overview-item-path"></span>
+      <span class="overview-item-state"></span>
+    </button>
   </template>
 
   <dialog id="browseDialog" class="modal-dialog browse-dialog" aria-labelledby="browseDialogTitle">

@@ -2,12 +2,15 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
+  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), reviewRoot: "",
+  navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, catalogGeneration: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
+  detectionTargetIds: [], pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
 };
 
@@ -44,6 +47,7 @@ async function loadTranslations() {
   document.querySelectorAll("[data-i18n]").forEach((element) => { element.textContent = t(element.dataset.i18n); });
   document.querySelectorAll("[data-i18n-title]").forEach((element) => { element.title = t(element.dataset.i18nTitle); });
   document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => { element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel)); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => { element.placeholder = t(element.dataset.i18nPlaceholder); });
 }
 
 function api(path, options = {}) {
@@ -76,6 +80,105 @@ function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor())
 function isBusy() { return ["running", "paused"].includes(state.job?.state) || state.saving || state.boundaryPending; }
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
 function saveTargets() { return state.images.filter(imageHasMask).map((image) => image.id); }
+function normaliseReviewRoot(value) { return String(value || "").trim().replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
+function reviewStoragePrefix() { return state.reviewRoot ? `lets-censoring.reviewed.v1:${state.reviewRoot}:` : ""; }
+function reviewPath(image) { return String(image?.relativePath || "").replaceAll("\\", "/").toLowerCase(); }
+function reviewStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}${path}` : ""; }
+function isReviewed(image) { return state.reviewedPaths.has(reviewPath(image)); }
+function loadReviewedPaths() {
+  if (!reviewStoragePrefix()) { state.reviewedPaths = new Set(); return; }
+  try {
+    state.reviewedPaths = new Set(state.images
+      .filter((image) => localStorage.getItem(reviewStorageKey(image)) === "true")
+      .map(reviewPath));
+  } catch { /* Keep the in-session review state when storage is unavailable. */ }
+}
+function refreshReviewViews() {
+  if (state.viewMode === "overview") renderOverview();
+  updateNavigationControls();
+  updateActionButtons();
+}
+function setReviewed(image, reviewed) {
+  if (!image) return;
+  const path = reviewPath(image);
+  const changed = reviewed ? !state.reviewedPaths.has(path) : state.reviewedPaths.has(path);
+  if (!changed) return;
+  if (reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
+  const key = reviewStorageKey(image);
+  if (key) try { if (reviewed) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
+  refreshReviewViews();
+}
+function moveReviewedPathAfterApply(previousImage, reloadedImage) {
+  const previousPath = reviewPath(previousImage);
+  const reloadedPath = reviewPath(reloadedImage);
+  if (!previousPath || !reloadedPath || previousPath === reloadedPath) return;
+
+  const previousKey = reviewStorageKey(previousImage);
+  const reloadedKey = reviewStorageKey(reloadedImage);
+  let wasReviewed;
+  try {
+    const previousValue = previousKey ? localStorage.getItem(previousKey) : null;
+    const reloadedValue = reloadedKey ? localStorage.getItem(reloadedKey) : null;
+    wasReviewed = previousValue === "true" || reloadedValue === "true";
+  } catch {
+    wasReviewed = state.reviewedPaths.has(previousPath) || state.reviewedPaths.has(reloadedPath);
+  }
+  state.reviewedPaths.delete(previousPath);
+  if (!wasReviewed) state.reviewedPaths.delete(reloadedPath);
+  else state.reviewedPaths.add(reloadedPath);
+
+  try {
+    if (previousKey) localStorage.removeItem(previousKey);
+    if (reloadedKey) {
+      if (wasReviewed) localStorage.setItem(reloadedKey, "true");
+      else localStorage.removeItem(reloadedKey);
+    }
+  } catch { /* Keep the reviewed paths migrated for this session. */ }
+}
+function markImagesUnreviewed(imageIds, renderAfter = true) {
+  let changed = false;
+  for (const imageId of imageIds) {
+    const image = state.images.find((item) => item.id === imageId);
+    if (!image) continue;
+    const path = reviewPath(image);
+    if (!state.reviewedPaths.delete(path)) continue;
+    changed = true;
+    const key = reviewStorageKey(image);
+    if (key) try { localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
+  }
+  if (!changed) return false;
+  if (renderAfter) refreshReviewViews();
+  return true;
+}
+function markCurrentUnreviewed(renderAfter = true) { return markImagesUnreviewed([state.currentId], renderAfter); }
+function refreshCurrentReviewAndMask() {
+  const reviewChanged = markCurrentUnreviewed(false);
+  const maskChanged = refreshMaskStatus(true);
+  if (reviewChanged && !maskChanged) refreshReviewViews();
+  return reviewChanged || maskChanged;
+}
+function imageIndex(imageId = state.currentId) { return state.images.findIndex((image) => image.id === imageId); }
+function hasOpenDialog() { return [...document.querySelectorAll("dialog")].some((dialog) => dialog.open); }
+function isEditableTarget(target) {
+  return Boolean(target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target?.tagName));
+}
+function focusElement(element) { element?.focus({ preventScroll: true }); }
+function focusCanvas() { focusElement(canvas); }
+function setNavigationShortcutsEnabled(enabled) {
+  state.navigationShortcutsEnabled = Boolean(enabled);
+  try { localStorage.setItem("lets-censoring.navigation-shortcuts.v1", String(state.navigationShortcutsEnabled)); } catch { /* Session setting still applies. */ }
+  updateNavigationControls();
+  focusCanvas();
+}
+function handleReviewStorageEvent(event) {
+  const prefix = reviewStoragePrefix();
+  if (!prefix || !event.key?.startsWith(prefix)) return;
+  const path = event.key.slice(prefix.length);
+  if (!path) return;
+  if (event.newValue === "true") state.reviewedPaths.add(path);
+  else state.reviewedPaths.delete(path);
+  refreshReviewViews();
+}
 
 function updateActionButtons() {
   const running = isBusy();
@@ -103,6 +206,12 @@ function updateActionButtons() {
   $("#galleryMaskedTab").disabled = running;
   $("#saveAllButton").disabled = running || saveTargets().length === 0;
   $("#saveButton").disabled = running || !hasImage || !imageHasMask(currentRecord());
+  $("#overviewButton").disabled = running || state.images.length === 0;
+  $("#previousImageButton").disabled = running || imageIndex() <= 0;
+  $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
+  $("#nextUnreviewedButton").disabled = running || !nextUnreviewedImage();
+  $("#reviewAndNextButton").disabled = running || !hasImage;
+  $("#navigationShortcutsEnabled").disabled = running;
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
@@ -165,9 +274,11 @@ async function loadFolder() {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (state.catalogGeneration !== catalogGeneration) return;
     state.images = data.images;
+    state.reviewRoot = normaliseReviewRoot(path);
+    loadReviewedPaths();
     state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
-    renderGallery(); clearEditor();
+    renderCatalogViews(); clearEditor();
     setStatus(t("status.imagesLoaded", { count: state.images.length }));
   } catch (error) { setStatus(error.message, "error"); }
 }
@@ -186,7 +297,8 @@ async function pickFolder() {
   finally { button.disabled = false; updateActionButtons(); }
 }
 
-function renderGallery() {
+function renderGallery(force = false) {
+  if (!force && state.viewMode === "overview") return;
   const gallery = $("#gallery");
   const scrollTop = gallery.scrollTop;
   gallery.textContent = "";
@@ -201,6 +313,7 @@ function renderGallery() {
     const item = template.content.firstElementChild.cloneNode(true);
     item.dataset.id = image.id;
     item.classList.toggle("selected", image.id === state.currentId);
+    item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
     preview.src = `/api/thumbnail/${encodeURIComponent(image.id)}`;
     preview.alt = image.relativePath;
@@ -211,6 +324,117 @@ function renderGallery() {
   }
   gallery.scrollTop = scrollTop;
   updateActionButtons();
+}
+
+function updateGallerySelection() {
+  for (const item of $("#gallery").children) item.classList.toggle("selected", item.dataset.id === state.currentId);
+  updateActionButtons();
+}
+
+function overviewFolderOptions() {
+  const folders = new Set();
+  for (const image of state.images) {
+    const parts = image.relativePath.replaceAll("\\", "/").split("/").slice(0, -1);
+    for (let depth = 1; depth <= parts.length; depth += 1) folders.add(parts.slice(0, depth).join("/"));
+  }
+  return [...folders].sort((left, right) => left.localeCompare(right));
+}
+function overviewImages() {
+  const query = state.overviewQuery.trim().toLowerCase();
+  const folder = state.overviewFolder;
+  return state.images.filter((image) => {
+    if (state.overviewFilter === "unreviewed" && isReviewed(image)) return false;
+    if (state.overviewFilter === "reviewed" && !isReviewed(image)) return false;
+    if (state.overviewFilter === "masked" && !imageHasMask(image)) return false;
+    const path = image.relativePath.replaceAll("\\", "/");
+    if (folder && path !== folder && !path.startsWith(`${folder}/`)) return false;
+    return !query || path.toLowerCase().includes(query);
+  });
+}
+function syncOverviewFolders() {
+  const select = $("#overviewFolder");
+  const options = overviewFolderOptions();
+  if (state.overviewFolder && !options.includes(state.overviewFolder)) state.overviewFolder = "";
+  select.textContent = "";
+  const all = document.createElement("option"); all.value = ""; all.textContent = t("overview.folder"); select.append(all);
+  for (const folder of options) {
+    const option = document.createElement("option"); option.value = folder; option.textContent = folder; select.append(option);
+  }
+  select.value = state.overviewFolder;
+}
+function renderOverview(force = false) {
+  if (!force && state.viewMode !== "overview") return;
+  const grid = $("#overviewGrid");
+  if (!grid) return;
+  syncOverviewFolders();
+  const visibleImages = overviewImages();
+  grid.textContent = "";
+  $("#overviewCount").textContent = t("overview.count", { visible: visibleImages.length, total: state.images.length });
+  document.querySelectorAll(".overview-filter").forEach((button) => {
+    const active = button.dataset.overviewFilter === state.overviewFilter;
+    button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active));
+  });
+  const template = $("#overviewItemTemplate");
+  for (const image of visibleImages) {
+    const item = template.content.firstElementChild.cloneNode(true);
+    item.dataset.id = image.id;
+    item.classList.toggle("selected", image.id === state.currentId);
+    const preview = item.querySelector("img");
+    preview.src = `/api/thumbnail/${encodeURIComponent(image.id)}`; preview.alt = image.relativePath;
+    item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
+    item.querySelector(".overview-item-path").textContent = image.relativePath;
+    const statuses = [];
+    statuses.push(isReviewed(image) ? t("overview.stateReviewed") : t("overview.stateUnreviewed"));
+    if (imageHasMask(image)) statuses.push(t("overview.stateMasked"));
+    const stateLabel = item.querySelector(".overview-item-state");
+    stateLabel.textContent = statuses.join(" / ");
+    stateLabel.classList.toggle("reviewed", isReviewed(image));
+    stateLabel.classList.toggle("masked", imageHasMask(image));
+    item.addEventListener("click", () => { setViewMode("edit"); void selectImage(image.id); });
+    grid.append(item);
+  }
+}
+function renderCatalogViews() { renderGallery(); renderOverview(); }
+function setViewMode(mode, refreshGallery = true) {
+  state.viewMode = mode;
+  const active = mode === "overview";
+  $(".studio-grid").classList.toggle("overview-active", active);
+  $("#overviewPane").hidden = !active;
+  if (!active) { if (refreshGallery) renderGallery(true); resizeRenderCanvas(); focusCanvas(); return; }
+  renderOverview(true);
+  requestAnimationFrame(() => {
+    const current = [...$("#overviewGrid").children].find((item) => item.dataset.id === state.currentId);
+    current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    focusElement($("#overviewPane"));
+  });
+}
+function moveCurrentBy(offset) {
+  const index = imageIndex();
+  const target = state.images[index + offset];
+  if (target) void selectImage(target.id);
+}
+function nextUnreviewedImage() {
+  const current = imageIndex();
+  for (let index = Math.max(0, current + 1); index < state.images.length; index += 1) if (!isReviewed(state.images[index])) return state.images[index];
+  return null;
+}
+function moveToNextUnreviewed() { const target = nextUnreviewedImage(); if (target) void selectImage(target.id); }
+function reviewAndMoveNext() {
+  const current = currentRecord();
+  if (!current) return null;
+  const target = state.images[imageIndex(current.id) + 1] || null;
+  setReviewed(current, true);
+  if (target) void selectImage(target.id);
+  return target;
+}
+function runNavigationAction(action) {
+  action();
+  focusCanvas();
+}
+function updateNavigationControls() {
+  const index = imageIndex();
+  $("#imagePosition").textContent = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
+  $("#navigationShortcutsEnabled").checked = state.navigationShortcutsEnabled;
 }
 
 function canvasSizeForImage(image) {
@@ -226,7 +450,7 @@ function clearEditor() {
   $("#emptyState").hidden = false;
   $("#imageInfo").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
-  renderCandidates(); updateHistoryButtons(); updateActionButtons(); render();
+  renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render();
 }
 
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
@@ -255,7 +479,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
-    renderCandidates(); updateActionButtons(); render(); setStatus(t("status.editReady"));
+    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatus(t("status.editReady"));
   } catch (error) {
     if (isCurrentGeneration(generation)) {
       state.pendingImageId = null;
@@ -374,10 +598,14 @@ function composeCurrentMask() {
 
 function refreshMaskStatus(renderGalleryAfter = false) {
   if (!state.currentId || !state.currentImage) return;
+  const record = currentRecord();
+  const previous = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : Boolean(record && Number(record.enabledCandidateCount || 0) > 0);
   composeCurrentMask();
-  state.maskStatus.set(state.currentId, combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0));
-  if (renderGalleryAfter) renderGallery();
+  const current = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0);
+  state.maskStatus.set(state.currentId, current);
+  if (renderGalleryAfter && previous !== current) renderCatalogViews();
   else updateActionButtons();
+  return previous !== current;
 }
 
 function paintMosaicPreview() {
@@ -446,7 +674,7 @@ function renderCandidates() {
       if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
       const previousEnabled = candidate.enabled;
       candidate.enabled = enabled.checked;
-      refreshMaskStatus(true); render(); await updateCandidate(candidate, previousEnabled);
+      refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled);
     });
     const label = document.createElement("span"); label.className = "candidate-label";
     label.innerHTML = `<span class="candidate-class">${escapeHtml(candidate.className)}</span><span class="candidate-conf">${Math.round(candidate.confidence * 100)}%</span>`;
@@ -489,6 +717,7 @@ async function addBoundaryCandidate(point) {
   const viewGeneration = state.imageGeneration;
   const roi = { ...state.boundaryRoi };
   const targetPoint = { ...point };
+  let catalogChanged = false;
   state.boundaryPending = true; updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
   try {
     const data = await api("/api/boundary", {
@@ -501,7 +730,9 @@ async function addBoundaryCandidate(point) {
       record.candidateCount = Number(record.candidateCount || 0) + 1;
       record.enabledCandidateCount = Number(record.enabledCandidateCount || 0) + 1;
     }
-    renderGallery();
+    state.maskStatus.delete(imageId);
+    catalogChanged = true;
+    markImagesUnreviewed([imageId], false);
     if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
 
     const maskImage = await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`);
@@ -511,9 +742,14 @@ async function addBoundaryCandidate(point) {
     state.candidateImages.set(candidate.id, maskImage);
     state.boundaryRoi = null;
     $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
-    refreshMaskStatus(true); renderCandidates(); render(); setStatus(t("status.boundaryDone"));
+    refreshMaskStatus(false);
+    renderCandidates(); render(); setStatus(t("status.boundaryDone"));
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
-  finally { state.boundaryPending = false; updateActionButtons(); }
+  finally {
+    state.boundaryPending = false;
+    if (catalogChanged) renderCatalogViews();
+    updateActionButtons();
+  }
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
@@ -545,7 +781,7 @@ async function restoreSnapshot(index) {
   const entry = state.history[index]; if (!entry) return;
   const [addImage, exclusionImage] = await Promise.all([loadImage(entry.add), loadImage(entry.exclusion)]);
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); state.historyIndex = index; updateHistoryButtons(); refreshMaskStatus(true); render();
+  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); state.historyIndex = index; updateHistoryButtons(); refreshCurrentReviewAndMask(); render();
 }
 
 function drawStroke(from, to, erase) {
@@ -564,6 +800,7 @@ async function runDetection(imageIds) {
   if (!imageIds.length || isBusy() || state.importing) return;
   try {
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence: detectionConfidence() }) });
+    state.detectionTargetIds = [...imageIds];
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
     updateProgress(state.job); setStatus(t("status.detectStarted"), "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
@@ -677,6 +914,7 @@ async function finishApplyJob(job) {
   const generation = ++state.imageGeneration;
   try {
     const keepCurrent = state.currentId;
+    const previousImagesById = new Map(state.images.map((image) => [image.id, image]));
     const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
     const completedImageIds = Array.isArray(job.completedImageIds)
       ? job.completedImageIds
@@ -685,6 +923,12 @@ async function finishApplyJob(job) {
     const data = await api("/api/images");
     if (!isCurrentGeneration(generation)) return;
     state.images = data.images;
+    const reloadedImagesById = new Map(state.images.map((image) => [image.id, image]));
+    for (const imageId of completedImageIds) {
+      const previousImage = previousImagesById.get(imageId);
+      const reloadedImage = reloadedImagesById.get(imageId);
+      if (previousImage && reloadedImage) moveReviewedPathAfterApply(previousImage, reloadedImage);
+    }
     state.maskStatus.clear();
     for (const imageId of completedImageIds) state.drafts.delete(imageId);
     state.applyTargetIds = requestedImageIds;
@@ -692,15 +936,16 @@ async function finishApplyJob(job) {
       state.candidates = [];
       state.candidateImages.clear();
     }
-    renderGallery();
-    if (reloadCurrent && state.images.some((image) => image.id === keepCurrent)) {
+    const reloadedCurrent = reloadCurrent && state.images.some((image) => image.id === keepCurrent);
+    if (reloadedCurrent) {
       await selectImage(keepCurrent, true, { saveCurrentDraft: false });
     } else if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
-      refreshMaskStatus(true);
+      refreshMaskStatus();
       renderCandidates();
       render();
     }
     else { state.currentId = null; state.currentImage = null; clearEditor(); }
+    renderCatalogViews();
     state.applyRunning = false;
     $("#applyPauseButton").hidden = true;
     $("#applyCancelButton").hidden = true;
@@ -713,6 +958,29 @@ async function finishApplyJob(job) {
     if (reconciled && job.startedAt != null) state.handledApplyStartedAt = job.startedAt;
     state.applyFinishing = false;
   }
+}
+
+function isTerminalDetection(job, previous) {
+  if (job.kind !== "detect" || job.state !== "complete" || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
+  const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "paused"].includes(previous.state);
+  return observedRunning || Number(job.startedAt) >= state.pageLoadedAt;
+}
+
+async function finishDetectionJob(job) {
+  const generation = ++state.imageGeneration;
+  const keepCurrent = state.currentId;
+  const targetIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
+  const data = await api("/api/images");
+  if (!isCurrentGeneration(generation)) return;
+  state.images = data.images;
+  state.maskStatus.clear();
+  markImagesUnreviewed(targetIds, false);
+  state.handledDetectionStartedAt = job.startedAt;
+  state.detectionTargetIds = [];
+  if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
+    await selectImage(keepCurrent, true);
+  }
+  renderCatalogViews();
 }
 
 async function pollJob() {
@@ -732,12 +1000,9 @@ async function pollJob() {
       if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
     } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
       setStatus(job.error || t("error.background"), "error");
-    } else if (job.kind === "detect" && job.state === "complete" && previous?.state === "running") {
-      const generation = ++state.imageGeneration;
-      const keepCurrent = state.currentId; const data = await api("/api/images");
-      if (!isCurrentGeneration(generation)) return;
-      state.images = data.images; state.maskStatus.clear(); renderGallery(); if (keepCurrent) await selectImage(keepCurrent, true);
-      setStatus(t(job.kind === "detect" ? "status.detectDone" : "status.applyDone"));
+  } else if (isTerminalDetection(job, previous)) {
+    await finishDetectionJob(job);
+      setStatus(t("status.detectDone"));
     }
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
 }
@@ -798,7 +1063,8 @@ async function clearMasks(imageIds, titleKey, messageKey) {
       }
     });
     imageIds.forEach((imageId) => state.maskStatus.delete(imageId));
-    renderGallery(); setStatus(t("status.editReady"));
+    markImagesUnreviewed(imageIds, false);
+    renderCatalogViews(); updateNavigationControls(); setStatus(t("status.editReady"));
   } catch (error) { setStatus(error.message, "error"); }
 }
 
@@ -811,7 +1077,7 @@ async function clearCatalog() {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (state.catalogGeneration !== catalogGeneration) return;
     state.images = []; state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearEditor(); renderGallery();
+    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.overviewFolder = ""; clearEditor(); renderCatalogViews();
     setStatus(t("status.chooseFolder"));
   } catch (error) { setStatus(error.message, "error"); }
 }
@@ -876,7 +1142,7 @@ async function importFiles(files) {
         body: JSON.stringify({ files: [{ name: file.name, data: bytesToBase64(await file.arrayBuffer()) }] }),
       });
     }
-    state.images = data.images; renderGallery(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
+    state.images = data.images; renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
   } catch (error) { setStatus(error.message, "error"); }
   finally { state.importing = false; updateActionButtons(); }
 }
@@ -888,6 +1154,56 @@ async function importDroppedFiles(event) {
   try {
     await importFiles(await directFilesFromDrop(event.dataTransfer));
   } catch (error) { setStatus(error.message, "error"); }
+}
+
+function handleEditorKeydown(event) {
+  if (isBusy() || state.importing || isEditableTarget(document.activeElement) || hasOpenDialog()) return false;
+  if (state.viewMode !== "edit") return false;
+  if (event.code === "Space") {
+    event.preventDefault();
+    state.spacePressed = true;
+    canvas.style.cursor = "grab";
+    return true;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    void restoreSnapshot(event.shiftKey ? state.historyIndex + 1 : state.historyIndex - 1);
+    return true;
+  }
+  return false;
+}
+
+function navigationShortcutAction(event) {
+  if (isBusy() || state.importing || !state.navigationShortcutsEnabled || isEditableTarget(document.activeElement) || hasOpenDialog()) return null;
+  if (event.ctrlKey || event.metaKey || event.altKey) return null;
+  if (event.key === "g" || event.key === "G") return "toggleOverview";
+  if (state.viewMode !== "edit") return null;
+  if (event.key === "ArrowLeft") return "previous";
+  if (event.key === "ArrowRight" && event.shiftKey) return "nextUnreviewed";
+  if (event.key === "ArrowRight") return "next";
+  if (event.key === "Home") return "first";
+  if (event.key === "End") return "last";
+  if (event.key === "Enter") return "reviewAndNext";
+  return null;
+}
+
+function handleNavigationKeydown(event) {
+  const action = navigationShortcutAction(event);
+  if (!action) return false;
+  event.preventDefault();
+  if (action === "toggleOverview") setViewMode(state.viewMode === "overview" ? "edit" : "overview");
+  else if (action === "previous") moveCurrentBy(-1);
+  else if (action === "next") moveCurrentBy(1);
+  else if (action === "nextUnreviewed") moveToNextUnreviewed();
+  else if (action === "first" && state.images[0]) void selectImage(state.images[0].id);
+  else if (action === "last" && state.images.at(-1)) void selectImage(state.images.at(-1).id);
+  else if (action === "reviewAndNext") reviewAndMoveNext();
+  return true;
+}
+
+function handleWindowKeydown(event) {
+  if (handleEditorKeydown(event)) return;
+  handleNavigationKeydown(event);
 }
 
 function bindEvents() {
@@ -909,6 +1225,26 @@ function bindEvents() {
   $("#clearCatalogButton").addEventListener("click", clearCatalog);
   $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
   $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
+  $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
+  $("#closeOverviewButton").addEventListener("click", () => setViewMode("edit"));
+  $("#previousImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(-1)));
+  $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
+  $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
+  $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
+  $("#navigationShortcutsEnabled").addEventListener("change", (event) => {
+    setNavigationShortcutsEnabled(event.target.checked);
+  });
+  document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
+    if (isBusy() || state.importing) return;
+    state.overviewFilter = button.dataset.overviewFilter; renderOverview();
+  }));
+  let overviewQueryTimer = null;
+  $("#overviewQuery").addEventListener("input", (event) => {
+    state.overviewQuery = event.target.value;
+    clearTimeout(overviewQueryTimer);
+    overviewQueryTimer = setTimeout(() => renderOverview(), 120);
+  });
+  $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
   $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
@@ -968,7 +1304,7 @@ function bindEvents() {
       if (state.boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
       else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
       state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    } else if (state.drawing && event.button === 0) { pushHistory(); refreshMaskStatus(true); }
+    } else if (state.drawing && event.button === 0) { pushHistory(); refreshCurrentReviewAndMask(); }
     state.drawing = false; state.panning = false; if (!state.spacePressed) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
   canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
@@ -982,18 +1318,16 @@ function bindEvents() {
     state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
-  window.addEventListener("keydown", (event) => {
-    if (isBusy() || state.importing) return;
-    if (event.code === "Space" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) { event.preventDefault(); state.spacePressed = true; canvas.style.cursor = "grab"; }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); restoreSnapshot(event.shiftKey ? state.historyIndex + 1 : state.historyIndex - 1); }
-  });
+  window.addEventListener("keydown", handleWindowKeydown);
+  window.addEventListener("storage", handleReviewStorageEvent);
   window.addEventListener("keyup", (event) => { if (event.code === "Space") { state.spacePressed = false; if (!state.panning) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; } });
 }
 
 async function initialise() {
   await loadTranslations(); bindEvents();
+  try { state.navigationShortcutsEnabled = localStorage.getItem("lets-censoring.navigation-shortcuts.v1") !== "false"; } catch { state.navigationShortcutsEnabled = true; }
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
-  updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateActionButtons();
+  updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
 }
 
 initialise();
