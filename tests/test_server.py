@@ -27,6 +27,7 @@ from server import (  # noqa: E402
     CACHE_DIR,
     ClientError,
     DEFAULT_DETECTION_CONFIDENCE,
+    DetectionModels,
     FOLDER_PICKER_LOCK,
     ImageRecord,
     JOB_LABELS,
@@ -635,6 +636,18 @@ class MosaicStudioTests(unittest.TestCase):
         ), patch.object(server_module, "YOLO", side_effect=[precise, primary, secondary]):
             first = state._ensure_models()
             second = state._ensure_models()
+        self.assertIs(first, second)
+        self.assertEqual(validate.call_count, 1)
+
+    def test_hand_model_verification_occurs_once_after_first_load(self):
+        state = self.new_state()
+        models = DetectionModels(Mock(), Mock())
+        hand = Mock()
+        with patch.object(server_module, "validate_model_manifest") as validate, patch.object(
+            server_module, "assert_onnx_cuda_available"
+        ), patch.object(server_module, "YOLO", return_value=hand):
+            first = state._ensure_hand_model(models)
+            second = state._ensure_hand_model(models)
         self.assertIs(first, second)
         self.assertEqual(validate.call_count, 1)
 
