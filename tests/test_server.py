@@ -585,12 +585,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(decision, "over_cap")
         self.assertTrue(np.array_equal(unchanged, genital))
 
-    def test_hand_sam_mask_rejects_low_confidence_invalid_shape_and_empty_masks(self):
+    def test_hand_sam_mask_rejects_invalid_shape_and_empty_masks(self):
         mask = np.ones((8, 8), dtype=bool)
-        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.89]), (8, 8)))
         self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (9, 9)))
         self.assertIsNone(accepted_hand_sam_mask(np.zeros((1, 8, 8), dtype=bool), np.array([0.95]), (8, 8)))
-        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (8, 8))
+        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.01]), (8, 8))
         self.assertIsNotNone(accepted)
         self.assertTrue(np.all(accepted == 255))
 

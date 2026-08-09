@@ -86,7 +86,6 @@ SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
 PRECISE_OVERLAP_IOU = 0.20
 PRECISE_CONTAINMENT = 0.60
 HAND_CONFIDENCE = 0.395
-HAND_SAM_MIN_SCORE = 0.90
 HAND_MAX_REMOVAL_RATIO = 0.20
 SOURCE_LABELS = {
     "precise": "精密性器モデル",
@@ -506,9 +505,9 @@ def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.n
 
 
 def accepted_hand_sam_mask(masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray | None:
-    """Accept only a high-confidence, full-image SAM hand mask."""
-    hand_mask, score = select_best_sam_mask(masks, scores)
-    if score < HAND_SAM_MIN_SCORE or hand_mask.shape[:2] != expected_shape:
+    """Return SAM's best full-image hand mask without using a bounding box as a mask."""
+    hand_mask, _score = select_best_sam_mask(masks, scores)
+    if hand_mask.shape[:2] != expected_shape:
         return None
     hand = np.asarray(hand_mask > 0, dtype=np.uint8) * 255
     return hand if np.any(hand) else None
