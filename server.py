@@ -69,9 +69,9 @@ HAND_MODEL = LocalModelManifest(
     path=APP_DIR / "models" / "ultralytics" / "anime-hand-v1.0-s.onnx",
     size=44_583_229,
     sha256="408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
-    revision="0c4ab4d",
+    revision="0c4ab4d58aafbd56794c82a9c1fe424f86c5780d",
     license="OpenRAIL",
-    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s/model.onnx",
+    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx",
 )
 MODEL_PATH = Path(
     r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt"
@@ -86,6 +86,7 @@ SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
 PRECISE_OVERLAP_IOU = 0.20
 PRECISE_CONTAINMENT = 0.60
 HAND_CONFIDENCE = 0.395
+HAND_SAM_MIN_SCORE = 0.88
 HAND_MAX_REMOVAL_RATIO = 0.20
 SOURCE_LABELS = {
     "precise": "精密性器モデル",
@@ -505,9 +506,9 @@ def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.n
 
 
 def accepted_hand_sam_mask(masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray | None:
-    """Return SAM's best full-image hand mask without using a bounding box as a mask."""
-    hand_mask, _score = select_best_sam_mask(masks, scores)
-    if hand_mask.shape[:2] != expected_shape:
+    """Return a reliable full-image hand mask without using a bounding box as a mask."""
+    hand_mask, score = select_best_sam_mask(masks, scores)
+    if score < HAND_SAM_MIN_SCORE or hand_mask.shape[:2] != expected_shape:
         return None
     hand = np.asarray(hand_mask > 0, dtype=np.uint8) * 255
     return hand if np.any(hand) else None
@@ -566,7 +567,7 @@ def confidence_for_source(source: str, confidence: float) -> float:
 
 
 def precise_confidence(confidence: float) -> float:
-    return max(0.05, confidence - 0.30)
+    return confidence
 
 
 def confidence_for_class(source: str, class_name: str, confidence: float) -> float:

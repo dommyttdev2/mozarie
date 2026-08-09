@@ -518,8 +518,8 @@ class MosaicStudioTests(unittest.TestCase):
 
     def test_detection_confidence_validation_and_secondary_floor(self):
         self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.50)
-        self.assertAlmostEqual(precise_confidence(DEFAULT_DETECTION_CONFIDENCE), 0.20)
-        self.assertAlmostEqual(precise_confidence(0.10), 0.05)
+        self.assertAlmostEqual(precise_confidence(DEFAULT_DETECTION_CONFIDENCE), 0.50)
+        self.assertAlmostEqual(precise_confidence(0.10), 0.10)
         self.assertEqual(read_detection_confidence("0.10"), 0.10)
         self.assertAlmostEqual(confidence_for_source("primary", 0.60), 0.45)
         self.assertEqual(confidence_for_source("secondary", 0.10), 0.50)
@@ -586,11 +586,12 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(decision, "over_cap")
         self.assertTrue(np.array_equal(unchanged, genital))
 
-    def test_hand_sam_mask_rejects_invalid_shape_and_empty_masks(self):
+    def test_hand_sam_mask_rejects_low_quality_invalid_shape_and_empty_masks(self):
         mask = np.ones((8, 8), dtype=bool)
+        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.87]), (8, 8)))
         self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (9, 9)))
         self.assertIsNone(accepted_hand_sam_mask(np.zeros((1, 8, 8), dtype=bool), np.array([0.95]), (8, 8)))
-        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.01]), (8, 8))
+        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.88]), (8, 8))
         self.assertIsNotNone(accepted)
         self.assertTrue(np.all(accepted == 255))
 
