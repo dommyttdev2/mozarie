@@ -40,6 +40,39 @@ from ultralytics import YOLO
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 CACHE_DIR = APP_DIR / ".mosaicstudio-cache"
+
+
+@dataclass(frozen=True)
+class LocalModelManifest:
+    """Pinned local model metadata. Files remain local and are never downloaded by the app."""
+
+    name: str
+    path: Path
+    size: int
+    sha256: str
+    revision: str
+    license: str
+    url: str
+
+
+PRECISE_MODEL = LocalModelManifest(
+    name="精密性器セグメンテーション",
+    path=APP_DIR / "models" / "ultralytics" / "nsfw-anime-xl-x1280.onnx",
+    size=126_350_117,
+    sha256="92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a",
+    revision="1697d5d1827b6a818b350b44bf3ec27f08837a2a",
+    license="MIT",
+    url="https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx",
+)
+HAND_MODEL = LocalModelManifest(
+    name="アニメ手検出",
+    path=APP_DIR / "models" / "ultralytics" / "anime-hand-v1.0-s.onnx",
+    size=44_583_229,
+    sha256="408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
+    revision="0c4ab4d",
+    license="OpenRAIL",
+    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s.onnx",
+)
 MODEL_PATH = Path(
     r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt"
 )
@@ -48,7 +81,20 @@ SECOND_MODEL_PATH = Path(
 )
 SAM_MODEL_PATH = APP_DIR / "models" / "sam_vit_b_01ec64.pth"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
-TARGET_CLASSES = {"pussy", "penis", "anus", "testicles"}
+TARGET_CLASSES = {"pussy", "penis"}
+SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
+PRECISE_OVERLAP_IOU = 0.20
+PRECISE_CONTAINMENT = 0.60
+HAND_CONFIDENCE = 0.395
+HAND_SAM_MIN_SCORE = 0.90
+HAND_MAX_REMOVAL_RATIO = 0.20
+SOURCE_LABELS = {
+    "precise": "精密性器モデル",
+    "primary": "補助検出モデル",
+    "secondary": "補助検出モデル2",
+    "boundary": "境界選択",
+}
+REFINEMENT_LABELS = {"hand": "手の重なりを除外"}
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
     "penis": "#e6b450",
@@ -229,6 +275,7 @@ class Candidate:
     enabled: bool = True
     color: str = "#5bb6d5"
     source: str = "auto"
+    refinement: str | None = None
 
 
 @dataclass
@@ -309,8 +356,79 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.count_nonzero(left_bool & right_bool) / smallest)
 
 
+def normalize_precise_class(class_name: str) -> str | None:
+    """Map the precise model's labels onto Lets Censoring's stable class names."""
+    normalized = class_name.strip().lower()
+    if normalized == "vagina":
+        return "pussy"
+    if normalized == "penis":
+        return "penis"
+    return None
+
+
+def model_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_model_manifest(manifest: LocalModelManifest) -> None:
+    """Reject missing or changed model files before Ultralytics attempts to load them."""
+    if not manifest.path.is_file():
+        raise ClientError(f"{manifest.name}モデルが見つかりません: {manifest.path}")
+    actual_size = manifest.path.stat().st_size
+    if actual_size != manifest.size:
+        raise ClientError(
+            f"{manifest.name}モデルのサイズが一致しません。再ダウンロードしてください。"
+        )
+    if model_sha256(manifest.path).lower() != manifest.sha256.lower():
+        raise ClientError(
+            f"{manifest.name}モデルのSHA-256が一致しません。再ダウンロードしてください。"
+        )
+
+
+def assert_onnx_cuda_available() -> None:
+    """Fail early instead of allowing an ONNX model to take an accidental CPU path."""
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise ClientError("ONNX Runtimeを読み込めません。onnxruntime-gpu を確認してください。") from exc
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise ClientError(
+            "ONNX RuntimeのCUDAExecutionProviderが利用できません。"
+            "GPU版ONNX RuntimeとNVIDIAドライバを確認してください。"
+        )
+    if not torch.cuda.is_available():
+        raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
+
+
+def assert_onnx_cuda_active(model: YOLO, manifest: LocalModelManifest) -> None:
+    """Confirm Ultralytics did not silently select the CPU execution provider."""
+    backend = getattr(getattr(model, "predictor", None), "model", None)
+    session = getattr(getattr(backend, "backend", backend), "session", None)
+    providers = list(session.get_providers()) if session is not None else []
+    if not providers or providers[0] != "CUDAExecutionProvider":
+        detail = ", ".join(providers) if providers else "取得できません"
+        raise ClientError(
+            f"{manifest.name}モデルがCUDAで実行されていません（現在: {detail}）。"
+            "ONNX RuntimeのCUDA設定を確認してください。"
+        )
+
+
+def segment_overlaps(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:
+    return (
+        left["class_name"] == right["class_name"]
+        and (
+            mask_iou(left["mask"], right["mask"]) >= iou_threshold
+            or mask_containment(left["mask"], right["mask"]) >= containment_threshold
+        )
+    )
+
+
 def _segment_rank(segment: dict[str, Any]) -> tuple[int, float]:
-    return (1 if segment["source"] == "primary" else 0, float(segment["confidence"]))
+    return (SOURCE_PRIORITY.get(str(segment["source"]), 0), float(segment["confidence"]))
 
 
 def merge_segment(
@@ -340,6 +458,60 @@ def merge_segment(
     for duplicate in matching:
         segments.remove(duplicate)
     segments.append(winner)
+
+
+def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer tighter precise segments without merging distinct nearby organs."""
+    ordered = sorted(
+        segments,
+        key=lambda segment: (-SOURCE_PRIORITY.get(str(segment["source"]), 0), -float(segment["confidence"])),
+    )
+    accepted: list[dict[str, Any]] = []
+    for segment in ordered:
+        duplicate = False
+        for winner in accepted:
+            if winner["source"] == segment["source"]:
+                continue
+            if winner["source"] == "precise" or segment["source"] == "precise":
+                iou_threshold, containment_threshold = PRECISE_OVERLAP_IOU, PRECISE_CONTAINMENT
+            else:
+                iou_threshold, containment_threshold = 0.75, 0.95
+            if segment_overlaps(winner, segment, iou_threshold, containment_threshold):
+                duplicate = True
+                break
+        if not duplicate:
+            accepted.append(segment)
+    return accepted
+
+
+def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.ndarray, str]:
+    """Conservatively remove a SAM-confirmed hand fringe from a fallback genital mask."""
+    genital = np.asarray(mask > 0, dtype=np.uint8)
+    hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+    area = int(np.count_nonzero(genital))
+    if area == 0 or hand.shape != genital.shape:
+        return mask, "skipped"
+    distance = cv2.distanceTransform(genital, cv2.DIST_L2, 3)
+    core_radius = max(1.0, min(float(distance.max()), math.sqrt(area) * 0.12))
+    core = distance >= core_radius
+    removed = (genital > 0) & (hand > 0) & ~core
+    removal_count = int(np.count_nonzero(removed))
+    if removal_count == 0:
+        return mask, "unchanged"
+    if removal_count / area > HAND_MAX_REMOVAL_RATIO:
+        return mask, "over_cap"
+    refined = genital.copy()
+    refined[removed] = 0
+    return refined.astype(np.uint8) * 255, "refined"
+
+
+def accepted_hand_sam_mask(masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray | None:
+    """Accept only a high-confidence, full-image SAM hand mask."""
+    hand_mask, score = select_best_sam_mask(masks, scores)
+    if score < HAND_SAM_MIN_SCORE or hand_mask.shape[:2] != expected_shape:
+        return None
+    hand = np.asarray(hand_mask > 0, dtype=np.uint8) * 255
+    return hand if np.any(hand) else None
 
 
 def read_detection_confidence(value: Any) -> float:
@@ -394,10 +566,22 @@ def confidence_for_source(source: str, confidence: float) -> float:
     return max(0.10, confidence - 0.15) if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
 
 
+def precise_confidence(confidence: float) -> float:
+    return max(0.05, confidence - 0.30)
+
+
 def confidence_for_class(source: str, class_name: str, confidence: float) -> float:
-    if source == "primary" and class_name == "testicles":
-        return max(0.10, confidence - 0.15)
     return confidence if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
+
+
+@dataclass
+class DetectionModels:
+    precise: YOLO
+    primary: YOLO
+    secondary: YOLO | None = None
+    hand: YOLO | None = None
+    precise_provider_checked: bool = False
+    hand_provider_checked: bool = False
 
 
 class StudioState:
@@ -414,7 +598,7 @@ class StudioState:
         self.job_generation = 0
         self.worker_thread: threading.Thread | None = None
         self.job_control: JobControl | None = None
-        self.models: list[tuple[str, YOLO]] | None = None
+        self.models: DetectionModels | None = None
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
@@ -660,6 +844,9 @@ class StudioState:
                 "enabled": candidate.enabled,
                 "color": candidate.color,
                 "source": candidate.source,
+                "sourceLabel": SOURCE_LABELS.get(candidate.source, candidate.source),
+                "refinement": candidate.refinement,
+                "refinementLabel": REFINEMENT_LABELS.get(candidate.refinement or "", ""),
             }
             for candidate in candidates
         ]
@@ -857,18 +1044,31 @@ class StudioState:
             self.worker_thread = thread
         thread.start()
 
-    def _ensure_models(self) -> list[tuple[str, YOLO]]:
+    def _ensure_models(self) -> DetectionModels:
         with self.lock:
             if self.models is not None:
                 return self.models
+        validate_model_manifest(PRECISE_MODEL)
+        assert_onnx_cuda_available()
         if not MODEL_PATH.is_file():
-            raise RuntimeError(f"検出モデルが見つかりません: {MODEL_PATH}")
-        models = [("primary", YOLO(str(MODEL_PATH)))]
+            raise ClientError(f"補完用検出モデルが見つかりません: {MODEL_PATH}")
+        models = DetectionModels(
+            precise=YOLO(str(PRECISE_MODEL.path), task="segment"),
+            primary=YOLO(str(MODEL_PATH)),
+        )
         if SECOND_MODEL_PATH.is_file():
-            models.append(("secondary", YOLO(str(SECOND_MODEL_PATH))))
+            models.secondary = YOLO(str(SECOND_MODEL_PATH))
         with self.lock:
             self.models = models
         return models
+
+    def _ensure_hand_model(self, models: DetectionModels) -> YOLO:
+        if models.hand is not None:
+            return models.hand
+        validate_model_manifest(HAND_MODEL)
+        assert_onnx_cuda_available()
+        models.hand = YOLO(str(HAND_MODEL.path), task="detect")
+        return models.hand
 
     def _detect_worker(
         self,
@@ -908,12 +1108,85 @@ class StudioState:
         for candidate in candidates:
             candidate.mask_path.unlink(missing_ok=True)
 
-    def _detect_image(self, models: list[tuple[str, YOLO]], record: ImageRecord, confidence: float) -> list[Candidate]:
-        with Image.open(record.path) as image:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
+    def _segments_from_results(
+        self,
+        results: Any,
+        *,
+        source: str,
+        width: int,
+        height: int,
+        x_offset: int = 0,
+        y_offset: int = 0,
+        full_width: int | None = None,
+        full_height: int | None = None,
+        precise_only: bool = False,
+        confidence: float,
+    ) -> list[dict[str, Any]]:
         segments: list[dict[str, Any]] = []
-        for source, model in models:
+        for result in results:
+            if result.boxes is None or result.masks is None:
+                continue
+            masks = result.masks.data.cpu().numpy()
+            boxes = result.boxes.cpu()
+            names = result.names
+            for mask, box in zip(masks, boxes):
+                raw_class = str(names[int(box.cls[0].item())])
+                class_name = normalize_precise_class(raw_class) if precise_only else raw_class
+                if class_name is None or class_name not in TARGET_CLASSES:
+                    continue
+                score = float(box.conf[0].item())
+                if not precise_only and score < confidence_for_class(source, class_name, confidence):
+                    continue
+                if mask.shape[:2] != (height, width):
+                    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+                local_mask = (np.asarray(mask) > 0.5).astype(np.uint8) * 255
+                if not local_mask.any():
+                    continue
+                full_mask = restore_tile_mask(
+                    local_mask,
+                    full_width if full_width is not None else width,
+                    full_height if full_height is not None else height,
+                    x_offset,
+                    y_offset,
+                )
+                merge_segment(segments, class_name, score, full_mask, source)
+        return segments
+
+    def _detect_precise_segments(
+        self, models: DetectionModels, rgb: Image.Image, confidence: float
+    ) -> list[dict[str, Any]]:
+        width, height = rgb.size
+        results = models.precise.predict(
+            rgb,
+            device=0,
+            conf=precise_confidence(confidence),
+            imgsz=1280,
+            retina_masks=True,
+            verbose=False,
+            max_det=300,
+            iou=0.85,
+        )
+        if not models.precise_provider_checked:
+            assert_onnx_cuda_active(models.precise, PRECISE_MODEL)
+            models.precise_provider_checked = True
+        return self._segments_from_results(
+            results,
+            source="precise",
+            width=width,
+            height=height,
+            precise_only=True,
+            confidence=confidence,
+        )
+
+    def _detect_legacy_segments(
+        self, models: DetectionModels, rgb: Image.Image, confidence: float
+    ) -> list[dict[str, Any]]:
+        width, height = rgb.size
+        segments: list[dict[str, Any]] = []
+        legacy_models = [("primary", models.primary)]
+        if models.secondary is not None:
+            legacy_models.append(("secondary", models.secondary))
+        for source, model in legacy_models:
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
                 crop = rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height))
                 results = model.predict(
@@ -926,26 +1199,88 @@ class StudioState:
                     max_det=300,
                     iou=0.85,
                 )
-                for result in results:
-                    if result.boxes is None or result.masks is None:
-                        continue
-                    masks = result.masks.data.cpu().numpy()
-                    boxes = result.boxes.cpu()
-                    names = result.names
-                    for mask, box in zip(masks, boxes):
-                        class_id = int(box.cls[0].item())
-                        class_name = str(names[class_id])
-                        if class_name not in TARGET_CLASSES:
-                            continue
-                        if float(box.conf[0].item()) < confidence_for_class(source, class_name, confidence):
-                            continue
-                        if mask.shape[:2] != (tile_height, tile_width):
-                            mask = cv2.resize(mask, (tile_width, tile_height), interpolation=cv2.INTER_NEAREST)
-                        local_mask = (np.asarray(mask) > 0.5).astype(np.uint8) * 255
-                        if not local_mask.any():
-                            continue
-                        full_mask = restore_tile_mask(local_mask, width, height, x_offset, y_offset)
-                        merge_segment(segments, class_name, float(box.conf[0].item()), full_mask, source)
+                for segment in self._segments_from_results(
+                    results,
+                    source=source,
+                    width=tile_width,
+                    height=tile_height,
+                    x_offset=x_offset,
+                    y_offset=y_offset,
+                    full_width=width,
+                    full_height=height,
+                    confidence=confidence,
+                ):
+                    merge_segment(
+                        segments,
+                        segment["class_name"],
+                        segment["confidence"],
+                        segment["mask"],
+                        segment["source"],
+                    )
+        return segments
+
+    def _hand_boxes(self, models: DetectionModels, rgb: Image.Image) -> list[tuple[int, int, int, int]]:
+        hand_model = self._ensure_hand_model(models)
+        results = hand_model.predict(rgb, device=0, conf=HAND_CONFIDENCE, imgsz=640, verbose=False, max_det=100, iou=0.70)
+        if not models.hand_provider_checked:
+            assert_onnx_cuda_active(hand_model, HAND_MODEL)
+            models.hand_provider_checked = True
+        boxes: list[tuple[int, int, int, int]] = []
+        for result in results:
+            if result.boxes is None:
+                continue
+            for box in result.boxes.cpu():
+                left, top, right, bottom = (int(round(value)) for value in box.xyxy[0].tolist())
+                if right > left and bottom > top:
+                    boxes.append((left, top, right, bottom))
+        return boxes
+
+    @staticmethod
+    def _box_intersects_mask(box: tuple[int, int, int, int], mask: np.ndarray) -> bool:
+        left, top, right, bottom = box
+        height, width = mask.shape[:2]
+        left, right = max(0, left), min(width, right)
+        top, bottom = max(0, top), min(height, bottom)
+        return left < right and top < bottom and bool(np.any(mask[top:bottom, left:right] > 0))
+
+    def _refine_fallback_segments(
+        self, models: DetectionModels, record: ImageRecord, rgb: Image.Image, segments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        fallback = [segment for segment in segments if segment["source"] in {"primary", "secondary"}]
+        if not fallback:
+            return segments
+        hand_boxes = self._hand_boxes(models, rgb)
+        if not hand_boxes:
+            return segments
+        predictor = self._sam_predictor_for(record)
+        for segment in fallback:
+            combined_hand_mask = np.zeros_like(segment["mask"], dtype=np.uint8)
+            for box in hand_boxes:
+                if not self._box_intersects_mask(box, segment["mask"]):
+                    continue
+                masks, scores, _ = predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=np.asarray(box, dtype=np.float32),
+                    multimask_output=True,
+                )
+                hand_mask = accepted_hand_sam_mask(masks, scores, segment["mask"].shape[:2])
+                if hand_mask is not None:
+                    combined_hand_mask = np.maximum(combined_hand_mask, hand_mask)
+            refined, decision = refine_mask_with_hand(segment["mask"], combined_hand_mask)
+            if decision == "refined":
+                segment["mask"] = refined
+                segment["refinement"] = "hand"
+        return segments
+
+    def _detect_image(self, models: DetectionModels, record: ImageRecord, confidence: float) -> list[Candidate]:
+        with Image.open(record.path) as image:
+            rgb = image.convert("RGB")
+        segments = arbitrate_segment_sources([
+            *self._detect_precise_segments(models, rgb, confidence),
+            *self._detect_legacy_segments(models, rgb, confidence),
+        ])
+        segments = self._refine_fallback_segments(models, record, rgb, segments)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
@@ -960,6 +1295,8 @@ class StudioState:
                     confidence=segment["confidence"],
                     mask_path=mask_path,
                     color=DEFAULT_COLORS.get(segment["class_name"], "#5bb6d5"),
+                    source=segment["source"],
+                    refinement=segment.get("refinement"),
                 )
             )
         return candidates
@@ -1006,6 +1343,9 @@ class StudioState:
             "enabled": candidate.enabled,
             "color": candidate.color,
             "source": candidate.source,
+            "sourceLabel": SOURCE_LABELS.get(candidate.source, candidate.source),
+            "refinement": candidate.refinement,
+            "refinementLabel": REFINEMENT_LABELS.get(candidate.refinement or "", ""),
         }
 
     def _apply_worker(

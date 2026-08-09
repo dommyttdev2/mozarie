@@ -1,8 +1,10 @@
 import http.client
 import base64
+import hashlib
 import io
 import json
 import logging
+import math
 import re
 import tempfile
 import threading
@@ -13,6 +15,7 @@ from subprocess import CompletedProcess
 from unittest.mock import Mock, patch
 
 import numpy as np
+import cv2
 from PIL import Image, PngImagePlugin
 
 import sys
@@ -27,12 +30,20 @@ from server import (  # noqa: E402
     FOLDER_PICKER_LOCK,
     ImageRecord,
     JOB_LABELS,
+    LocalModelManifest,
     MosaicHandler,
+    PRECISE_MODEL,
     StudioState,
+    TARGET_CLASSES,
+    accepted_hand_sam_mask,
+    arbitrate_segment_sources,
+    assert_onnx_cuda_available,
+    assert_onnx_cuda_active,
     calculate_block_size,
     clip_mask_to_roi,
     confidence_for_class,
     confidence_for_source,
+    precise_confidence,
     detection_tiles,
     jpeg_metadata_manifest,
     mask_iou,
@@ -42,9 +53,12 @@ from server import (  # noqa: E402
     restore_tile_mask,
     read_boundary_request,
     read_detection_confidence,
+    normalize_precise_class,
+    refine_mask_with_hand,
     _read_mosaic_divisor,
     save_with_mask,
     select_best_sam_mask,
+    validate_model_manifest,
     webp_metadata_manifest,
     LOG_DATE_FORMAT,
     LOG_FORMAT,
@@ -503,17 +517,140 @@ class MosaicStudioTests(unittest.TestCase):
 
     def test_detection_confidence_validation_and_secondary_floor(self):
         self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.50)
+        self.assertAlmostEqual(precise_confidence(DEFAULT_DETECTION_CONFIDENCE), 0.20)
+        self.assertAlmostEqual(precise_confidence(0.10), 0.05)
         self.assertEqual(read_detection_confidence("0.10"), 0.10)
         self.assertAlmostEqual(confidence_for_source("primary", 0.60), 0.45)
         self.assertEqual(confidence_for_source("secondary", 0.10), 0.50)
         self.assertEqual(confidence_for_source("secondary", 0.85), 0.85)
-        self.assertAlmostEqual(confidence_for_class("primary", "testicles", 0.60), 0.45)
         self.assertEqual(confidence_for_class("primary", "penis", 0.60), 0.60)
-        self.assertEqual(confidence_for_class("secondary", "testicles", 0.10), 0.50)
+        self.assertEqual(confidence_for_class("secondary", "penis", 0.10), 0.50)
         with self.assertRaises(ClientError):
             read_detection_confidence(0.09)
         with self.assertRaises(ClientError):
             read_detection_confidence(0.91)
+
+    def test_precise_class_normalization_keeps_only_stable_genital_classes(self):
+        self.assertEqual(TARGET_CLASSES, {"penis", "pussy"})
+        self.assertEqual(normalize_precise_class("penis"), "penis")
+        self.assertEqual(normalize_precise_class("Vagina"), "pussy")
+        self.assertIsNone(normalize_precise_class("anus"))
+        self.assertIsNone(normalize_precise_class("testicles"))
+
+    def test_precise_source_replaces_only_overlapping_legacy_segments(self):
+        precise = np.zeros((40, 40), dtype=np.uint8)
+        precise[5:15, 5:15] = 255
+        overlapping_legacy = np.zeros((40, 40), dtype=np.uint8)
+        overlapping_legacy[4:18, 4:18] = 255
+        unmatched_legacy = np.zeros((40, 40), dtype=np.uint8)
+        unmatched_legacy[24:34, 24:34] = 255
+        result = arbitrate_segment_sources([
+            {"class_name": "penis", "confidence": 0.55, "mask": unmatched_legacy, "source": "primary"},
+            {"class_name": "penis", "confidence": 0.80, "mask": overlapping_legacy, "source": "primary"},
+            {"class_name": "penis", "confidence": 0.20, "mask": precise, "source": "precise"},
+        ])
+        self.assertEqual(len(result), 2)
+        self.assertEqual([segment["source"] for segment in result], ["precise", "primary"])
+        self.assertTrue(any(np.array_equal(segment["mask"], unmatched_legacy) for segment in result))
+
+    def test_precise_arbitration_does_not_merge_nearby_organs(self):
+        left = np.zeros((40, 40), dtype=np.uint8)
+        left[5:13, 5:13] = 255
+        right = np.zeros((40, 40), dtype=np.uint8)
+        right[15:23, 15:23] = 255
+        result = arbitrate_segment_sources([
+            {"class_name": "pussy", "confidence": 0.5, "mask": left, "source": "precise"},
+            {"class_name": "pussy", "confidence": 0.5, "mask": right, "source": "precise"},
+        ])
+        self.assertEqual(len(result), 2)
+
+    def test_hand_refinement_preserves_core_and_removes_valid_fringe_only(self):
+        genital = np.zeros((30, 30), dtype=np.uint8)
+        genital[5:25, 5:25] = 255
+        hand = np.zeros_like(genital)
+        hand[5:8, 5:25] = 255
+        refined, decision = refine_mask_with_hand(genital, hand)
+        distance = cv2.distanceTransform((genital > 0).astype(np.uint8), cv2.DIST_L2, 3)
+        core = distance >= max(1.0, min(float(distance.max()), math.sqrt(400) * 0.12))
+        self.assertEqual(decision, "refined")
+        self.assertTrue(np.all(refined[core] == 255))
+        self.assertLess(np.count_nonzero(refined), np.count_nonzero(genital))
+
+    def test_hand_refinement_skips_over_cap(self):
+        genital = np.zeros((30, 30), dtype=np.uint8)
+        genital[5:25, 5:25] = 255
+        large_hand = np.zeros_like(genital)
+        large_hand[5:25, 5:25] = 255
+        unchanged, decision = refine_mask_with_hand(genital, large_hand)
+        self.assertEqual(decision, "over_cap")
+        self.assertTrue(np.array_equal(unchanged, genital))
+
+    def test_hand_sam_mask_rejects_low_confidence_invalid_shape_and_empty_masks(self):
+        mask = np.ones((8, 8), dtype=bool)
+        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.89]), (8, 8)))
+        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (9, 9)))
+        self.assertIsNone(accepted_hand_sam_mask(np.zeros((1, 8, 8), dtype=bool), np.array([0.95]), (8, 8)))
+        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (8, 8))
+        self.assertIsNotNone(accepted)
+        self.assertTrue(np.all(accepted == 255))
+
+    def test_model_manifest_rejects_missing_size_and_hash_mismatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"verified")
+            manifest = LocalModelManifest("test", path, 8, hashlib.sha256(b"verified").hexdigest(), "r", "MIT", "https://example.invalid")
+            validate_model_manifest(manifest)
+            with self.assertRaisesRegex(ClientError, "サイズ"):
+                validate_model_manifest(LocalModelManifest("test", path, 7, manifest.sha256, "r", "MIT", "https://example.invalid"))
+            with self.assertRaisesRegex(ClientError, "SHA-256"):
+                validate_model_manifest(LocalModelManifest("test", path, 8, "0" * 64, "r", "MIT", "https://example.invalid"))
+            path.unlink()
+            with self.assertRaisesRegex(ClientError, "見つかりません"):
+                validate_model_manifest(manifest)
+
+    def test_onnx_provider_check_requires_cuda_without_loading_a_gpu(self):
+        class FakeSession:
+            def __init__(self, providers): self.providers = providers
+            def get_providers(self): return self.providers
+        class FakeModel:
+            def __init__(self, providers):
+                onnx_backend = type("OnnxBackend", (), {"session": FakeSession(providers)})()
+                auto_backend = type("AutoBackend", (), {"backend": onnx_backend})()
+                self.predictor = type("Predictor", (), {"model": auto_backend})()
+        assert_onnx_cuda_active(FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"]), PRECISE_MODEL)
+        with self.assertRaisesRegex(ClientError, "CUDA"):
+            assert_onnx_cuda_active(FakeModel(["CPUExecutionProvider"]), PRECISE_MODEL)
+
+    def test_onnx_provider_preflight_rejects_cpu_only_runtime(self):
+        with patch("onnxruntime.get_available_providers", return_value=["CPUExecutionProvider"]):
+            with self.assertRaisesRegex(ClientError, "CUDAExecutionProvider"):
+                assert_onnx_cuda_available()
+
+    def test_model_verification_occurs_once_for_a_loaded_model_set(self):
+        state = self.new_state()
+        precise = Mock()
+        primary = Mock()
+        secondary = Mock()
+        with patch.object(server_module, "validate_model_manifest") as validate, patch.object(
+            server_module, "assert_onnx_cuda_available"
+        ), patch.object(server_module, "YOLO", side_effect=[precise, primary, secondary]):
+            first = state._ensure_models()
+            second = state._ensure_models()
+        self.assertIs(first, second)
+        self.assertEqual(validate.call_count, 1)
+
+    def test_precise_segments_never_enter_hand_refinement(self):
+        state = self.new_state()
+        precise_mask = np.zeros((16, 16), dtype=np.uint8)
+        precise_mask[4:12, 4:12] = 255
+        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        with patch.object(state, "_hand_boxes") as hand_boxes:
+            result = state._refine_fallback_segments(
+                Mock(), record, Image.new("RGB", (16, 16), "white"),
+                [{"class_name": "penis", "confidence": 0.8, "mask": precise_mask, "source": "precise"}],
+            )
+        hand_boxes.assert_not_called()
+        self.assertTrue(np.array_equal(result[0]["mask"], precise_mask))
 
     def test_boundary_request_requires_a_valid_roi_and_click(self):
         roi, point = read_boundary_request(

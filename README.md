@@ -18,14 +18,25 @@ Python 環境には `Pillow`、`numpy`、`opencv-python`、`torch`、`ultralytic
 
 ## 自動検出モデル
 
-自動検出では次の primary モデルを使用します。ファイルが存在する場合だけ、secondary モデルも併用します。
+自動検出では、精密性器セグメンテーションを最優先で使います。精密モデルは全画像を一度だけ 1280 px で検出し、`penis` と `vagina`（画面上は従来どおり `pussy`）だけを候補にします。旧モデルはタイル検出の補助として残るため、精密モデルが取りこぼした部位も候補になります。
+
+同じクラスの候補が重なった場合は、精密モデルのマスクを採用し、旧モデルの広いマスクと合成しません。これにより、精液・手・周囲の衣服まで一緒にモザイクされる量を減らします。精液専用の信頼できるアニメ向けセグメンテーションモデルは確認できなかったため、色や明るさによる推測処理は行いません。
 
 | 種別 | パス |
 | --- | --- |
+| precise genital segmentation | `models\ultralytics\nsfw-anime-xl-x1280.onnx` |
+| anime hand detection | `models\ultralytics\anime-hand-v1.0-s.onnx` |
 | primary | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt` |
 | optional secondary | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt` |
 
-secondary は必須ではありません。primary だけでも起動できますが、対象や構図によっては検出漏れ・誤検出が起きます。
+精密モデルと手モデルは起動中に自動ダウンロードしません。初回読込前にファイルサイズと SHA-256 を検証し、不一致なら検出を止めます。ONNX Runtime の `CUDAExecutionProvider` が実際に選ばれなかった場合も、CPUで長時間実行せず日本語エラーで停止します。
+
+| モデル | 入手元（固定revision） | サイズ | SHA-256 | ライセンス |
+| --- | --- | ---: | --- | --- |
+| precise | `https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx` | 126350117 | `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a` | MIT |
+| hand | `https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s.onnx` | 44583229 | `408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0` | OpenRAIL |
+
+旧primary/secondaryは精密モデルの検出漏れを補います。手検出は旧モデル候補にだけ使い、手の矩形そのものではなくSAMで確認したスコア `0.90` 以上の輪郭だけを候補外へ減算します。性器マスクの中心部は保護し、候補面積の20%を超える除外は適用しません。
 
 ## 境界選択用の SAM
 
@@ -40,7 +51,7 @@ secondary は必須ではありません。primary だけでも起動できま�
 1. 上部の「参照...」から「フォルダを選択」または「画像を選択」を選びます。フォルダを選んだ場合は指定フォルダ配下の PNG / JPEG / WebP を一覧へ読み込みます。
 2. ギャラリーには複数ファイルをドラッグ＆ドロップできます。ディレクトリをドロップした場合は、その直下にある対応画像だけを追加します。
 3. 「画像を選択」またはドラッグで追加した画像は、読み込み中のフォルダ内にある `.mosaicstudio_imports` へ元のバイト列のままコピーされ、一覧へ追加されます。画像追加の前にフォルダを読み込んでください。
-4. 「自動検出」で現在の画像を検出し、「全画像を自動検出」で一覧全体を検出します。右側の候補一覧で、適用する候補を ON / OFF できます。判定しきい値は 0.10～0.90、初期値は 0.50 です。主モデルは `testicles` だけを少し低いしきい値でも候補に残すため、ほかのクラスの誤検出を増やさずに取りこぼしを減らします。
+4. 「自動検出」で現在の画像を検出し、「全画像を自動検出」で一覧全体を検出します。右側の候補一覧で、適用する候補を ON / OFF できます。判定しきい値は 0.10～0.90、初期値は 0.50 です。自動候補に出すクラスは `penis` と `pussy` だけです。
 5. 「境界」を選び、対象の周囲をドラッグして白い範囲を作ります。その範囲内の対象をクリックすると、SAM が輪郭候補を追加します。候補の追加に成功すると範囲は消え、失敗した場合は同じ範囲で再試行できます。境界候補も通常の候補一覧で ON / OFF できます。
 6. 中央ツールバーの「モザイク表示」で実際のモザイクプレビューだけを表示・非表示にできます。候補、手描き、除外、保存対象は変わりません。
 7. 「ブラシ」はモザイクを追加する範囲を描きます。「消しゴム」は、ブラシや候補から外す範囲を描きます。
