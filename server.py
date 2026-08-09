@@ -71,7 +71,7 @@ HAND_MODEL = LocalModelManifest(
     sha256="408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
     revision="0c4ab4d",
     license="OpenRAIL",
-    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s.onnx",
+    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s/model.onnx",
 )
 MODEL_PATH = Path(
     r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt"
@@ -576,7 +576,7 @@ def confidence_for_class(source: str, class_name: str, confidence: float) -> flo
 @dataclass
 class DetectionModels:
     precise: YOLO
-    primary: YOLO
+    primary: YOLO | None = None
     secondary: YOLO | None = None
     hand: YOLO | None = None
     precise_provider_checked: bool = False
@@ -1049,12 +1049,11 @@ class StudioState:
                 return self.models
         validate_model_manifest(PRECISE_MODEL)
         assert_onnx_cuda_available()
-        if not MODEL_PATH.is_file():
-            raise ClientError(f"補完用検出モデルが見つかりません: {MODEL_PATH}")
         models = DetectionModels(
             precise=YOLO(str(PRECISE_MODEL.path), task="segment"),
-            primary=YOLO(str(MODEL_PATH)),
         )
+        if MODEL_PATH.is_file():
+            models.primary = YOLO(str(MODEL_PATH))
         if SECOND_MODEL_PATH.is_file():
             models.secondary = YOLO(str(SECOND_MODEL_PATH))
         with self.lock:
@@ -1182,7 +1181,9 @@ class StudioState:
     ) -> list[dict[str, Any]]:
         width, height = rgb.size
         segments: list[dict[str, Any]] = []
-        legacy_models = [("primary", models.primary)]
+        legacy_models: list[tuple[str, YOLO]] = []
+        if models.primary is not None:
+            legacy_models.append(("primary", models.primary))
         if models.secondary is not None:
             legacy_models.append(("secondary", models.secondary))
         for source, model in legacy_models:

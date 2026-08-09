@@ -26,15 +26,15 @@ Python 環境には `Pillow`、`numpy`、`opencv-python`、`torch`、`ultralytic
 | --- | --- |
 | precise genital segmentation | `models\ultralytics\nsfw-anime-xl-x1280.onnx` |
 | anime hand detection | `models\ultralytics\anime-hand-v1.0-s.onnx` |
-| primary | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt` |
-| optional secondary | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt` |
+| optional primary fallback | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt` |
+| optional secondary fallback | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt` |
 
 精密モデルと手モデルは起動中に自動ダウンロードしません。初回読込前にファイルサイズと SHA-256 を検証し、不一致なら検出を止めます。ONNX Runtime の `CUDAExecutionProvider` が実際に選ばれなかった場合も、CPUで長時間実行せず日本語エラーで停止します。
 
 | モデル | 入手元（固定revision） | サイズ | SHA-256 | ライセンス |
 | --- | --- | ---: | --- | --- |
 | precise | `https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx` | 126350117 | `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a` | MIT |
-| hand | `https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s.onnx` | 44583229 | `408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0` | OpenRAIL |
+| hand | `https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d/hand_detect_v1.0_s/model.onnx` | 44583229 | `408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0` | OpenRAIL |
 
 旧primary/secondaryは精密モデルの検出漏れを補います。手検出は旧モデル候補にだけ使い、手の矩形そのものではなくSAMが返す輪郭だけを候補外へ減算します。性器マスクの中心部は保護し、候補面積の20%を超える除外は適用しません。
 

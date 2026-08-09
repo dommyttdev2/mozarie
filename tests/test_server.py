@@ -639,6 +639,19 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(validate.call_count, 1)
 
+    def test_precise_model_loads_without_optional_legacy_models(self):
+        state = self.new_state()
+        missing = Path(tempfile.gettempdir()) / "mosaicstudio-missing-model.pt"
+        with patch.object(server_module, "validate_model_manifest"), patch.object(
+            server_module, "assert_onnx_cuda_available"
+        ), patch.object(server_module, "MODEL_PATH", missing), patch.object(
+            server_module, "SECOND_MODEL_PATH", missing
+        ), patch.object(server_module, "YOLO", return_value=Mock()) as yolo:
+            models = state._ensure_models()
+        self.assertIsNone(models.primary)
+        self.assertIsNone(models.secondary)
+        self.assertEqual(yolo.call_count, 1)
+
     def test_hand_model_verification_occurs_once_after_first_load(self):
         state = self.new_state()
         models = DetectionModels(Mock(), Mock())
