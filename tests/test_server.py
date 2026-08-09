@@ -655,13 +655,109 @@ class MosaicStudioTests(unittest.TestCase):
     def test_start_detection_propagates_ui_confidence(self):
         state = self.new_state()
         record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
-        with patch.object(state, "_records_for_ids", return_value=[record]), patch.object(state, "_start_job") as start:
+        with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
         self.assertEqual(start.call_args.args[0], "detect")
         self.assertEqual(start.call_args.args[-1], 0.65)
-        with patch.object(state, "_records_for_ids", return_value=[record]), patch.object(state, "_start_job") as start:
+        self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 7)
+        with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 8)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"])
         self.assertEqual(start.call_args.args[-1], DEFAULT_DETECTION_CONFIDENCE)
+        self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 8)
+
+    def test_detection_start_rejects_a_catalog_switch_after_records_are_captured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_root = Path(directory) / "first"
+            second_root = Path(directory) / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            Image.new("RGB", (16, 16), "white").save(first_root / "first.png")
+            Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
+            state = self.new_state()
+            first_id = state.set_root(str(first_root))[0]["id"]
+            original_start_job = state._start_job
+
+            def switch_then_start(*args, **kwargs):
+                state.set_root(str(second_root))
+                return original_start_job(*args, **kwargs)
+
+            with patch.object(state, "_start_job", side_effect=switch_then_start):
+                with self.assertRaisesRegex(ClientError, "画像一覧が更新されたため"):
+                    state.start_detection([first_id])
+
+            self.assertEqual(state.root, second_root.resolve())
+            self.assertEqual(state.job.state, "idle")
+
+    def test_apply_start_rejects_a_catalog_switch_without_touching_old_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_root = Path(directory) / "first"
+            second_root = Path(directory) / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            source = first_root / "first.png"
+            Image.new("RGB", (16, 16), "#6688aa").save(source)
+            original_source = source.read_bytes()
+            Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
+            state = self.new_state()
+            first_id = state.set_root(str(first_root))[0]["id"]
+            original_start_job = state._start_job
+
+            def switch_then_start(*args, **kwargs):
+                state.set_root(str(second_root))
+                return original_start_job(*args, **kwargs)
+
+            with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), \
+                 patch.object(state, "_start_job", side_effect=switch_then_start):
+                with self.assertRaisesRegex(ClientError, "画像一覧が更新されたため"):
+                    state.start_apply([first_id], 100, "copy", "_censored", True, {})
+
+            self.assertEqual(source.read_bytes(), original_source)
+            self.assertFalse((first_root / "first_censored.png").exists())
+            self.assertEqual(state.root, second_root.resolve())
+
+    def test_import_aborts_and_removes_only_its_copy_after_a_catalog_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_root = Path(directory) / "first"
+            second_root = Path(directory) / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            Image.new("RGB", (16, 16), "white").save(first_root / "first.png")
+            Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            state.set_root(str(first_root))
+            original_replace = server_module.os.replace
+            switched = False
+
+            def replace_then_switch(source, destination):
+                nonlocal switched
+                original_replace(source, destination)
+                if not switched and Path(destination).parent == first_root / ".mosaicstudio_imports":
+                    switched = True
+                    state.set_root(str(second_root))
+
+            with patch.object(server_module.os, "replace", side_effect=replace_then_switch):
+                with self.assertRaisesRegex(ClientError, "画像一覧が更新されたため"):
+                    state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+
+            self.assertTrue(switched)
+            self.assertFalse((first_root / ".mosaicstudio_imports" / "imported.png").exists())
+            self.assertEqual(state.root, second_root.resolve())
+            self.assertEqual([image["relativePath"] for image in state.list_images()], ["second.png"])
+
+    def test_job_api_exposes_immutable_target_image_ids(self):
+        state = self.new_state()
+        records = [
+            ImageRecord("first", Path(__file__), "first.png", 1, 1, 0),
+            ImageRecord("second", Path(__file__), "second.png", 1, 1, 0),
+        ]
+        with patch("server.threading.Thread"):
+            state._start_job("apply", records, lambda *_args, **_kwargs: None)
+        payload = state.job.as_dict()
+        self.assertEqual(payload["imageIds"], ["first", "second"])
+        payload["imageIds"].append("other")
+        self.assertEqual(state.job.image_ids, ("first", "second"))
 
     def test_injected_test_cache_never_touches_the_production_cache_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -719,6 +815,22 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertTrue(cleared.is_set())
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
+
+    def test_list_candidates_prunes_all_missing_masks_before_returning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            missing_one = state.cache_dir / image_id / "missing-one.png"
+            missing_two = state.cache_dir / image_id / "missing-two.png"
+            state.candidates[image_id] = [
+                Candidate("missing-one", "penis", 0.9, missing_one),
+                Candidate("missing-two", "testicles", 0.8, missing_two),
+            ]
+
+            self.assertEqual(state.list_candidates(image_id), [])
+            self.assertEqual(state.candidates[image_id], [])
 
     def test_missing_candidate_mask_removes_stale_candidate_and_returns_404(self):
         from http.server import ThreadingHTTPServer

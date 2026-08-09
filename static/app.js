@@ -7,7 +7,7 @@ const state = {
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, catalogGeneration: 0, translations: {},
-  applyTargetIds: [], applyRunning: false, applyFinishing: false, importing: false, mosaicPreviewEnabled: true,
+  applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
 };
 
@@ -229,10 +229,10 @@ function clearEditor() {
   renderCandidates(); updateHistoryButtons(); updateActionButtons(); render();
 }
 
-async function selectImage(imageId, force = false) {
+async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
   if ((isBusy() || state.importing) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
-  saveDraft();
+  if (saveCurrentDraft) saveDraft();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   const record = state.images.find((image) => image.id === imageId);
@@ -585,7 +585,8 @@ function setApplyResult(message, error = false) {
 }
 
 function isTerminalApply(job) {
-  return job.kind === "apply" && state.applyRunning && ["complete", "cancelled", "error"].includes(job.state);
+  if (job.kind !== "apply" || !["complete", "cancelled", "error"].includes(job.state)) return false;
+  return state.applyRunning || (job.startedAt != null && state.handledApplyStartedAt !== job.startedAt);
 }
 
 function selectedSaveMode() { return document.querySelector('input[name="saveMode"]:checked').value; }
@@ -672,17 +673,22 @@ function showRunningApply(job) {
 async function finishApplyJob(job) {
   if (state.applyFinishing) return;
   state.applyFinishing = true;
+  let reconciled = false;
   const generation = ++state.imageGeneration;
   try {
     const keepCurrent = state.currentId;
+    const affectedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
     const data = await api("/api/images");
     if (!isCurrentGeneration(generation)) return;
     state.images = data.images;
     state.maskStatus.clear();
-    for (const imageId of state.applyTargetIds) state.drafts.delete(imageId);
+    for (const imageId of affectedImageIds) state.drafts.delete(imageId);
+    state.applyTargetIds = affectedImageIds;
     state.candidates = []; state.candidateImages.clear();
     renderGallery();
-    if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) await selectImage(keepCurrent, true);
+    if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
+      await selectImage(keepCurrent, true, { saveCurrentDraft: !affectedImageIds.includes(keepCurrent) });
+    }
     else { state.currentId = null; state.currentImage = null; clearEditor(); }
     state.applyRunning = false;
     $("#applyPauseButton").hidden = true;
@@ -691,7 +697,11 @@ async function finishApplyJob(job) {
     if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
     else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
     else setApplyResult(t("apply.error", { error: job.error || t("error.background") }), true);
-  } finally { state.applyFinishing = false; }
+    reconciled = true;
+  } finally {
+    if (reconciled && job.startedAt != null) state.handledApplyStartedAt = job.startedAt;
+    state.applyFinishing = false;
+  }
 }
 
 async function pollJob() {

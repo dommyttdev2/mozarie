@@ -69,9 +69,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate } = context.__mosaicTest;
 
 (async () => {
   state.translations["status.progressCount"] = "{completed} / {total}";
@@ -201,14 +201,17 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
 
   // A stale mask is reconciled by exactly one fresh candidate-list request.
   state.imageGeneration = 30;
+  const staleCandidateRequestCount = requests.filter((request) => request.path === "/api/candidates/first").length;
   const staleMask = loadCandidateBundle("first", 30);
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "stale" }] }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "stale-one" }, { id: "stale-two" }] }) });
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: false, status: 404 });
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
   const reconciled = await staleMask;
   assert.equal(reconciled.candidates.length, 0);
+  const staleCandidateRequests = requests.filter((request) => request.path === "/api/candidates/first");
+  assert.equal(staleCandidateRequests.length - staleCandidateRequestCount, 2);
 
   // A failed selection leaves the previously coherent editor state untouched.
   state.images = [
@@ -241,6 +244,48 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   const updateRequests = requests.filter((request) => request.path.endsWith("/serialized"));
   assert.deepEqual(updateRequests.map((request) => JSON.parse(request.options.body).enabled), [true, false]);
 
+  // Same-tab completion reloads a target image without putting its old canvas
+  // back into drafts.
+  const target = { id: "target", relativePath: "target.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [target];
+  state.currentId = "target";
+  state.currentImage = { width: 100, height: 80 };
+  state.drafts = new Map([["target", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }]]);
+  state.applyTargetIds = ["target"];
+  state.applyRunning = true;
+  state.applyFinishing = false;
+  state.imageGeneration += 1;
+  const completion = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["target"], startedAt: 200 });
+  resolveFetch({ ok: true, json: async () => ({ images: [target] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
+  await completion;
+  assert.equal(state.drafts.has("target"), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.applyTargetIds)), ["target"]);
+
+  // A tab that did not start the job still uses the server's immutable target
+  // IDs when its first job poll sees the terminal state.
+  state.images = [target];
+  state.currentId = "target";
+  state.currentImage = { width: 100, height: 80 };
+  state.drafts = new Map([["target", { add: "data:image/png;base64,test", exclusion: "data:image/png;base64,test" }]]);
+  state.applyTargetIds = [];
+  state.applyRunning = false;
+  state.applyFinishing = false;
+  state.handledApplyStartedAt = null;
+  state.job = { kind: "idle", state: "idle" };
+  state.imageGeneration += 1;
+  const crossTabPoll = pollJob();
+  resolveFetch({ ok: true, json: async () => ({ kind: "apply", state: "complete", completed: 1, total: 1, imageIds: ["target"], startedAt: 201 }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: [target] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
+  await crossTabPoll;
+  assert.equal(state.drafts.has("target"), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.applyTargetIds)), ["target"]);
+  assert.equal(state.handledApplyStartedAt, 201);
+
   state.currentId = null;
   state.currentImage = null;
   state.job = { kind: "detect", state: "running", total: 3, completed: 0 };
@@ -258,9 +303,18 @@ const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandid
   assert.equal(isTerminalApply({ kind: "apply", state: "cancelled" }), true);
   assert.equal(isTerminalApply({ kind: "apply", state: "error" }), true);
   assert.equal(isTerminalApply({ kind: "apply", state: "running" }), false);
+  state.applyRunning = false;
+  state.handledApplyStartedAt = null;
+  assert.equal(isTerminalApply({ kind: "apply", state: "complete", startedAt: 123 }), true);
+  state.handledApplyStartedAt = 123;
+  assert.equal(isTerminalApply({ kind: "apply", state: "complete", startedAt: 123 }), false);
 
   assert.equal(calculatedBlockSize({ width: 832, height: 1216 }, 100), 13);
   assert.equal(calculatedBlockSize({ width: 832, height: 1216 }, 200), 7);
+  state.images = [
+    { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "second", relativePath: "second.png", width: 100, height: 80, candidateCount: 4, enabledCandidateCount: 2 },
+  ];
   state.maskStatus = new Map([["first", true], ["second", false]]);
   assert.equal(imageHasMask(state.images[0]), true);
   assert.deepEqual(JSON.parse(JSON.stringify(saveTargets())), ["first"]);

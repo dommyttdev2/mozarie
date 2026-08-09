@@ -241,6 +241,7 @@ class Job:
     error: str = ""
     started_at: float | None = None
     outputs: list[str] = field(default_factory=list)
+    image_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -252,6 +253,7 @@ class Job:
             "error": self.error,
             "startedAt": self.started_at,
             "outputs": self.outputs,
+            "imageIds": list(self.image_ids),
         }
 
 
@@ -500,6 +502,7 @@ class StudioState:
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         with self.lock:
             root = self.root
+            catalog_generation = self.catalog_generation
             if self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は画像を追加できません。")
         if root is None:
@@ -510,6 +513,7 @@ class StudioState:
         destination_dir = root / ".mosaicstudio_imports"
         destination_dir.mkdir(parents=True, exist_ok=True)
         added: list[ImageRecord] = []
+        created_files: list[tuple[Path, tuple[int, int, int, int]]] = []
         for file_data in files:
             if not isinstance(file_data, dict):
                 raise ClientError("画像データの形式が正しくありません。")
@@ -533,9 +537,23 @@ class StudioState:
             with Image.open(io.BytesIO(raw)) as image:
                 width, height = image.size
             stat = destination.stat()
+            created_files.append((destination, (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)))
             added.append(ImageRecord(uuid.uuid4().hex, destination, destination.relative_to(root).as_posix(), width, height, stat.st_mtime_ns))
 
         with self.lock:
+            if self.root != root or self.catalog_generation != catalog_generation:
+                for destination, identity in created_files:
+                    try:
+                        stat = destination.stat()
+                    except FileNotFoundError:
+                        continue
+                    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) == identity:
+                        destination.unlink()
+                try:
+                    destination_dir.rmdir()
+                except OSError:
+                    pass
+                raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
             for record in added:
                 self.images[record.image_id] = record
                 self.order.append(record.image_id)
@@ -611,7 +629,8 @@ class StudioState:
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
         self.image_for_id(image_id)
         with self.lock:
-            candidates = list(self.candidates.get(image_id, []))
+            candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.mask_path.is_file()]
+            self.candidates[image_id] = candidates
         return [
             {
                 "id": candidate.candidate_id,
@@ -667,8 +686,8 @@ class StudioState:
                 candidate.color = color
 
     def start_detection(self, image_ids: list[str], confidence: float = DEFAULT_DETECTION_CONFIDENCE) -> None:
-        records = self._records_for_ids(image_ids)
-        self._start_job("detect", records, self._detect_worker, confidence)
+        records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
+        self._start_job("detect", records, self._detect_worker, confidence, expected_catalog_generation=catalog_generation)
 
     def start_apply(
         self,
@@ -679,7 +698,7 @@ class StudioState:
         delete_original: bool,
         drafts: dict[str, dict[str, Any]],
     ) -> None:
-        records = self._records_for_ids(image_ids)
+        records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if mode not in {"copy", "overwrite"}:
             raise ClientError("保存方法が正しくありません。")
         if mode == "copy" and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
@@ -699,7 +718,7 @@ class StudioState:
             raise ClientError("保存するモザイク範囲がありません。")
         self._start_job(
             "apply", records, self._apply_worker, divisor, mode, suffix if mode == "copy" else "",
-            bool(delete_original and mode == "copy"), prepared_masks,
+            bool(delete_original and mode == "copy"), prepared_masks, expected_catalog_generation=catalog_generation,
         )
 
     def request_pause(self) -> Job:
@@ -740,15 +759,50 @@ class StudioState:
             raise ClientError("処理する画像がありません。")
         return records
 
-    def _start_job(self, kind: str, records: list[ImageRecord], worker: Any, *args: Any) -> None:
+    def _records_for_ids_with_catalog(self, image_ids: list[str]) -> tuple[list[ImageRecord], int]:
+        if not isinstance(image_ids, list):
+            raise ClientError("画像の選択が正しくありません。")
+        with self.lock:
+            source_ids = image_ids or list(self.order)
+            records = [self.images.get(str(image_id)) for image_id in source_ids]
+            root = self.root
+            catalog_generation = self.catalog_generation
+        if root is None or not records or any(record is None for record in records):
+            raise ClientError("処理する画像がありません。")
+        verified_records = [record for record in records if record is not None]
+        for record in verified_records:
+            try:
+                record.path.resolve().relative_to(root)
+            except ValueError as exc:
+                raise ClientError("許可されていない画像パスです。") from exc
+            if not record.path.is_file():
+                raise ClientError("画像ファイルが見つかりません。")
+        return verified_records, catalog_generation
+
+    def _start_job(
+        self,
+        kind: str,
+        records: list[ImageRecord],
+        worker: Any,
+        *args: Any,
+        expected_catalog_generation: int | None = None,
+    ) -> None:
         with self.lock:
             if self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("別の処理が進行中です。")
+            if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
+                raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
             self.job_generation += 1
             job_generation = self.job_generation
             catalog_generation = self.catalog_generation
             control = JobControl()
-            self.job = Job(kind=kind, state="running", total=len(records), started_at=time.time())
+            self.job = Job(
+                kind=kind,
+                state="running",
+                total=len(records),
+                started_at=time.time(),
+                image_ids=tuple(record.image_id for record in records),
+            )
             self.job_control = control
         LOGGER.info("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
         thread = threading.Thread(
