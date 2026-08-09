@@ -7,7 +7,7 @@ const state = {
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, translations: {},
-  applyTargetIds: [], applyRunning: false,
+  applyTargetIds: [], applyRunning: false, importing: false, mosaicPreviewEnabled: true,
 };
 
 const canvas = $("#editorCanvas");
@@ -73,7 +73,21 @@ function saveTargets() { return state.images.filter(imageHasMask).map((image) =>
 
 function updateActionButtons() {
   const running = isBusy();
+  const locked = running || state.importing;
   const hasImage = Boolean(state.currentId && state.currentImage);
+  const controls = [...document.querySelectorAll("button, input, select, textarea")];
+  if (!locked) {
+    for (const control of controls) {
+      if (control.dataset.disabledByLock === "true") {
+        control.disabled = false;
+        delete control.dataset.disabledByLock;
+      }
+    }
+  }
+  $("#pickFolder").disabled = running || state.importing;
+  $("#browseFolderOption").disabled = running || state.importing;
+  $("#browseImagesOption").disabled = running || state.importing;
+  $("#importFilesInput").disabled = running || state.importing;
   $("#detectAllButton").disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
@@ -83,20 +97,59 @@ function updateActionButtons() {
   $("#galleryMaskedTab").disabled = running;
   $("#saveAllButton").disabled = running || saveTargets().length === 0;
   $("#saveButton").disabled = running || !hasImage || !imageHasMask(currentRecord());
+  updateHistoryButtons();
+  if (locked) for (const control of controls) {
+    if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
+    if (!control.disabled) control.dataset.disabledByLock = "true";
+    control.disabled = true;
+  }
+  $("#gallery").classList.toggle("locked", locked);
+  canvas.style.pointerEvents = locked ? "none" : "";
+  canvas.setAttribute("aria-disabled", String(locked));
+}
+
+function clearBoundaryInteraction() {
+  state.boundaryRoi = null;
+  state.boundaryStart = null;
+  state.boundaryStartClient = null;
+  state.boundaryPoint = null;
+  state.boundaryDragging = false;
+}
+
+function setMosaicPreviewEnabled(enabled) {
+  if (isBusy() || state.importing) return;
+  state.mosaicPreviewEnabled = enabled;
+  const button = $("#mosaicPreviewButton");
+  button.classList.toggle("active", enabled);
+  button.setAttribute("aria-pressed", String(enabled));
+  render();
+}
+
+function openBrowseDialog() {
+  if (isBusy() || state.importing) return;
+  const dialog = $("#browseDialog");
+  dialog.showModal();
+  $("#browseFolderOption").focus();
 }
 
 function updateProgress(job) {
   const progress = $("#jobProgress");
+  const progressText = $("#jobProgressText");
   const running = ["running", "paused"].includes(job?.state);
-  progress.hidden = !running;
-  if (running) {
+  const completedDetection = job?.kind === "detect" && job?.state === "complete";
+  const visible = running || completedDetection;
+  progress.hidden = !visible;
+  progressText.hidden = !visible;
+  if (visible) {
     progress.max = Math.max(1, Number(job.total) || 1);
-    progress.value = Math.min(progress.max, Number(job.completed) || 0);
+    progress.value = completedDetection ? progress.max : Math.min(progress.max, Number(job.completed) || 0);
+    progressText.textContent = t("status.progressCount", { completed: progress.value, total: progress.max });
   }
   updateActionButtons();
 }
 
 async function loadFolder() {
+  if (isBusy() || state.importing) return;
   const path = $("#folderPath").value.trim();
   if (!path) return setStatus(t("status.enterFolder"), "error");
   setStatus(t("status.loadingImages"), "running");
@@ -112,6 +165,7 @@ async function loadFolder() {
 }
 
 async function pickFolder() {
+  if (isBusy() || state.importing) return;
   const button = $("#pickFolder");
   button.disabled = true;
   setStatus(t("status.openingFolder"), "running");
@@ -121,11 +175,12 @@ async function pickFolder() {
     $("#folderPath").value = data.path;
     await loadFolder();
   } catch (error) { setStatus(error.message, "error"); }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; updateActionButtons(); }
 }
 
 function renderGallery() {
   const gallery = $("#gallery");
+  const scrollTop = gallery.scrollTop;
   gallery.textContent = "";
   const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
   $("#imageCount").textContent = t("gallery.count", { count: visibleImages.length });
@@ -146,6 +201,7 @@ function renderGallery() {
     item.addEventListener("click", () => selectImage(image.id));
     gallery.append(item);
   }
+  gallery.scrollTop = scrollTop;
   updateActionButtons();
 }
 
@@ -156,7 +212,7 @@ function canvasSizeForImage(image) {
 }
 
 function clearEditor() {
-  state.history = []; state.historyIndex = -1; state.hover = null; state.boundaryRoi = null; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null;
+  state.history = []; state.historyIndex = -1; state.hover = null; clearBoundaryInteraction();
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -166,10 +222,11 @@ function clearEditor() {
 }
 
 async function selectImage(imageId, force = false) {
+  if ((isBusy() || state.importing) && !force) return;
   if (state.currentId === imageId && !force) return;
   saveDraft(); state.currentId = imageId;
   const generation = ++state.imageGeneration;
-  state.boundaryRoi = null; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null;
+  clearBoundaryInteraction();
   const record = currentRecord(); renderGallery();
   setStatus(t("status.loadingImages"), "running");
   try {
@@ -190,7 +247,7 @@ async function selectImage(imageId, force = false) {
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
-    renderCandidates(); updateActionButtons(); setStatus(t("status.editReady"));
+    renderCandidates(); updateActionButtons(); render(); setStatus(t("status.editReady"));
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === generation) setStatus(error.message, "error"); }
 }
 
@@ -316,7 +373,7 @@ function render() {
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) return;
   ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
-  paintMosaicPreview();
+  if (state.mosaicPreviewEnabled) paintMosaicPreview();
   drawBoundaryRoi();
   drawBrushCursor();
 }
@@ -331,6 +388,7 @@ function renderCandidates() {
     const row = document.createElement("label"); row.className = "candidate-row";
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled;
     enabled.addEventListener("change", async () => {
+      if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
       candidate.enabled = enabled.checked;
       refreshMaskStatus(true); render(); await updateCandidate(candidate);
     });
@@ -371,6 +429,7 @@ async function addBoundaryCandidate(point) {
     if (state.candidates.some((item) => item.id === candidate.id)) return;
     state.candidates.push(candidate);
     state.candidateImages.set(candidate.id, maskImage);
+    state.boundaryRoi = null;
     $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
     refreshMaskStatus(true); renderCandidates(); render(); setStatus(t("status.boundaryDone"));
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
@@ -402,6 +461,7 @@ function pushHistory() {
 }
 function updateHistoryButtons() { $("#undoButton").disabled = state.historyIndex <= 0; $("#redoButton").disabled = state.historyIndex >= state.history.length - 1; }
 async function restoreSnapshot(index) {
+  if (isBusy() || state.importing) return;
   const entry = state.history[index]; if (!entry) return;
   const [addImage, exclusionImage] = await Promise.all([loadImage(entry.add), loadImage(entry.exclusion)]);
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
@@ -421,7 +481,7 @@ function buildCombinedMask() {
 }
 
 async function runDetection(imageIds) {
-  if (!imageIds.length) return;
+  if (!imageIds.length || isBusy() || state.importing) return;
   try {
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence: detectionConfidence() }) });
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
@@ -430,10 +490,11 @@ async function runDetection(imageIds) {
 }
 
 function saveCurrent() {
-  if (state.currentId && imageHasMask(currentRecord())) openApplyDialog([state.currentId]);
+  if (!isBusy() && !state.importing && state.currentId && imageHasMask(currentRecord())) openApplyDialog([state.currentId]);
 }
 
 function saveAll() {
+  if (isBusy() || state.importing) return;
   saveDraft(); refreshMaskStatus();
   const imageIds = saveTargets();
   if (imageIds.length) openApplyDialog(imageIds);
@@ -557,12 +618,15 @@ async function pollJob() {
 }
 
 function setTool(tool) {
+  if (isBusy() || state.importing) return;
+  if (tool !== "boundary") clearBoundaryInteraction();
   state.tool = tool; $("#brushTool").classList.toggle("active", tool === "brush"); $("#eraserTool").classList.toggle("active", tool === "eraser"); $("#boundaryTool").classList.toggle("active", tool === "boundary");
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
   if (tool === "boundary" && state.boundaryRoi) setStatus(t("status.boundaryReady"));
   render();
 }
 function updateBrushSize(value) {
+  if (isBusy() || state.importing) return;
   const input = $("#brushSize"); input.value = Math.min(500, Math.max(2, Math.round(value)));
   $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render();
 }
@@ -592,7 +656,7 @@ function resetCurrentDraft() {
 }
 
 async function clearMasks(imageIds, titleKey, messageKey) {
-  if (!imageIds.length || isBusy()) return;
+  if (!imageIds.length || isBusy() || state.importing) return;
   if (!await confirmAction(t(titleKey), t(messageKey))) return;
   try {
     await api("/api/masks/clear", { method: "POST", body: JSON.stringify({ imageIds }) });
@@ -613,7 +677,7 @@ async function clearMasks(imageIds, titleKey, messageKey) {
 }
 
 async function clearCatalog() {
-  if (!state.images.length || isBusy()) return;
+  if (!state.images.length || isBusy() || state.importing) return;
   if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"))) return;
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
@@ -664,46 +728,69 @@ async function directFilesFromDrop(dataTransfer) {
   return [...dataTransfer.files];
 }
 
-async function importDroppedFiles(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  $("#gallery").classList.remove("drag-over");
-  if (isBusy()) return;
+function isSupportedImageFile(file) {
+  return /\.(png|jpe?g|webp)$/i.test(file.name);
+}
+
+async function importFiles(files) {
+  if (isBusy() || state.importing) return;
+  const supportedFiles = [...files].filter(isSupportedImageFile);
+  if (!supportedFiles.length) return;
+  state.importing = true;
+  updateActionButtons();
   try {
-    const files = (await directFilesFromDrop(event.dataTransfer)).filter((file) => /\.(png|jpe?g|webp)$/i.test(file.name));
-    if (!files.length) return;
     let data = null;
-    for (const [index, file] of files.entries()) {
-      setStatus(t("gallery.importProgress", { completed: index + 1, total: files.length }), "running");
+    for (const [index, file] of supportedFiles.entries()) {
+      setStatus(t("gallery.importProgress", { completed: index + 1, total: supportedFiles.length }), "running");
       data = await api("/api/import", {
         method: "POST",
         body: JSON.stringify({ files: [{ name: file.name, data: bytesToBase64(await file.arrayBuffer()) }] }),
       });
     }
-    state.images = data.images; renderGallery(); setStatus(t("gallery.imported", { count: files.length }));
+    state.images = data.images; renderGallery(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
+  } catch (error) { setStatus(error.message, "error"); }
+  finally { state.importing = false; updateActionButtons(); }
+}
+
+async function importDroppedFiles(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  $("#gallery").classList.remove("drag-over");
+  try {
+    await importFiles(await directFilesFromDrop(event.dataTransfer));
   } catch (error) { setStatus(error.message, "error"); }
 }
 
 function bindEvents() {
-  $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", pickFolder);
+  $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", openBrowseDialog);
+  $("#browseFolderOption").addEventListener("click", () => { $("#browseDialog").close(); void pickFolder(); });
+  $("#browseImagesOption").addEventListener("click", () => { $("#browseDialog").close(); $("#importFilesInput").click(); });
+  $("#browseCancelButton").addEventListener("click", () => $("#browseDialog").close());
+  $("#browseDialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); });
+  $("#importFilesInput").addEventListener("change", async (event) => {
+    try { await importFiles(event.target.files); }
+    finally { event.target.value = ""; }
+  });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
-  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", fitImage);
+  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"));
   $("#clearCatalogButton").addEventListener("click", clearCatalog);
-  $("#galleryAllTab").addEventListener("click", () => { state.galleryFilter = "all"; renderGallery(); });
-  $("#galleryMaskedTab").addEventListener("click", () => { state.galleryFilter = "masked"; renderGallery(); });
+  $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
+  $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
+  $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
   $("#divisor").addEventListener("input", () => {
+    if (isBusy() || state.importing) return;
     const divisor = normaliseDivisor($("#divisor").value);
     $("#divisor").value = divisor;
     rebuildMosaicPreview(); updateBlockSizeDisplay(); render();
   });
-  $("#applyDivisor").addEventListener("input", () => updateBlockSizeDisplay());
-  $("#confidence").addEventListener("input", () => { $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
+  $("#applyDivisor").addEventListener("input", () => { if (!isBusy() && !state.importing) updateBlockSizeDisplay(); });
+  $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
@@ -718,12 +805,11 @@ function bindEvents() {
 
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointerdown", (event) => {
-    if (!state.currentImage) return;
+    if (!state.currentImage || isBusy() || state.importing) return;
     if (event.button === 1 || (state.spacePressed && event.button === 0)) {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
-    if (isBusy()) return;
     canvas.setPointerCapture(event.pointerId);
     const point = clampPoint(pointFromEvent(event));
     state.drawing = true; state.pointer = point; state.hover = point;
@@ -731,6 +817,7 @@ function bindEvents() {
     drawStroke(point, point, state.tool === "eraser"); render();
   });
   canvas.addEventListener("pointermove", (event) => {
+    if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
     }
@@ -745,6 +832,7 @@ function bindEvents() {
     render();
   });
   canvas.addEventListener("pointerup", (event) => {
+    if (isBusy() || state.importing) return;
     if (state.drawing && event.button === 0 && state.tool === "boundary") {
       const point = clampPoint(pointFromEvent(event));
       const roi = roiFromPoints(state.boundaryStart, point);
@@ -757,7 +845,7 @@ function bindEvents() {
   canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
   canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
-    if (!state.currentImage) return;
+    if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
     if (event.shiftKey) return updateBrushSize(Number($("#brushSize").value) * (event.deltaY < 0 ? 1.1 : 1 / 1.1));
     const rect = canvas.getBoundingClientRect(); const mouseX = event.clientX - rect.left; const mouseY = event.clientY - rect.top;
@@ -766,6 +854,7 @@ function bindEvents() {
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
+    if (isBusy() || state.importing) return;
     if (event.code === "Space" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) { event.preventDefault(); state.spacePressed = true; canvas.style.cursor = "grab"; }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); restoreSnapshot(event.shiftKey ? state.historyIndex + 1 : state.historyIndex - 1); }
   });

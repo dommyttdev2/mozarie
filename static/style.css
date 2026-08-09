@@ -54,6 +54,10 @@ input[type="range"] { accent-color: #4bb99d; }
 .status.running { color: #f0cd73; }
 #jobProgress { width: 100%; height: 5px; accent-color: #51b99e; }
 #jobProgress[hidden] { display: none; }
+.job-progress-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+#jobProgressText { color: #b7c4cf; font-size: 12px; white-space: nowrap; }
+#jobProgressText[hidden] { display: none; }
+.gallery.locked, #editorCanvas[aria-disabled="true"] { pointer-events: none; }
 
 .studio-grid {
   height: calc(100vh - 58px);
@@ -158,6 +162,8 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .dialog-body h2 { font-size: 16px; }
 .dialog-body p { margin: 0; line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.browse-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.browse-actions button { min-width: 0; }
 .danger { color: #ffd8d4; border-color: #a15b55; background: #4a2d2b; }
 .danger:hover { background: #633632; }
 .apply-dialog fieldset { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 0; border: 0; }

@@ -15,10 +15,14 @@
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
       <button id="pickFolder" data-i18n="folder.browse">参照...</button>
       <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
+      <input id="importFilesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
     </div>
     <div class="job-status">
       <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
-      <progress id="jobProgress" value="0" max="1" hidden data-i18n-aria-label="status.progress" aria-label="処理状況"></progress>
+      <div class="job-progress-row">
+        <progress id="jobProgress" value="0" max="1" hidden data-i18n-aria-label="status.progress" aria-label="処理状況"></progress>
+        <output id="jobProgressText" hidden aria-live="polite"></output>
+      </div>
     </div>
   </header>
 
@@ -54,6 +58,7 @@
           <button id="fitButton" class="tool" data-i18n="editor.fit" data-i18n-title="editor.fit">全体表示</button>
           <button id="undoButton" class="tool" data-i18n="editor.undo" data-i18n-title="editor.undo">元に戻す</button>
           <button id="redoButton" class="tool" data-i18n="editor.redo" data-i18n-title="editor.redo">やり直す</button>
+          <button id="mosaicPreviewButton" class="tool active" type="button" aria-pressed="true" data-i18n="editor.mosaicPreview" data-i18n-title="editor.mosaicPreviewHelp">モザイク表示</button>
           <button id="detectCurrentButton" class="tool detect-current" disabled data-i18n="editor.detectCurrent">自動検出</button>
           <button id="clearCurrentMasksButton" class="tool" disabled data-i18n="editor.clearMasks">モザイククリア</button>
         </div>
@@ -109,6 +114,19 @@
       <div class="gallery-meta"></div>
     </article>
   </template>
+
+  <dialog id="browseDialog" class="modal-dialog browse-dialog" aria-labelledby="browseDialogTitle">
+    <div class="dialog-body">
+      <h2 id="browseDialogTitle" data-i18n="folder.chooseSource">参照</h2>
+      <div class="browse-actions">
+        <button id="browseFolderOption" type="button" data-i18n="folder.chooseFolder">フォルダを選択</button>
+        <button id="browseImagesOption" type="button" data-i18n="folder.chooseImages">画像を選択</button>
+      </div>
+      <div class="dialog-actions">
+        <button id="browseCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
+      </div>
+    </div>
+  </dialog>
 
   <dialog id="confirmDialog" class="modal-dialog confirm-dialog">
     <form method="dialog" class="dialog-body">
