@@ -77,7 +77,18 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .muted { color: #929ba6; font-size: 12px; }
 .text-button { min-height: 28px; padding-inline: 5px; border-color: transparent; background: transparent; color: #a8d6ca; }
 .text-button:hover { border-color: #4c535d; background: #2d333a; }
-.gallery-heading-actions { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.gallery-heading {
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  align-items: initial;
+  gap: 4px;
+}
+.gallery-heading > :first-child { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.gallery-heading h2 { margin: 0; }
+.gallery-heading-actions { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 3px; }
+.gallery-heading-actions .text-button { min-width: 0; overflow: hidden; padding-inline: 4px; text-overflow: ellipsis; }
 
 .gallery-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px; padding: 8px; border-bottom: 1px solid #3c424a; }
 .gallery-tabs { display: flex; align-items: center; gap: 4px; padding: 7px 8px; border-bottom: 1px solid #3c424a; }

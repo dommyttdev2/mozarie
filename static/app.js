@@ -1274,7 +1274,7 @@ function bindEvents() {
   $("#fileBrowserUpButton").addEventListener("click", () => { if (state.browser.parent) void loadBrowserPath(state.browser.parent); });
   $("#fileBrowserCancelButton").addEventListener("click", () => browserDialog().close());
   $("#fileBrowserLoadButton").addEventListener("click", () => void loadFromFileBrowser());
-  browserDialog().addEventListener("cancel", (event) => { if (state.browser.loading) event.preventDefault(); });
+  browserDialog().addEventListener("cancel", (event) => { if (state.browser.loading || state.importing) event.preventDefault(); });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));

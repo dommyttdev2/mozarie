@@ -11,7 +11,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -28,7 +27,6 @@ from server import (  # noqa: E402
     ClientError,
     DEFAULT_DETECTION_CONFIDENCE,
     DetectionModels,
-    FOLDER_PICKER_LOCK,
     ImageRecord,
     JOB_LABELS,
     LocalModelManifest,
@@ -49,7 +47,6 @@ from server import (  # noqa: E402
     jpeg_metadata_manifest,
     mask_iou,
     merge_segment,
-    pick_windows_folder,
     png_ancillary_manifest,
     restore_tile_mask,
     read_boundary_request,
@@ -1461,106 +1458,6 @@ class MosaicStudioTests(unittest.TestCase):
                 connection.close()
             httpd.shutdown()
             httpd.server_close()
-
-    def test_pick_folder_api_uses_sta_common_item_dialog_and_handles_cancel(self):
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as directory:
-            initial = Path(directory).resolve()
-            selected = initial / "日本語フォルダ"
-            selected.mkdir()
-            completed = [
-                CompletedProcess([], 0, str(selected).encode("utf-8"), b""),
-                CompletedProcess([], 0, b"", b""),
-            ]
-            httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
-            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            thread.start()
-            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-            try:
-                with patch("server.subprocess.run", side_effect=completed) as run:
-                    body = json.dumps({"path": str(initial)}).encode("utf-8")
-                    connection.request("POST", "/api/pick-folder", body, {"Content-Type": "application/json"})
-                    response = connection.getresponse()
-                    payload = json.loads(response.read().decode("utf-8"))
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(payload, {"cancelled": False, "path": str(selected.resolve())})
-                    command = run.call_args_list[0].args[0]
-                    self.assertIn("-NoProfile", command)
-                    self.assertIn("-STA", command)
-                    self.assertIn("-NonInteractive", command)
-                    self.assertEqual(
-                        run.call_args_list[0].kwargs["env"]["MOSAIC_STUDIO_INITIAL_FOLDER"],
-                        str(initial),
-                    )
-
-                    connection.request("POST", "/api/pick-folder", body, {"Content-Type": "application/json"})
-                    response = connection.getresponse()
-                    payload = json.loads(response.read().decode("utf-8"))
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(payload, {"cancelled": True})
-            finally:
-                connection.close()
-                httpd.shutdown()
-                httpd.server_close()
-
-    def test_pick_folder_rejects_parallel_dialog(self):
-        FOLDER_PICKER_LOCK.acquire()
-        try:
-            with self.assertRaisesRegex(ClientError, "既に開いています"):
-                pick_windows_folder("")
-        finally:
-            FOLDER_PICKER_LOCK.release()
-
-    def test_folder_picker_script_uses_common_item_dialog_contract(self):
-        from server import FOLDER_PICKER_SCRIPT
-
-        self.assertIn("IFileOpenDialog", FOLDER_PICKER_SCRIPT)
-        self.assertIn("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7", FOLDER_PICKER_SCRIPT)
-        self.assertIn("D57C7288-D4AD-4768-BE02-9D969532D960", FOLDER_PICKER_SCRIPT)
-        self.assertIn("FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM | FOS.FOS_PATHMUSTEXIST", FOLDER_PICKER_SCRIPT)
-        self.assertIn("SetDefaultFolder(defaultFolder)", FOLDER_PICKER_SCRIPT)
-        self.assertNotIn("dialog.SetFolder(", FOLDER_PICKER_SCRIPT)
-        self.assertIn("Marshal.FinalReleaseComObject", FOLDER_PICKER_SCRIPT)
-        self.assertIn("Marshal.FreeCoTaskMem(pathPointer)", FOLDER_PICKER_SCRIPT)
-        self.assertNotIn("FolderBrowserDialog", FOLDER_PICKER_SCRIPT)
-        self.assertNotIn("System.Windows.Forms", FOLDER_PICKER_SCRIPT)
-
-        interface_start = FOLDER_PICKER_SCRIPT.index("internal interface IFileOpenDialog {")
-        interface_end = FOLDER_PICKER_SCRIPT.index("    }", interface_start)
-        interface_block = FOLDER_PICKER_SCRIPT[interface_start:interface_end]
-        method_order = [
-            "Show(",
-            "SetFileTypes(",
-            "SetFileTypeIndex(",
-            "GetFileTypeIndex(",
-            "Advise(",
-            "Unadvise(",
-            "SetOptions(",
-            "GetOptions(",
-            "SetDefaultFolder(",
-            "SetFolder(",
-            "GetFolder(",
-            "GetCurrentSelection(",
-            "SetFileName(",
-            "GetFileName(",
-            "SetTitle(",
-            "SetOkButtonLabel(",
-            "SetFileNameLabel(",
-            "GetResult(",
-            "AddPlace(",
-            "SetDefaultExtension(",
-            "Close(",
-            "SetClientGuid(",
-            "ClearClientData(",
-            "SetFilter(",
-            "GetResults(",
-            "GetSelectedItems(",
-        ]
-        positions = [interface_block.index(method) for method in method_order]
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn("IFileOpenDialog :", FOLDER_PICKER_SCRIPT)
-
 
 if __name__ == "__main__":
     unittest.main()

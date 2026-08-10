@@ -17,7 +17,6 @@ import math
 import mimetypes
 import os
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -105,148 +104,10 @@ DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
-FOLDER_PICKER_LOCK = threading.Lock()
 LOGGER = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
-
-FOLDER_PICKER_SCRIPT = r"""
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$source = @'
-using System;
-using System.Runtime.InteropServices;
-
-namespace MosaicStudio {
-    [Flags]
-    internal enum FOS : uint {
-        FOS_PICKFOLDERS = 0x00000020,
-        FOS_FORCEFILESYSTEM = 0x00000040,
-        FOS_PATHMUSTEXIST = 0x00000800,
-    }
-
-    internal enum SigDn : uint {
-        FileSystemPath = 0x80058000,
-    }
-
-    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    internal interface IShellItem {
-        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
-        void GetParent(out IShellItem parent);
-        void GetDisplayName(SigDn sigdnName, out IntPtr name);
-        void GetAttributes(uint mask, out uint attributes);
-        void Compare(IShellItem other, uint hint, out int order);
-    }
-
-    [ComImport, Guid("B63EA76D-1F85-456F-A19C-48159EFA858B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    internal interface IShellItemArray { }
-
-    // This is deliberately flat: COM interface inheritance must retain the
-    // complete native IFileOpenDialog vtable order in its managed definition.
-    [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    internal interface IFileOpenDialog {
-        [PreserveSig] int Show(IntPtr parent);
-        void SetFileTypes(uint count, IntPtr filters);
-        void SetFileTypeIndex(uint index);
-        void GetFileTypeIndex(out uint index);
-        void Advise(IntPtr events, out uint cookie);
-        void Unadvise(uint cookie);
-        void SetOptions(FOS options);
-        void GetOptions(out FOS options);
-        void SetDefaultFolder(IShellItem folder);
-        void SetFolder(IShellItem folder);
-        void GetFolder(out IShellItem folder);
-        void GetCurrentSelection(out IShellItem item);
-        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
-        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
-        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
-        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
-        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
-        void GetResult(out IShellItem item);
-        void AddPlace(IShellItem item, int alignment);
-        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
-        void Close(int result);
-        void SetClientGuid(ref Guid guid);
-        void ClearClientData();
-        void SetFilter(IntPtr filter);
-        void GetResults(out IShellItemArray results);
-        void GetSelectedItems(out IShellItemArray items);
-    }
-
-    [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
-    internal class FileOpenDialogClass { }
-
-    internal static class Native {
-        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
-        internal static extern void SHCreateItemFromParsingName(
-            string path, IntPtr bindContext, ref Guid riid, out IShellItem shellItem);
-
-        [DllImport("user32.dll")]
-        internal static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool SetForegroundWindow(IntPtr window);
-    }
-
-    public static class FolderPicker {
-        private const int ErrorCancelled = unchecked((int)0x800704C7);
-        private static readonly Guid ShellItemIid = new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE");
-
-        public static string Pick(string initialPath) {
-            IFileOpenDialog dialog = null;
-            IShellItem defaultFolder = null;
-            IShellItem result = null;
-            try {
-                dialog = (IFileOpenDialog)new FileOpenDialogClass();
-                FOS options;
-                dialog.GetOptions(out options);
-                dialog.SetOptions(options | FOS.FOS_PICKFOLDERS | FOS.FOS_FORCEFILESYSTEM | FOS.FOS_PATHMUSTEXIST);
-                dialog.SetTitle("画像フォルダを選択してください");
-                dialog.SetOkButtonLabel("選択");
-
-                if (!String.IsNullOrWhiteSpace(initialPath)) {
-                    Guid shellItemIid = ShellItemIid;
-                    Native.SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref shellItemIid, out defaultFolder);
-                    dialog.SetDefaultFolder(defaultFolder);
-                }
-
-                IntPtr owner = Native.GetForegroundWindow();
-                if (owner != IntPtr.Zero) Native.SetForegroundWindow(owner);
-                int showResult = dialog.Show(owner);
-                if (showResult == ErrorCancelled) return null;
-                if (showResult < 0) Marshal.ThrowExceptionForHR(showResult);
-
-                dialog.GetResult(out result);
-                IntPtr pathPointer = IntPtr.Zero;
-                try {
-                    result.GetDisplayName(SigDn.FileSystemPath, out pathPointer);
-                    string path = Marshal.PtrToStringUni(pathPointer);
-                    if (String.IsNullOrWhiteSpace(path)) throw new COMException("Folder path was not returned.");
-                    return path;
-                }
-                finally {
-                    if (pathPointer != IntPtr.Zero) Marshal.FreeCoTaskMem(pathPointer);
-                }
-            }
-            finally {
-                if (result != null) Marshal.FinalReleaseComObject(result);
-                if (defaultFolder != null) Marshal.FinalReleaseComObject(defaultFolder);
-                if (dialog != null) Marshal.FinalReleaseComObject(dialog);
-            }
-        }
-    }
-}
-'@
-
-Add-Type -TypeDefinition $source -Language CSharp
-$initialPath = [Environment]::GetEnvironmentVariable('MOSAIC_STUDIO_INITIAL_FOLDER', 'Process')
-$selectedPath = [MosaicStudio.FolderPicker]::Pick($initialPath)
-if ($null -ne $selectedPath) {
-    [Console]::Out.Write($selectedPath)
-}
-"""
-
 
 class ClientError(ValueError):
     """An invalid request that can be shown directly in the UI."""
@@ -1592,52 +1453,6 @@ def inference_device_name() -> str | None:
     return torch.cuda.get_device_name(0)
 
 
-def pick_windows_folder(initial_path: str) -> dict[str, Any]:
-    if not FOLDER_PICKER_LOCK.acquire(blocking=False):
-        raise ClientError("フォルダ参照ダイアログは既に開いています。")
-    try:
-        initial = ""
-        if initial_path:
-            candidate = Path(initial_path).expanduser()
-            if candidate.is_dir():
-                initial = str(candidate.resolve())
-        environment = os.environ.copy()
-        environment["MOSAIC_STUDIO_INITIAL_FOLDER"] = initial
-        try:
-            completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-STA",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    FOLDER_PICKER_SCRIPT,
-                ],
-                capture_output=True,
-                check=False,
-                env=environment,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except OSError as exc:
-            raise ClientError("Windowsフォルダ参照ダイアログを開けませんでした。") from exc
-        if completed.returncode != 0:
-            raise ClientError("Windowsフォルダ参照ダイアログを開けませんでした。")
-        try:
-            selected_text = completed.stdout.decode("utf-8-sig").strip("\r\n")
-        except UnicodeDecodeError as exc:
-            raise ClientError("フォルダ参照結果をUTF-8で読み取れませんでした。") from exc
-        if not selected_text:
-            return {"cancelled": True}
-        selected = Path(selected_text).resolve()
-        if not selected.is_dir():
-            raise ClientError("選択されたフォルダが見つかりません。")
-        return {"cancelled": False, "path": str(selected)}
-    finally:
-        FOLDER_PICKER_LOCK.release()
-
-
 def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     if not raw.startswith(PNG_SIGNATURE):
         raise ClientError("PNGファイルではありません。")
@@ -1982,9 +1797,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             payload = self._read_json_body()
-            if path == "/api/pick-folder":
-                self._json(pick_windows_folder(str(payload.get("path", ""))))
-            elif path == "/api/browser/list":
+            if path == "/api/browser/list":
                 self._json(STATE.browse_folder(str(payload.get("path", ""))))
             elif path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
