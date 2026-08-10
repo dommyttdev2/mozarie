@@ -15,7 +15,6 @@
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
       <button id="pickFolder" data-i18n="folder.browse">参照...</button>
       <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
-      <input id="importFilesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
     </div>
     <div class="job-status">
       <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
@@ -34,6 +33,7 @@
           <span id="imageCount" class="muted">0件</span>
         </div>
         <div class="gallery-heading-actions">
+          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">画像一覧</button>
           <button id="clearAllMasksButton" class="text-button" data-i18n="gallery.clearAllMasks">全画像のモザイククリア</button>
         </div>
       </div>
@@ -83,8 +83,8 @@
       </div>
       <div class="editor-footer">
         <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
+        <output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
         <div class="navigation-controls" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
-          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧</button>
           <button id="previousImageButton" class="icon-button" type="button" title="前へ" aria-label="前へ" data-i18n-title="navigation.previous" data-i18n-aria-label="navigation.previous">‹</button>
           <output id="imagePosition" class="image-position">- / -</output>
           <button id="nextImageButton" class="icon-button" type="button" title="次へ" aria-label="次へ" data-i18n-title="navigation.next" data-i18n-aria-label="navigation.next">›</button>
@@ -139,6 +139,7 @@
   <template id="galleryItemTemplate">
     <article class="gallery-item">
       <img loading="lazy" alt="">
+      <span class="gallery-review-badge"></span>
       <div class="gallery-name"></div>
       <div class="gallery-meta"></div>
     </article>
@@ -153,15 +154,19 @@
     </button>
   </template>
 
-  <dialog id="browseDialog" class="modal-dialog browse-dialog" aria-labelledby="browseDialogTitle">
+  <dialog id="fileBrowserDialog" class="modal-dialog file-browser-dialog" aria-labelledby="fileBrowserDialogTitle">
     <div class="dialog-body">
-      <h2 id="browseDialogTitle" data-i18n="folder.chooseSource">参照</h2>
-      <div class="browse-actions">
-        <button id="browseFolderOption" type="button" data-i18n="folder.chooseFolder">フォルダを選択</button>
-        <button id="browseImagesOption" type="button" data-i18n="folder.chooseImages">画像を選択</button>
+      <div class="file-browser-heading">
+        <h2 id="fileBrowserDialogTitle" data-i18n="folder.chooseSource">画像を開く</h2>
+        <output id="fileBrowserPath" class="truncate"></output>
       </div>
+      <div class="file-browser-toolbar">
+        <button id="fileBrowserUpButton" type="button" data-i18n="folder.up">一つ上へ</button>
+      </div>
+      <div id="fileBrowserList" class="file-browser-list" role="listbox" aria-multiselectable="true"></div>
       <div class="dialog-actions">
-        <button id="browseCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
+        <button id="fileBrowserCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
+        <button id="fileBrowserLoadButton" type="button" class="primary" data-i18n="folder.loadCurrent">このフォルダを読み込む</button>
       </div>
     </div>
   </dialog>

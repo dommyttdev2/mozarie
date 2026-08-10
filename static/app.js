@@ -5,13 +5,14 @@ const state = {
   viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), reviewRoot: "",
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
-  tool: "brush", spacePressed: false, panning: false, drawing: false, boundaryPending: false,
+  tool: "brush", panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, catalogGeneration: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
+  browser: { path: "", parent: "", directories: [], images: [], selectedNames: new Set(), loading: false },
 };
 
 const canvas = $("#editorCanvas");
@@ -94,6 +95,7 @@ function loadReviewedPaths() {
   } catch { /* Keep the in-session review state when storage is unavailable. */ }
 }
 function refreshReviewViews() {
+  renderGallery(true);
   if (state.viewMode === "overview") renderOverview();
   updateNavigationControls();
   updateActionButtons();
@@ -194,9 +196,6 @@ function updateActionButtons() {
     }
   }
   $("#pickFolder").disabled = running || state.importing;
-  $("#browseFolderOption").disabled = running || state.importing;
-  $("#browseImagesOption").disabled = running || state.importing;
-  $("#importFilesInput").disabled = running || state.importing;
   $("#detectAllButton").disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
@@ -240,11 +239,93 @@ function setMosaicPreviewEnabled(enabled) {
   render();
 }
 
-function openBrowseDialog() {
+function browserDialog() { return $("#fileBrowserDialog"); }
+function updateFileBrowser() {
+  const browser = state.browser;
+  const dialog = browserDialog();
+  $("#fileBrowserPath").textContent = browser.path;
+  $("#fileBrowserUpButton").disabled = browser.loading || !browser.parent;
+  $("#fileBrowserCancelButton").disabled = browser.loading;
+  const selected = browser.selectedNames.size;
+  $("#fileBrowserLoadButton").disabled = browser.loading;
+  $("#fileBrowserLoadButton").textContent = selected
+    ? t("folder.loadSelected", { count: selected })
+    : t("folder.loadCurrent");
+  const list = $("#fileBrowserList");
+  list.textContent = "";
+  for (const directory of browser.directories) {
+    const item = document.createElement("button");
+    item.type = "button"; item.className = "file-browser-item directory";
+    item.textContent = directory.name;
+    item.addEventListener("click", () => { if (!browser.loading) void loadBrowserPath(directory.path); });
+    list.append(item);
+  }
+  for (const image of browser.images) {
+    const item = document.createElement("button");
+    const selectedImage = browser.selectedNames.has(image.name);
+    item.type = "button"; item.className = "file-browser-item image";
+    item.classList.toggle("selected", selectedImage);
+    item.setAttribute("aria-selected", String(selectedImage));
+    item.textContent = image.name;
+    item.addEventListener("click", () => {
+      if (browser.loading) return;
+      if (browser.selectedNames.has(image.name)) browser.selectedNames.delete(image.name);
+      else browser.selectedNames.add(image.name);
+      updateFileBrowser();
+    });
+    list.append(item);
+  }
+  dialog.classList.toggle("loading", browser.loading);
+}
+
+async function loadBrowserPath(path) {
+  if (state.browser.loading || isBusy() || state.importing) return;
+  state.browser.loading = true; updateFileBrowser();
+  try {
+    const data = await api("/api/browser/list", { method: "POST", body: JSON.stringify({ path }) });
+    state.browser.path = data.path;
+    state.browser.parent = data.parent;
+    state.browser.directories = data.directories;
+    state.browser.images = data.images;
+    state.browser.selectedNames = new Set();
+  } catch (error) { setStatus(error.message, "error"); }
+  finally { state.browser.loading = false; updateFileBrowser(); }
+}
+
+function resetCatalog(images, root) {
+  state.images = images;
+  state.reviewRoot = normaliseReviewRoot(root);
+  loadReviewedPaths();
+  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
+  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
+  renderCatalogViews(); clearEditor();
+}
+
+async function openFileBrowser() {
   if (isBusy() || state.importing) return;
-  const dialog = $("#browseDialog");
-  dialog.showModal();
-  $("#browseFolderOption").focus();
+  const dialog = browserDialog();
+  if (!dialog.open) dialog.showModal();
+  await loadBrowserPath($("#folderPath").value.trim() || state.reviewRoot);
+}
+
+async function loadFromFileBrowser() {
+  const browser = state.browser;
+  if (browser.loading || isBusy() || state.importing || !browser.path) return;
+  state.importing = true; updateActionButtons(); updateFileBrowser();
+  const catalogGeneration = ++state.catalogGeneration;
+  ++state.imageGeneration;
+  try {
+    const selectedNames = [...browser.selectedNames];
+    const endpoint = selectedNames.length ? "/api/catalog/select" : "/api/folder";
+    const payload = selectedNames.length ? { path: browser.path, names: selectedNames } : { path: browser.path };
+    const data = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
+    if (state.catalogGeneration !== catalogGeneration) return;
+    $("#folderPath").value = browser.path;
+    resetCatalog(data.images, browser.path);
+    browserDialog().close();
+    setStatus(t("status.imagesLoaded", { count: state.images.length }));
+  } catch (error) { setStatus(error.message, "error"); }
+  finally { state.importing = false; updateActionButtons(); updateFileBrowser(); }
 }
 
 function updateProgress(job) {
@@ -273,29 +354,11 @@ async function loadFolder() {
   try {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (state.catalogGeneration !== catalogGeneration) return;
-    state.images = data.images;
-    state.reviewRoot = normaliseReviewRoot(path);
-    loadReviewedPaths();
-    state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
-    renderCatalogViews(); clearEditor();
+    resetCatalog(data.images, path);
     setStatus(t("status.imagesLoaded", { count: state.images.length }));
   } catch (error) { setStatus(error.message, "error"); }
 }
 
-async function pickFolder() {
-  if (isBusy() || state.importing) return;
-  const button = $("#pickFolder");
-  button.disabled = true;
-  setStatus(t("status.openingFolder"), "running");
-  try {
-    const data = await api("/api/pick-folder", { method: "POST", body: JSON.stringify({ path: $("#folderPath").value.trim() }) });
-    if (data.cancelled) return setStatus(t("status.folderCancelled"));
-    $("#folderPath").value = data.path;
-    await loadFolder();
-  } catch (error) { setStatus(error.message, "error"); }
-  finally { button.disabled = false; updateActionButtons(); }
-}
 
 function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
@@ -319,6 +382,8 @@ function renderGallery(force = false) {
     preview.alt = image.relativePath;
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
     item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
+    const reviewBadge = item.querySelector(".gallery-review-badge");
+    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.addEventListener("click", () => selectImage(image.id));
     gallery.append(item);
   }
@@ -435,6 +500,10 @@ function updateNavigationControls() {
   const index = imageIndex();
   $("#imagePosition").textContent = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
   $("#navigationShortcutsEnabled").checked = state.navigationShortcutsEnabled;
+  const status = $("#reviewStatus");
+  const reviewed = isReviewed(currentRecord());
+  status.textContent = currentRecord() ? t(reviewed ? "review.reviewed" : "review.unreviewed") : t("review.unreviewed");
+  status.classList.toggle("reviewed", Boolean(currentRecord()) && reviewed);
 }
 
 function canvasSizeForImage(image) {
@@ -1159,12 +1228,6 @@ async function importDroppedFiles(event) {
 function handleEditorKeydown(event) {
   if (isBusy() || state.importing || isEditableTarget(document.activeElement) || hasOpenDialog()) return false;
   if (state.viewMode !== "edit") return false;
-  if (event.code === "Space") {
-    event.preventDefault();
-    state.spacePressed = true;
-    canvas.style.cursor = "grab";
-    return true;
-  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     event.preventDefault();
     void restoreSnapshot(event.shiftKey ? state.historyIndex + 1 : state.historyIndex - 1);
@@ -1207,15 +1270,11 @@ function handleWindowKeydown(event) {
 }
 
 function bindEvents() {
-  $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", openBrowseDialog);
-  $("#browseFolderOption").addEventListener("click", () => { $("#browseDialog").close(); void pickFolder(); });
-  $("#browseImagesOption").addEventListener("click", () => { $("#browseDialog").close(); $("#importFilesInput").click(); });
-  $("#browseCancelButton").addEventListener("click", () => $("#browseDialog").close());
-  $("#browseDialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); });
-  $("#importFilesInput").addEventListener("change", async (event) => {
-    try { await importFiles(event.target.files); }
-    finally { event.target.value = ""; }
-  });
+  $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", () => void openFileBrowser());
+  $("#fileBrowserUpButton").addEventListener("click", () => { if (state.browser.parent) void loadBrowserPath(state.browser.parent); });
+  $("#fileBrowserCancelButton").addEventListener("click", () => browserDialog().close());
+  $("#fileBrowserLoadButton").addEventListener("click", () => void loadFromFileBrowser());
+  browserDialog().addEventListener("cancel", (event) => { if (state.browser.loading) event.preventDefault(); });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
@@ -1271,7 +1330,7 @@ function bindEvents() {
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointerdown", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
-    if (event.button === 1 || (state.spacePressed && event.button === 0)) {
+    if (event.button === 1) {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
@@ -1305,7 +1364,7 @@ function bindEvents() {
       else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
       state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
     } else if (state.drawing && event.button === 0) { pushHistory(); refreshCurrentReviewAndMask(); }
-    state.drawing = false; state.panning = false; if (!state.spacePressed) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
+    state.drawing = false; state.panning = false; canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
   canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
   canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
@@ -1320,7 +1379,6 @@ function bindEvents() {
   }, { passive: false });
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("storage", handleReviewStorageEvent);
-  window.addEventListener("keyup", (event) => { if (event.code === "Space") { state.spacePressed = false; if (!state.panning) canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; } });
 }
 
 async function initialise() {

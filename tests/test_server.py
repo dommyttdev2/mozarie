@@ -298,6 +298,71 @@ class MosaicStudioTests(unittest.TestCase):
             with self.assertRaises(ClientError):
                 state.image_for_id("..%2foutside")
 
+    def test_file_browser_lists_direct_children_and_selected_images_stay_in_one_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "child").mkdir()
+            Image.new("RGB", (8, 8), "white").save(root / "one.png")
+            Image.new("RGB", (8, 8), "white").save(root / "two.webp")
+            (root / "ignored.txt").write_text("not an image", encoding="utf-8")
+            outside = root.parent / "outside.png"
+            Image.new("RGB", (8, 8), "white").save(outside)
+            state = self.new_state()
+
+            listing = state.browse_folder(str(root))
+
+            self.assertEqual(listing["path"], str(root.resolve()))
+            self.assertEqual([entry["name"] for entry in listing["directories"]], ["child"])
+            self.assertEqual([entry["name"] for entry in listing["images"]], ["one.png", "two.webp"])
+            images = state.set_selected_images(str(root), ["two.webp", "one.png"])
+            self.assertEqual([image["relativePath"] for image in images], ["one.png", "two.webp"])
+            self.assertEqual(state.root, root.resolve())
+            with self.assertRaisesRegex(ClientError, "選択できない画像"):
+                state.set_selected_images(str(root), ["../outside.png"])
+            outside.unlink(missing_ok=True)
+
+    def test_file_browser_rejects_missing_folder_and_non_image_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "note.txt").write_text("note", encoding="utf-8")
+            state = self.new_state()
+            with self.assertRaisesRegex(ClientError, "指定フォルダが見つかりません"):
+                state.browse_folder(str(root / "missing"))
+            with self.assertRaisesRegex(ClientError, "選択できない画像"):
+                state.set_selected_images(str(root), ["note.txt"])
+
+    def test_file_browser_api_lists_and_catalogues_selected_direct_images(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(root / "one.png")
+            Image.new("RGB", (8, 8), "white").save(root / "two.jpg")
+            state = self.new_state()
+            with patch("server.STATE", state):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                try:
+                    body = json.dumps({"path": str(root)}).encode("utf-8")
+                    connection.request("POST", "/api/browser/list", body, {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    listing = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual([entry["name"] for entry in listing["images"]], ["one.png", "two.jpg"])
+
+                    body = json.dumps({"path": str(root), "names": ["two.jpg"]}).encode("utf-8")
+                    connection.request("POST", "/api/catalog/select", body, {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    selected = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual([image["relativePath"] for image in selected["images"]], ["two.jpg"])
+                finally:
+                    connection.close()
+                    httpd.shutdown()
+                    httpd.server_close()
+
     def test_import_keeps_original_bytes_under_the_hidden_import_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1294,14 +1359,14 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="clearCurrentMasksButton"', page)
         self.assertIn('id="mosaicPreviewButton"', page)
         self.assertIn('aria-pressed="true"', page)
-        self.assertIn('id="browseDialog"', page)
+        self.assertIn('id="fileBrowserDialog"', page)
         self.assertEqual(page.count('id="pickFolder"'), 1)
-        self.assertIn('id="browseFolderOption"', page)
-        self.assertIn('id="browseImagesOption"', page)
+        self.assertIn('id="fileBrowserList"', page)
+        self.assertIn('id="fileBrowserLoadButton"', page)
         self.assertNotIn('id="addImagesButton"', page)
         self.assertNotIn('画像を追加', page)
-        self.assertIn('id="importFilesInput" type="file" multiple', page)
-        self.assertIn('accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"', page)
+        self.assertNotIn('id="browseDialog"', page)
+        self.assertNotIn('id="importFilesInput"', page)
         self.assertIn('id="jobProgressText"', page)
         self.assertIn('id="clearAllMasksButton"', page)
         self.assertIn('id="clearCatalogButton"', page)
@@ -1314,6 +1379,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="overviewGrid"', page)
         self.assertIn('id="navigationShortcutsEnabled" type="checkbox"', page)
         self.assertIn('id="reviewAndNextButton"', page)
+        self.assertIn('id="reviewStatus"', page)
+        self.assertIn('gallery-review-badge', page)
         self.assertIn('id="previousImageButton"', page)
         self.assertIn('id="nextImageButton"', page)
         self.assertIn('id="divisor"', page)
@@ -1324,16 +1391,20 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('drawBoundaryRoi()', app)
         self.assertIn('pointInBoundaryRoi(point)', app)
         self.assertIn('if (state.mosaicPreviewEnabled) paintMosaicPreview();', app)
-        self.assertIn('function openBrowseDialog()', app)
+        self.assertIn('async function openFileBrowser()', app)
+        self.assertIn('async function loadFromFileBrowser()', app)
+        self.assertIn('/api/browser/list', app)
+        self.assertIn('/api/catalog/select', app)
         self.assertIn('async function importFiles(files)', app)
-        self.assertIn('event.target.value = ""', app)
+        self.assertNotIn('spacePressed', app)
         self.assertIn('const scrollTop = gallery.scrollTop;', app)
         self.assertIn('gallery.scrollTop = scrollTop;', app)
         self.assertIn('document.querySelectorAll("button, input, select, textarea")', app)
         self.assertIn('status.progressCount', app)
         self.assertIn("status.boundaryReady", dictionary)
         self.assertIn("editor.mosaicPreview", dictionary)
-        self.assertIn("folder.chooseImages", dictionary)
+        self.assertIn("folder.loadSelected", dictionary)
+        self.assertIn("review.reviewedBadge", dictionary)
         self.assertIn("status.progressCount", dictionary)
         self.assertIn('grid-auto-rows: max-content', styles)
         self.assertIn('object-fit: contain', styles)
@@ -1358,6 +1429,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertNotIn('Math.sin(Date.now()', app)
         backend = (root / "server.py").read_text(encoding="utf-8")
         self.assertIn('path == "/api/import"', backend)
+        self.assertIn('path == "/api/browser/list"', backend)
+        self.assertIn('path == "/api/catalog/select"', backend)
         self.assertIn('payload.get("divisor")', backend)
         self.assertNotIn('payload.get("blockSize")', backend)
         self.assertIn('iou=0.85', backend)

@@ -13,13 +13,14 @@ function element() {
 
 function galleryItem() {
   const preview = element();
+  const badge = element();
   const name = element();
   const meta = element();
   return {
     ...element(),
     meta,
     querySelector(selector) {
-      return { img: preview, ".gallery-name": name, ".gallery-meta": meta }[selector];
+      return { img: preview, ".gallery-review-badge": badge, ".gallery-name": name, ".gallery-meta": meta }[selector];
     },
   };
 }
@@ -39,8 +40,8 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "browseFolderOption", "browseImagesOption", "importFilesInput", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
-  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "browseDialog", "confirmDialog",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "fileBrowserUpButton", "fileBrowserCancelButton", "fileBrowserLoadButton", "fileBrowserList", "fileBrowserPath", "fileBrowserDialog", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
+  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
   "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
 ]) {
@@ -76,7 +77,7 @@ const document = {
   querySelector: (selector) => selector === 'input[name="saveMode"]:checked' ? { value: "copy" } : (elements.get(selector) || element()),
   querySelectorAll: (selector) => {
     if (selector === "button, input, select, textarea") return [...elements.values()].filter((item) => item.id);
-    if (selector === "dialog") return [elements.get("#browseDialog"), elements.get("#confirmDialog")];
+    if (selector === "dialog") return [elements.get("#fileBrowserDialog"), elements.get("#confirmDialog")];
     return [];
   },
   createElement: (tag) => tag === "canvas" ? {
@@ -108,9 +109,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, bindEvents };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, bindEvents };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, bindEvents } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, bindEvents } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -120,6 +121,22 @@ function keyEvent(key, options = {}) {
 (async () => {
   state.translations["status.progressCount"] = "{completed} / {total}";
   state.translations["gallery.candidates"] = "{count} candidates";
+  state.translations["folder.loadCurrent"] = "Load this folder";
+  state.translations["folder.loadSelected"] = "Load {count} selected";
+  state.translations["review.reviewed"] = "Reviewed";
+  state.translations["review.unreviewed"] = "Unreviewed";
+  state.translations["review.reviewedBadge"] = "Reviewed badge";
+  state.translations["review.unreviewedBadge"] = "Unreviewed badge";
+  state.browser = {
+    path: "G:\\images", parent: "G:\\", loading: false,
+    directories: [{ name: "child", path: "G:\\images\\child" }],
+    images: [{ name: "one.png", path: "G:\\images\\one.png" }], selectedNames: new Set(),
+  };
+  updateFileBrowser();
+  assert.equal(elements.get("#fileBrowserLoadButton").textContent, "Load this folder");
+  state.browser.selectedNames.add("one.png");
+  updateFileBrowser();
+  assert.equal(elements.get("#fileBrowserLoadButton").textContent, "Load 1 selected");
   state.currentImage = { width: 100, height: 80 };
   const clampedLow = clampPoint({ x: -0.5, y: 80.5 });
   assert.equal(clampedLow.x, 0);
@@ -700,9 +717,9 @@ function keyEvent(key, options = {}) {
   document.activeElement = { tagName: "INPUT" };
   assert.equal(navigationShortcutAction(keyEvent("g")), null);
   document.activeElement = null;
-  elements.get("#browseDialog").open = true;
+  elements.get("#fileBrowserDialog").open = true;
   assert.equal(navigationShortcutAction(keyEvent("g")), null);
-  elements.get("#browseDialog").open = false;
+  elements.get("#fileBrowserDialog").open = false;
   const toggleOverview = keyEvent("g");
   assert.equal(handleNavigationKeydown(toggleOverview), true);
   assert.equal(toggleOverview.prevented, true);
@@ -719,9 +736,8 @@ function keyEvent(key, options = {}) {
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   const space = keyEvent(" ", { code: "Space" });
   state.navigationShortcutsEnabled = false;
-  assert.equal(handleEditorKeydown(space), true);
-  assert.equal(space.prevented, true);
-  assert.equal(state.spacePressed, true);
+  assert.equal(handleEditorKeydown(space), false);
+  assert.equal(space.prevented, false);
   const undo = keyEvent("z", { ctrlKey: true });
   assert.equal(handleEditorKeydown(undo), true);
   assert.equal(undo.prevented, true);
@@ -733,7 +749,6 @@ function keyEvent(key, options = {}) {
   assert.equal(handleEditorKeydown(overviewUndo), false);
   assert.equal(overviewUndo.prevented, false);
   state.viewMode = "edit";
-  state.spacePressed = false;
   state.navigationShortcutsEnabled = true;
   const shiftRight = keyEvent("ArrowRight", { shiftKey: true });
   assert.equal(handleNavigationKeydown(shiftRight), true);

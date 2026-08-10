@@ -621,6 +621,87 @@ class StudioState:
         with self.import_lock:
             return self._set_root(raw_path)
 
+    def browse_folder(self, raw_path: str) -> dict[str, Any]:
+        """Return only direct children for the in-app file browser."""
+        if raw_path and not isinstance(raw_path, str):
+            raise ClientError("フォルダの指定が正しくありません。")
+        with self.lock:
+            current_root = self.root
+        initial = Path(raw_path).expanduser() if raw_path else (current_root or Path.cwd().anchor)
+        folder = Path(initial).resolve()
+        if not folder.is_dir():
+            raise ClientError("指定フォルダが見つかりません。")
+
+        directories: list[dict[str, str]] = []
+        images: list[dict[str, str]] = []
+        try:
+            children = list(folder.iterdir())
+        except OSError as exc:
+            raise ClientError("フォルダを読み込めません。") from exc
+        for child in children:
+            try:
+                resolved = child.resolve()
+                if child.is_dir():
+                    directories.append({"name": child.name, "path": str(resolved)})
+                elif child.is_file() and child.suffix.lower() in IMAGE_SUFFIXES:
+                    with Image.open(resolved) as image:
+                        image.verify()
+                    images.append({"name": child.name, "path": str(resolved)})
+            except (OSError, UnidentifiedImageError, ValueError):
+                continue
+        directories.sort(key=lambda item: item["name"].lower())
+        images.sort(key=lambda item: item["name"].lower())
+        parent = folder.parent if folder.parent != folder else None
+        return {"path": str(folder), "parent": str(parent) if parent else "", "directories": directories, "images": images}
+
+    def set_selected_images(self, raw_path: str, names: list[str]) -> list[dict[str, Any]]:
+        """Replace the catalogue with selected direct children of one folder."""
+        if not raw_path or not isinstance(raw_path, str):
+            raise ClientError("フォルダを入力してください。")
+        if not isinstance(names, list) or not names:
+            raise ClientError("画像を選択してください。")
+        root = Path(raw_path).expanduser().resolve()
+        if not root.is_dir():
+            raise ClientError("指定フォルダが見つかりません。")
+        selected_names: list[str] = []
+        for value in names:
+            name = str(value)
+            if not name or Path(name).name != name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
+                raise ClientError("選択できない画像が含まれています。")
+            if name not in selected_names:
+                selected_names.append(name)
+
+        with self.import_lock:
+            with self.lock:
+                self._assert_catalog_mutable()
+            records: list[ImageRecord] = []
+            for name in selected_names:
+                candidate = (root / name).resolve()
+                try:
+                    candidate.relative_to(root)
+                    if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_SUFFIXES:
+                        raise ClientError("選択できない画像が含まれています。")
+                    with Image.open(candidate) as image:
+                        width, height = image.size
+                    stat = candidate.stat()
+                except (OSError, UnidentifiedImageError, ValueError) as exc:
+                    if isinstance(exc, ClientError):
+                        raise
+                    raise ClientError("選択した画像を読み込めません。") from exc
+                records.append(ImageRecord(uuid.uuid4().hex, candidate, candidate.name, width, height, stat.st_mtime_ns))
+            records.sort(key=lambda record: record.relative_path.lower())
+            with self.lock:
+                self._assert_catalog_mutable()
+                self.root = root
+                self.images = {record.image_id: record for record in records}
+                self.order = [record.image_id for record in records]
+                self.candidates = {}
+                self._clear_cache()
+                self._invalidate_sam_cache()
+                self.job = Job()
+                self.catalog_generation += 1
+            return self.list_images()
+
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
             raise ClientError("Windowsフォルダを入力してください。")
@@ -1903,8 +1984,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if path == "/api/pick-folder":
                 self._json(pick_windows_folder(str(payload.get("path", ""))))
+            elif path == "/api/browser/list":
+                self._json(STATE.browse_folder(str(payload.get("path", ""))))
             elif path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
+                self._json({"images": images})
+            elif path == "/api/catalog/select":
+                images = STATE.set_selected_images(str(payload.get("path", "")), payload.get("names", []))
                 self._json({"images": images})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()

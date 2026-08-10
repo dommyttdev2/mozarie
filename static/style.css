@@ -114,6 +114,8 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .gallery-item:hover { border-color: #6d7783; }
 .gallery-item.selected { border-color: #42a98f; box-shadow: inset 0 0 0 1px #42a98f; }
 .gallery-item img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #151719; }
+.gallery-review-badge { position: absolute; top: 5px; right: 5px; max-width: calc(100% - 10px); padding: 2px 5px; border: 1px solid #5c6671; border-radius: 3px; background: #1d2024e8; color: #d6dbe0; font-size: 10px; line-height: 1.25; white-space: nowrap; }
+.gallery-item.reviewed .gallery-review-badge { border-color: #3a9780; background: #173e35e8; color: #d8fff3; }
 .gallery-name { min-width: 0; padding: 5px 6px 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .gallery-meta { min-width: 0; padding: 0 6px 5px; overflow: hidden; color: #9ca5ae; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -136,6 +138,8 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .empty-state[hidden] { display: none; }
 .editor-footer { min-height: 30px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 8px; padding: 5px 10px; border-top: 1px solid #3c424a; color: #929ba6; font-size: 12px; }
 #imageInfo { flex: 1 1 180px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-status { flex: 0 0 auto; min-width: 52px; color: #c6ccd3; white-space: nowrap; }
+.review-status.reviewed { color: #72cdb3; }
 .navigation-controls { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-width: 0; align-items: center; justify-content: flex-end; gap: 4px; }
 .icon-button { min-width: 30px; min-height: 28px; padding: 1px 7px; font-size: 20px; line-height: 1; }
 .image-position { min-width: 54px; color: #bdc4cd; text-align: center; }
@@ -195,8 +199,17 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .dialog-body h2 { font-size: 16px; }
 .dialog-body p { margin: 0; line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
-.browse-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.browse-actions button { min-width: 0; }
+.file-browser-dialog { width: min(920px, calc(100vw - 32px)); max-height: min(780px, calc(100vh - 32px)); }
+.file-browser-dialog .dialog-body { grid-template-rows: auto auto minmax(280px, 1fr) auto; min-height: min(680px, calc(100vh - 80px)); }
+.file-browser-heading { min-width: 0; display: grid; gap: 4px; }
+.file-browser-heading output { color: #aeb7c1; font-size: 12px; }
+.file-browser-toolbar { display: flex; gap: 7px; }
+.file-browser-list { min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); align-content: start; gap: 6px; padding: 8px; border: 1px solid #424953; border-radius: 4px; background: #17191c; }
+.file-browser-item { min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.file-browser-item.directory::before { content: "[フォルダ] "; color: #9ec8ef; }
+.file-browser-item.image::before { content: "[画像] "; color: #bfc7d0; }
+.file-browser-item.selected { border-color: #42a98f; background: #26473f; color: #e8fff8; }
+.file-browser-dialog.loading .file-browser-list { opacity: .55; pointer-events: none; }
 .danger { color: #ffd8d4; border-color: #a15b55; background: #4a2d2b; }
 .danger:hover { background: #633632; }
 .apply-dialog fieldset { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 0; border: 0; }
