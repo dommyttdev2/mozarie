@@ -43,7 +43,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "fileBrowserUpButton", "fileBrowserCancelButton", "fileBrowserLoadButton", "fileBrowserList", "fileBrowserPath", "fileBrowserDialog", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
   "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote",
 ]) {
   const value = element();
   value.id = id;
@@ -74,7 +74,9 @@ elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode
 elements.set("#overviewItemTemplate", { content: { firstElementChild: { cloneNode: overviewItem } } });
 
 const document = {
-  querySelector: (selector) => selector === 'input[name="saveMode"]:checked' ? { value: "copy" } : (elements.get(selector) || element()),
+  querySelector: (selector) => selector === 'input[name="saveMode"]:checked'
+    ? { value: elements.get("#applyOverwriteMode").checked ? "overwrite" : "copy" }
+    : (elements.get(selector) || element()),
   querySelectorAll: (selector) => {
     if (selector === "button, input, select, textarea") return [...elements.values()].filter((item) => item.id);
     if (selector === "dialog") return [elements.get("#fileBrowserDialog"), elements.get("#confirmDialog")];
@@ -109,9 +111,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, bindEvents };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, bindEvents } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, updateFileBrowser, loadBrowserPath, loadFromFileBrowser, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -264,6 +266,25 @@ function keyEvent(key, options = {}) {
   assert.equal("blockSize" in applyPayload, false);
   assert.equal("prefix" in applyPayload, false);
   assert.equal(state.currentId, "second");
+
+  // Session imports are never offered an overwrite path and are sent as copies.
+  state.images = [{ id: "session", sourceKind: "session", relativePath: "dropped.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 }];
+  state.currentId = "session";
+  state.applyTargetIds = ["session"];
+  state.applyRunning = false;
+  elements.get("#applyOverwriteMode").checked = true;
+  syncApplyMode();
+  assert.equal(applyTargetsContainSessionImage(), true);
+  assert.equal(elements.get("#applyCopyMode").checked, true);
+  assert.equal(elements.get("#applyOverwriteMode").disabled, true);
+  assert.equal(elements.get("#applyTemporarySourceNote").hidden, false);
+  const sessionApply = startApplyFromDialog({ preventDefault() {} });
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await sessionApply;
+  const sessionApplyPayload = JSON.parse(requests.at(-1).options.body);
+  assert.equal(sessionApplyPayload.mode, "copy");
+  assert.equal(sessionApplyPayload.suffix, "_censored");
+  assert.match(source, /async function initialise\(\)[\s\S]*?await api\("\/api\/images"\)/);
 
   state.job = { state: "paused" };
   assert.equal(isBusy(), true);

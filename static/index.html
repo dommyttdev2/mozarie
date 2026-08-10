@@ -187,10 +187,11 @@
       <h2 data-i18n="apply.title">ファイルを保存</h2>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
-        <label class="choice-row"><input type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
-        <label class="choice-row"><input type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
+        <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
+        <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
         <label class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
+        <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.tempSource">ドラッグ追加画像は作業用の一時コピーです。読み込みフォルダへコピー保存します。</p>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize">-</output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>

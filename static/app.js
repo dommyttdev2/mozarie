@@ -896,12 +896,20 @@ function isTerminalApply(job) {
 }
 
 function selectedSaveMode() { return document.querySelector('input[name="saveMode"]:checked').value; }
+function applyTargetsContainSessionImage() {
+  return state.applyTargetIds.some((imageId) => state.images.find((image) => image.id === imageId)?.sourceKind === "session");
+}
 
 function syncApplyMode() {
+  const containsSessionImage = applyTargetsContainSessionImage();
+  if (containsSessionImage) $("#applyCopyMode").checked = true;
   const copying = selectedSaveMode() === "copy";
   $("#applySuffix").disabled = !copying || state.applyRunning;
   $("#deleteOriginalRow").hidden = !copying;
   $("#deleteOriginal").disabled = !copying || state.applyRunning;
+  $("#applyOverwriteMode").disabled = containsSessionImage || state.applyRunning;
+  $("#applyOverwriteRow").classList.toggle("muted", containsSessionImage);
+  $("#applyTemporarySourceNote").hidden = !containsSessionImage;
 }
 
 function openApplyDialog(imageIds) {
@@ -935,7 +943,7 @@ async function startApplyFromDialog(event) {
   event.preventDefault();
   const imageIds = state.applyTargetIds;
   if (!imageIds.length) return;
-  const copy = selectedSaveMode() === "copy";
+  const copy = selectedSaveMode() === "copy" || applyTargetsContainSessionImage();
   const suffix = $("#applySuffix").value.trim();
   if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
   try {
@@ -1386,6 +1394,14 @@ async function initialise() {
   try { state.navigationShortcutsEnabled = localStorage.getItem("lets-censoring.navigation-shortcuts.v1") !== "false"; } catch { state.navigationShortcutsEnabled = true; }
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
+  try {
+    const data = await api("/api/images");
+    if (data.images.length) {
+      $("#folderPath").value = data.root || "";
+      resetCatalog(data.images, data.root);
+      setStatus(t("status.imagesLoaded", { count: state.images.length }));
+    }
+  } catch (error) { setStatus(error.message, "error"); }
 }
 
 initialise();

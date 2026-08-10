@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import mimetypes
+import msvcrt
 import os
 import shutil
 import tempfile
@@ -39,6 +40,7 @@ from ultralytics import YOLO
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 CACHE_DIR = APP_DIR / ".mosaicstudio-cache"
+SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "LetsCensoring"
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,7 @@ class ImageRecord:
     width: int
     height: int
     mtime_ns: int
+    source_kind: str = "filesystem"
 
 
 @dataclass
@@ -446,10 +449,14 @@ class DetectionModels:
 
 
 class StudioState:
-    def __init__(self, cache_dir: Path | None = None) -> None:
+    def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
         self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
+        self.session_base_dir = Path(session_base_dir) if session_base_dir is not None else SESSION_BASE_DIR
+        self.session_dir: Path | None = None
+        self.session_imports_dir: Path | None = None
+        self._session_lock_handle: Any | None = None
         self.root: Path | None = None
         self.images: dict[str, ImageRecord] = {}
         self.order: list[str] = []
@@ -464,6 +471,83 @@ class StudioState:
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
         self.inference_lock = threading.Lock()
+        self._cleanup_stale_sessions()
+
+    def _cleanup_stale_sessions(self) -> None:
+        """Remove abandoned import sessions without touching a live instance."""
+        if not self.session_base_dir.is_dir():
+            return
+        cutoff = time.time() - 60
+        for session_dir in self.session_base_dir.glob("session-*"):
+            try:
+                if not session_dir.is_dir() or session_dir.stat().st_mtime > cutoff:
+                    continue
+                lock_path = session_dir / ".active.lock"
+                with lock_path.open("a+b") as handle:
+                    handle.seek(0)
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    except OSError:
+                        continue
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                shutil.rmtree(session_dir, ignore_errors=True)
+            except OSError:
+                continue
+
+    def _ensure_session(self) -> Path:
+        if self.session_imports_dir is not None:
+            return self.session_imports_dir
+        self.session_base_dir.mkdir(parents=True, exist_ok=True)
+        session_dir = self.session_base_dir / f"session-{uuid.uuid4().hex}"
+        imports_dir = session_dir / "imports"
+        imports_dir.mkdir(parents=True)
+        lock_handle = (session_dir / ".active.lock").open("w+b")
+        try:
+            lock_handle.write(b"1")
+            lock_handle.flush()
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except Exception:
+            lock_handle.close()
+            shutil.rmtree(session_dir, ignore_errors=True)
+            raise
+        self.session_dir = session_dir
+        self.session_imports_dir = imports_dir
+        self._session_lock_handle = lock_handle
+        return imports_dir
+
+    def _clear_session_unchecked(self) -> None:
+        session_dir = self.session_dir
+        lock_handle = self._session_lock_handle
+        self.session_dir = None
+        self.session_imports_dir = None
+        self._session_lock_handle = None
+        if lock_handle is not None:
+            try:
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            lock_handle.close()
+        if session_dir is not None:
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
+        with self.lock:
+            self._assert_catalog_mutable()
+            self.images = {record.image_id: record for record in records}
+            self.order = [record.image_id for record in records]
+            self.candidates = {}
+            self.root = root
+            self._clear_cache()
+            self._invalidate_sam_cache()
+            self.job = Job()
+            self.catalog_generation += 1
+            self._clear_session_unchecked()
+        return self.list_images()
 
     def _has_active_worker(self) -> bool:
         return self.worker_thread is not None and self.worker_thread.is_alive()
@@ -551,17 +635,7 @@ class StudioState:
                     raise ClientError("選択した画像を読み込めません。") from exc
                 records.append(ImageRecord(uuid.uuid4().hex, candidate, candidate.name, width, height, stat.st_mtime_ns))
             records.sort(key=lambda record: record.relative_path.lower())
-            with self.lock:
-                self._assert_catalog_mutable()
-                self.root = root
-                self.images = {record.image_id: record for record in records}
-                self.order = [record.image_id for record in records]
-                self.candidates = {}
-                self._clear_cache()
-                self._invalidate_sam_cache()
-                self.job = Job()
-                self.catalog_generation += 1
-            return self.list_images()
+            return self._replace_catalog(root, records)
 
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -596,17 +670,7 @@ class StudioState:
             )
 
         records.sort(key=lambda record: record.relative_path.lower())
-        with self.lock:
-            self._assert_catalog_mutable()
-            self.root = root
-            self.images = {record.image_id: record for record in records}
-            self.order = [record.image_id for record in records]
-            self.candidates = {}
-            self._clear_cache()
-            self._invalidate_sam_cache()
-            self.job = Job()
-            self.catalog_generation += 1
-        return self.list_images()
+        return self._replace_catalog(root, records)
 
     def clear_catalog(self) -> None:
         with self.import_lock:
@@ -618,6 +682,21 @@ class StudioState:
                 self._clear_cache()
                 self._invalidate_sam_cache()
                 self.catalog_generation += 1
+                self._clear_session_unchecked()
+
+    def shutdown(self) -> None:
+        """Stop background work before releasing the session import directory."""
+        with self.lock:
+            worker = self.worker_thread
+            control = self.job_control
+            if control is not None:
+                control.cancel_requested.set()
+                control.pause_requested.clear()
+        if worker is not None and worker.is_alive():
+            worker.join()
+        with self.import_lock:
+            with self.lock:
+                self._clear_session_unchecked()
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
@@ -645,8 +724,7 @@ class StudioState:
             if root is None:
                 raise ClientError("画像を追加する前に画像フォルダを読み込んでください。")
 
-            destination_dir = root / ".mosaicstudio_imports"
-            destination_dir.mkdir(parents=True, exist_ok=True)
+            destination_dir = self._ensure_session()
             pending: list[tuple[Path, str, int, int]] = []
             try:
                 for file_data in files:
@@ -688,12 +766,13 @@ class StudioState:
                                 ImageRecord(
                                     uuid.uuid4().hex,
                                     destination,
-                                    destination.relative_to(root).as_posix(),
-                                    width,
-                                    height,
-                                    stat.st_mtime_ns,
-                                )
-                            )
+                            destination.name,
+                            width,
+                            height,
+                            stat.st_mtime_ns,
+                            "session",
+                        )
+                    )
                     except Exception:
                         for destination in final_paths:
                             destination.unlink(missing_ok=True)
@@ -746,10 +825,16 @@ class StudioState:
         with self.lock:
             record = self.images.get(image_id)
             root = self.root
+            session_imports_dir = self.session_imports_dir
         if record is None or root is None:
             raise ClientError("画像が見つかりません。フォルダを再読込してください。")
         try:
-            record.path.resolve().relative_to(root)
+            if record.source_kind not in {"filesystem", "session"}:
+                raise ValueError
+            allowed_root = root if record.source_kind == "filesystem" else session_imports_dir
+            if allowed_root is None:
+                raise ValueError
+            record.path.resolve().relative_to(allowed_root.resolve())
         except ValueError as exc:
             raise ClientError("許可されていない画像パスです。") from exc
         if not record.path.is_file():
@@ -765,6 +850,7 @@ class StudioState:
                     {
                         "id": record.image_id,
                         "relativePath": record.relative_path,
+                        "sourceKind": record.source_kind,
                         "width": record.width,
                         "height": record.height,
                         "candidateCount": len(self.candidates.get(image_id, [])),
@@ -851,7 +937,8 @@ class StudioState:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if mode not in {"copy", "overwrite"}:
             raise ClientError("保存方法が正しくありません。")
-        if mode == "copy" and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
+        requires_copy = any(record.source_kind == "session" for record in records)
+        if (mode == "copy" or requires_copy) and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
             raise ClientError("ファイル名の末尾が正しくありません。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
@@ -867,9 +954,34 @@ class StudioState:
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
         self._start_job(
-            "apply", records, self._apply_worker, divisor, mode, suffix if mode == "copy" else "",
-            bool(delete_original and mode == "copy"), prepared_masks, expected_catalog_generation=catalog_generation,
+            "apply", records, self._apply_worker, divisor, mode, suffix if (mode == "copy" or requires_copy) else "",
+            bool(delete_original and (mode == "copy" or requires_copy)), prepared_masks, expected_catalog_generation=catalog_generation,
         )
+
+    def save_image(self, image_id: str, mask: np.ndarray, divisor: int) -> Path:
+        record = self.image_for_id(image_id)
+        with self.lock:
+            self._assert_catalog_mutable()
+            root = self.root
+        if record.source_kind == "session":
+            if root is None:
+                raise ClientError("保存先フォルダが見つかりません。")
+            destination = unique_destination(root / f"{record.path.stem}_censored{record.path.suffix}")
+            save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
+            stat = destination.stat()
+            copied = ImageRecord(
+                uuid.uuid4().hex, destination, destination.relative_to(root).as_posix(),
+                record.width, record.height, stat.st_mtime_ns, "filesystem",
+            )
+            with self.lock:
+                self.images[copied.image_id] = copied
+                self.order.append(copied.image_id)
+                self.order.sort(key=lambda current_id: self.images[current_id].relative_path.lower())
+        else:
+            destination = record.path
+            save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
+        self.invalidate_sam_image(image_id)
+        return destination
 
     def request_pause(self) -> Job:
         with self.lock:
@@ -916,13 +1028,19 @@ class StudioState:
             source_ids = image_ids or list(self.order)
             records = [self.images.get(str(image_id)) for image_id in source_ids]
             root = self.root
+            session_imports_dir = self.session_imports_dir
             catalog_generation = self.catalog_generation
         if root is None or not records or any(record is None for record in records):
             raise ClientError("処理する画像がありません。")
         verified_records = [record for record in records if record is not None]
         for record in verified_records:
             try:
-                record.path.resolve().relative_to(root)
+                if record.source_kind not in {"filesystem", "session"}:
+                    raise ValueError
+                allowed_root = root if record.source_kind == "filesystem" else session_imports_dir
+                if allowed_root is None:
+                    raise ValueError
+                record.path.resolve().relative_to(allowed_root.resolve())
             except ValueError as exc:
                 raise ClientError("許可されていない画像パスです。") from exc
             if not record.path.is_file():
@@ -1024,6 +1142,9 @@ class StudioState:
             models = self._ensure_models()
             for index, record in enumerate(records, start=1):
                 if not self._job_is_current(job_generation, catalog_generation):
+                    return
+                if control is not None and control.cancel_requested.is_set():
+                    self._cancel_job(job_generation, catalog_generation)
                     return
                 self._set_job_current(record.relative_path, index - 1, job_generation, catalog_generation)
                 with self.inference_lock:
@@ -1319,21 +1440,27 @@ class StudioState:
                 mask = prepared_masks.get(record.image_id)
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                output = record.path if mode == "overwrite" else unique_destination(
-                    record.path.with_name(f"{record.path.stem}{suffix}{record.path.suffix}")
-                )
+                effective_mode = "copy" if record.source_kind == "session" else mode
+                if effective_mode == "overwrite":
+                    output = record.path
+                else:
+                    destination_dir = self.root if record.source_kind == "session" else record.path.parent
+                    if destination_dir is None:
+                        raise ClientError("保存先フォルダが見つかりません。")
+                    output = unique_destination(destination_dir / f"{record.path.stem}{suffix}{record.path.suffix}")
                 save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), output)
-                if mode == "copy" and delete_original:
+                if effective_mode == "copy" and delete_original:
                     record.path.unlink()
                     record.path = output
                     record.relative_path = output.relative_to(self.root).as_posix() if self.root else output.name
                     record.mtime_ns = output.stat().st_mtime_ns
-                elif mode == "copy":
+                    record.source_kind = "filesystem"
+                elif effective_mode == "copy":
                     copied_stat = output.stat()
                     copied = ImageRecord(
                         uuid.uuid4().hex, output,
                         output.relative_to(self.root).as_posix() if self.root else output.name,
-                        record.width, record.height, copied_stat.st_mtime_ns,
+                        record.width, record.height, copied_stat.st_mtime_ns, "filesystem",
                     )
                     with self.lock:
                         self.images[copied.image_id] = copied
@@ -1839,9 +1966,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 image_id = path.split("/")[3]
                 record = STATE.image_for_id(image_id)
                 mask = _decode_mask(str(payload.get("mask", "")), record.width, record.height)
-                save_with_mask(record, mask, calculate_block_size(record.width, record.height, _read_mosaic_divisor(payload.get("divisor"))))
-                STATE.invalidate_sam_image(image_id)
-                self._json({"ok": True})
+                output = STATE.save_image(image_id, mask, _read_mosaic_divisor(payload.get("divisor")))
+                self._json({"ok": True, "output": str(output)})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 STATE.set_candidate_state(image_id, candidate_id, payload)
@@ -1963,6 +2089,7 @@ def main() -> None:
         LOGGER.info("Lets Censoring を停止します")
     finally:
         server.server_close()
+        STATE.shutdown()
         LOGGER.info("Lets Censoring を停止しました")
 
 

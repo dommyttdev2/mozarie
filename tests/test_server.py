@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import tempfile
 import threading
@@ -69,12 +70,17 @@ class MosaicStudioTests(unittest.TestCase):
     def setUp(self) -> None:
         self._cache_directory = tempfile.TemporaryDirectory()
         self.cache_dir = Path(self._cache_directory.name) / "cache"
+        self._states: list[StudioState] = []
 
     def tearDown(self) -> None:
+        for state in self._states:
+            state.shutdown()
         self._cache_directory.cleanup()
 
     def new_state(self) -> StudioState:
-        return StudioState(self.cache_dir)
+        state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
+        self._states.append(state)
+        return state
 
     @staticmethod
     def _record(path: Path, width: int, height: int) -> ImageRecord:
@@ -131,9 +137,10 @@ class MosaicStudioTests(unittest.TestCase):
         fake_server = Mock()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
         with patch("server.logging.basicConfig") as basic_config, \
-              patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
-              patch("server._schedule_browser_open") as schedule_browser, \
-              patch.object(server_module.STATE, "cache_dir", self.cache_dir), \
+               patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
+               patch("server._schedule_browser_open") as schedule_browser, \
+               patch.object(server_module.STATE, "shutdown") as shutdown, \
+               patch.object(server_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
             server_module.main()
 
@@ -141,6 +148,7 @@ class MosaicStudioTests(unittest.TestCase):
         server_class.assert_called_once_with(("127.0.0.1", 9876), MosaicHandler)
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
+        shutdown.assert_called_once_with()
 
     def test_http_log_message_logs_successful_api_posts_and_errors_only(self):
         handler = object.__new__(MosaicHandler)
@@ -360,7 +368,7 @@ class MosaicStudioTests(unittest.TestCase):
                     httpd.shutdown()
                     httpd.server_close()
 
-    def test_import_keeps_original_bytes_under_the_hidden_import_folder(self):
+    def test_import_keeps_original_bytes_under_the_session_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = io.BytesIO()
@@ -370,10 +378,11 @@ class MosaicStudioTests(unittest.TestCase):
             state.set_root(str(root))
             images = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
             self.assertEqual(len(images), 1)
-            imported = root / ".mosaicstudio_imports" / "dropped.png"
+            imported = state.session_imports_dir / "dropped.png"
             self.assertEqual(imported.read_bytes(), raw)
             state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
-            self.assertTrue((root / ".mosaicstudio_imports" / "dropped_2.png").is_file())
+            self.assertTrue((state.session_imports_dir / "dropped_2.png").is_file())
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
 
     def test_clear_masks_removes_candidates_without_touching_image(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -980,7 +989,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertFalse((first_root / "first_censored.png").exists())
             self.assertEqual(state.root, second_root.resolve())
 
-    def test_same_root_reload_waits_for_import_commit_without_losing_the_image(self):
+    def test_same_root_reload_waits_for_import_commit_and_replaces_the_session_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             Image.new("RGB", (16, 16), "white").save(root / "source.png")
@@ -1030,12 +1039,9 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertTrue(imported.is_set())
             self.assertTrue(reloaded.is_set())
-            self.assertTrue((root / ".mosaicstudio_imports" / "imported.png").is_file())
-            self.assertEqual(
-                [image["relativePath"] for image in state.list_images()],
-                [".mosaicstudio_imports/imported.png", "source.png"],
-            )
-            self.assertEqual(list((root / ".mosaicstudio_imports").glob("*.tmp")), [])
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertEqual([image["relativePath"] for image in state.list_images()], ["source.png"])
+            self.assertIsNone(state.session_dir)
 
     def test_concurrent_same_name_imports_commit_to_two_unique_intact_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1064,10 +1070,155 @@ class MosaicStudioTests(unittest.TestCase):
             second.join(2)
 
             self.assertEqual(errors, [])
-            destination_dir = root / ".mosaicstudio_imports"
+            destination_dir = state.session_imports_dir
+            self.assertIsNotNone(destination_dir)
+            assert destination_dir is not None
             self.assertEqual((destination_dir / "same.png").read_bytes(), raw)
             self.assertEqual((destination_dir / "same_2.png").read_bytes(), raw)
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
             self.assertEqual(len(state.list_images()), 2)
+
+    def test_drag_import_uses_a_session_without_writing_to_the_source_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            raw_buffer = io.BytesIO()
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("workflow", "kept exactly")
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG", pnginfo=metadata)
+            raw = raw_buffer.getvalue()
+            state = self.new_state()
+            state.set_root(str(root))
+
+            images = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+
+            imported = next(image for image in images if image["relativePath"] == "dropped.png")
+            record = state.image_for_id(imported["id"])
+            self.assertEqual(imported["sourceKind"], "session")
+            self.assertEqual(record.path.read_bytes(), raw)
+            self.assertEqual(Image.open(record.path).text["workflow"], "kept exactly")
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertTrue(record.path.is_relative_to(state.session_imports_dir))
+
+    def test_clear_catalog_removes_only_session_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            state.set_root(str(root))
+            state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+            session_dir = state.session_dir
+
+            state.clear_catalog()
+
+            self.assertTrue(source.is_file())
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse(session_dir.exists())
+            self.assertEqual(state.list_images(), [])
+
+    def test_session_apply_keeps_output_when_the_session_is_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            raw_buffer = io.BytesIO()
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("workflow", "preserved")
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG", pnginfo=metadata)
+            state = self.new_state()
+            state.set_root(str(root))
+            imported = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]
+            record = state.image_for_id(imported["id"])
+            session_path = record.path
+
+            state._apply_worker([record], 100, "overwrite", "_censored", False, {record.image_id: self._mask(16, 16)})
+
+            output = root / "dropped_censored.png"
+            self.assertTrue(output.is_file())
+            self.assertTrue(session_path.is_file())
+            self.assertEqual(Image.open(output).text["workflow"], "preserved")
+            state.set_root(str(root))
+            self.assertTrue(output.is_file())
+            self.assertFalse(session_path.exists())
+
+    def test_direct_session_save_creates_a_root_copy_without_replacing_the_temp_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            state.set_root(str(root))
+            session_id = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]["id"]
+            source = state.image_for_id(session_id)
+
+            output = state.save_image(session_id, self._mask(16, 16), 100)
+
+            self.assertEqual(output, root / "dropped_censored.png")
+            self.assertTrue(output.is_file())
+            self.assertTrue(source.path.is_file())
+            self.assertEqual(source.source_kind, "session")
+            self.assertTrue(any(image["relativePath"] == "dropped_censored.png" for image in state.list_images()))
+
+    def test_mixed_apply_overwrites_only_filesystem_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            filesystem_path = root / "normal.png"
+            filesystem_image = Image.new("RGB", (16, 16), "#ffffff")
+            filesystem_image.putpixel((5, 5), (0, 0, 0))
+            filesystem_image.save(filesystem_path)
+            original_filesystem_bytes = filesystem_path.read_bytes()
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            filesystem_id = state.set_root(str(root))[0]["id"]
+            session_id = next(
+                image["id"] for image in state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                if image["sourceKind"] == "session"
+            )
+            filesystem_record = state.image_for_id(filesystem_id)
+            session_record = state.image_for_id(session_id)
+
+            state._apply_worker(
+                [filesystem_record, session_record], 100, "overwrite", "_censored", False,
+                {filesystem_id: self._mask(16, 16), session_id: self._mask(16, 16)},
+            )
+
+            self.assertNotEqual(filesystem_path.read_bytes(), original_filesystem_bytes)
+            self.assertTrue((root / "dropped_censored.png").is_file())
+            self.assertTrue(session_record.path.is_file())
+            self.assertEqual(session_record.source_kind, "session")
+
+    def test_stale_session_is_cleaned_but_an_active_session_is_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session_base = Path(directory) / "sessions"
+            stale = session_base / "session-stale"
+            stale.mkdir(parents=True)
+            (stale / ".active.lock").write_bytes(b"1")
+            old = time.time() - 120
+            os.utime(stale, (old, old))
+
+            first = StudioState(Path(directory) / "cache-first", session_base)
+            self.assertFalse(stale.exists())
+            root = Path(directory) / "images"
+            root.mkdir()
+            first.set_root(str(root))
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            first.import_images([{"name": "active.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+            active = first.session_dir
+            os.utime(active, (old, old))
+
+            second = StudioState(Path(directory) / "cache-second", session_base)
+
+            self.assertTrue(active.exists())
+            first.shutdown()
+            second._cleanup_stale_sessions()
+            self.assertFalse(active.exists())
 
     def test_import_rejects_when_a_job_has_already_started(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1131,7 +1282,8 @@ class MosaicStudioTests(unittest.TestCase):
                 importer.join(2)
 
             self.assertEqual(errors, [])
-            self.assertTrue((root / ".mosaicstudio_imports" / "imported.png").is_file())
+            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertIsNotNone(state.session_imports_dir)
 
     def test_job_api_exposes_immutable_target_image_ids(self):
         state = self.new_state()
@@ -1368,6 +1520,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="clearAllMasksButton"', page)
         self.assertIn('id="clearCatalogButton"', page)
         self.assertIn('id="applyDialog"', page)
+        self.assertIn('id="applyOverwriteMode"', page)
+        self.assertIn('id="applyTemporarySourceNote"', page)
         self.assertIn('id="detectAllButton"', page)
         self.assertIn('id="saveButton"', page)
         self.assertIn('id="galleryMaskedTab"', page)
@@ -1417,6 +1571,9 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('paintMosaicPreview()', app)
         self.assertIn('saveTargets()', app)
         self.assertIn('lets-censoring.reviewed.v1:', app)
+        self.assertIn('applyTargetsContainSessionImage()', app)
+        self.assertIn('await api("/api/images")', app)
+        self.assertIn("apply.tempSource", dictionary)
         self.assertIn('lets-censoring.navigation-shortcuts.v1', app)
         self.assertIn('function renderOverview(', app)
         self.assertIn('function markImagesUnreviewed(', app)

@@ -1,6 +1,5 @@
-# アプリ実行時の一時データと取り込み画像
+# アプリ実行時の一時データ
 .mosaicstudio-cache/
-.mosaicstudio_imports/
 .ui-fixture/
 
 # 大容量のローカルモデル
