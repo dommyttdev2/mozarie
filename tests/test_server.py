@@ -1163,7 +1163,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(source.source_kind, "session")
             self.assertTrue(any(image["relativePath"] == "dropped_censored.png" for image in state.list_images()))
 
-    def test_mixed_apply_overwrites_only_filesystem_sources(self):
+    def test_mixed_apply_copies_every_source_when_a_session_image_is_present(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "images"
             root.mkdir()
@@ -1188,19 +1188,39 @@ class MosaicStudioTests(unittest.TestCase):
                 {filesystem_id: self._mask(16, 16), session_id: self._mask(16, 16)},
             )
 
-            self.assertNotEqual(filesystem_path.read_bytes(), original_filesystem_bytes)
+            self.assertEqual(filesystem_path.read_bytes(), original_filesystem_bytes)
+            self.assertTrue((root / "normal_censored.png").is_file())
             self.assertTrue((root / "dropped_censored.png").is_file())
             self.assertTrue(session_record.path.is_file())
             self.assertEqual(session_record.source_kind, "session")
 
-    def test_stale_session_is_cleaned_but_an_active_session_is_not(self):
+    def test_start_apply_forces_copy_and_disables_delete_for_a_mixed_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            Image.new("RGB", (16, 16), "#ffffff").save(root / "normal.png")
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            state = self.new_state()
+            filesystem_id = state.set_root(str(root))[0]["id"]
+            session_id = next(
+                image["id"] for image in state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                if image["sourceKind"] == "session"
+            )
+            with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), \
+                 patch.object(state, "_start_job") as start_job:
+                state.start_apply([filesystem_id, session_id], 100, "overwrite", "_censored", True, {})
+
+            self.assertEqual(start_job.call_args.args[4], "copy")
+            self.assertEqual(start_job.call_args.args[5], "_censored")
+            self.assertFalse(start_job.call_args.args[6])
+
+    def test_stale_session_is_cleaned_immediately_but_an_active_session_is_not(self):
         with tempfile.TemporaryDirectory() as directory:
             session_base = Path(directory) / "sessions"
             stale = session_base / "session-stale"
             stale.mkdir(parents=True)
             (stale / ".active.lock").write_bytes(b"1")
-            old = time.time() - 120
-            os.utime(stale, (old, old))
 
             first = StudioState(Path(directory) / "cache-first", session_base)
             self.assertFalse(stale.exists())
@@ -1211,7 +1231,6 @@ class MosaicStudioTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
             first.import_images([{"name": "active.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
             active = first.session_dir
-            os.utime(active, (old, old))
 
             second = StudioState(Path(directory) / "cache-second", session_base)
 
@@ -1219,6 +1238,20 @@ class MosaicStudioTests(unittest.TestCase):
             first.shutdown()
             second._cleanup_stale_sessions()
             self.assertFalse(active.exists())
+
+    def test_fresh_session_without_a_lock_uses_a_short_grace_period(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session_base = Path(directory) / "sessions"
+            pending = session_base / "session-pending"
+            pending.mkdir(parents=True)
+
+            StudioState(Path(directory) / "cache-fresh", session_base)
+            self.assertTrue(pending.exists())
+
+            old = time.time() - 120
+            os.utime(pending, (old, old))
+            StudioState(Path(directory) / "cache-expired", session_base)
+            self.assertFalse(pending.exists())
 
     def test_import_rejects_when_a_job_has_already_started(self):
         with tempfile.TemporaryDirectory() as directory:

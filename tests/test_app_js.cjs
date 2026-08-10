@@ -273,17 +273,22 @@ function keyEvent(key, options = {}) {
   state.applyTargetIds = ["session"];
   state.applyRunning = false;
   elements.get("#applyOverwriteMode").checked = true;
+  elements.get("#deleteOriginal").checked = true;
   syncApplyMode();
   assert.equal(applyTargetsContainSessionImage(), true);
   assert.equal(elements.get("#applyCopyMode").checked, true);
   assert.equal(elements.get("#applyOverwriteMode").disabled, true);
   assert.equal(elements.get("#applyTemporarySourceNote").hidden, false);
+  assert.equal(elements.get("#deleteOriginal").checked, false);
+  assert.equal(elements.get("#deleteOriginal").disabled, true);
+  assert.equal(elements.get("#deleteOriginalRow").hidden, true);
   const sessionApply = startApplyFromDialog({ preventDefault() {} });
   resolveFetch({ ok: true, json: async () => ({ ok: true }) });
   await sessionApply;
   const sessionApplyPayload = JSON.parse(requests.at(-1).options.body);
   assert.equal(sessionApplyPayload.mode, "copy");
   assert.equal(sessionApplyPayload.suffix, "_censored");
+  assert.equal(sessionApplyPayload.deleteOriginal, false);
   assert.match(source, /async function initialise\(\)[\s\S]*?await api\("\/api\/images"\)/);
 
   state.job = { state: "paused" };

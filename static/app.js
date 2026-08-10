@@ -902,11 +902,14 @@ function applyTargetsContainSessionImage() {
 
 function syncApplyMode() {
   const containsSessionImage = applyTargetsContainSessionImage();
-  if (containsSessionImage) $("#applyCopyMode").checked = true;
+  if (containsSessionImage) {
+    $("#applyCopyMode").checked = true;
+    $("#deleteOriginal").checked = false;
+  }
   const copying = selectedSaveMode() === "copy";
   $("#applySuffix").disabled = !copying || state.applyRunning;
-  $("#deleteOriginalRow").hidden = !copying;
-  $("#deleteOriginal").disabled = !copying || state.applyRunning;
+  $("#deleteOriginalRow").hidden = !copying || containsSessionImage;
+  $("#deleteOriginal").disabled = !copying || containsSessionImage || state.applyRunning;
   $("#applyOverwriteMode").disabled = containsSessionImage || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", containsSessionImage);
   $("#applyTemporarySourceNote").hidden = !containsSessionImage;

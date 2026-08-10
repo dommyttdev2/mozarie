@@ -480,9 +480,14 @@ class StudioState:
         cutoff = time.time() - 60
         for session_dir in self.session_base_dir.glob("session-*"):
             try:
-                if not session_dir.is_dir() or session_dir.stat().st_mtime > cutoff:
+                if not session_dir.is_dir():
                     continue
                 lock_path = session_dir / ".active.lock"
+                if not lock_path.exists():
+                    if session_dir.stat().st_mtime > cutoff:
+                        continue
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    continue
                 with lock_path.open("a+b") as handle:
                     handle.seek(0)
                     try:
@@ -938,7 +943,8 @@ class StudioState:
         if mode not in {"copy", "overwrite"}:
             raise ClientError("保存方法が正しくありません。")
         requires_copy = any(record.source_kind == "session" for record in records)
-        if (mode == "copy" or requires_copy) and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
+        effective_mode = "copy" if requires_copy else mode
+        if effective_mode == "copy" and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
             raise ClientError("ファイル名の末尾が正しくありません。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
@@ -954,8 +960,8 @@ class StudioState:
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
         self._start_job(
-            "apply", records, self._apply_worker, divisor, mode, suffix if (mode == "copy" or requires_copy) else "",
-            bool(delete_original and (mode == "copy" or requires_copy)), prepared_masks, expected_catalog_generation=catalog_generation,
+            "apply", records, self._apply_worker, divisor, effective_mode, suffix if effective_mode == "copy" else "",
+            bool(delete_original and effective_mode == "copy" and not requires_copy), prepared_masks, expected_catalog_generation=catalog_generation,
         )
 
     def save_image(self, image_id: str, mask: np.ndarray, divisor: int) -> Path:
@@ -1426,6 +1432,9 @@ class StudioState:
         catalog_generation: int | None = None,
     ) -> None:
         try:
+            if any(record.source_kind == "session" for record in records):
+                mode = "copy"
+                delete_original = False
             for index, record in enumerate(records, start=1):
                 if not self._job_is_current(job_generation, catalog_generation):
                     return
@@ -1440,7 +1449,7 @@ class StudioState:
                 mask = prepared_masks.get(record.image_id)
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                effective_mode = "copy" if record.source_kind == "session" else mode
+                effective_mode = mode
                 if effective_mode == "overwrite":
                     output = record.path
                 else:
