@@ -108,7 +108,7 @@
   "confirm.clearAllMasks.title": "全画像のモザイク候補をクリア",
   "confirm.clearAllMasks.message": "全画像の未適用の自動候補・境界候補・手描き追加/除外をすべて消去します。画像ファイルに焼き込み済みのモザイク画素は復元しません。",
   "confirm.clearCatalog.title": "画像一覧をクリア",
-  "confirm.clearCatalog.message": "画面上の画像一覧を空にします。ディスク上の画像ファイルは削除しません。",
+  "confirm.clearCatalog.message": "通常の参照画像は削除しません。ドラッグ追加画像の一時コピーは削除します。",
   "apply.title": "ファイルを保存",
   "apply.target": "対象: {count}件",
   "apply.copy": "コピー保存",

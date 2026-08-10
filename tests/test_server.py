@@ -1596,6 +1596,10 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('gallery.detectAll', dictionary)
         self.assertIn('editor.clearMasks', dictionary)
         self.assertIn('confirm.clearCurrent.message', dictionary)
+        self.assertEqual(
+            dictionary["confirm.clearCatalog.message"],
+            "通常の参照画像は削除しません。ドラッグ追加画像の一時コピーは削除します。",
+        )
         self.assertIn('navigation.shortcuts', dictionary)
         self.assertIn('overview.searchPlaceholder', dictionary)
         self.assertIn('getAsFileSystemHandle', app)
