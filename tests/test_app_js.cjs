@@ -604,6 +604,62 @@ function keyEvent(key, options = {}) {
   assert.equal(state.maskStatus.get(failedUpdateTarget.id), true);
   assert.equal(state.currentId, failedUpdateOther.id);
 
+  // Mutations for different candidates on one image are serialized. If A
+  // fails and B then succeeds after navigation, B's server aggregate wins and
+  // the image remains a save target. The stored manual draft is untouched.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  const aggregateTarget = { id: "aggregate-target", relativePath: "aggregate.png", width: 100, height: 80, candidateCount: 2, enabledCandidateCount: 2 };
+  const aggregateOther = { id: "aggregate-other", relativePath: "other.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [aggregateTarget, aggregateOther];
+  state.currentId = aggregateTarget.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 65;
+  const aggregateA = { id: "aggregate-a", className: "penis", confidence: 0.8, enabled: true, color: "#ffffff" };
+  const aggregateB = { id: "aggregate-b", className: "pussy", confidence: 0.8, enabled: true, color: "#ffffff" };
+  state.candidates = [aggregateA, aggregateB];
+  state.candidateImages = new Map([[aggregateA.id, {}], [aggregateB.id, {}]]);
+  state.maskStatus.set(aggregateTarget.id, true);
+  const preservedDraft = {
+    add: "data:image/png;base64,manual",
+    exclusion: "data:image/png;base64,exclusion",
+    manualEnabled: false,
+    manualMaskPresent: true,
+  };
+  state.drafts = new Map([[aggregateTarget.id, preservedDraft]]);
+  const aggregateUpdateA = updateCandidate(aggregateA, false, false);
+  const aggregateUpdateB = updateCandidate(aggregateB, false, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidate/aggregate-target/aggregate-a");
+  state.currentId = aggregateOther.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration += 1;
+  state.candidates = [];
+  state.candidateImages.clear();
+  resolveFetch({ ok: false, status: 500, json: async () => ({ error: "A failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/aggregate-target");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [
+    { ...aggregateA, enabled: false },
+    { ...aggregateB, enabled: false },
+  ] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidate/aggregate-target/aggregate-b");
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/aggregate-target");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [
+    { ...aggregateA, enabled: false },
+    { ...aggregateB, enabled: true },
+  ] }) });
+  await Promise.all([aggregateUpdateA, aggregateUpdateB]);
+  assert.equal(aggregateTarget.candidateCount, 2);
+  assert.equal(aggregateTarget.enabledCandidateCount, 1);
+  assert.equal(state.maskStatus.get(aggregateTarget.id), true);
+  assert.equal(saveTargets().includes(aggregateTarget.id), true);
+  assert.equal(state.drafts.get(aggregateTarget.id), preservedDraft);
+  assert.equal(state.drafts.get(aggregateTarget.id).manualEnabled, false);
+
   // Save entry points wait for candidate mutations instead of opening or
   // submitting against stale server state.
   state.candidateUpdateChains.clear();

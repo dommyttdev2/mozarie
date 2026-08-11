@@ -563,9 +563,16 @@ function syncCandidateRecord(imageId, candidates) {
 
 function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, state.candidates); }
 
-async function refreshCandidateRecord(imageId) {
+function syncStoredMaskStatus(imageId, candidates) {
+  const draft = state.drafts.get(imageId);
+  const hasManualMask = Boolean(draft?.manualMaskPresent && draft.manualEnabled !== false);
+  state.maskStatus.set(imageId, candidates.some((candidate) => candidate.enabled) || hasManualMask);
+}
+
+async function refreshCandidateRecord(imageId, syncMask = false) {
   const data = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
   syncCandidateRecord(imageId, data.candidates);
+  if (syncMask) syncStoredMaskStatus(imageId, data.candidates);
   return data.candidates;
 }
 
@@ -773,14 +780,14 @@ function nextCandidateMutationVersion(key) {
   state.candidateUpdateVersions.set(key, version);
   return version;
 }
-function enqueueCandidateMutation(key, send) {
-  const previous = state.candidateUpdateChains.get(key) || Promise.resolve();
+function enqueueCandidateMutation(imageId, send) {
+  const previous = state.candidateUpdateChains.get(imageId) || Promise.resolve();
   const queued = previous.then(send, send);
   const tracked = queued.finally(() => {
-    if (state.candidateUpdateChains.get(key) === tracked) state.candidateUpdateChains.delete(key);
+    if (state.candidateUpdateChains.get(imageId) === tracked) state.candidateUpdateChains.delete(imageId);
     updateActionButtons();
   });
-  state.candidateUpdateChains.set(key, tracked);
+  state.candidateUpdateChains.set(imageId, tracked);
   updateActionButtons();
   return tracked;
 }
@@ -795,16 +802,25 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   const targetCandidates = [...state.candidates];
-  const key = candidateMutationKey(imageId, candidate.id);
-  const version = nextCandidateMutationVersion(key);
+  const mutationKey = candidateMutationKey(imageId, candidate.id);
+  const version = nextCandidateMutationVersion(mutationKey);
   const desired = candidate.enabled;
   const send = async () => {
     try {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
       });
+      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
+      if (state.currentId === imageId && isCurrentGeneration(generation)) {
+        const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
+        if (currentCandidate) currentCandidate.enabled = desired;
+        syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
+      } else {
+        try { await refreshCandidateRecord(imageId, true); } catch { /* Keep the optimistic aggregate until a later refresh. */ }
+        renderCatalogViews();
+      }
     } catch (error) {
-      if (state.candidateUpdateVersions.get(key) !== version) return;
+      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         try {
           if (await reconcileCurrentCandidates(imageId, generation)) {
@@ -823,28 +839,27 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
       syncCandidateRecord(imageId, targetCandidates);
       if (previousMaskStatus !== undefined) state.maskStatus.set(imageId, previousMaskStatus);
       try {
-        const candidates = await refreshCandidateRecord(imageId);
-        if (previousMaskStatus === undefined) state.maskStatus.set(imageId, candidates.some((item) => item.enabled));
+        await refreshCandidateRecord(imageId, true);
       } catch { /* The local rollback already removed the optimistic aggregate. */ }
       renderCatalogViews();
     }
   };
-  return enqueueCandidateMutation(key, send);
+  return enqueueCandidateMutation(imageId, send);
 }
 
 async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
   const imageId = state.currentId;
   const generation = state.imageGeneration;
-  const key = candidateMutationKey(imageId, candidate.id);
-  const version = nextCandidateMutationVersion(key);
+  const mutationKey = candidateMutationKey(imageId, candidate.id);
+  const version = nextCandidateMutationVersion(mutationKey);
   const remainingCandidates = state.candidates.filter((item) => item.id !== candidate.id);
   const remainingMaskStatus = maskStatusWithoutCandidate(candidate.id);
-  state.candidateDeleting.add(key); renderCandidates();
+  state.candidateDeleting.add(mutationKey); renderCandidates();
   const send = async () => {
     try {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
-      if (state.candidateUpdateVersions.get(key) !== version) return;
+      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       syncCandidateRecord(imageId, remainingCandidates);
       state.maskStatus.set(imageId, remainingMaskStatus);
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
@@ -852,22 +867,22 @@ async function deleteCandidate(candidate) {
         state.candidateImages.delete(candidate.id);
         updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
       } else {
-        try { await refreshCandidateRecord(imageId); } catch { /* The known deletion is already reflected locally. */ }
+        try { await refreshCandidateRecord(imageId, true); } catch { /* The known deletion is already reflected locally. */ }
       }
       renderCatalogViews();
     } catch (error) {
-      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
+      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(mutationKey) === version) {
         try { await reconcileCurrentCandidates(imageId, generation); } catch { /* Keep the existing coherent row. */ }
         setStatus(error.message, "error");
       }
     } finally {
-      if (state.candidateUpdateVersions.get(key) === version) {
-        state.candidateDeleting.delete(key);
+      if (state.candidateUpdateVersions.get(mutationKey) === version) {
+        state.candidateDeleting.delete(mutationKey);
         if (state.currentId === imageId && isCurrentGeneration(generation)) renderCandidates();
       }
     }
   };
-  return enqueueCandidateMutation(key, send);
+  return enqueueCandidateMutation(imageId, send);
 }
 
 function deleteManualMask() {
