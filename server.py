@@ -10,6 +10,7 @@ import base64
 import binascii
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait
+import heapq
 import hashlib
 import io
 import json
@@ -437,24 +438,30 @@ def accepted_hand_sam_mask(
     masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int]
 ) -> np.ndarray | None:
     """Return a high-confidence SAM hand mask contained by its padded detection box."""
-    hand_mask, score = select_best_sam_mask(masks, scores)
-    if score < HAND_SAM_MIN_SCORE or hand_mask.shape[:2] != expected_shape:
-        return None
-    hand = np.asarray(hand_mask > 0, dtype=np.uint8)
-    total = int(np.count_nonzero(hand))
-    if total == 0:
-        return None
     left, top, right, bottom = box
-    inside = int(np.count_nonzero(hand[top:bottom, left:right]))
-    if inside / total < 0.85:
-        return None
-    clipped = np.zeros_like(hand, dtype=np.uint8)
-    clipped[top:bottom, left:right] = hand[top:bottom, left:right]
+    if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
     box_area = (right - left) * (bottom - top)
-    clipped_area = int(np.count_nonzero(clipped))
-    if not 0.03 <= clipped_area / box_area <= 0.95:
-        return None
-    return clipped * 255
+    for index in np.argsort(-np.asarray(scores), kind="stable"):
+        score = float(scores[index])
+        if score < HAND_SAM_MIN_SCORE:
+            break
+        hand_mask = np.asarray(masks[index])
+        if hand_mask.shape[:2] != expected_shape:
+            continue
+        hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+        total = int(np.count_nonzero(hand))
+        if total == 0:
+            continue
+        inside = int(np.count_nonzero(hand[top:bottom, left:right]))
+        if inside / total < 0.85:
+            continue
+        clipped = np.zeros_like(hand, dtype=np.uint8)
+        clipped[top:bottom, left:right] = hand[top:bottom, left:right]
+        clipped_area = int(np.count_nonzero(clipped))
+        if 0.03 <= clipped_area / box_area <= 0.95:
+            return clipped * 255
+    return None
 
 
 def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
@@ -476,22 +483,25 @@ def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
     minimum = max(4, math.ceil(penis_area * 0.001))
     maximum = math.floor(penis_area * FLUID_MAX_COMPONENT_RATIO)
     total_cap = math.floor(penis_area * FLUID_MAX_TOTAL_RATIO)
-    components: list[np.ndarray] = []
-    for label in range(1, count):
-        component = (labels == label) & candidate & (penis > 0)
-        area = int(np.count_nonzero(component))
-        seed_count = int(np.count_nonzero(component & seed))
-        if minimum <= area <= maximum and seed_count >= 2 and seed_count / area >= 0.10:
-            components.append(component)
-    selected = np.zeros_like(penis, dtype=np.uint8)
+    flat_labels = np.asarray(labels).ravel()
+    areas = np.bincount(flat_labels[candidate.ravel()], minlength=count)
+    seed_counts = np.bincount(flat_labels[seed.ravel()], minlength=count)
+    eligible = [
+        label
+        for label in range(1, count)
+        if minimum <= areas[label] <= maximum and seed_counts[label] >= 2 and seed_counts[label] / areas[label] >= 0.10
+    ]
+    candidates = heapq.nlargest(FLUID_MAX_COMPONENTS, eligible, key=lambda label: (areas[label], -label))
+    selected_labels: list[int] = []
     selected_area = 0
-    for component in sorted(components, key=np.count_nonzero, reverse=True)[:FLUID_MAX_COMPONENTS]:
-        area = int(np.count_nonzero(component))
+    for label in candidates:
+        area = int(areas[label])
         if selected_area + area > total_cap:
             continue
-        selected[component] = 255
+        selected_labels.append(label)
         selected_area += area
-    return selected
+    selected = np.isin(labels, selected_labels) & candidate & (penis > 0)
+    return np.asarray(selected, dtype=np.uint8) * 255
 
 
 def read_detection_confidence(value: Any) -> float:

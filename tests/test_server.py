@@ -900,6 +900,15 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIsNotNone(accepted)
         self.assertTrue(np.all(accepted[2:6, 2:6] == 255))
 
+    def test_hand_sam_mask_uses_next_highest_scoring_valid_proposal(self):
+        outside = np.ones((10, 10), dtype=bool)
+        valid = np.zeros((10, 10), dtype=bool)
+        valid[3:7, 3:7] = True
+        accepted = accepted_hand_sam_mask(
+            np.array([outside, valid]), np.array([0.97, 0.95]), (10, 10), (2, 2, 8, 8)
+        )
+        self.assertTrue(np.array_equal(accepted, valid.astype(np.uint8) * 255))
+
     def test_padded_hand_box_uses_the_specified_bounded_padding(self):
         self.assertEqual(padded_hand_box((10, 10, 20, 30), (50, 50)), (8, 8, 22, 32))
         self.assertEqual(padded_hand_box((5, 5, 505, 505), (512, 512)), (0, 0, 512, 512))
@@ -930,6 +939,35 @@ class MosaicStudioTests(unittest.TestCase):
         rgb[(6, 6, 10, 10), (6, 10, 6, 10)] = 255
         fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
         self.assertFalse(np.any(fluid))
+
+    def test_white_fluid_mask_filters_many_components_without_per_label_equality_scans(self):
+        class TrackingLabels(np.ndarray):
+            equality_scans = 0
+
+            def __eq__(self, other):
+                type(self).equality_scans += 1
+                return super().__eq__(other)
+
+        rgb = np.zeros((64, 64, 3), dtype=np.uint8)
+        penis = np.full((64, 64), 255, dtype=np.uint8)
+        labels = np.zeros((64, 64), dtype=np.int32)
+        components = []
+        for label, (top, left) in enumerate(((row, column) for row in range(2, 52, 10) for column in range(2, 52, 10)), 1):
+            labels[top:top + 4, left:left + 4] = label
+            rgb[top:top + 4, left:left + 4] = 255
+            components.append((top, left))
+        tracked_labels = labels.view(TrackingLabels)
+        stats = np.zeros((len(components) + 1, 5), dtype=np.int32)
+        with patch.object(
+            server_module.cv2,
+            "connectedComponentsWithStats",
+            return_value=(len(components) + 1, tracked_labels, stats, np.zeros((len(components) + 1, 2))),
+        ):
+            fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        self.assertEqual(TrackingLabels.equality_scans, 0)
+        self.assertEqual(np.count_nonzero(fluid), 8 * 16)
+        for top, left in components[:8]:
+            self.assertTrue(np.all(fluid[top:top + 4, left:left + 4] == 255))
 
     def test_model_manifest_rejects_missing_size_and_hash_mismatches(self):
         with tempfile.TemporaryDirectory() as directory:
