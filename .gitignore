@@ -1,7 +1,6 @@
 # アプリ実行時の一時データ
 .mosaicstudio-cache/
 .ui-fixture/
-.rescue/
 
 # 大容量のローカルモデル
 models/
