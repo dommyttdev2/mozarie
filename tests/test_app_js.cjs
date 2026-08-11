@@ -80,12 +80,32 @@ Object.defineProperty(candidateList, "textContent", {
 
 const createdCanvases = [];
 function canvasElement() {
+  let target;
   const context = {
-    clearRectCalls: 0, drawImageCalls: [],
-    clearRect() { this.clearRectCalls += 1; }, drawImage(...args) { this.drawImageCalls.push(args); }, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {},
-    getImageData() { return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) }; },
+    clearRectCalls: 0, drawImageCalls: [], globalCompositeOperation: "source-over",
+    clearRect() {
+      this.clearRectCalls += 1;
+      if (target._usePixelAlpha) target._alpha.fill(0);
+    },
+    drawImage(...args) {
+      this.drawImageCalls.push(args);
+      if (!target._usePixelAlpha) return;
+      const sourceAlpha = args[0]?._alpha || new Uint8Array(target._alpha.length);
+      for (let index = 0; index < target._alpha.length; index += 1) {
+        if (this.globalCompositeOperation === "destination-out") {
+          if (sourceAlpha[index]) target._alpha[index] = 0;
+        } else if (sourceAlpha[index]) {
+          target._alpha[index] = sourceAlpha[index];
+        }
+      }
+    },
+    setTransform() {}, save() {}, restore() {}, translate() {}, scale() {},
+    getImageData() {
+      if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) };
+      return { data: new Uint8ClampedArray([...target._alpha].flatMap((alpha) => [0, 0, 0, alpha ? 255 : 0])) };
+    },
   };
-  const target = { width: 1, height: 1, _context: context, getContext: () => context, toDataURL: () => "data:image/png;base64,test" };
+  target = { width: 1, height: 1, _alpha: new Uint8Array(2), _usePixelAlpha: false, _context: context, getContext: () => context, toDataURL: () => "data:image/png;base64,test" };
   createdCanvases.push(target);
   return target;
 }
@@ -662,28 +682,47 @@ function keyEvent(key, options = {}) {
   assert.equal(state.drafts.get(aggregateTarget.id), preservedDraft);
   assert.equal(state.drafts.get(aggregateTarget.id).manualEnabled, false);
 
-  // An enabled server candidate that is fully removed by the saved exclusion
-  // stays out of saveTargets after its offscreen mutation completes.
+  // Visibility is captured from actual destination-out composition. An enabled
+  // candidate fully covered by exclusion stays out of saveTargets, while a
+  // disabled but geometrically visible candidate remains in the visibility cache.
   state.candidateUpdateChains.clear();
   state.candidateUpdateVersions.clear();
-  const excludedTarget = { id: "excluded-target", relativePath: "excluded.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 };
+  const excludedTarget = { id: "excluded-target", relativePath: "excluded.png", width: 100, height: 80, candidateCount: 2, enabledCandidateCount: 1 };
   const excludedOther = { id: "excluded-other", relativePath: "other.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   state.images = [excludedTarget, excludedOther];
   state.currentId = excludedTarget.id;
   state.currentImage = { width: 100, height: 80 };
   state.imageGeneration = 66;
   const excludedB = { id: "excluded-b", className: "penis", confidence: 0.9, enabled: true, color: "#ffffff" };
-  state.candidates = [excludedB];
-  state.candidateImages = new Map([[excludedB.id, {}]]);
-  state.manualMaskPresent = false;
-  state.manualEnabled = true;
+  const visibleDisabledC = { id: "visible-disabled-c", className: "pussy", confidence: 0.8, enabled: false, color: "#ffffff" };
+  const excludedBImage = { _alpha: new Uint8Array([1, 0]) };
+  const visibleDisabledCImage = { _alpha: new Uint8Array([0, 1]) };
+  state.candidates = [excludedB, visibleDisabledC];
+  state.candidateImages = new Map([[excludedB.id, excludedBImage], [visibleDisabledC.id, visibleDisabledCImage]]);
+  const addMask = createdCanvases[0];
+  const exclusionMask = createdCanvases[1];
+  const combinedMask = createdCanvases[2];
+  for (const canvas of [addMask, exclusionMask, combinedMask]) {
+    canvas._usePixelAlpha = true;
+    canvas._alpha.fill(0);
+  }
+  addMask._alpha.set([0, 1]);
+  exclusionMask._alpha.set([1, 0]);
+  state.manualMaskPresent = true;
+  state.manualEnabled = false;
   state.maskStatus.set(excludedTarget.id, false);
-  combinedMaskPresent = false;
   const excludedUpdate = updateCandidate(excludedB, false, false);
   saveDraft();
   const excludedDraft = state.drafts.get(excludedTarget.id);
-  assert.deepEqual(JSON.parse(JSON.stringify(excludedDraft.visibleCandidateIds)), []);
-  assert.equal(excludedDraft.manualVisible, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(excludedDraft.visibleCandidateIds)), [visibleDisabledC.id]);
+  assert.equal(excludedDraft.manualVisible, true);
+  assert.deepEqual([...combinedMask._alpha], [0, 0]);
+  state.manualEnabled = true;
+  buildCombinedMask();
+  assert.deepEqual([...combinedMask._alpha], [0, 1]);
+  state.manualEnabled = false;
+  buildCombinedMask();
+  assert.deepEqual([...combinedMask._alpha], [0, 0]);
   await new Promise((resolve) => setImmediate(resolve));
   state.currentId = excludedOther.id;
   state.currentImage = { width: 100, height: 80 };
@@ -693,12 +732,18 @@ function keyEvent(key, options = {}) {
   resolveFetch({ ok: true, json: async () => ({ ok: true }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(requests.at(-1).path, "/api/candidates/excluded-target");
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ ...excludedB, enabled: true }] }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ ...excludedB, enabled: true }, visibleDisabledC] }) });
   await excludedUpdate;
+  assert.equal(excludedTarget.candidateCount, 2);
   assert.equal(excludedTarget.enabledCandidateCount, 1);
   assert.equal(state.maskStatus.get(excludedTarget.id), false);
   assert.equal(saveTargets().includes(excludedTarget.id), false);
   assert.equal(state.drafts.get(excludedTarget.id), excludedDraft);
+  assert.equal(excludedDraft.manualEnabled, false);
+  for (const canvas of [addMask, exclusionMask, combinedMask]) {
+    canvas._usePixelAlpha = false;
+    canvas._alpha.fill(0);
+  }
 
   // Save entry points wait for candidate mutations instead of opening or
   // submitting against stale server state.
