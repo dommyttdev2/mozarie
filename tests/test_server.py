@@ -52,12 +52,14 @@ from server import (  # noqa: E402
     read_boundary_request,
     read_detection_confidence,
     normalize_precise_class,
+    padded_hand_box,
     refine_mask_with_hand,
     _read_mosaic_divisor,
     save_with_mask,
     select_best_sam_mask,
     validate_model_manifest,
     webp_metadata_manifest,
+    white_fluid_mask,
     LOG_DATE_FORMAT,
     LOG_FORMAT,
     _open_browser,
@@ -856,16 +858,14 @@ class MosaicStudioTests(unittest.TestCase):
         ])
         self.assertEqual(len(result), 2)
 
-    def test_hand_refinement_preserves_core_and_removes_valid_fringe_only(self):
+    def test_hand_refinement_removes_valid_overlap(self):
         genital = np.zeros((30, 30), dtype=np.uint8)
         genital[5:25, 5:25] = 255
         hand = np.zeros_like(genital)
-        hand[5:8, 5:25] = 255
+        hand[5:8, 10:20] = 255
         refined, decision = refine_mask_with_hand(genital, hand)
-        distance = cv2.distanceTransform((genital > 0).astype(np.uint8), cv2.DIST_L2, 3)
-        core = distance >= max(1.0, min(float(distance.max()), math.sqrt(400) * 0.12))
         self.assertEqual(decision, "refined")
-        self.assertTrue(np.all(refined[core] == 255))
+        self.assertTrue(np.all(refined[5:8, 10:20] == 0))
         self.assertLess(np.count_nonzero(refined), np.count_nonzero(genital))
 
     def test_hand_refinement_skips_over_cap(self):
@@ -877,14 +877,59 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(decision, "over_cap")
         self.assertTrue(np.array_equal(unchanged, genital))
 
+    def test_hand_refinement_requires_a_minimum_remaining_mask(self):
+        genital = np.zeros((20, 20), dtype=np.uint8)
+        genital[5:15, 5:15] = 255
+        hand = np.zeros_like(genital)
+        hand[5:15, 5:12] = 255
+        unchanged, decision = refine_mask_with_hand(genital, hand)
+        self.assertEqual(decision, "too_small")
+        self.assertTrue(np.array_equal(unchanged, genital))
+
     def test_hand_sam_mask_rejects_low_quality_invalid_shape_and_empty_masks(self):
-        mask = np.ones((8, 8), dtype=bool)
-        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.87]), (8, 8)))
-        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (9, 9)))
-        self.assertIsNone(accepted_hand_sam_mask(np.zeros((1, 8, 8), dtype=bool), np.array([0.95]), (8, 8)))
-        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.88]), (8, 8))
+        mask = np.zeros((8, 8), dtype=bool)
+        mask[2:6, 2:6] = True
+        box = (0, 0, 8, 8)
+        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.87]), (8, 8), box))
+        self.assertIsNone(accepted_hand_sam_mask(np.array([mask]), np.array([0.95]), (9, 9), box))
+        self.assertIsNone(accepted_hand_sam_mask(np.zeros((1, 8, 8), dtype=bool), np.array([0.95]), (8, 8), box))
+        outside = np.zeros((8, 8), dtype=bool)
+        outside[:2, :2] = True
+        self.assertIsNone(accepted_hand_sam_mask(np.array([outside]), np.array([0.95]), (8, 8), (2, 2, 8, 8)))
+        accepted = accepted_hand_sam_mask(np.array([mask]), np.array([0.88]), (8, 8), box)
         self.assertIsNotNone(accepted)
-        self.assertTrue(np.all(accepted == 255))
+        self.assertTrue(np.all(accepted[2:6, 2:6] == 255))
+
+    def test_padded_hand_box_uses_the_specified_bounded_padding(self):
+        self.assertEqual(padded_hand_box((10, 10, 20, 30), (50, 50)), (8, 8, 22, 32))
+        self.assertEqual(padded_hand_box((5, 5, 505, 505), (512, 512)), (0, 0, 512, 512))
+
+    def test_white_fluid_mask_accepts_a_small_strong_white_penis_component(self):
+        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+        penis = np.zeros((24, 24), dtype=np.uint8)
+        penis[2:22, 2:22] = 255
+        rgb[8:12, 8:12] = 255
+        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        self.assertEqual(np.count_nonzero(fluid), 16)
+
+    def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
+        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+        penis = np.zeros((24, 24), dtype=np.uint8)
+        penis[2:22, 2:22] = 255
+        rgb[3:13, 3:13] = 255
+        rgb[15:19, 3:7] = (255, 40, 40)
+        rgb[20, 20] = 255
+        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        self.assertFalse(np.any(fluid))
+
+    def test_white_fluid_mask_rejects_pale_skin_connected_to_white_seeds(self):
+        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+        penis = np.zeros((24, 24), dtype=np.uint8)
+        penis[2:22, 2:22] = 255
+        rgb[6:11, 6:14] = (245, 230, 215)
+        rgb[(6, 6, 10, 10), (6, 10, 6, 10)] = 255
+        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        self.assertFalse(np.any(fluid))
 
     def test_model_manifest_rejects_missing_size_and_hash_mismatches(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -956,18 +1001,89 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(validate.call_count, 1)
 
-    def test_precise_segments_never_enter_hand_refinement(self):
+    def test_precise_segments_receive_hand_refinement(self):
         state = self.new_state()
         precise_mask = np.zeros((16, 16), dtype=np.uint8)
         precise_mask[4:12, 4:12] = 255
         record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
-        with patch.object(state, "_hand_boxes") as hand_boxes:
-            result = state._refine_fallback_segments(
+        sam_mask = np.zeros((1, 16, 16), dtype=bool)
+        sam_mask[0, 4:8, 4:8] = True
+        predictor = Mock()
+        predictor.predict.return_value = sam_mask, np.asarray([0.95]), None
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 12, 12)]), patch.object(
+            state, "_sam_predictor_for", return_value=predictor
+        ):
+            result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
                 [{"class_name": "penis", "confidence": 0.8, "mask": precise_mask, "source": "precise"}],
             )
-        hand_boxes.assert_not_called()
-        self.assertTrue(np.array_equal(result[0]["mask"], precise_mask))
+        self.assertEqual(result[0]["refinement"], "hand")
+        self.assertEqual(np.count_nonzero(result[0]["mask"]), 48)
+        predictor.predict.assert_called_once()
+
+    def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
+        state = self.new_state()
+        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        base_mask = np.zeros((16, 16), dtype=np.uint8)
+        base_mask[4:12, 4:12] = 255
+
+        def predict(*, box, **_kwargs):
+            mask = np.zeros((1, 16, 16), dtype=bool)
+            if box[0] < 5:
+                mask[0, 4:6, 4:6] = True
+            else:
+                mask[0, 10:12, 10:12] = True
+            return mask, np.asarray([0.95]), None
+
+        predictor = Mock()
+        predictor.predict.side_effect = predict
+        segments = [
+            {"class_name": "penis", "confidence": 0.8, "mask": base_mask.copy(), "source": source}
+            for source in ("precise", "primary", "secondary")
+        ]
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8), (8, 8, 12, 12), (0, 0, 2, 2)]) as hand_boxes, patch.object(
+            state, "_sam_predictor_for", return_value=predictor
+        ):
+            result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
+        hand_boxes.assert_called_once()
+        self.assertEqual(predictor.predict.call_count, 2)
+        self.assertTrue(all(segment["refinement"] == "hand" for segment in result))
+        self.assertTrue(all(np.count_nonzero(segment["mask"]) == 56 for segment in result))
+
+    def test_pussy_skips_white_fluid_refinement(self):
+        state = self.new_state()
+        pussy = np.zeros((16, 16), dtype=np.uint8)
+        pussy[4:12, 4:12] = 255
+        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
+            result = state._refine_detected_segments(
+                Mock(), record, Image.new("RGB", (16, 16), "white"),
+                [{"class_name": "pussy", "confidence": 0.8, "mask": pussy, "source": "precise"}],
+            )
+        fluid_mask.assert_not_called()
+        self.assertNotIn("refinement", result[0])
+
+    def test_hand_and_fluid_refinement_metadata(self):
+        state = self.new_state()
+        penis = np.zeros((24, 24), dtype=np.uint8)
+        penis[2:22, 2:22] = 255
+        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+        rgb[14:18, 14:18] = 255
+        sam_mask = np.zeros((1, 24, 24), dtype=bool)
+        sam_mask[0, 4:8, 4:8] = True
+        predictor = Mock()
+        predictor.predict.return_value = sam_mask, np.asarray([0.95]), None
+        record = ImageRecord("image", Path(__file__), "image.png", 24, 24, 0)
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_sam_predictor_for", return_value=predictor
+        ):
+            result = state._refine_detected_segments(
+                Mock(), record, Image.fromarray(rgb, mode="RGB"),
+                [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "precise"}],
+            )
+        self.assertEqual(result[0]["refinement"], "hand_fluid")
+        self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりと白い体液を除外")
+        self.assertEqual(np.count_nonzero(result[0]["mask"]), 368)
 
     def test_boundary_request_requires_a_valid_roi_and_click(self):
         roi, point = read_boundary_request(

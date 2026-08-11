@@ -91,14 +91,26 @@ PRECISE_OVERLAP_IOU = 0.20
 PRECISE_CONTAINMENT = 0.60
 HAND_CONFIDENCE = 0.395
 HAND_SAM_MIN_SCORE = 0.88
-HAND_MAX_REMOVAL_RATIO = 0.20
+HAND_MAX_REMOVAL_RATIO = 0.70
+HAND_MIN_REMAINING_RATIO = 0.15
+HAND_MIN_REMAINING_PIXELS = 32
+HAND_BOX_PADDING_RATIO = 0.03
+HAND_BOX_PADDING_MIN = 2
+HAND_BOX_PADDING_MAX = 16
+FLUID_MAX_COMPONENTS = 8
+FLUID_MAX_COMPONENT_RATIO = 0.15
+FLUID_MAX_TOTAL_RATIO = 0.20
 SOURCE_LABELS = {
     "precise": "精密性器モデル",
     "primary": "補助検出モデル",
     "secondary": "補助検出モデル2",
     "boundary": "境界選択",
 }
-REFINEMENT_LABELS = {"hand": "手の重なりを除外"}
+REFINEMENT_LABELS = {
+    "hand": "手の重なりを除外",
+    "fluid": "白い体液を除外",
+    "hand_fluid": "手の重なりと白い体液を除外",
+}
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
     "penis": "#e6b450",
@@ -391,33 +403,95 @@ def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.ndarray, str]:
-    """Conservatively remove a SAM-confirmed hand fringe from a fallback genital mask."""
+    """Remove a SAM-confirmed hand overlap while retaining a usable genital mask."""
     genital = np.asarray(mask > 0, dtype=np.uint8)
     hand = np.asarray(hand_mask > 0, dtype=np.uint8)
     area = int(np.count_nonzero(genital))
     if area == 0 or hand.shape != genital.shape:
         return mask, "skipped"
-    distance = cv2.distanceTransform(genital, cv2.DIST_L2, 3)
-    core_radius = max(1.0, min(float(distance.max()), math.sqrt(area) * 0.12))
-    core = distance >= core_radius
-    removed = (genital > 0) & (hand > 0) & ~core
+    removed = (genital > 0) & (hand > 0)
     removal_count = int(np.count_nonzero(removed))
     if removal_count == 0:
         return mask, "unchanged"
     if removal_count / area > HAND_MAX_REMOVAL_RATIO:
         return mask, "over_cap"
+    remaining = area - removal_count
+    if remaining < max(math.ceil(area * HAND_MIN_REMAINING_RATIO), HAND_MIN_REMAINING_PIXELS):
+        return mask, "too_small"
     refined = genital.copy()
     refined[removed] = 0
     return refined.astype(np.uint8) * 255, "refined"
 
 
-def accepted_hand_sam_mask(masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray | None:
-    """Return a reliable full-image hand mask without using a bounding box as a mask."""
+def padded_hand_box(box: tuple[int, int, int, int], shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Expand a detected hand box slightly while keeping it inside the image."""
+    left, top, right, bottom = box
+    height, width = shape
+    padding = max(HAND_BOX_PADDING_MIN, min(HAND_BOX_PADDING_MAX, math.ceil(max(right - left, bottom - top) * HAND_BOX_PADDING_RATIO)))
+    left, top = max(0, left - padding), max(0, top - padding)
+    right, bottom = min(width, right + padding), min(height, bottom + padding)
+    return (left, top, right, bottom) if left < right and top < bottom else None
+
+
+def accepted_hand_sam_mask(
+    masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int]
+) -> np.ndarray | None:
+    """Return a high-confidence SAM hand mask contained by its padded detection box."""
     hand_mask, score = select_best_sam_mask(masks, scores)
     if score < HAND_SAM_MIN_SCORE or hand_mask.shape[:2] != expected_shape:
         return None
-    hand = np.asarray(hand_mask > 0, dtype=np.uint8) * 255
-    return hand if np.any(hand) else None
+    hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+    total = int(np.count_nonzero(hand))
+    if total == 0:
+        return None
+    left, top, right, bottom = box
+    inside = int(np.count_nonzero(hand[top:bottom, left:right]))
+    if inside / total < 0.85:
+        return None
+    clipped = np.zeros_like(hand, dtype=np.uint8)
+    clipped[top:bottom, left:right] = hand[top:bottom, left:right]
+    box_area = (right - left) * (bottom - top)
+    clipped_area = int(np.count_nonzero(clipped))
+    if not 0.03 <= clipped_area / box_area <= 0.95:
+        return None
+    return clipped * 255
+
+
+def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
+    """Find small, neutral-white regions contained by a penis segment."""
+    penis = np.asarray(penis_mask > 0, dtype=np.uint8)
+    penis_area = int(np.count_nonzero(penis))
+    empty = np.zeros_like(penis, dtype=np.uint8)
+    if penis_area == 0:
+        return empty
+    pixels = np.asarray(rgb)
+    hsv = cv2.cvtColor(pixels, cv2.COLOR_RGB2HSV)
+    saturation, value = hsv[:, :, 1], hsv[:, :, 2]
+    channel_min = pixels.min(axis=2)
+    channel_spread = pixels.max(axis=2) - channel_min
+    candidate = (penis > 0) & (saturation <= 80) & (value >= 180) & (channel_spread <= 24) & (channel_min >= 215)
+    seed = candidate & (saturation <= 45) & (value >= 225) & (channel_spread <= 18) & (channel_min >= 230)
+    closed = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)) > 0
+    count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(closed.astype(np.uint8), connectivity=8)
+    minimum = max(4, math.ceil(penis_area * 0.001))
+    maximum = math.floor(penis_area * FLUID_MAX_COMPONENT_RATIO)
+    total_cap = math.floor(penis_area * FLUID_MAX_TOTAL_RATIO)
+    components: list[np.ndarray] = []
+    for label in range(1, count):
+        component = (labels == label) & candidate & (penis > 0)
+        area = int(np.count_nonzero(component))
+        seed_count = int(np.count_nonzero(component & seed))
+        if minimum <= area <= maximum and seed_count >= 2 and seed_count / area >= 0.10:
+            components.append(component)
+    selected = np.zeros_like(penis, dtype=np.uint8)
+    selected_area = 0
+    for component in sorted(components, key=np.count_nonzero, reverse=True)[:FLUID_MAX_COMPONENTS]:
+        area = int(np.count_nonzero(component))
+        if selected_area + area > total_cap:
+            continue
+        selected[component] = 255
+        selected_area += area
+    return selected
 
 
 def read_detection_confidence(value: Any) -> float:
@@ -1634,36 +1708,50 @@ class StudioState:
         top, bottom = max(0, top), min(height, bottom)
         return left < right and top < bottom and bool(np.any(mask[top:bottom, left:right] > 0))
 
-    def _refine_fallback_segments(
+    def _refine_detected_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: Image.Image, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        fallback = [segment for segment in segments if segment["source"] in {"primary", "secondary"}]
-        if not fallback:
+        detected = [segment for segment in segments if segment["class_name"] in TARGET_CLASSES]
+        if not detected:
             return segments
+        genital_mask = np.zeros_like(detected[0]["mask"], dtype=np.uint8)
+        for segment in detected:
+            genital_mask = np.maximum(genital_mask, segment["mask"])
         hand_boxes = self._hand_boxes(models, rgb)
-        if not hand_boxes:
-            return segments
-        # SAM caches one current image, so set_image and every predictor call share one lock.
-        with self.sam_lock:
-            predictor = self._sam_predictor_for(record)
-            for segment in fallback:
-                combined_hand_mask = np.zeros_like(segment["mask"], dtype=np.uint8)
-                for box in hand_boxes:
-                    if not self._box_intersects_mask(box, segment["mask"]):
+        intersecting_boxes = [box for box in hand_boxes if self._box_intersects_mask(box, genital_mask)]
+        if not intersecting_boxes:
+            hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
+        else:
+            hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
+            # SAM caches one current image, so set_image and every predictor call share one lock.
+            with self.sam_lock:
+                predictor = self._sam_predictor_for(record)
+                for box in intersecting_boxes:
+                    padded_box = padded_hand_box(box, genital_mask.shape[:2])
+                    if padded_box is None:
                         continue
                     masks, scores, _ = predictor.predict(
                         point_coords=None,
                         point_labels=None,
-                        box=np.asarray(box, dtype=np.float32),
+                        box=np.asarray(padded_box, dtype=np.float32),
                         multimask_output=True,
                     )
-                    hand_mask = accepted_hand_sam_mask(masks, scores, segment["mask"].shape[:2])
-                    if hand_mask is not None:
-                        combined_hand_mask = np.maximum(combined_hand_mask, hand_mask)
-                refined, decision = refine_mask_with_hand(segment["mask"], combined_hand_mask)
-                if decision == "refined":
-                    segment["mask"] = refined
-                    segment["refinement"] = "hand"
+                    confirmed = accepted_hand_sam_mask(masks, scores, genital_mask.shape[:2], padded_box)
+                    if confirmed is not None:
+                        hand_mask = np.maximum(hand_mask, confirmed)
+
+        for segment in detected:
+            refined, decision = refine_mask_with_hand(segment["mask"], hand_mask)
+            if decision == "refined":
+                segment["mask"] = refined
+                segment["refinement"] = "hand"
+            if segment["class_name"] != "penis":
+                continue
+            fluid_mask = white_fluid_mask(rgb, segment["mask"])
+            if not np.any(fluid_mask):
+                continue
+            segment["mask"] = np.where(fluid_mask > 0, 0, segment["mask"]).astype(np.uint8)
+            segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
         return segments
 
     def _detect_image(self, models: DetectionModels, record: ImageRecord, confidence: float) -> list[Candidate]:
@@ -1674,7 +1762,7 @@ class StudioState:
             *self._detect_precise_segments(models, rgb, confidence),
             *self._detect_legacy_segments(models, rgb, confidence),
         ])
-        segments = self._refine_fallback_segments(models, record, rgb, segments)
+        segments = self._refine_detected_segments(models, record, rgb, segments)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
