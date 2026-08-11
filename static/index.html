@@ -14,7 +14,7 @@
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
       <div class="picker-anchor">
-        <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">参照...</button>
+        <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を追加</button>
         <div id="pickerMenu" class="picker-menu" popover>
           <button id="pickImages" type="button" data-i18n="folder.pickImages">画像ファイルを選択</button>
           <button id="pickFolderFiles" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
@@ -22,7 +22,7 @@
         <input id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden>
         <input id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden>
       </div>
-      <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
+      <button id="loadFolder" class="primary" data-i18n="folder.load">フォルダーを読み込む</button>
     </div>
     <div class="job-status">
       <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
@@ -41,25 +41,19 @@
           <span id="imageCount" class="muted">0件</span>
         </div>
         <div class="gallery-heading-actions">
-          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">画像一覧</button>
-          <button id="clearAllMasksButton" class="text-button" data-i18n="gallery.clearAllMasks">全画像のモザイククリア</button>
+          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧表示</button>
         </div>
       </div>
-      <div class="gallery-actions">
-        <button id="detectAllButton" class="primary wide" data-i18n="gallery.detectAll">全画像を自動検出</button>
-        <button id="clearCatalogButton" class="text-button wide" data-i18n="gallery.clearCatalog">画像一覧をクリア</button>
-      </div>
-      <div class="gallery-tabs" role="tablist" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
-        <button id="galleryAllTab" class="gallery-tab active" role="tab" aria-selected="true" data-i18n="gallery.tabAll">全体</button>
-        <button id="galleryMaskedTab" class="gallery-tab" role="tab" aria-selected="false" data-i18n="gallery.tabMasked">モザイク適用済</button>
-        <button id="saveAllButton" class="primary gallery-save" data-i18n="gallery.saveAll">全画像保存</button>
+      <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
+        <button id="galleryAllTab" class="gallery-tab active" aria-pressed="true" data-i18n="gallery.tabAll">すべて</button>
+        <button id="galleryMaskedTab" class="gallery-tab" aria-pressed="false" data-i18n="gallery.tabMasked">モザイクあり</button>
       </div>
       <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">画像をドロップして追加</div>
     </aside>
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div class="editor-toolbar">
-        <div class="tool-group" role="group" data-i18n-aria-label="editor.tools" aria-label="編集ツール">
+        <div class="tool-group" data-i18n-aria-label="editor.tools" aria-label="編集ツール">
           <button id="brushTool" class="tool active" data-i18n="editor.brush" data-i18n-title="editor.brush">ブラシ</button>
           <button id="eraserTool" class="tool" data-i18n="editor.eraser" data-i18n-title="editor.eraser">消しゴム</button>
           <button id="boundaryTool" class="tool" data-i18n="editor.boundary" data-i18n-title="editor.boundary">境界</button>
@@ -67,8 +61,10 @@
           <button id="undoButton" class="tool" data-i18n="editor.undo" data-i18n-title="editor.undo">元に戻す</button>
           <button id="redoButton" class="tool" data-i18n="editor.redo" data-i18n-title="editor.redo">やり直す</button>
           <button id="mosaicPreviewButton" class="tool active" type="button" aria-pressed="true" data-i18n="editor.mosaicPreview" data-i18n-title="editor.mosaicPreviewHelp">モザイク表示</button>
+        </div>
+        <div class="tool-group command-actions" data-i18n-aria-label="editor.currentActions" aria-label="現在の画像">
           <button id="detectCurrentButton" class="tool detect-current" disabled data-i18n="editor.detectCurrent">自動検出</button>
-          <button id="clearCurrentMasksButton" class="tool" disabled data-i18n="editor.clearMasks">モザイククリア</button>
+          <button id="clearCurrentMasksButton" class="tool" disabled data-i18n="editor.clearMasks">候補を消去</button>
         </div>
         <div class="numeric-controls">
           <label class="numeric-control" for="brushSize">
@@ -143,6 +139,17 @@
       <div id="overviewGrid" class="overview-grid"></div>
     </section>
   </main>
+
+  <footer class="batch-bar" aria-label="全画像の操作">
+    <output id="batchImageCount" class="batch-count">0件</output>
+    <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
+    <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存...</button>
+    <button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
+    <div id="batchMoreMenu" class="batch-more-menu" popover>
+      <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像の候補を消去...</button>
+      <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">画像一覧を閉じる...</button>
+    </div>
+  </footer>
 
   <template id="galleryItemTemplate">
     <article class="gallery-item">

@@ -200,6 +200,7 @@ function updateActionButtons() {
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
   $("#clearAllMasksButton").disabled = running || state.images.length === 0;
   $("#clearCatalogButton").disabled = running || state.images.length === 0;
+  $("#batchMoreButton").disabled = running || state.images.length === 0;
   $("#galleryAllTab").disabled = running;
   $("#galleryMaskedTab").disabled = running;
   $("#saveAllButton").disabled = running || saveTargets().length === 0;
@@ -287,9 +288,10 @@ function renderGallery(force = false) {
   const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
   $("#imageCount").textContent = t("gallery.count", { count: visibleImages.length });
   $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
-  $("#galleryAllTab").setAttribute("aria-selected", String(state.galleryFilter === "all"));
+  $("#galleryAllTab").setAttribute("aria-pressed", String(state.galleryFilter === "all"));
   $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
-  $("#galleryMaskedTab").setAttribute("aria-selected", String(state.galleryFilter === "masked"));
+  $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
+  $("#batchImageCount").textContent = t("gallery.count", { count: state.images.length });
   const template = $("#galleryItemTemplate");
   for (const image of visibleImages) {
     const item = template.content.firstElementChild.cloneNode(true);
@@ -1213,6 +1215,11 @@ function openImportPicker(inputId) {
   $(inputId).click();
 }
 
+function closeBatchMoreMenu() {
+  const menu = $("#batchMoreMenu");
+  if (menu.matches(":popover-open")) menu.hidePopover();
+}
+
 function bindEvents() {
   $("#loadFolder").addEventListener("click", loadFolder);
   $("#pickImages").addEventListener("click", () => openImportPicker("#importImagesInput"));
@@ -1234,8 +1241,11 @@ function bindEvents() {
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
-  $("#clearAllMasksButton").addEventListener("click", () => clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"));
-  $("#clearCatalogButton").addEventListener("click", clearCatalog);
+  $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
+  $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearCatalog(); });
+  $("#batchMoreMenu").addEventListener("toggle", () => {
+    $("#batchMoreButton").setAttribute("aria-expanded", String($("#batchMoreMenu").matches(":popover-open")));
+  });
   $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
   $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
