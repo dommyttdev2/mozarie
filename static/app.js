@@ -240,6 +240,15 @@ function setMosaicPreviewEnabled(enabled) {
 
 function closePickerMenu() { $("#pickerMenu").hidden = true; }
 
+function resetCatalog(images, root) {
+  state.images = images;
+  state.reviewRoot = normaliseReviewRoot(root);
+  loadReviewedPaths();
+  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
+  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
+  renderCatalogViews(); clearEditor();
+}
+
 function togglePickerMenu() {
   if (isBusy() || state.importing) return;
   const menu = $("#pickerMenu");

@@ -98,7 +98,7 @@ const storage = new Map();
 let storageWrites = 0;
 const windowListeners = new Map();
 const context = {
-  console, document, Date, Math, Promise, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class {},
+  console, document, Date, Math, Promise, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} },
   localStorage: {
     getItem(key) { return storage.get(key) || null; },
     setItem(key, value) { storageWrites += 1; storage.set(key, value); },
@@ -112,9 +112,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -122,6 +122,42 @@ function keyEvent(key, options = {}) {
 }
 
 (async () => {
+  const initialiseRun = initialise();
+  resolveFetch({ ok: true, json: async () => ({}) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const initialImage = { id: "initial", relativePath: "initial.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  resolveFetch({ ok: true, json: async () => ({ images: [initialImage], root: "G:/images/initial" }) });
+  await initialiseRun;
+  assert.equal(requests.at(-1).path, "/api/images");
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [initialImage]);
+  assert.equal(state.reviewRoot, "g:\\images\\initial");
+  assert.notEqual(elements.get("#status").className, "status error");
+
+  const loadedImage = { id: "loaded", relativePath: "loaded.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  elements.get("#folderPath").value = "G:/images/loaded";
+  state.currentId = "initial";
+  state.currentImage = { width: 100, height: 80 };
+  state.maskStatus.set("initial", true);
+  const folderLoad = loadFolder();
+  resolveFetch({ ok: true, json: async () => ({ images: [loadedImage] }) });
+  await folderLoad;
+  assert.equal(requests.at(-1).path, "/api/folder");
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [loadedImage]);
+  assert.equal(state.reviewRoot, "g:\\images\\loaded");
+  assert.equal(state.currentId, null);
+  assert.equal(state.maskStatus.size, 0);
+
+  const pickedImage = { id: "picked", relativePath: "picked.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  const nativeFolder = pickNativeSource("folder");
+  resolveFetch({ ok: true, json: async () => ({ images: [pickedImage], root: "G:/images/picked" }) });
+  await nativeFolder;
+  assert.equal(requests.at(-1).path, "/api/picker/folder");
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [pickedImage]);
+  assert.equal(state.reviewRoot, "g:\\images\\picked");
+  assert.equal(elements.get("#folderPath").value, "G:/images/picked");
+
+  fetchCalls = 0;
+  requests.length = 0;
   state.translations["status.progressCount"] = "{completed} / {total}";
   state.translations["gallery.candidates"] = "{count} candidates";
   state.translations["folder.loadCurrent"] = "Load this folder";
