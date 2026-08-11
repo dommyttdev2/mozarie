@@ -496,6 +496,42 @@ class MosaicStudioTests(unittest.TestCase):
         state.request_cancel()
         self.assertEqual(state.job.state, "cancelled")
 
+    def test_detect_cancel_is_cooperative_and_discards_the_inflight_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "first.png")
+            Image.new("RGB", (16, 16), "black").save(root / "second.png")
+            state = self.new_state()
+            first_id, second_id = (image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(first_id), state.image_for_id(second_id)]
+            control = server_module.JobControl()
+            state.job = server_module.Job(kind="detect", state="running", total=2, image_ids=(first_id, second_id))
+
+            def detect_image(_models, record, _confidence):
+                mask_path = state.cache_dir / record.image_id / "candidate.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+                if record.image_id == second_id:
+                    control.cancel_requested.set()
+                return [Candidate(record.image_id, "penis", 0.9, mask_path)]
+
+            with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
+                state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, control=control)
+
+            self.assertEqual(state.job.state, "cancelled")
+            self.assertEqual(state.job.completed, 1)
+            self.assertEqual(state.job.completed_image_ids, (first_id,))
+            self.assertEqual(len(state.candidates[first_id]), 1)
+            self.assertEqual(state.candidates.get(second_id, []), [])
+            self.assertFalse((state.cache_dir / second_id / "candidate.png").exists())
+
+    def test_detect_job_can_be_cancelled_with_the_shared_control(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", total=1)
+        state.job_control = server_module.JobControl()
+        state.request_cancel()
+        self.assertTrue(state.job_control.cancel_requested.is_set())
+
     def test_cancelled_or_failed_apply_reports_only_successfully_completed_images(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1566,7 +1602,7 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('event.buttons & 1', app)
         self.assertIn('event.shiftKey', app)
         self.assertIn('canvas.addEventListener("contextmenu"', app)
-        self.assertIn('confidence: detectionConfidence()', app)
+        self.assertIn('async function startDetectionFromDialog', app)
         self.assertIn('data-i18n="editor.undo"', page)
         self.assertIn('id="detectCurrentButton"', page)
         self.assertIn('id="clearCurrentMasksButton"', page)
@@ -1597,6 +1633,10 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="applyOverwriteMode"', page)
         self.assertIn('id="applyTemporarySourceNote"', page)
         self.assertIn('id="detectAllButton"', page)
+        self.assertIn('id="detectDialog"', page)
+        self.assertIn('id="detectConfidenceRange"', page)
+        self.assertIn('id="detectConfidenceNumber"', page)
+        self.assertIn('id="detectStartButton"', page)
         self.assertIn('id="saveButton"', page)
         self.assertIn('id="galleryMaskedTab"', page)
         self.assertIn('id="saveAllButton"', page)
@@ -1646,10 +1686,16 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('gallery.detectAll', dictionary)
         self.assertIn('editor.clearMasks', dictionary)
         self.assertIn('confirm.clearCurrent.message', dictionary)
-        self.assertIn("現在の画像一覧", dictionary["confirm.clearCatalog.message"])
+        self.assertIn("通常の参照元画像は削除しません", dictionary["confirm.clearCatalog.message"])
+        self.assertIn("焼き込み済みのモザイク画素は復元しません", dictionary["confirm.clearAllMasks.message"])
+        self.assertNotIn("画像一覧を閉じる", page)
         self.assertEqual(dictionary["folder.browse"], "画像を追加")
         self.assertEqual(dictionary["folder.load"], "フォルダーを読み込む")
-        self.assertIn("batch.more", dictionary)
+        self.assertIn("batch.clear", dictionary)
+        self.assertNotIn("batch.more", dictionary)
+        self.assertIn('async function cancelDetection()', app)
+        self.assertIn('"/api/job/cancel"', app)
+        self.assertIn('control.cancel_requested.is_set()', (root / "server.py").read_text(encoding="utf-8"))
         self.assertIn('navigation.shortcuts', dictionary)
         self.assertIn('overview.searchPlaceholder', dictionary)
         self.assertIn('getAsFileSystemHandle', app)

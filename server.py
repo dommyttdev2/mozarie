@@ -1004,8 +1004,8 @@ class StudioState:
 
     def request_cancel(self) -> Job:
         with self.lock:
-            if self.job.kind != "apply" or self.job.state not in {"running", "paused"}:
-                raise ClientError("キャンセルできるモザイク適用はありません。")
+            if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "paused"}:
+                raise ClientError("キャンセルできる処理はありません。")
             assert self.job_control is not None
             self.job_control.cancel_requested.set()
             self.job_control.pause_requested.clear()
@@ -1150,6 +1150,10 @@ class StudioState:
                 self._set_job_current(record.relative_path, index - 1, job_generation, catalog_generation)
                 with self.inference_lock:
                     candidates = self._detect_image(models, record, confidence)
+                if control is not None and control.cancel_requested.is_set():
+                    self._discard_candidates(candidates)
+                    self._cancel_job(job_generation, catalog_generation)
+                    return
                 with self.lock:
                     if not self._job_is_current(job_generation, catalog_generation):
                         self._discard_candidates(candidates)
@@ -1162,6 +1166,7 @@ class StudioState:
                         if candidate.source != "boundary":
                             candidate.mask_path.unlink(missing_ok=True)
                     self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                self._mark_image_completed(record.image_id, job_generation, catalog_generation)
                 self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.

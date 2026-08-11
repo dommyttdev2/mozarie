@@ -14,16 +14,33 @@ const contentTypes = {
 };
 
 function startFixtureServer() {
+  const detectRequests = [];
   const server = http.createServer(async (request, response) => {
     const requestPath = new URL(request.url, "http://127.0.0.1").pathname;
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ images: [], root: "" }));
+      response.end(JSON.stringify({
+        images: [{ id: "sample", relativePath: "sample.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }],
+        root: "G:/fixture",
+      }));
       return;
     }
     if (requestPath === "/api/job") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ state: "idle" }));
+      return;
+    }
+    if (requestPath === "/api/detect" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      detectRequests.push(JSON.parse(body));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (requestPath.startsWith("/api/thumbnail/") || requestPath.startsWith("/api/image/")) {
+      response.writeHead(200, { "Content-Type": "image/svg+xml" });
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
       return;
     }
 
@@ -34,8 +51,9 @@ function startFixtureServer() {
       return;
     }
     try {
+      const body = await fs.readFile(filePath);
       response.writeHead(200, { "Content-Type": contentTypes[path.extname(filePath)] || "application/octet-stream" });
-      response.end(await fs.readFile(filePath));
+      response.end(body);
     } catch {
       response.writeHead(404).end();
     }
@@ -46,7 +64,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}` });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests });
     });
   });
 }
@@ -59,8 +77,9 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
+  let detectRequests;
   try {
-    ({ server, url: fixtureUrl } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests } = await startFixtureServer());
     browser = await chromium.launch();
     const page = await browser.newPage();
     const pageErrors = [];
@@ -82,6 +101,16 @@ async function main() {
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible");
     }
     await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator("#detectAllButton").click();
+    assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
+    assert.equal(detectRequests.length, 0, "opening settings must not start detection");
+    await page.locator("#detectConfidenceNumber").fill("0.67");
+    await page.locator("#detectStartButton").click();
+    await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
+    await page.waitForTimeout(50);
+    assert.equal(detectRequests.length, 1, "starting settings should call detection once");
+    assert.equal(detectRequests[0].confidence, 0.67, "dialog threshold should be submitted");
+    await page.reload({ waitUntil: "networkidle" });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");
     assert.equal(await menu.evaluate((element) => element.matches(":popover-open")), false, "the picker menu should initially be closed");

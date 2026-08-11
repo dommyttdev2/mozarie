@@ -40,7 +40,7 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectCancelButton", "detectStartButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
   "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote",
@@ -80,7 +80,7 @@ const document = {
     : (elements.get(selector) || element()),
   querySelectorAll: (selector) => {
     if (selector === "button, input, select, textarea") return [...elements.values()].filter((item) => item.id);
-    if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog")];
+    if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog"), elements.get("#detectDialog")];
     return [];
   },
   createElement: (tag) => tag === "canvas" ? {
@@ -112,9 +112,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -164,6 +164,43 @@ function keyEvent(key, options = {}) {
   state.translations["review.unreviewed"] = "Unreviewed";
   state.translations["review.reviewedBadge"] = "Reviewed badge";
   state.translations["review.unreviewedBadge"] = "Unreviewed badge";
+  state.translations["gallery.detectAll"] = "Detect all";
+  state.translations["detectDialog.target"] = "Target: {count}";
+  state.translations["detectDialog.stop"] = "Stop detection";
+  state.translations["detectDialog.stopping"] = "Stopping...";
+  state.translations["status.detectCancelling"] = "Stopping after current image";
+  state.translations["status.detectCancelled"] = "Stopped. {completed} complete.";
+  state.images = [loadedImage];
+  state.job = null;
+  state.detectCancelRequested = false;
+  updateActionButtons();
+  const requestsBeforeDetectionDialog = requests.length;
+  elements.get("#detectAllButton").click();
+  assert.equal(elements.get("#detectDialog").open, true, "detect all should open settings before starting");
+  assert.equal(requests.length, requestsBeforeDetectionDialog, "opening settings must not call /api/detect");
+  assert.equal(elements.get("#detectTargetCount").textContent, "Target: 1");
+  elements.get("#detectConfidenceNumber").value = "0.67";
+  const startDetection = startDetectionFromDialog({ preventDefault() {} });
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await startDetection;
+  assert.equal(requests.at(-1).path, "/api/detect");
+  assert.equal(JSON.parse(requests.at(-1).options.body).confidence, 0.67);
+  assert.equal(elements.get("#confidence").value, "0.67", "dialog confidence should synchronize to the right pane");
+  updateActionButtons();
+  assert.equal(elements.get("#detectAllButton").disabled, false, "stop must remain available while detecting");
+  assert.equal(elements.get("#detectCurrentButton").disabled, true);
+  assert.equal(elements.get("#saveAllButton").disabled, true);
+  const cancelDetectionRequest = cancelDetection();
+  assert.equal(elements.get("#detectAllButton").disabled, true, "stop button disables while cancellation is pending");
+  assert.equal(elements.get("#detectAllButton").textContent, "Stopping...");
+  resolveFetch({ ok: true, json: async () => ({ kind: "detect", state: "running" }) });
+  await cancelDetectionRequest;
+  assert.equal(requests.at(-1).path, "/api/job/cancel");
+  state.job = null;
+  state.detectCancelRequested = false;
+  updateActionButtons();
+  fetchCalls = 0;
+  requests.length = 0;
   state.currentImage = { width: 100, height: 80 };
   const clampedLow = clampPoint({ x: -0.5, y: 80.5 });
   assert.equal(clampedLow.x, 0);

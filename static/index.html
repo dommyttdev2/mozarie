@@ -106,7 +106,7 @@
           <span data-i18n="detection.confidence">判定しきい値</span>
           <output id="confidenceValue">0.50</output>
         </label>
-        <input id="confidence" type="range" min="0.10" max="0.90" step="0.05" value="0.50">
+        <input id="confidence" type="range" min="0.10" max="0.90" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
       </section>
       <div class="pane-heading candidates-heading">
@@ -144,10 +144,10 @@
     <output id="batchImageCount" class="batch-count">0件</output>
     <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
     <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存...</button>
-    <button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
+    <button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.clear">一括クリア</button>
     <div id="batchMoreMenu" class="batch-more-menu" popover>
-      <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像の候補を消去...</button>
-      <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">画像一覧を閉じる...</button>
+      <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
+      <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
     </div>
   </footer>
 
@@ -176,6 +176,26 @@
       <div class="dialog-actions">
         <button value="cancel" data-i18n="dialog.cancel">キャンセル</button>
         <button id="confirmAccept" value="confirm" class="danger" data-i18n="dialog.confirm">実行</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="detectDialog" class="modal-dialog detect-dialog">
+    <form id="detectForm" class="dialog-body">
+      <h2 data-i18n="detectDialog.title">自動検出の設定</h2>
+      <p id="detectTargetCount" class="muted"></p>
+      <label class="form-row">
+        <span data-i18n="detection.confidence">判定しきい値</span>
+        <span class="threshold-dialog-control">
+          <input id="detectConfidenceRange" type="range" min="0.10" max="0.90" step="0.01" value="0.50">
+          <input id="detectConfidenceNumber" type="number" min="0.10" max="0.90" step="0.01" value="0.50">
+        </span>
+      </label>
+      <p class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
+      <p class="fixed-note" data-i18n="detectDialog.rerunNote">再検出では自動候補だけを置き換え、境界候補と手描きの範囲は残ります。</p>
+      <div class="dialog-actions">
+        <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
+        <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>
       </div>
     </form>
   </dialog>

@@ -10,7 +10,8 @@ const state = {
   pointer: null, hover: null, history: [], historyIndex: -1,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, imageGeneration: 0, catalogGeneration: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
-  detectionTargetIds: [], pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
+  detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
+  pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
 };
 
@@ -71,7 +72,16 @@ function setStatus(message, kind = "") {
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
 function isCurrentGeneration(generation) { return state.imageGeneration === generation; }
-function detectionConfidence() { return Number($("#confidence").value); }
+function normaliseDetectionConfidence(value) { return Math.max(0.10, Math.min(0.90, Number(value) || 0.50)); }
+function detectionConfidence() { return normaliseDetectionConfidence($("#confidence").value); }
+function setDetectionConfidence(value) {
+  const confidence = normaliseDetectionConfidence(value);
+  $("#confidence").value = confidence.toFixed(2);
+  $("#confidenceValue").textContent = confidence.toFixed(2);
+  $("#detectConfidenceRange").value = confidence.toFixed(2);
+  $("#detectConfidenceNumber").value = confidence.toFixed(2);
+}
+function activeDetection() { return state.job?.kind === "detect" && state.job?.state === "running"; }
 function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
@@ -184,6 +194,7 @@ function handleReviewStorageEvent(event) {
 function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;
+  const detecting = activeDetection();
   const hasImage = Boolean(state.currentId && state.currentImage);
   const controls = [...document.querySelectorAll("button, input, select, textarea")];
   if (!locked) {
@@ -195,7 +206,10 @@ function updateActionButtons() {
     }
   }
   $("#pickFolder").disabled = running || state.importing;
-  $("#detectAllButton").disabled = running || state.images.length === 0;
+  const detectAllButton = $("#detectAllButton");
+  detectAllButton.textContent = t(detecting ? (state.detectCancelRequested ? "detectDialog.stopping" : "detectDialog.stop") : "gallery.detectAll");
+  detectAllButton.classList.toggle("detect-stop", detecting);
+  detectAllButton.disabled = detecting ? state.detectCancelRequested : (running || state.images.length === 0);
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
   $("#clearAllMasksButton").disabled = running || state.images.length === 0;
@@ -214,6 +228,7 @@ function updateActionButtons() {
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
+    if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
   }
@@ -786,14 +801,43 @@ function buildCombinedMask() {
   return combinedCanvas.toDataURL("image/png");
 }
 
-async function runDetection(imageIds) {
+function openDetectionDialog(imageIds) {
+  if (!imageIds.length || isBusy() || state.importing) return;
+  state.pendingDetectionTargetIds = [...imageIds];
+  setDetectionConfidence(detectionConfidence());
+  $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
+  $("#detectDialog").showModal();
+}
+
+async function runDetection(imageIds, confidence = detectionConfidence()) {
   if (!imageIds.length || isBusy() || state.importing) return;
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence: detectionConfidence() }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence }) });
     state.detectionTargetIds = [...imageIds];
+    state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
     updateProgress(state.job); setStatus(t("status.detectStarted"), "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
+}
+
+async function startDetectionFromDialog(event) {
+  event.preventDefault();
+  const imageIds = state.pendingDetectionTargetIds;
+  if (!imageIds.length) return;
+  const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
+  setDetectionConfidence(confidence);
+  $("#detectDialog").close();
+  state.pendingDetectionTargetIds = [];
+  await runDetection(imageIds, confidence);
+}
+
+async function cancelDetection() {
+  if (!activeDetection() || state.detectCancelRequested) return;
+  state.detectCancelRequested = true;
+  updateActionButtons();
+  setStatus(t("status.detectCancelling"), "running");
+  try { await api("/api/job/cancel", { method: "POST", body: JSON.stringify({}) }); }
+  catch (error) { state.detectCancelRequested = false; updateActionButtons(); setStatus(error.message, "error"); }
 }
 
 function saveCurrent() {
@@ -963,7 +1007,7 @@ async function finishApplyJob(job) {
 }
 
 function isTerminalDetection(job, previous) {
-  if (job.kind !== "detect" || job.state !== "complete" || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
+  if (job.kind !== "detect" || !["complete", "cancelled"].includes(job.state) || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
   const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "paused"].includes(previous.state);
   return observedRunning || Number(job.startedAt) >= state.pageLoadedAt;
 }
@@ -971,7 +1015,10 @@ function isTerminalDetection(job, previous) {
 async function finishDetectionJob(job) {
   const generation = ++state.imageGeneration;
   const keepCurrent = state.currentId;
-  const targetIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
+  const requestedIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
+  const targetIds = Array.isArray(job.completedImageIds) && job.completedImageIds.length
+    ? job.completedImageIds
+    : (job.state === "complete" ? requestedIds : []);
   const data = await api("/api/images");
   if (!isCurrentGeneration(generation)) return;
   state.images = data.images;
@@ -979,6 +1026,7 @@ async function finishDetectionJob(job) {
   markImagesUnreviewed(targetIds, false);
   state.handledDetectionStartedAt = job.startedAt;
   state.detectionTargetIds = [];
+  state.detectCancelRequested = false;
   if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
     await selectImage(keepCurrent, true);
   }
@@ -1001,10 +1049,11 @@ async function pollJob() {
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
       if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
     } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
+      state.detectCancelRequested = false;
       setStatus(job.error || t("error.background"), "error");
   } else if (isTerminalDetection(job, previous)) {
     await finishDetectionJob(job);
-      setStatus(t("status.detectDone"));
+      setStatus(job.state === "cancelled" ? t("status.detectCancelled", { completed: job.completed }) : t("status.detectDone"));
     }
   } catch { /* Keep the current useful message if the local server is unavailable. */ }
 }
@@ -1237,8 +1286,11 @@ function bindEvents() {
     if (event.dataTransfer?.files?.length) void importDroppedFiles(event);
   });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
-  $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
-  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));
+  $("#detectAllButton").addEventListener("click", () => {
+    if (activeDetection()) void cancelDetection();
+    else openDetectionDialog(state.images.map((image) => image.id));
+  });
+  $("#detectCurrentButton").addEventListener("click", () => state.currentId && openDetectionDialog([state.currentId]));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -1278,7 +1330,12 @@ function bindEvents() {
     rebuildMosaicPreview(); updateBlockSizeDisplay(); render();
   });
   $("#applyDivisor").addEventListener("input", () => { if (!isBusy() && !state.importing) updateBlockSizeDisplay(); });
-  $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) $("#confidenceValue").textContent = Number($("#confidence").value).toFixed(2); });
+  $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
+  $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
+  $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
+  $("#detectForm").addEventListener("submit", startDetectionFromDialog);
+  $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
+  $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
