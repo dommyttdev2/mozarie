@@ -14,6 +14,7 @@ const state = {
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(),
   manualMaskPresent: false, manualEnabled: true,
+  galleryNodes: new Map(), overviewNodes: new Map(), browserSave: null, pollInFlight: null, pollFailures: 0,
 };
 
 const canvas = $("#editorCanvas");
@@ -53,7 +54,11 @@ async function loadTranslations() {
 }
 
 function api(path, options = {}) {
-  return fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options })
+  const token = document.querySelector('meta[name="lets-censoring-token"]')?.content || "";
+  return fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", "X-Lets-Censoring-Token": token, ...(options.headers || {}) },
+  })
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -264,7 +269,20 @@ function resetCatalog(images, root) {
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
   state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
+  state.candidateUpdateVersions.clear(); state.candidateDeleting.clear();
+  discardCatalogNodes(state.galleryNodes, $("#gallery"));
+  discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
   renderCatalogViews(); clearEditor();
+}
+
+function discardCatalogNodes(nodes, container) {
+  for (const item of nodes.values()) {
+    const preview = item.querySelector?.("img");
+    if (preview) preview.src = "";
+    item.remove?.();
+  }
+  nodes.clear();
+  container.textContent = "";
 }
 
 function updateProgress(job) {
@@ -301,7 +319,6 @@ function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
   const gallery = $("#gallery");
   const scrollTop = gallery.scrollTop;
-  gallery.textContent = "";
   const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
   $("#imageCount").textContent = t("gallery.count", { count: visibleImages.length });
   $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
@@ -310,19 +327,28 @@ function renderGallery(force = false) {
   $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
   $("#batchImageCount").textContent = t("gallery.count", { count: state.images.length });
   const template = $("#galleryItemTemplate");
+  const visibleIds = new Set(visibleImages.map((image) => image.id));
+  for (const [imageId, item] of state.galleryNodes) {
+    if (!visibleIds.has(imageId)) { item.remove?.(); state.galleryNodes.delete(imageId); }
+  }
   for (const image of visibleImages) {
-    const item = template.content.firstElementChild.cloneNode(true);
+    let item = state.galleryNodes.get(image.id);
+    if (!item) {
+      item = template.content.firstElementChild.cloneNode(true);
+      state.galleryNodes.set(image.id, item);
+    }
     item.dataset.id = image.id;
     item.classList.toggle("selected", image.id === state.currentId);
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
-    preview.src = `/api/thumbnail/${encodeURIComponent(image.id)}`;
+    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
+    if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
     preview.alt = image.relativePath;
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
     item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
-    item.addEventListener("click", () => selectImage(image.id));
+    item.onclick = () => selectImage(image.id);
     gallery.append(item);
   }
   gallery.scrollTop = scrollTop;
@@ -371,19 +397,28 @@ function renderOverview(force = false) {
   if (!grid) return;
   syncOverviewFolders();
   const visibleImages = overviewImages();
-  grid.textContent = "";
   $("#overviewCount").textContent = t("overview.count", { visible: visibleImages.length, total: state.images.length });
   document.querySelectorAll(".overview-filter").forEach((button) => {
     const active = button.dataset.overviewFilter === state.overviewFilter;
     button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active));
   });
   const template = $("#overviewItemTemplate");
+  const visibleIds = new Set(visibleImages.map((image) => image.id));
+  for (const [imageId, item] of state.overviewNodes) {
+    if (!visibleIds.has(imageId)) { item.remove?.(); state.overviewNodes.delete(imageId); }
+  }
   for (const image of visibleImages) {
-    const item = template.content.firstElementChild.cloneNode(true);
+    let item = state.overviewNodes.get(image.id);
+    if (!item) {
+      item = template.content.firstElementChild.cloneNode(true);
+      state.overviewNodes.set(image.id, item);
+    }
     item.dataset.id = image.id;
     item.classList.toggle("selected", image.id === state.currentId);
     const preview = item.querySelector("img");
-    preview.src = `/api/thumbnail/${encodeURIComponent(image.id)}`; preview.alt = image.relativePath;
+    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
+    if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
+    preview.alt = image.relativePath;
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
     item.querySelector(".overview-item-path").textContent = image.relativePath;
     const statuses = [];
@@ -393,7 +428,7 @@ function renderOverview(force = false) {
     stateLabel.textContent = statuses.join(" / ");
     stateLabel.classList.toggle("reviewed", isReviewed(image));
     stateLabel.classList.toggle("masked", imageHasMask(image));
-    item.addEventListener("click", () => { setViewMode("edit"); void selectImage(image.id); });
+    item.onclick = () => { setViewMode("edit"); void selectImage(image.id); };
     grid.append(item);
   }
 }
@@ -403,7 +438,12 @@ function setViewMode(mode, refreshGallery = true) {
   const active = mode === "overview";
   $(".studio-grid").classList.toggle("overview-active", active);
   $("#overviewPane").hidden = !active;
-  if (!active) { if (refreshGallery) renderGallery(true); resizeRenderCanvas(); focusCanvas(); return; }
+  if (!active) {
+    discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
+    if (refreshGallery) renderGallery(true);
+    resizeRenderCanvas(); focusCanvas(); return;
+  }
+  discardCatalogNodes(state.galleryNodes, $("#gallery"));
   renderOverview(true);
   requestAnimationFrame(() => {
     const current = [...$("#overviewGrid").children].find((item) => item.dataset.id === state.currentId);
@@ -509,7 +549,9 @@ function loadImage(source) {
 }
 
 async function loadCandidateMask(source) {
-  const response = await fetch(source);
+  const response = await fetch(source, {
+    headers: { "X-Lets-Censoring-Token": document.querySelector('meta[name="lets-censoring-token"]')?.content || "" },
+  });
   if (!response.ok) {
     const error = new Error(t("error.imageLoad"));
     error.status = response.status;
@@ -593,9 +635,16 @@ function updateCandidateStatus() {
 
 function saveDraft() {
   if (!state.currentId || !state.currentImage) return;
+  const hasAdd = canvasHasPixels(addCtx, addCanvas);
+  const hasExclusion = canvasHasPixels(exclusionCtx, exclusionCanvas);
+  if (!hasAdd && !hasExclusion) {
+    state.drafts.delete(state.currentId);
+    return;
+  }
   const visibility = captureCurrentMaskVisibility();
   state.drafts.set(state.currentId, {
-    add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png"),
+    add: hasAdd ? addCanvas.toDataURL("image/png") : "",
+    exclusion: hasExclusion ? exclusionCanvas.toDataURL("image/png") : "",
     manualEnabled: state.manualEnabled, manualMaskPresent: state.manualMaskPresent,
     visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
   });
@@ -607,9 +656,12 @@ function restoreDraft(imageId, generation) {
   state.manualEnabled = draft?.manualEnabled !== false;
   state.manualMaskPresent = false;
   if (!draft) { pushHistory(); updateCandidateStatus(); renderCandidates(); return; }
-  Promise.all([loadImage(draft.add), loadImage(draft.exclusion)]).then(([addImage, exclusionImage]) => {
+  const addImagePromise = draft.add ? loadImage(draft.add) : Promise.resolve(null);
+  const exclusionImagePromise = draft.exclusion ? loadImage(draft.exclusion) : Promise.resolve(null);
+  Promise.all([addImagePromise, exclusionImagePromise]).then(([addImage, exclusionImage]) => {
     if (state.currentId !== imageId || state.imageGeneration !== generation) return;
-    addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0);
+    if (addImage) addCtx.drawImage(addImage, 0, 0);
+    if (exclusionImage) exclusionCtx.drawImage(exclusionImage, 0, 0);
     state.manualMaskPresent = draft.manualMaskPresent ?? canvasHasPixels(addCtx, addCanvas);
     pushHistory(); refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
   });
@@ -1129,21 +1181,239 @@ function draftPayload(imageIds) {
   return drafts;
 }
 
+async function pickOutputDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") {
+    throw new Error(t("error.directoryPickerUnsupported"));
+  }
+  try {
+    return await window.showDirectoryPicker({ id: "lets-censoring-output", mode: "readwrite" });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(t("error.directoryPickerCancelled"));
+    throw error;
+  }
+}
+
+async function outputDirectoryFor(root, relativePath) {
+  let directory = root;
+  const parts = String(relativePath).replaceAll("\\", "/").split("/").slice(0, -1).filter(Boolean);
+  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
+  return directory;
+}
+
+async function uniqueOutputFile(directory, sourceName, suffix) {
+  const dot = sourceName.lastIndexOf(".");
+  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
+  const extension = dot > 0 ? sourceName.slice(dot) : "";
+  for (let number = 1; number < 10000; number += 1) {
+    const name = `${stem}${suffix}${number === 1 ? "" : `_${number}`}${extension}`;
+    try {
+      await directory.getFileHandle(name);
+    } catch (error) {
+      if (error?.name !== "NotFoundError") throw error;
+      const reservedAt = Date.now();
+      const handle = await directory.getFileHandle(name, { create: true });
+      const file = await handle.getFile();
+      if (file.size !== 0 || file.lastModified + 2000 < reservedAt) continue;
+      return { name, handle };
+    }
+  }
+  throw new Error(t("error.outputNameExhausted"));
+}
+
+async function writeBrowserSaveOutput(destination, entry, suffix, bytes) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const output = await uniqueOutputFile(destination, entry.relativePath.split("/").pop(), suffix);
+    let stream = null;
+    try {
+      stream = await output.handle.createWritable({ mode: "exclusive", keepExistingData: false });
+      await stream.write(bytes);
+      await stream.close();
+      return output;
+    } catch (error) {
+      try { await stream?.abort?.(); } catch { /* The source image remains unchanged. */ }
+      if (error?.name === "InvalidStateError" || error?.name === "NoModificationAllowedError") continue;
+      throw error;
+    }
+  }
+  throw new Error(t("error.outputNameExhausted"));
+}
+
+async function waitForBrowserSave(save) {
+  while (save.paused && !save.cancelled) await new Promise((resolve) => setTimeout(resolve, 100));
+  return !save.cancelled;
+}
+
+function showBrowserSaveProgress(save, entry) {
+  state.job = { kind: "apply", state: save.paused ? "paused" : "running", total: save.entries.length, completed: save.completed, current: entry?.relativePath || "" };
+  $("#applyProgress").max = Math.max(1, save.entries.length);
+  $("#applyProgress").value = save.completed;
+  $("#applyCurrentName").textContent = entry?.relativePath || "";
+  $("#applyProgressText").textContent = t("apply.progress", { completed: save.completed, total: save.entries.length });
+  $("#applyPauseButton").textContent = t(save.paused ? "apply.resume" : "apply.pause");
+}
+
+function reconcileStoredMaskStatuses() {
+  const remainingImageIds = new Set(state.images.map((image) => image.id));
+  for (const imageId of state.maskStatus.keys()) {
+    if (!remainingImageIds.has(imageId)) state.maskStatus.delete(imageId);
+  }
+  for (const image of state.images) {
+    const draft = state.drafts.get(image.id);
+    if (!draft) {
+      state.maskStatus.delete(image.id);
+      continue;
+    }
+    const hasVisibleManualAdd = Boolean(draft.add)
+      && draft.manualEnabled !== false
+      && draft.manualVisible !== false;
+    if (hasVisibleManualAdd) {
+      state.maskStatus.set(image.id, true);
+      continue;
+    }
+    if (!draft.exclusion) {
+      state.maskStatus.delete(image.id);
+      continue;
+    }
+    const excludesAllCandidates = Array.isArray(draft.visibleCandidateIds) && draft.visibleCandidateIds.length === 0;
+    if (Number(image.enabledCandidateCount || 0) === 0 || excludesAllCandidates) {
+      state.maskStatus.set(image.id, false);
+    }
+  }
+}
+
+function reconcileBrowserSaveState() {
+  reconcileStoredMaskStatuses();
+  if (state.currentId && !state.images.some((image) => image.id === state.currentId)) {
+    state.currentId = null;
+    state.currentImage = null;
+    state.candidates = [];
+    state.candidateImages.clear();
+    clearEditor();
+  } else if (state.currentId) {
+    refreshMaskStatus();
+    renderCandidates();
+    render();
+  }
+  renderCatalogViews();
+}
+
+async function runBrowserSave(directory, imageIds, suffix, deleteOriginal) {
+  const result = await api("/api/save/prepare", {
+    method: "POST",
+    body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal }),
+  });
+  const save = { directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false };
+  state.browserSave = save;
+  state.saving = true;
+  state.applyRunning = true;
+  $("#applySettings").disabled = true;
+  $("#applyProgressPanel").hidden = false;
+  $("#applyStartButton").hidden = true;
+  $("#applyCloseButton").hidden = true;
+  $("#applyPauseButton").hidden = false;
+  $("#applyCancelButton").hidden = false;
+  updateActionButtons();
+  try {
+    await navigator.locks.request("lets-censoring-output", { mode: "exclusive" }, async () => {
+      for (const entry of save.entries) {
+        if (!await waitForBrowserSave(save)) break;
+        showBrowserSaveProgress(save, entry);
+        const draft = draftPayload([entry.imageId])[entry.imageId] || null;
+        const response = await fetch("/api/save/render", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Lets-Censoring-Token": document.querySelector('meta[name="lets-censoring-token"]')?.content || "",
+          },
+          body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || t("error.requestFailed"));
+        }
+        const saveToken = response.headers?.get("X-Lets-Censoring-Save-Token") || "";
+        if (!await waitForBrowserSave(save)) break;
+        const destination = await outputDirectoryFor(directory, entry.relativePath);
+        await writeBrowserSaveOutput(destination, entry, suffix, await response.arrayBuffer());
+        if (!await waitForBrowserSave(save)) {
+          break;
+        }
+        const committed = await api("/api/save/commit", {
+          method: "POST",
+          body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: entry.deleteOriginal, saveToken }),
+        });
+        if (committed.cleared) {
+          state.drafts.delete(entry.imageId);
+          if (state.currentId === entry.imageId) {
+            state.candidates = [];
+            state.candidateImages.clear();
+            state.manualMaskPresent = false;
+            state.manualEnabled = true;
+            resetCurrentDraft();
+          }
+        }
+        if (committed.stale) save.stale += 1;
+        state.images = committed.images;
+        save.completed += 1;
+        showBrowserSaveProgress(save, entry);
+      }
+    });
+    const cancelled = save.cancelled;
+    setApplyResult(cancelled
+      ? t("apply.cancelled", { completed: save.completed })
+      : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed })));
+  } finally {
+    state.saving = false;
+    state.applyRunning = false;
+    state.browserSave = null;
+    state.job = { kind: "idle", state: "idle" };
+    $("#applyPauseButton").hidden = true;
+    $("#applyCancelButton").hidden = true;
+    $("#applyCloseButton").hidden = false;
+    reconcileBrowserSaveState();
+    updateActionButtons();
+  }
+}
+
 async function startApplyFromDialog(event) {
   event.preventDefault();
-  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
-  if (isBusy() || state.importing) return;
   const imageIds = state.applyTargetIds;
   if (!imageIds.length) return;
   const copy = selectedSaveMode() === "copy" || applyTargetsContainSessionImage();
   const suffix = $("#applySuffix").value.trim();
   if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
+  let outputDirectory = null;
+  if (copy) {
+    try {
+      // This must remain directly inside the submit event for browser user activation.
+      outputDirectory = await pickOutputDirectory();
+    } catch (error) {
+      setApplyResult(error.message, true);
+      return;
+    }
+  }
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+  if (isBusy() || state.importing) return;
+  if (copy) {
+    try {
+      await runBrowserSave(outputDirectory, imageIds, suffix, $("#deleteOriginal").checked);
+    } catch (error) {
+      setApplyResult(error.message, true);
+      state.saving = false;
+      state.applyRunning = false;
+      state.browserSave = null;
+      $("#applyPauseButton").hidden = true;
+      $("#applyCancelButton").hidden = true;
+      $("#applyCloseButton").hidden = false;
+      updateActionButtons();
+    }
+    return;
+  }
   try {
     const result = await api("/api/apply", {
       method: "POST",
       body: JSON.stringify({
-        imageIds, divisor: Number($("#applyDivisor").value), mode: copy ? "copy" : "overwrite",
-        suffix: copy ? suffix : "_censored", deleteOriginal: copy && $("#deleteOriginal").checked,
+        imageIds, divisor: Number($("#applyDivisor").value),
         drafts: draftPayload(imageIds),
       }),
     });
@@ -1161,6 +1431,13 @@ async function startApplyFromDialog(event) {
 }
 
 async function controlApply(action) {
+  if (state.browserSave) {
+    if (action === "cancel") state.browserSave.cancelled = true;
+    if (action === "pause") state.browserSave.paused = true;
+    if (action === "resume") state.browserSave.paused = false;
+    showBrowserSaveProgress(state.browserSave, state.browserSave.entries[state.browserSave.completed]);
+    return;
+  }
   try { await api(`/api/job/${action}`, { method: "POST", body: JSON.stringify({}) }); }
   catch (error) { setApplyResult(error.message, true); }
 }
@@ -1258,8 +1535,11 @@ async function finishDetectionJob(job) {
 }
 
 async function pollJob() {
+  if (state.browserSave) return;
+  if (state.pollInFlight) return state.pollInFlight;
+  state.pollInFlight = (async () => {
   try {
-    const job = await api("/api/job"); const previous = state.job; state.job = job; updateProgress(job);
+    const job = await api("/api/job"); const previous = state.job; state.job = job; state.pollFailures = 0; updateProgress(job);
     const terminalApply = isTerminalApply(job);
     if (terminalApply) {
       await finishApplyJob(job);
@@ -1274,12 +1554,19 @@ async function pollJob() {
       if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
     } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
       state.detectCancelRequested = false;
+      await finishDetectionJob(job);
       setStatus(job.error || t("error.background"), "error");
   } else if (isTerminalDetection(job, previous)) {
     await finishDetectionJob(job);
       setStatus(job.state === "cancelled" ? t("status.detectCancelled", { completed: job.completed }) : t("status.detectDone"));
     }
-  } catch { /* Keep the current useful message if the local server is unavailable. */ }
+  } catch (error) {
+    state.pollFailures += 1;
+    if (state.pollFailures >= 3) setStatus(t("error.connectionLost"), "error");
+  }
+  })();
+  try { return await state.pollInFlight; }
+  finally { state.pollInFlight = null; }
 }
 
 function setTool(tool) {
@@ -1373,13 +1660,14 @@ async function directFilesFromDrop(dataTransfer) {
   if (handles.length) {
     const files = [];
     async function collectHandle(handle, parent = "") {
+      if (!handle) return;
       const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
       if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), relativePath));
       else for await (const entry of handle.values()) await collectHandle(entry, relativePath);
     }
     for (const handlePromise of handles) {
       const handle = await handlePromise;
-      await collectHandle(handle);
+      if (handle) await collectHandle(handle);
     }
     return files;
   }
@@ -1427,7 +1715,14 @@ async function importFiles(files) {
       });
     }
     state.images = data.images; renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) {
+    try {
+      const latest = await api("/api/images");
+      state.images = latest.images;
+      renderCatalogViews();
+    } catch { /* Keep the import failure visible. */ }
+    setStatus(error.message, "error");
+  }
   finally { state.importing = false; updateActionButtons(); }
 }
 
@@ -1564,7 +1859,10 @@ function bindEvents() {
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
-  $("#applyPauseButton").addEventListener("click", () => controlApply(state.job?.state === "paused" ? "resume" : "pause"));
+  $("#applyPauseButton").addEventListener("click", () => {
+    const paused = state.browserSave ? state.browserSave.paused : state.job?.state === "paused";
+    controlApply(paused ? "resume" : "pause");
+  });
   $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
   $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
   $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });

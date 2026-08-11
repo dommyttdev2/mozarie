@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import cv2
-from PIL import Image, PngImagePlugin
+from PIL import Image, ImageOps, PngImagePlugin
 
 import sys
 
@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as server_module  # noqa: E402
 from server import (  # noqa: E402
     Candidate,
-    CACHE_DIR,
     ClientError,
     DEFAULT_DETECTION_CONFIDENCE,
     DetectionModels,
@@ -132,12 +131,6 @@ class MosaicStudioTests(unittest.TestCase):
         timer_class.assert_called_once_with(0.1, _open_browser, args=("http://127.0.0.1:8765",))
         self.assertTrue(timer.daemon)
         timer.start.assert_called_once_with()
-
-    def test_native_folder_picker_uses_new_dialog_flag_without_shellcon_attribute(self):
-        with patch("server._run_with_com", side_effect=lambda callback: callback()), \
-             patch("win32com.shell.shell.SHBrowseForFolder", return_value=None) as browse:
-            self.assertIsNone(server_module.choose_native_folder("保存先"))
-        self.assertEqual(browse.call_args.args[3], 0x0001 | 0x0040)
 
     def test_main_configures_logging_and_schedules_one_browser_open(self):
         fake_server = Mock()
@@ -286,6 +279,57 @@ class MosaicStudioTests(unittest.TestCase):
             with Image.open(path) as image:
                 image.load()
 
+    def test_exif_rotated_png_swaps_dimensions_and_preserves_other_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rotated.png"
+            exif = Image.Exif()
+            exif[274] = 6
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("prompt", '{"seed": 1}')
+            metadata.add_itxt("workflow", '{"nodes": []}', lang="ja", tkey="workflow")
+            Image.new("RGB", (40, 20), "#6688aa").save(path, format="PNG", exif=exif.tobytes(), pnginfo=metadata)
+            source = path.read_bytes()
+            record = ImageRecord("test", path, path.name, 20, 40, path.stat().st_mtime_ns)
+            mask = np.zeros((40, 20), dtype=np.uint8)
+            mask[4:12, 4:12] = 255
+
+            output = server_module.render_with_mask(record, mask, 4)
+
+            self.assertEqual(
+                png_ancillary_manifest(source, exclude={b"eXIf"}),
+                png_ancillary_manifest(output, exclude={b"eXIf"}),
+            )
+            with Image.open(io.BytesIO(output)) as saved:
+                self.assertEqual(saved.size, (20, 40))
+                self.assertEqual(saved.getexif().get(274), 1)
+                self.assertEqual(saved.text["prompt"], '{"seed": 1}')
+                self.assertEqual(saved.info["workflow"], '{"nodes": []}')
+                saved.load()
+
+    def test_exif_rotated_webp_swaps_dimensions_and_preserves_other_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rotated.webp"
+            exif = Image.Exif()
+            exif[274] = 6
+            Image.new("RGB", (40, 20), "#6688aa").save(
+                path, format="WEBP", exif=exif.tobytes(), icc_profile=b"Mosaic ICC", xmp=b"<x:xmpmeta>test</x:xmpmeta>",
+            )
+            source = path.read_bytes()
+            record = ImageRecord("test", path, path.name, 20, 40, path.stat().st_mtime_ns)
+            mask = np.zeros((40, 20), dtype=np.uint8)
+            mask[4:12, 4:12] = 255
+
+            output = server_module.render_with_mask(record, mask, 4)
+
+            self.assertEqual(
+                webp_metadata_manifest(source, exclude={b"EXIF"}),
+                webp_metadata_manifest(output, exclude={b"EXIF"}),
+            )
+            with Image.open(io.BytesIO(output)) as saved:
+                self.assertEqual(saved.size, (20, 40))
+                self.assertEqual(saved.getexif().get(274), 1)
+                saved.load()
+
     def test_metadata_mismatch_does_not_replace_original_jpeg(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.jpg"
@@ -326,29 +370,6 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(records, [record])
         self.assertEqual(Image.open(record.path).text["prompt"], '{"seed": 123}')
         self.assertEqual(Image.open(record.path).text["workflow"], '{"nodes": []}')
-
-    def test_rootless_save_chooses_an_output_folder_and_keeps_png_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output_root = Path(directory) / "saved"
-            output_root.mkdir()
-            raw_buffer = io.BytesIO()
-            metadata = PngImagePlugin.PngInfo()
-            metadata.add_text("prompt", '{"seed": 123}')
-            metadata.add_text("workflow", '{"nodes": []}')
-            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG", pnginfo=metadata)
-            state = self.new_state()
-            image_id = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]["id"]
-
-            with patch("server.choose_native_folder", return_value=output_root) as picker:
-                output = state.save_image(image_id, self._mask(16, 16), 100)
-
-            self.assertEqual(picker.call_count, 1)
-            self.assertEqual(output, output_root / "dropped_censored.png")
-            self.assertEqual(state.output_root, output_root)
-            self.assertEqual(Image.open(output).text["prompt"], '{"seed": 123}')
-            self.assertEqual(Image.open(output).text["workflow"], '{"nodes": []}')
-            copied = state.image_for_id(next(image["id"] for image in state.list_images() if image["relativePath"] == "dropped_censored.png"))
-            self.assertEqual(copied.source_kind, "output")
 
     def test_import_preserves_safe_nested_relative_paths_and_same_names(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -454,48 +475,22 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(state.root, Path(directory).resolve())
 
-    def test_copy_save_preserves_png_metadata_and_leaves_source_untouched(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.image.png"
-            metadata = PngImagePlugin.PngInfo()
-            metadata.add_text("workflow", '{"nodes":[]}')
-            Image.new("RGB", (16, 16), "#6688aa").save(source, pnginfo=metadata)
-            original = source.read_bytes()
-            source_mtime_ns = source.stat().st_mtime_ns
-            destination = Path(directory) / "source.image_censored.png"
-            save_with_mask(self._record(source, 16, 16), self._mask(16, 16), 4, destination)
-            self.assertEqual(source.read_bytes(), original)
-            self.assertEqual(png_ancillary_manifest(original), png_ancillary_manifest(destination.read_bytes()))
-            self.assertEqual(destination.stat().st_mtime_ns, source_mtime_ns)
-
-    def test_copy_apply_adds_a_suffix_before_the_extension_and_resolves_collisions(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.image.png"
-            Image.new("RGB", (16, 16), "#6688aa").save(source)
-            state = self.new_state()
-            image_id = state.set_root(directory)[0]["id"]
-            record = state.image_for_id(image_id)
-            state.job = server_module.Job(kind="apply", state="running", total=1, image_ids=(image_id,))
-            state._apply_worker([record], 100, "copy", "_censored", False, {image_id: self._mask(16, 16)})
-            self.assertEqual(state.job.completed_image_ids, (image_id,))
-            state.job = server_module.Job(kind="apply", state="running", total=1, image_ids=(image_id,))
-            state._apply_worker([record], 100, "copy", "_censored", False, {image_id: self._mask(16, 16)})
-            names = [image["relativePath"] for image in state.list_images()]
-            self.assertEqual(state.job.state, "complete")
-            self.assertEqual(names, ["source.image.png", "source.image_censored.png", "source.image_censored_2.png"])
-            self.assertEqual((Path(directory) / "source.image_censored.png").stat().st_mtime_ns, source.stat().st_mtime_ns)
-
-    def test_overwrite_ignores_suffix_and_copy_rejects_invalid_suffix(self):
+    def test_apply_is_overwrite_only_and_rejects_session_images(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "#6688aa").save(source)
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
             with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), patch.object(state, "_start_job") as start_job:
-                state.start_apply([image_id], 100, "overwrite", "../ignored", False, {})
-            self.assertEqual(start_job.call_args.args[5], "")
-            with self.assertRaisesRegex(ClientError, "ファイル名の末尾"), patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)):
-                state.start_apply([image_id], 100, "copy", "../invalid", False, {})
+                state.start_apply([image_id], 100, {})
+            self.assertEqual(start_job.call_args.args[3], 100)
+            self.assertEqual(start_job.call_args.args[4], {})
+            buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "white").save(buffer, format="PNG")
+            imported = state.import_images([{"name": "dropped.png", "data": base64.b64encode(buffer.getvalue()).decode("ascii")}])
+            session_id = next(item["id"] for item in imported if item["sourceKind"] == "session")
+            with self.assertRaisesRegex(ClientError, "コピー保存"):
+                state.start_apply([session_id], 100, {})
 
     def test_apply_pause_resume_and_cancel_state_transitions(self):
         state = self.new_state()
@@ -624,7 +619,7 @@ class MosaicStudioTests(unittest.TestCase):
                 control.cancel_requested.set()
 
             with patch.object(server_module, "save_with_mask", side_effect=save_then_cancel):
-                state._apply_worker(records, 100, "overwrite", "", False, masks, control=control)
+                state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
 
@@ -639,7 +634,7 @@ class MosaicStudioTests(unittest.TestCase):
                 original_save(*args, **kwargs)
 
             with patch.object(server_module, "save_with_mask", side_effect=save_then_fail):
-                state._apply_worker(records, 100, "overwrite", "", False, masks)
+                state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
 
@@ -1025,7 +1020,11 @@ class MosaicStudioTests(unittest.TestCase):
         try:
             with patch.object(server_module.STATE, "add_boundary_candidate", return_value=expected) as add_candidate:
                 body = json.dumps({"imageId": "image", "roi": {"left": 1, "top": 2, "right": 3, "bottom": 4}, "point": {"x": 2, "y": 3}}).encode("utf-8")
-                connection.request("POST", "/api/boundary", body, {"Content-Type": "application/json"})
+                connection.request("POST", "/api/boundary", body, {
+                    "Content-Type": "application/json",
+                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
                 response = connection.getresponse()
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 200)
@@ -1046,7 +1045,10 @@ class MosaicStudioTests(unittest.TestCase):
         try:
             with patch.object(server_module.STATE, "delete_candidate", side_effect=[True, False]) as delete_candidate:
                 for expected in (True, False):
-                    connection.request("DELETE", "/api/candidate/image/candidate")
+                    connection.request("DELETE", "/api/candidate/image/candidate", headers={
+                        "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                        "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                    })
                     response = connection.getresponse()
                     payload = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(response.status, 200)
@@ -1055,6 +1057,40 @@ class MosaicStudioTests(unittest.TestCase):
             delete_candidate.assert_called_with("image", "candidate")
         finally:
             connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_mutation_api_rejects_invalid_request_context(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+        cases = [
+            ({"Content-Type": "application/json", "Origin": origin}, 403),
+            ({
+                "Content-Type": "application/json",
+                "Origin": "http://127.0.0.1:1",
+                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+            }, 403),
+            ({
+                "Content-Type": "text/plain",
+                "Origin": origin,
+                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+            }, 400),
+        ]
+        try:
+            for headers, expected_status in cases:
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                try:
+                    connection.request("POST", "/api/catalog/clear", b"{}", headers)
+                    response = connection.getresponse()
+                    response.read()
+                    self.assertEqual(response.status, expected_status)
+                finally:
+                    connection.close()
+        finally:
             httpd.shutdown()
             httpd.server_close()
 
@@ -1115,10 +1151,9 @@ class MosaicStudioTests(unittest.TestCase):
             with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), \
                  patch.object(state, "_start_job", side_effect=switch_then_start):
                 with self.assertRaisesRegex(ClientError, "画像一覧が更新されたため"):
-                    state.start_apply([first_id], 100, "copy", "_censored", True, {})
+                    state.start_apply([first_id], 100, {})
 
             self.assertEqual(source.read_bytes(), original_source)
-            self.assertFalse((first_root / "first_censored.png").exists())
             self.assertEqual(state.root, second_root.resolve())
 
     def test_same_root_reload_waits_for_import_commit_and_replaces_the_session_catalog(self):
@@ -1252,31 +1287,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertFalse(session_dir.exists())
             self.assertEqual(state.list_images(), [])
 
-    def test_session_apply_keeps_output_when_the_session_is_replaced(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "images"
-            root.mkdir()
-            raw_buffer = io.BytesIO()
-            metadata = PngImagePlugin.PngInfo()
-            metadata.add_text("workflow", "preserved")
-            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG", pnginfo=metadata)
-            state = self.new_state()
-            state.set_root(str(root))
-            imported = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]
-            record = state.image_for_id(imported["id"])
-            session_path = record.path
-
-            state._apply_worker([record], 100, "overwrite", "_censored", False, {record.image_id: self._mask(16, 16)})
-
-            output = root / "dropped_censored.png"
-            self.assertTrue(output.is_file())
-            self.assertTrue(session_path.is_file())
-            self.assertEqual(Image.open(output).text["workflow"], "preserved")
-            state.set_root(str(root))
-            self.assertTrue(output.is_file())
-            self.assertFalse(session_path.exists())
-
-    def test_direct_session_save_preserves_nested_path_without_replacing_the_temp_source(self):
+    def test_browser_session_save_preserves_nested_relative_path_and_temp_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "images"
             root.mkdir()
@@ -1288,94 +1299,20 @@ class MosaicStudioTests(unittest.TestCase):
                 "name": "dropped.png", "relativePath": "nested/dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii"),
             }])[0]["id"]
             source = state.image_for_id(session_id)
+            mask_path = state.cache_dir / session_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[session_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(session_id)
 
-            output = state.save_image(session_id, self._mask(16, 16), 100)
+            entry = state.prepare_browser_save([session_id], 100, "_censored", False)[0]
+            output, _record, output_revision, _save_token = state.render_browser_save(session_id, revision, 100, None)
 
-            self.assertEqual(output, root / "nested" / "dropped_censored.png")
-            self.assertTrue(output.is_file())
+            self.assertEqual(entry["relativePath"], "nested/dropped.png")
+            self.assertEqual(output_revision, revision)
+            self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
             self.assertTrue(source.path.is_file())
             self.assertEqual(source.source_kind, "session")
-            self.assertTrue(any(image["relativePath"] == "nested/dropped_censored.png" for image in state.list_images()))
-
-    def test_session_apply_preserves_nested_same_name_paths_under_output_root(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "images"
-            root.mkdir()
-            raw_buffer = io.BytesIO()
-            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
-            encoded = base64.b64encode(raw_buffer.getvalue()).decode("ascii")
-            state = self.new_state()
-            state.set_root(str(root))
-            imported = state.import_images([
-                {"name": "same.png", "relativePath": "a/same.png", "data": encoded},
-                {"name": "same.png", "relativePath": "b/same.png", "data": encoded},
-            ])
-            records = [state.image_for_id(image["id"]) for image in imported if image["sourceKind"] == "session"]
-
-            state._apply_worker(
-                records, 100, "copy", "_censored", False,
-                {record.image_id: self._mask(16, 16) for record in records},
-            )
-
-            self.assertTrue((root / "a" / "same_censored.png").is_file())
-            self.assertTrue((root / "b" / "same_censored.png").is_file())
-            output_paths = {
-                image["relativePath"] for image in state.list_images()
-                if image["relativePath"].endswith("_censored.png")
-            }
-            self.assertEqual(output_paths, {"a/same_censored.png", "b/same_censored.png"})
-
-    def test_mixed_apply_copies_every_source_when_a_session_image_is_present(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "images"
-            root.mkdir()
-            filesystem_path = root / "normal.png"
-            filesystem_image = Image.new("RGB", (16, 16), "#ffffff")
-            filesystem_image.putpixel((5, 5), (0, 0, 0))
-            filesystem_image.save(filesystem_path)
-            original_filesystem_bytes = filesystem_path.read_bytes()
-            raw_buffer = io.BytesIO()
-            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
-            state = self.new_state()
-            filesystem_id = state.set_root(str(root))[0]["id"]
-            session_id = next(
-                image["id"] for image in state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                if image["sourceKind"] == "session"
-            )
-            filesystem_record = state.image_for_id(filesystem_id)
-            session_record = state.image_for_id(session_id)
-
-            state._apply_worker(
-                [filesystem_record, session_record], 100, "overwrite", "_censored", False,
-                {filesystem_id: self._mask(16, 16), session_id: self._mask(16, 16)},
-            )
-
-            self.assertEqual(filesystem_path.read_bytes(), original_filesystem_bytes)
-            self.assertTrue((root / "normal_censored.png").is_file())
-            self.assertTrue((root / "dropped_censored.png").is_file())
-            self.assertTrue(session_record.path.is_file())
-            self.assertEqual(session_record.source_kind, "session")
-
-    def test_start_apply_forces_copy_and_disables_delete_for_a_mixed_batch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "images"
-            root.mkdir()
-            Image.new("RGB", (16, 16), "#ffffff").save(root / "normal.png")
-            raw_buffer = io.BytesIO()
-            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
-            state = self.new_state()
-            filesystem_id = state.set_root(str(root))[0]["id"]
-            session_id = next(
-                image["id"] for image in state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                if image["sourceKind"] == "session"
-            )
-            with patch.object(state, "combined_candidate_mask", return_value=self._mask(16, 16)), \
-                 patch.object(state, "_start_job") as start_job:
-                state.start_apply([filesystem_id, session_id], 100, "overwrite", "_censored", True, {})
-
-            self.assertEqual(start_job.call_args.args[4], "copy")
-            self.assertEqual(start_job.call_args.args[5], "_censored")
-            self.assertFalse(start_job.call_args.args[6])
 
     def test_stale_session_is_cleaned_immediately_but_an_active_session_is_not(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1414,6 +1351,21 @@ class MosaicStudioTests(unittest.TestCase):
             os.utime(pending, (old, old))
             StudioState(Path(directory) / "cache-expired", session_base)
             self.assertFalse(pending.exists())
+
+    def test_fresh_process_cache_without_a_lock_uses_a_short_grace_period(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache_base = Path(directory) / "cache"
+            pending = cache_base / "process-pending"
+            pending.mkdir(parents=True)
+
+            with patch.object(server_module, "CACHE_BASE_DIR", cache_base):
+                StudioState._cleanup_stale_process_caches()
+                self.assertTrue(pending.exists())
+
+                old = time.time() - 120
+                os.utime(pending, (old, old))
+                StudioState._cleanup_stale_process_caches()
+                self.assertFalse(pending.exists())
 
     def test_import_rejects_when_a_job_has_already_started(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1504,9 +1456,8 @@ class MosaicStudioTests(unittest.TestCase):
             sentinel = simulated_production_cache / "keep-me.txt"
             sentinel.write_text("sentinel", encoding="utf-8")
 
-            with patch.object(server_module, "CACHE_DIR", simulated_production_cache):
-                state = self.new_state()
-                state.set_root(str(root))
+            state = self.new_state()
+            state.set_root(str(root))
 
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "sentinel")
             self.assertTrue(state.cache_dir.is_dir())
@@ -1551,7 +1502,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
 
-    def test_list_candidates_prunes_all_missing_masks_before_returning(self):
+    def test_list_candidates_prunes_missing_masks_and_advances_revision_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             Image.new("RGB", (16, 16), "white").save(root / "source.png")
@@ -1563,9 +1514,15 @@ class MosaicStudioTests(unittest.TestCase):
                 Candidate("missing-one", "penis", 0.9, missing_one),
                 Candidate("missing-two", "testicles", 0.8, missing_two),
             ]
+            revision_before_prune = state._touch_candidates(image_id)
 
             self.assertEqual(state.list_candidates(image_id), [])
-            self.assertEqual(state.candidates[image_id], [])
+            self.assertEqual(state.candidates.get(image_id, []), [])
+            revision_after_prune = state._candidate_revision(image_id)
+            self.assertEqual(revision_after_prune, revision_before_prune + 1)
+
+            self.assertEqual(state.list_candidates(image_id), [])
+            self.assertEqual(state._candidate_revision(image_id), revision_after_prune)
 
     def test_missing_candidate_mask_removes_stale_candidate_and_returns_404(self):
         from http.server import ThreadingHTTPServer
@@ -1577,6 +1534,7 @@ class MosaicStudioTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             missing = state.cache_dir / image_id / "missing.png"
             state.candidates[image_id] = [Candidate("missing", "penis", 0.9, missing)]
+            revision_before_read = state._touch_candidates(image_id)
             previous_state = server_module.STATE
             server_module.STATE = state
             httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
@@ -1591,7 +1549,11 @@ class MosaicStudioTests(unittest.TestCase):
                 self.assertEqual(response.status, 404)
                 self.assertIn("検出候補", payload["error"])
                 logged.assert_not_called()
+                revision_after_read = state._candidate_revision(image_id)
+                self.assertEqual(revision_after_read, revision_before_read + 1)
+                self.assertEqual(state.candidates.get(image_id, []), [])
                 self.assertEqual(state.list_candidates(image_id), [])
+                self.assertEqual(state._candidate_revision(image_id), revision_after_read)
             finally:
                 connection.close()
                 httpd.shutdown()
@@ -1617,14 +1579,12 @@ class MosaicStudioTests(unittest.TestCase):
             state.candidates[second_id] = [Candidate("missing", "penis", 0.9, missing)]
 
             with self.assertRaisesRegex(ClientError, "自動検出をやり直してください"):
-                state.start_apply([first_id, second_id], 100, "copy", "_censored", True, {})
+                state.start_apply([first_id, second_id], 100, {})
 
             self.assertEqual({path: path.read_bytes() for path in (first, second)}, originals)
             self.assertTrue(valid.exists())
             self.assertEqual(len(state.candidates[first_id]), 1)
             self.assertEqual(len(state.candidates[second_id]), 1)
-            self.assertFalse((root / "first_censored.png").exists())
-            self.assertFalse((root / "second_censored.png").exists())
 
     def test_catalog_reload_is_rejected_while_worker_is_alive_and_stale_worker_cannot_commit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1844,7 +1804,11 @@ class MosaicStudioTests(unittest.TestCase):
         try:
             connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
             body = json.dumps({"path": ""}).encode("utf-8")
-            connection.request("POST", "/api/folder", body, {"Content-Type": "application/json"})
+            connection.request("POST", "/api/folder", body, {
+                "Content-Type": "application/json",
+                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                "Origin": f"http://127.0.0.1:{httpd.server_port}",
+            })
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
@@ -1854,6 +1818,365 @@ class MosaicStudioTests(unittest.TestCase):
                 connection.close()
             httpd.shutdown()
             httpd.server_close()
+
+    def test_save_render_returns_the_one_time_token_in_a_response_header(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            record = ImageRecord("image", Path("image.png"), "image.png", 16, 16, 1)
+            with patch.object(server_module.STATE, "render_browser_save", return_value=(b"png", record, 3, "one-time-token")):
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None}).encode("utf-8")
+                connection.request("POST", "/api/save/render", body, {
+                    "Content-Type": "application/json",
+                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("X-Lets-Censoring-Save-Token"), "one-time-token")
+                response.read()
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_save_commit_forwards_the_render_token_to_the_state(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            with patch.object(server_module.STATE, "commit_browser_save", return_value={"cleared": True}) as commit:
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                body = json.dumps({
+                    "imageId": "image",
+                    "candidateRevision": 3,
+                    "saveToken": "one-time-token",
+                    "deleteOriginal": False,
+                }).encode("utf-8")
+                connection.request("POST", "/api/save/commit", body, {
+                    "Content-Type": "application/json",
+                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                self.assertEqual(commit.call_args.args, ("image", 3, "one-time-token", False))
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_browser_save_renders_then_clears_only_matching_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            info = PngImagePlugin.PngInfo()
+            info.add_text("prompt", '{"seed": 1}')
+            Image.new("RGB", (16, 16), "white").save(source, pnginfo=info)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+
+            entry = state.prepare_browser_save([image_id], 100, "_censored", False)[0]
+            output, record, revision, save_token = state.render_browser_save(image_id, entry["candidateRevision"], 100, None)
+            self.assertEqual(record.image_id, image_id)
+            self.assertEqual(revision, entry["candidateRevision"])
+            self.assertEqual(Image.open(io.BytesIO(output)).text["prompt"], '{"seed": 1}')
+            committed = state.commit_browser_save(image_id, revision, save_token, False)
+            self.assertTrue(committed["cleared"])
+            self.assertEqual(state.candidates.get(image_id, []), [])
+
+    def test_browser_save_does_not_clear_candidates_changed_after_render(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+
+            entry = state.prepare_browser_save([image_id], 100, "_censored", False)[0]
+            _output, _record, revision, save_token = state.render_browser_save(
+                image_id, entry["candidateRevision"], 100, None,
+            )
+            state._touch_candidates(image_id)
+
+            committed = state.commit_browser_save(image_id, revision, save_token, False)
+            self.assertFalse(committed["cleared"])
+            self.assertEqual(len(state.candidates[image_id]), 1)
+
+    def test_browser_save_commit_requires_a_matching_one_time_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+            with self.assertRaisesRegex(ClientError, "保存確認トークン"):
+                state.commit_browser_save(image_id, rendered_revision, "", False)
+            with self.assertRaisesRegex(ClientError, "保存対象と一致"):
+                state.commit_browser_save(image_id, rendered_revision + 1, save_token, False)
+
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, False)
+            self.assertTrue(committed["cleared"])
+            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, False)
+
+    def test_browser_save_token_expires_and_catalog_change_discards_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, expired_token = state.render_browser_save(image_id, revision, 100, None)
+            details = state.browser_save_tokens[expired_token]
+            state.browser_save_tokens[expired_token] = type(details)(
+                details.image_id,
+                details.candidate_revision,
+                details.source_fingerprint,
+                details.catalog_generation,
+                time.monotonic() - server_module.SAVE_TOKEN_TTL_SECONDS - 1,
+            )
+            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
+                state.commit_browser_save(image_id, rendered_revision, expired_token, False)
+
+            _output, _record, rendered_revision, catalog_token = state.render_browser_save(image_id, revision, 100, None)
+            state.clear_catalog()
+            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
+                state.commit_browser_save(image_id, rendered_revision, catalog_token, False)
+
+    def test_shutdown_discards_pending_browser_save_tokens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, _rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+
+            state.shutdown()
+            self.assertNotIn(save_token, state.browser_save_tokens)
+
+    def test_browser_save_rejects_stale_token_before_deleting_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+            state._touch_candidates(image_id)
+
+            with self.assertRaisesRegex(ClientError, "元画像は削除しませんでした"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, True)
+            self.assertTrue(source.is_file())
+            self.assertEqual(len(state.candidates[image_id]), 1)
+
+    def test_browser_save_rejects_a_token_after_the_source_fingerprint_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+
+            Image.new("RGB", (16, 16), "black").save(source)
+            with self.assertRaisesRegex(ClientError, "元画像が.*変更"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, False)
+            self.assertEqual(len(state.candidates[image_id]), 1)
+            self.assertNotIn(save_token, state.browser_save_tokens)
+
+    def test_browser_save_keeps_candidates_and_token_when_source_unlink_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+
+            original_unlink = Path.unlink
+
+            def fail_only_for_source(path: Path, *args, **kwargs):
+                if path == source:
+                    raise PermissionError("locked")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_only_for_source):
+                with self.assertRaisesRegex(ClientError, "候補は保持"):
+                    state.commit_browser_save(image_id, rendered_revision, save_token, True)
+
+            self.assertTrue(source.is_file())
+            self.assertEqual(len(state.candidates[image_id]), 1)
+            self.assertIn(save_token, state.browser_save_tokens)
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, True)
+            self.assertTrue(committed["deleted"])
+            self.assertFalse(source.exists())
+
+    def test_browser_save_uses_one_candidate_snapshot_when_candidates_change_during_render(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            mask = self._mask(16, 16)
+            mask[2:6, 2:6] = 255
+            Image.fromarray(mask, mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            render_started = threading.Event()
+            allow_render_to_finish = threading.Event()
+            observed: dict[str, np.ndarray] = {}
+            outcome: dict[str, Any] = {}
+
+            def capture_snapshot(_record, snapshot, _divisor):
+                observed["mask"] = snapshot.copy()
+                render_started.set()
+                self.assertTrue(allow_render_to_finish.wait(2))
+                return b"rendered"
+
+            def run_render():
+                try:
+                    outcome["result"] = state.render_browser_save(image_id, revision, 100, None)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            with patch.object(server_module, "render_with_mask", side_effect=capture_snapshot):
+                thread = threading.Thread(target=run_render)
+                thread.start()
+                self.assertTrue(render_started.wait(2))
+                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                allow_render_to_finish.set()
+                thread.join(2)
+
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertTrue(np.any(observed["mask"]))
+            _output, _record, rendered_revision, save_token = outcome["result"]
+            self.assertEqual(rendered_revision, revision)
+            with self.assertRaisesRegex(ClientError, "元画像は削除しませんでした"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, True)
+            self.assertTrue(source.is_file())
+
+    def test_browser_save_prunes_missing_candidates_and_advances_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            mask_path.unlink()
+
+            with self.assertRaisesRegex(ClientError, "候補が変更"):
+                state.render_browser_save(image_id, revision, 100, None)
+            self.assertEqual(state.candidates[image_id], [])
+            self.assertGreater(state._candidate_revision(image_id), revision)
+
+    def test_browser_save_rejects_duplicate_image_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+
+            with self.assertRaises(ClientError):
+                state.prepare_browser_save([image_id, image_id], 100, "_censored", False)
+
+    def test_browser_save_rejects_changed_source_and_preserves_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            Image.new("RGB", (16, 16), "black").save(source)
+            with self.assertRaises(ClientError):
+                state.prepare_browser_save([image_id], 100, "_censored", False)
+            self.assertEqual(len(state.candidates[image_id]), 1)
+
+    def test_exif_rotated_jpeg_uses_normalized_mask_coordinates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "rotated.jpg"
+            exif = Image.Exif()
+            exif[274] = 6
+            Image.new("RGB", (40, 20), "white").save(source, exif=exif)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            self.assertEqual((record.width, record.height), (20, 40))
+            mask = np.zeros((40, 20), dtype=np.uint8)
+            mask[4:12, 4:12] = 255
+            output = server_module.render_with_mask(record, mask, 4)
+            with Image.open(io.BytesIO(output)) as saved:
+                self.assertEqual(saved.getexif().get(274), 1)
+                self.assertEqual(ImageOps.exif_transpose(saved).size, (20, 40))
 
 if __name__ == "__main__":
     unittest.main()

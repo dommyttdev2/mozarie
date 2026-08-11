@@ -17,12 +17,14 @@ import math
 import mimetypes
 import msvcrt
 import os
+import secrets
 import shutil
 import tempfile
 import threading
 import time
 import uuid
 import webbrowser
+import zlib
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,14 +34,14 @@ from urllib.parse import unquote, urlparse
 
 import cv2
 import numpy as np
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 import torch
 from ultralytics import YOLO
 
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
-CACHE_DIR = APP_DIR / ".mosaicstudio-cache"
+CACHE_BASE_DIR = APP_DIR / ".mosaicstudio-cache"
 SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "LetsCensoring"
 
 
@@ -106,6 +108,7 @@ DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
+SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -115,8 +118,19 @@ class ClientError(ValueError):
     """An invalid request that can be shown directly in the UI."""
 
 
+class ForbiddenClientError(ClientError):
+    """A request that was not issued by this local browser session."""
+
+
 class StaleMaskError(LookupError):
     """A candidate mask was removed while a browser still referenced it."""
+
+
+def oriented_image_size(image: Image.Image) -> tuple[int, int]:
+    width, height = image.size
+    if image.getexif().get(274, 1) in {5, 6, 7, 8}:
+        return height, width
+    return width, height
 
 
 def safe_import_relative_path(value: Any) -> Path:
@@ -140,7 +154,9 @@ class ImageRecord:
     width: int
     height: int
     mtime_ns: int
+    size_bytes: int = 0
     source_kind: str = "filesystem"
+    content_version: int = 0
 
 
 @dataclass
@@ -153,6 +169,15 @@ class Candidate:
     color: str = "#5bb6d5"
     source: str = "auto"
     refinement: str | None = None
+
+
+@dataclass(frozen=True)
+class BrowserSaveToken:
+    image_id: str
+    candidate_revision: int
+    source_fingerprint: tuple[int, int]
+    catalog_generation: int
+    issued_at: float
 
 
 @dataclass
@@ -465,16 +490,26 @@ class StudioState:
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else CACHE_DIR
+        self._cache_lock_handle: Any | None = None
+        self._owns_process_cache = cache_dir is None
+        if cache_dir is None:
+            self._cleanup_stale_process_caches()
+            self.cache_dir = CACHE_BASE_DIR / f"process-{os.getpid()}-{uuid.uuid4().hex}"
+            self.cache_dir.mkdir(parents=True, exist_ok=False)
+            self._cache_lock_handle = self._lock_directory(self.cache_dir)
+        else:
+            self.cache_dir = Path(cache_dir)
         self.session_base_dir = Path(session_base_dir) if session_base_dir is not None else SESSION_BASE_DIR
         self.session_dir: Path | None = None
         self.session_imports_dir: Path | None = None
         self._session_lock_handle: Any | None = None
         self.root: Path | None = None
-        self.output_root: Path | None = None
         self.images: dict[str, ImageRecord] = {}
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
+        self.candidate_revisions: dict[str, int] = {}
+        self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
+        self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
         self.job_generation = 0
@@ -486,6 +521,59 @@ class StudioState:
         self.sam_lock = threading.RLock()
         self.inference_lock = threading.Lock()
         self._cleanup_stale_sessions()
+
+    @staticmethod
+    def _lock_directory(directory: Path) -> Any:
+        lock_handle = (directory / ".active.lock").open("w+b")
+        try:
+            lock_handle.write(b"1")
+            lock_handle.flush()
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return lock_handle
+        except Exception:
+            lock_handle.close()
+            raise
+
+    @staticmethod
+    def _release_directory_lock(lock_handle: Any | None) -> None:
+        if lock_handle is None:
+            return
+        try:
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        lock_handle.close()
+
+    @classmethod
+    def _cleanup_stale_process_caches(cls) -> None:
+        if not CACHE_BASE_DIR.is_dir():
+            return
+        cutoff = time.time() - 60
+        for cache_dir in CACHE_BASE_DIR.glob("process-*"):
+            if not cache_dir.is_dir():
+                continue
+            lock_path = cache_dir / ".active.lock"
+            try:
+                if not lock_path.exists():
+                    if cache_dir.stat().st_mtime > cutoff:
+                        continue
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    continue
+                with lock_path.open("a+b") as handle:
+                    handle.seek(0)
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    except OSError:
+                        continue
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            except OSError:
+                continue
 
     def _cleanup_stale_sessions(self) -> None:
         """Remove abandoned import sessions without touching a live instance."""
@@ -560,8 +648,9 @@ class StudioState:
             self.images = {record.image_id: record for record in records}
             self.order = [record.image_id for record in records]
             self.candidates = {}
+            self.candidate_revisions = {record.image_id: 0 for record in records}
+            self.browser_save_tokens = {}
             self.root = root
-            self.output_root = root
             self._clear_cache()
             self._invalidate_sam_cache()
             self.job = Job()
@@ -603,7 +692,7 @@ class StudioState:
                 resolved = path.resolve()
                 resolved.relative_to(root)
                 with Image.open(resolved) as image:
-                    width, height = image.size
+                    width, height = oriented_image_size(image)
                 stat = resolved.stat()
             except (OSError, UnidentifiedImageError, ValueError):
                 continue
@@ -615,6 +704,7 @@ class StudioState:
                     width=width,
                     height=height,
                     mtime_ns=stat.st_mtime_ns,
+                    size_bytes=stat.st_size,
                 )
             )
 
@@ -628,6 +718,8 @@ class StudioState:
                 self.images = {}
                 self.order = []
                 self.candidates = {}
+                self.candidate_revisions = {}
+                self.browser_save_tokens = {}
                 self._clear_cache()
                 self._invalidate_sam_cache()
                 self.catalog_generation += 1
@@ -638,14 +730,66 @@ class StudioState:
         with self.lock:
             worker = self.worker_thread
             control = self.job_control
+            self.browser_save_tokens = {}
             if control is not None:
                 control.cancel_requested.set()
                 control.pause_requested.clear()
         if worker is not None and worker.is_alive():
-            worker.join()
+            worker.join(timeout=5)
+        if worker is not None and worker.is_alive():
+            LOGGER.warning("Background worker did not stop before shutdown; retaining this process cache.")
+            return
         with self.import_lock:
             with self.lock:
                 self._clear_session_unchecked()
+                self.browser_save_tokens = {}
+                if self._owns_process_cache:
+                    self._release_directory_lock(self._cache_lock_handle)
+                    self._cache_lock_handle = None
+                    shutil.rmtree(self.cache_dir, ignore_errors=True)
+
+    def _touch_candidates(self, image_id: str) -> int:
+        revision = self.candidate_revisions.get(image_id, 0) + 1
+        self.candidate_revisions[image_id] = revision
+        return revision
+
+    def _candidate_revision(self, image_id: str) -> int:
+        return self.candidate_revisions.get(image_id, 0)
+
+    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int]:
+        self._assert_record_fresh(record)
+        return record.mtime_ns, record.size_bytes
+
+    def _discard_expired_browser_save_tokens_unchecked(self) -> None:
+        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
+        self.browser_save_tokens = {
+            token: details
+            for token, details in self.browser_save_tokens.items()
+            if details.issued_at >= cutoff
+        }
+
+    def _issue_browser_save_token_unchecked(self, record: ImageRecord, revision: int, source_fingerprint: tuple[int, int], catalog_generation: int) -> str:
+        self._discard_expired_browser_save_tokens_unchecked()
+        token = secrets.token_urlsafe(32)
+        self.browser_save_tokens[token] = BrowserSaveToken(
+            image_id=record.image_id,
+            candidate_revision=revision,
+            source_fingerprint=source_fingerprint,
+            catalog_generation=catalog_generation,
+            issued_at=time.monotonic(),
+        )
+        return token
+
+    def _assert_record_fresh(self, record: ImageRecord) -> None:
+        try:
+            stat = record.path.stat()
+        except OSError as exc:
+            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。") from exc
+        if (
+            stat.st_mtime_ns != record.mtime_ns
+            or (record.size_bytes > 0 and stat.st_size != record.size_bytes)
+        ):
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。")
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
@@ -657,9 +801,21 @@ class StudioState:
 
     def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
         for record in records:
-            for candidate in self.candidates.pop(record.image_id, []):
-                candidate.mask_path.unlink(missing_ok=True)
-            shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
+            candidates = list(self.candidates.get(record.image_id, []))
+            for candidate in candidates:
+                try:
+                    candidate.mask_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    LOGGER.warning("Could not remove stale mask %s: %s", candidate.mask_path, exc)
+            self.candidates[record.image_id] = []
+            self._touch_candidates(record.image_id)
+            candidate_dir = self.cache_dir / record.image_id
+            try:
+                if candidate_dir.exists():
+                    for mask_path in candidate_dir.glob("*.png"):
+                        mask_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(files, list) or not files:
@@ -687,7 +843,7 @@ class StudioState:
                         continue
                     _verify_decodable_image(raw)
                     with Image.open(io.BytesIO(raw)) as image:
-                        width, height = image.size
+                        width, height = oriented_image_size(image)
                     temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
                     pending.append((temporary, relative_path.as_posix(), width, height))
                     temporary.write_bytes(raw)
@@ -704,7 +860,7 @@ class StudioState:
                     final_paths: list[Path] = []
                     try:
                         for temporary, name, width, height in pending:
-                            destination = unique_destination(destination_dir / name)
+                            destination = unique_session_import_destination(destination_dir / name)
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             os.replace(temporary, destination)
                             final_paths.append(destination)
@@ -717,6 +873,7 @@ class StudioState:
                             width,
                             height,
                             stat.st_mtime_ns,
+                            stat.st_size,
                             "session",
                         )
                     )
@@ -733,41 +890,18 @@ class StudioState:
                 for temporary, _name, _width, _height in pending:
                     temporary.unlink(missing_ok=True)
 
-    def _ensure_output_root(self) -> Path | None:
-        with self.lock:
-            output_root = self.output_root
-        if output_root is not None:
-            return output_root
-        selected = choose_native_folder("保存先フォルダーを選択")
-        if selected is None:
-            return None
-        if not selected.is_dir():
-            raise ClientError("保存先フォルダーを読み込めません。")
-        with self.lock:
-            self.output_root = selected
-        return selected
-
-    def _output_record_kind(self, destination: Path) -> str:
-        with self.lock:
-            root = self.root
-            output_root = self.output_root
-        if root is not None:
-            try:
-                destination.resolve().relative_to(root.resolve())
-                return "filesystem"
-            except ValueError:
-                pass
-        if output_root is not None:
-            try:
-                destination.resolve().relative_to(output_root.resolve())
-                return "output"
-            except ValueError:
-                pass
-        raise ClientError("保存先フォルダーを確認できません。")
-
     def _clear_cache(self) -> None:
-        shutil.rmtree(self.cache_dir, ignore_errors=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        for child in self.cache_dir.iterdir():
+            if child.name == ".active.lock":
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError as exc:
+                LOGGER.warning("Could not clear cache entry %s: %s", child, exc)
 
     def _invalidate_sam_cache(self) -> None:
         with self.sam_lock:
@@ -796,7 +930,7 @@ class StudioState:
 
             if self.sam_image_id != record.image_id:
                 with Image.open(record.path) as image:
-                    self.sam_predictor.set_image(np.asarray(image.convert("RGB")))
+                    self.sam_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
                 self.sam_image_id = record.image_id
             return self.sam_predictor
 
@@ -805,14 +939,11 @@ class StudioState:
         record: ImageRecord,
         root: Path | None,
         session_imports_dir: Path | None,
-        output_root: Path | None,
     ) -> Path | None:
         if record.source_kind == "filesystem":
             return root
         if record.source_kind == "session":
             return session_imports_dir
-        if record.source_kind == "output":
-            return output_root
         return None
 
     def image_for_id(self, image_id: str) -> ImageRecord:
@@ -820,11 +951,10 @@ class StudioState:
             record = self.images.get(image_id)
             root = self.root
             session_imports_dir = self.session_imports_dir
-            output_root = self.output_root
         if record is None:
             raise ClientError("画像が見つかりません。フォルダを再読込してください。")
         try:
-            allowed_root = self._allowed_root_for_record(record, root, session_imports_dir, output_root)
+            allowed_root = self._allowed_root_for_record(record, root, session_imports_dir)
             if allowed_root is None:
                 raise ValueError
             record.path.resolve().relative_to(allowed_root.resolve())
@@ -832,6 +962,7 @@ class StudioState:
             raise ClientError("許可されていない画像パスです。") from exc
         if not record.path.is_file():
             raise ClientError("画像ファイルが見つかりません。")
+        self._assert_record_fresh(record)
         return record
 
     def list_images(self) -> list[dict[str, Any]]:
@@ -846,8 +977,11 @@ class StudioState:
                         "sourceKind": record.source_kind,
                         "width": record.width,
                         "height": record.height,
+                        "mtimeNs": record.mtime_ns,
+                        "contentVersion": record.content_version,
                         "candidateCount": len(self.candidates.get(image_id, [])),
                         "enabledCandidateCount": sum(candidate.enabled for candidate in self.candidates.get(image_id, [])),
+                        "candidateRevision": self._candidate_revision(image_id),
                     }
                 )
             return output
@@ -855,7 +989,10 @@ class StudioState:
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
         self.image_for_id(image_id)
         with self.lock:
-            candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.mask_path.is_file()]
+            stored_candidates = self.candidates.get(image_id, [])
+            candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
+            if len(candidates) != len(stored_candidates):
+                self._touch_candidates(image_id)
             self.candidates[image_id] = candidates
         return [
             {
@@ -895,11 +1032,14 @@ class StudioState:
                     return output.getvalue()
             except FileNotFoundError as exc:
                 self._remove_candidate_unchecked(image_id, candidate_id)
+                self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> None:
         self.image_for_id(image_id)
         with self.lock:
+            if self._has_active_worker():
+                raise ClientError("バックグラウンド処理中は候補を変更できません。")
             candidate = next(
                 (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
                 None,
@@ -907,94 +1047,185 @@ class StudioState:
             if candidate is None:
                 raise ClientError("検出候補が見つかりません。")
             if "enabled" in payload:
-                candidate.enabled = bool(payload["enabled"])
+                if not isinstance(payload["enabled"], bool):
+                    raise ClientError("候補のON/OFFは真偽値で指定してください。")
+                candidate.enabled = payload["enabled"]
             if "color" in payload:
                 color = str(payload["color"])
                 if not _valid_color(color):
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
+            self._touch_candidates(image_id)
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
         with self.lock:
+            if self._has_active_worker():
+                raise ClientError("バックグラウンド処理中は候補を変更できません。")
             candidates = self.candidates.get(image_id, [])
             candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
             if candidate is None:
                 return False
             candidate.mask_path.unlink(missing_ok=True)
             self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
+            self._touch_candidates(image_id)
             return True
 
     def start_detection(self, image_ids: list[str], confidence: float = DEFAULT_DETECTION_CONFIDENCE) -> None:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         self._start_job("detect", records, self._detect_worker, confidence, expected_catalog_generation=catalog_generation)
 
-    def start_apply(
-        self,
-        image_ids: list[str],
-        divisor: int,
-        mode: str,
-        suffix: str,
-        delete_original: bool,
-        drafts: dict[str, dict[str, Any]],
-    ) -> bool:
+    def start_apply(self, image_ids: list[str], divisor: int, drafts: dict[str, dict[str, Any]]) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        if mode not in {"copy", "overwrite"}:
-            raise ClientError("保存方法が正しくありません。")
-        requires_copy = any(record.source_kind == "session" for record in records)
-        effective_mode = "copy" if requires_copy else mode
-        if effective_mode == "copy" and (not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix):
-            raise ClientError("ファイル名の末尾が正しくありません。")
+        if any(record.source_kind != "filesystem" for record in records):
+            raise ClientError("一時画像はコピー保存を選んでください。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
-        decoded_drafts = {
-            record.image_id: decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
-            for record in records
-        }
-        prepared_masks = {
-            record.image_id: self.combined_candidate_mask(record.image_id, decoded_drafts[record.image_id])
-            for record in records
-        }
-        records = [record for record in records if prepared_masks[record.image_id] is not None and np.any(prepared_masks[record.image_id])]
+        eligible_records: list[ImageRecord] = []
+        for record in records:
+            draft_masks = decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
+            mask = self.combined_candidate_mask(record.image_id, draft_masks)
+            if mask is not None and np.any(mask):
+                eligible_records.append(record)
+            del mask, draft_masks
+        records = eligible_records
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
-        if requires_copy and self._ensure_output_root() is None:
-            return False
         self._start_job(
-            "apply", records, self._apply_worker, divisor, effective_mode, suffix if effective_mode == "copy" else "",
-            bool(delete_original and effective_mode == "copy" and not requires_copy), prepared_masks, expected_catalog_generation=catalog_generation,
+            "apply", records, self._apply_worker, divisor, drafts, expected_catalog_generation=catalog_generation,
         )
         return True
 
-    def save_image(self, image_id: str, mask: np.ndarray, divisor: int) -> Path | None:
+    def prepare_browser_save(
+        self,
+        image_ids: list[str],
+        divisor: int,
+        suffix: str,
+        delete_original: bool,
+    ) -> list[dict[str, Any]]:
+        records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
+        _read_mosaic_divisor(divisor)
+        if not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix:
+            raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+        return [
+            {
+                "imageId": record.image_id,
+                "relativePath": record.relative_path,
+                "sourceKind": record.source_kind,
+                "candidateRevision": self._candidate_revision(record.image_id),
+                "deleteOriginal": bool(delete_original and record.source_kind == "filesystem"),
+            }
+            for record in records
+        ]
+
+    def render_browser_save(
+        self,
+        image_id: str,
+        revision: int,
+        divisor: int,
+        draft: Any,
+    ) -> tuple[bytes, ImageRecord, int, str]:
         record = self.image_for_id(image_id)
+        draft_masks = decode_draft_masks(draft, record.width, record.height)
         with self.lock:
-            self._assert_catalog_mutable()
-            output_root = self.output_root
-        if record.source_kind == "session":
-            if output_root is None:
-                output_root = self._ensure_output_root()
-            if output_root is None:
-                return None
-            destination = unique_destination(
-                output_root / Path(record.relative_path).parent / f"{record.path.stem}_censored{record.path.suffix}"
+            current_record = self.images.get(image_id)
+            if current_record is not record:
+                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+            if self._has_active_worker():
+                raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
+
+            # A vanished mask changes the candidate state; force a fresh render rather
+            # than silently composing a different image under the old revision.
+            stored_candidates = self.candidates.get(image_id, [])
+            candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
+            if len(candidates) != len(stored_candidates):
+                self.candidates[image_id] = candidates
+                self._touch_candidates(image_id)
+            current_revision = self._candidate_revision(image_id)
+            if revision != current_revision:
+                raise ClientError("候補が変更されました。保存をやり直してください。")
+
+            source_fingerprint = self._source_fingerprint(record)
+            catalog_generation = self.catalog_generation
+            enabled_candidates = [candidate for candidate in candidates if candidate.enabled]
+            add_mask, exclusion_mask = draft_masks
+            if not enabled_candidates and add_mask is None:
+                raise ClientError("保存するモザイク範囲がありません。")
+            mask = np.zeros((record.height, record.width), dtype=np.uint8)
+            for candidate in enabled_candidates:
+                try:
+                    with Image.open(candidate.mask_path) as mask_image:
+                        candidate_mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
+                except FileNotFoundError:
+                    self._remove_candidate_unchecked(image_id, candidate.candidate_id)
+                    self._touch_candidates(image_id)
+                    raise ClientError("検出候補のマスクが見つかりません。保存をやり直してください。")
+                if candidate_mask.shape != mask.shape:
+                    raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
+                mask = np.maximum(mask, candidate_mask)
+            if add_mask is not None:
+                mask = np.maximum(mask, add_mask)
+            if exclusion_mask is not None:
+                mask[exclusion_mask > 0] = 0
+        if mask is None or not np.any(mask):
+            raise ClientError("保存するモザイク範囲がありません。")
+        output = render_with_mask(record, mask, _read_mosaic_divisor(divisor))
+        with self.lock:
+            if self.catalog_generation != catalog_generation:
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+            save_token = self._issue_browser_save_token_unchecked(
+                record, current_revision, source_fingerprint, catalog_generation,
             )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
-            stat = destination.stat()
-            copied = ImageRecord(
-                uuid.uuid4().hex, destination, destination.relative_to(output_root).as_posix(),
-                record.width, record.height, stat.st_mtime_ns, self._output_record_kind(destination),
-            )
-            with self.lock:
-                self.images[copied.image_id] = copied
-                self.order.append(copied.image_id)
-                self.order.sort(key=lambda current_id: self.images[current_id].relative_path.lower())
-        else:
-            destination = record.path
-            save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
+        return output, record, current_revision, save_token
+
+    def commit_browser_save(self, image_id: str, revision: int, save_token: str, delete_original: bool) -> dict[str, Any]:
+        if not isinstance(save_token, str) or not save_token:
+            raise ClientError("保存確認トークンがありません。保存をやり直してください。")
+        with self.lock:
+            self._discard_expired_browser_save_tokens_unchecked()
+            token_details = self.browser_save_tokens.get(save_token)
+            if token_details is None:
+                raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+            if token_details.image_id != image_id or token_details.candidate_revision != revision:
+                raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+            if token_details.catalog_generation != self.catalog_generation:
+                self.browser_save_tokens.pop(save_token, None)
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+            record = self.images.get(image_id)
+            if record is None:
+                self.browser_save_tokens.pop(save_token, None)
+                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+            if self._has_active_worker():
+                raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
+            try:
+                current_fingerprint = self._source_fingerprint(record)
+            except ClientError:
+                self.browser_save_tokens.pop(save_token, None)
+                raise
+            if current_fingerprint != token_details.source_fingerprint:
+                self.browser_save_tokens.pop(save_token, None)
+                raise ClientError("元画像が変更されました。保存をやり直してください。")
+            current_revision = self._candidate_revision(image_id)
+            if delete_original and revision != current_revision:
+                self.browser_save_tokens.pop(save_token, None)
+                raise ClientError("候補が変更されたため元画像は削除しませんでした。")
+            deleted = False
+            if delete_original and record.source_kind == "filesystem":
+                try:
+                    record.path.unlink()
+                except OSError as exc:
+                    raise ClientError("元画像を削除できませんでした。候補は保持しています。") from exc
+            self.browser_save_tokens.pop(save_token, None)
+            cleared = revision == current_revision
+            if cleared:
+                self._clear_masks_unchecked([record])
+            if delete_original and record.source_kind == "filesystem":
+                self.images.pop(record.image_id, None)
+                self.order = [current_id for current_id in self.order if current_id != record.image_id]
+                self.candidate_revisions.pop(record.image_id, None)
+                deleted = True
         self.invalidate_sam_image(image_id)
-        return destination
+        return {"cleared": cleared, "stale": not cleared, "deleted": deleted, "images": self.list_images()}
 
     def request_pause(self) -> Job:
         with self.lock:
@@ -1029,6 +1260,8 @@ class StudioState:
         if not isinstance(image_ids, list):
             raise ClientError("画像の選択が正しくありません。")
         source_ids = image_ids or self.order
+        if len({str(image_id) for image_id in source_ids}) != len(source_ids):
+            raise ClientError("同じ画像を複数回指定できません。")
         records = [self.image_for_id(str(image_id)) for image_id in source_ids]
         if not records:
             raise ClientError("処理する画像がありません。")
@@ -1039,17 +1272,18 @@ class StudioState:
             raise ClientError("画像の選択が正しくありません。")
         with self.lock:
             source_ids = image_ids or list(self.order)
+            if len({str(image_id) for image_id in source_ids}) != len(source_ids):
+                raise ClientError("同じ画像を複数回指定できません。")
             records = [self.images.get(str(image_id)) for image_id in source_ids]
             root = self.root
             session_imports_dir = self.session_imports_dir
-            output_root = self.output_root
             catalog_generation = self.catalog_generation
         if not records or any(record is None for record in records):
             raise ClientError("処理する画像がありません。")
         verified_records = [record for record in records if record is not None]
         for record in verified_records:
             try:
-                allowed_root = self._allowed_root_for_record(record, root, session_imports_dir, output_root)
+                allowed_root = self._allowed_root_for_record(record, root, session_imports_dir)
                 if allowed_root is None:
                     raise ValueError
                 record.path.resolve().relative_to(allowed_root.resolve())
@@ -1057,6 +1291,8 @@ class StudioState:
                 raise ClientError("許可されていない画像パスです。") from exc
             if not record.path.is_file():
                 raise ClientError("画像ファイルが見つかりません。")
+        for record in verified_records:
+            self._assert_record_fresh(record)
         return verified_records, catalog_generation
 
     def _start_job(
@@ -1181,6 +1417,7 @@ class StudioState:
                         if candidate.source != "boundary":
                             candidate.mask_path.unlink(missing_ok=True)
                     self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                    self._touch_candidates(record.image_id)
                     self._mark_image_completed(record.image_id, job_generation, catalog_generation)
                     self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
             self._finish_job(job_generation, catalog_generation)
@@ -1359,8 +1596,9 @@ class StudioState:
         return segments
 
     def _detect_image(self, models: DetectionModels, record: ImageRecord, confidence: float) -> list[Candidate]:
+        self._assert_record_fresh(record)
         with Image.open(record.path) as image:
-            rgb = image.convert("RGB")
+            rgb = ImageOps.exif_transpose(image).convert("RGB")
         segments = arbitrate_segment_sources([
             *self._detect_precise_segments(models, rgb, confidence),
             *self._detect_legacy_segments(models, rgb, confidence),
@@ -1421,6 +1659,7 @@ class StudioState:
             candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
             self.candidates.setdefault(image_id, []).append(candidate)
+            self._touch_candidates(image_id)
         return {
             "id": candidate.candidate_id,
             "className": candidate.class_name,
@@ -1437,19 +1676,13 @@ class StudioState:
         self,
         records: list[ImageRecord],
         divisor: int,
-        mode: str,
-        suffix: str,
-        delete_original: bool,
-        prepared_masks: dict[str, np.ndarray | None],
+        drafts_or_masks: dict[str, Any],
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            if any(record.source_kind == "session" for record in records):
-                mode = "copy"
-                delete_original = False
             for index, record in enumerate(records, start=1):
                 if not self._job_is_current(job_generation, catalog_generation):
                     return
@@ -1461,43 +1694,22 @@ class StudioState:
                     self._cancel_job(job_generation, catalog_generation)
                     return
                 self._set_job_current(record.relative_path, index - 1, job_generation, catalog_generation)
-                mask = prepared_masks.get(record.image_id)
+                self._assert_record_fresh(record)
+                draft_or_mask = drafts_or_masks.get(record.image_id)
+                if isinstance(draft_or_mask, np.ndarray):
+                    mask = draft_or_mask
+                else:
+                    draft_masks = decode_draft_masks(draft_or_mask, record.width, record.height)
+                    mask = self.combined_candidate_mask(record.image_id, draft_masks)
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                effective_mode = mode
-                if effective_mode == "overwrite":
-                    output = record.path
-                else:
-                    destination_dir = self.output_root if record.source_kind == "session" else record.path.parent
-                    if destination_dir is None:
-                        raise ClientError("保存先フォルダが見つかりません。")
-                    relative_parent = Path(record.relative_path).parent if record.source_kind == "session" else Path()
-                    output = unique_destination(destination_dir / relative_parent / f"{record.path.stem}{suffix}{record.path.suffix}")
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), output)
-                if effective_mode == "copy" and delete_original:
-                    record.path.unlink()
-                    record.path = output
-                    record.relative_path = output.name
-                    record.mtime_ns = output.stat().st_mtime_ns
-                    record.source_kind = self._output_record_kind(output)
-                elif effective_mode == "copy":
-                    copied_stat = output.stat()
-                    copied_relative_path = (
-                        output.relative_to(destination_dir).as_posix()
-                        if record.source_kind == "session"
-                        else output.name
-                    )
-                    copied = ImageRecord(
-                        uuid.uuid4().hex, output, copied_relative_path,
-                        record.width, record.height, copied_stat.st_mtime_ns, self._output_record_kind(output),
-                    )
-                    with self.lock:
-                        self.images[copied.image_id] = copied
-                        self.order.append(copied.image_id)
-                        self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
+                save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                output_stat = record.path.stat()
+                record.mtime_ns = output_stat.st_mtime_ns
+                record.size_bytes = output_stat.st_size
+                record.content_version += 1
                 with self.lock:
-                    self.job.outputs.append(str(output))
+                    self.job.outputs.append(str(record.path))
                 self.invalidate_sam_image(record.image_id)
                 with self.lock:
                     self._clear_masks_unchecked([record])
@@ -1630,16 +1842,33 @@ def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     return chunks
 
 
-def png_ancillary_manifest(raw: bytes) -> list[str]:
+def png_ancillary_manifest(raw: bytes, *, exclude: set[bytes] | None = None) -> list[str]:
     """Hash the exact bytes of every ancillary chunk, in file order."""
+    excluded = exclude or set()
     return [
         f"{chunk_type.decode('ascii', 'replace')}:{hashlib.sha256(chunk).hexdigest()}"
         for chunk_type, chunk in parse_png_chunks(raw)
-        if chunk_type[0] & 0x20
+        if chunk_type[0] & 0x20 and chunk_type not in excluded
     ]
 
 
-def _png_with_original_chunks(source: bytes, image: Image.Image) -> bytes:
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    body = chunk_type + payload
+    return len(payload).to_bytes(4, "big") + body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "big")
+
+
+def _normalized_exif_bytes(source: bytes) -> bytes:
+    with Image.open(io.BytesIO(source)) as source_image:
+        exif = source_image.getexif()
+    exif[274] = 1
+    return exif.tobytes()
+
+
+def _png_exif_payload(exif: bytes) -> bytes:
+    return exif.removeprefix(b"Exif\x00\x00")
+
+
+def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
     source_chunks = parse_png_chunks(source)
     if any(chunk_type == b"acTL" for chunk_type, _chunk in source_chunks):
         raise ClientError("アニメーションPNGは保存対象外です。")
@@ -1649,13 +1878,25 @@ def _png_with_original_chunks(source: bytes, image: Image.Image) -> bytes:
     image.save(encoded, format="PNG", optimize=False)
     encoded_chunks = parse_png_chunks(encoded.getvalue())
     encoded_ihdr = next(chunk for chunk_type, chunk in encoded_chunks if chunk_type == b"IHDR")
-    if source_ihdr[8:-4] != encoded_ihdr[8:-4]:
+    source_ihdr_data = source_ihdr[8:-4]
+    encoded_ihdr_data = encoded_ihdr[8:-4]
+    if normalize_orientation:
+        if source_ihdr_data[8:] != encoded_ihdr_data[8:]:
+            raise ClientError("PNGの色形式またはビット深度が変化したため保存を中止しました。")
+    elif source_ihdr_data != encoded_ihdr_data:
         raise ClientError("このPNGのカラーモードはメタデータを安全に保持して保存できません。")
     encoded_idat = [chunk for chunk_type, chunk in encoded_chunks if chunk_type == b"IDAT"]
 
     result = bytearray(PNG_SIGNATURE)
     wrote_idat = False
+    normalized_exif = _png_exif_payload(_normalized_exif_bytes(source)) if normalize_orientation else None
     for chunk_type, chunk in source_chunks:
+        if chunk_type == b"IHDR" and normalize_orientation:
+            result.extend(encoded_ihdr)
+            continue
+        if chunk_type == b"eXIf" and normalized_exif is not None:
+            result.extend(_png_chunk(b"eXIf", normalized_exif))
+            continue
         if chunk_type == b"IDAT":
             if not wrote_idat:
                 result.extend(b"".join(encoded_idat))
@@ -1663,8 +1904,14 @@ def _png_with_original_chunks(source: bytes, image: Image.Image) -> bytes:
             continue
         result.extend(chunk)
     output = bytes(result)
-    if png_ancillary_manifest(source) != png_ancillary_manifest(output):
+    excluded = {b"eXIf"} if normalize_orientation else set()
+    if png_ancillary_manifest(source, exclude=excluded) != png_ancillary_manifest(output, exclude=excluded):
         raise ClientError("PNGメタデータ検証に失敗したため保存を中止しました。")
+    if normalize_orientation:
+        with Image.open(io.BytesIO(output)) as verified:
+            if verified.getexif().get(274, 1) != 1:
+                raise ClientError("PNGの向き情報を正規化できませんでした。")
+            verified.load()
     return output
 
 
@@ -1716,6 +1963,24 @@ def jpeg_metadata_manifest(raw: bytes) -> list[str]:
     ]
 
 
+def _jpeg_metadata_manifest_from_segments(segments: list[tuple[int, bytes]]) -> list[str]:
+    return [
+        f"FF{marker:02X}:{hashlib.sha256(segment).hexdigest()}"
+        for marker, segment in segments
+        if _is_jpeg_metadata_marker(marker)
+    ]
+
+
+def _jpeg_exif_orientation_one_segment(source: bytes) -> bytes:
+    with Image.open(io.BytesIO(source)) as source_image:
+        exif = source_image.getexif()
+    exif[274] = 1
+    payload = exif.tobytes()
+    if not payload.startswith(b"Exif\x00\x00"):
+        payload = b"Exif\x00\x00" + payload
+    return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
 def _verify_decodable_image(raw: bytes) -> None:
     try:
         with Image.open(io.BytesIO(raw)) as image:
@@ -1724,14 +1989,27 @@ def _verify_decodable_image(raw: bytes) -> None:
         raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
-def _jpeg_with_original_metadata(source: bytes, image: Image.Image) -> bytes:
+def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
     source_segments, _source_scan = _parse_jpeg_header(source)
-    source_manifest = jpeg_metadata_manifest(source)
+    metadata_segments: list[tuple[int, bytes]] = []
+    orientation_replaced = False
+    for marker, segment in source_segments:
+        if (
+            normalize_orientation
+            and not orientation_replaced
+            and marker == 0xE1
+            and segment[4:10] == b"Exif\x00\x00"
+        ):
+            metadata_segments.append((marker, _jpeg_exif_orientation_one_segment(source)))
+            orientation_replaced = True
+        elif _is_jpeg_metadata_marker(marker):
+            metadata_segments.append((marker, segment))
+    source_manifest = _jpeg_metadata_manifest_from_segments(metadata_segments)
     encoded = io.BytesIO()
     image.save(encoded, format="JPEG", quality=95)
     encoded_segments, encoded_scan = _parse_jpeg_header(encoded.getvalue())
     output = b"\xff\xd8" + b"".join(
-        segment for marker, segment in source_segments if _is_jpeg_metadata_marker(marker)
+        segment for _marker, segment in metadata_segments
     ) + b"".join(
         segment for marker, segment in encoded_segments if not _is_jpeg_metadata_marker(marker)
     ) + encoded_scan
@@ -1777,28 +2055,37 @@ def _validate_safe_webp_structure(raw: bytes) -> None:
         raise ClientError("WebP画像データを安全に検証できません。")
 
 
-def webp_metadata_manifest(raw: bytes) -> list[str]:
+def webp_metadata_manifest(raw: bytes, *, exclude: set[bytes] | None = None) -> list[str]:
     _validate_safe_webp_structure(raw)
+    excluded = exclude or set()
     return [
         f"{chunk_type.decode('ascii')}:{hashlib.sha256(chunk).hexdigest()}"
         for chunk_type, chunk in _parse_webp_chunks(raw)
-        if chunk_type in WEBP_METADATA_CHUNKS
+        if chunk_type in WEBP_METADATA_CHUNKS and chunk_type not in excluded
     ]
 
 
-def _webp_with_original_metadata(source: bytes, image: Image.Image, source_info: dict[str, Any]) -> bytes:
-    source_manifest = webp_metadata_manifest(source)
+def _webp_with_original_metadata(
+    source: bytes, image: Image.Image, source_info: dict[str, Any], *, normalize_orientation: bool = False,
+) -> bytes:
+    source_manifest = webp_metadata_manifest(source, exclude={b"EXIF"} if normalize_orientation else set())
     save_args = {
         key: source_info[key]
         for key in ("icc_profile", "exif", "xmp")
         if key in source_info
     }
+    if normalize_orientation:
+        save_args["exif"] = _normalized_exif_bytes(source)
     encoded = io.BytesIO()
     image.save(encoded, format="WEBP", quality=95, **save_args)
     output = encoded.getvalue()
-    if source_manifest != webp_metadata_manifest(output):
+    if source_manifest != webp_metadata_manifest(output, exclude={b"EXIF"} if normalize_orientation else set()):
         raise ClientError("WebPメタデータ検証に失敗したため保存を中止しました。")
     _verify_decodable_image(output)
+    if normalize_orientation:
+        with Image.open(io.BytesIO(output)) as verified:
+            if verified.getexif().get(274, 1) != 1:
+                raise ClientError("WebPの向き情報を正規化できませんでした。")
     return output
 
 
@@ -1862,7 +2149,7 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
     )
 
 
-def unique_destination(path: Path) -> Path:
+def unique_session_import_destination(path: Path) -> Path:
     if not path.exists():
         return path
     for number in range(2, 10000):
@@ -1872,20 +2159,41 @@ def unique_destination(path: Path) -> Path:
     raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
 
 
-def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int, destination: Path | None = None) -> None:
-    destination = destination or record.path
+def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
+    """Render one image without changing the source file or its catalogue state."""
+    source = record.path.read_bytes()
+    suffix = record.path.suffix.lower()
+    with Image.open(io.BytesIO(source)) as source_image:
+        source_image.load()
+        normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
+        normalized = ImageOps.exif_transpose(source_image)
+        modified = _apply_mosaic_to_image(normalized, mask, block_size)
+        if suffix == ".png":
+            return _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
+        if suffix in {".jpg", ".jpeg"}:
+            return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
+        if suffix == ".webp":
+            return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation)
+    raise ClientError("この画像形式は保存に対応していません。")
+
+
+def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
+    destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
+        normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
+        source_info = dict(source_image.info)
+        source_image = ImageOps.exif_transpose(source_image)
         modified = _apply_mosaic_to_image(source_image, mask, block_size)
         if suffix == ".png":
-            output = _png_with_original_chunks(source, modified)
+            output = _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
         elif suffix in {".jpg", ".jpeg"}:
-            output = _jpeg_with_original_metadata(source, modified)
+            output = _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
         elif suffix == ".webp":
-            output = _webp_with_original_metadata(source, modified, source_image.info)
+            output = _webp_with_original_metadata(source, modified, source_info, normalize_orientation=normalize_orientation)
         else:
             raise ClientError("この画像形式は安全保存に対応していません。")
 
@@ -1897,51 +2205,54 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int, desti
             handle.flush()
             os.fsync(handle.fileno())
         temporary_bytes = temporary_path.read_bytes()
-        if suffix == ".png" and png_ancillary_manifest(source) != png_ancillary_manifest(temporary_bytes):
+        if suffix == ".png" and png_ancillary_manifest(source, exclude={b"eXIf"} if normalize_orientation else set()) != png_ancillary_manifest(temporary_bytes, exclude={b"eXIf"} if normalize_orientation else set()):
             raise ClientError("PNGメタデータ検証に失敗したため置換しませんでした。")
-        if suffix in {".jpg", ".jpeg"} and jpeg_metadata_manifest(source) != jpeg_metadata_manifest(temporary_bytes):
+        if suffix in {".jpg", ".jpeg"} and not normalize_orientation and jpeg_metadata_manifest(source) != jpeg_metadata_manifest(temporary_bytes):
             raise ClientError("JPEGメタデータ検証に失敗したため置換しませんでした。")
-        if suffix == ".webp" and webp_metadata_manifest(source) != webp_metadata_manifest(temporary_bytes):
+        if suffix == ".webp" and webp_metadata_manifest(source, exclude={b"EXIF"} if normalize_orientation else set()) != webp_metadata_manifest(temporary_bytes, exclude={b"EXIF"} if normalize_orientation else set()):
             raise ClientError("WebPメタデータ検証に失敗したため置換しませんでした。")
         _verify_decodable_image(temporary_bytes)
         os.replace(temporary_path, destination)
         temporary_path = None
-        os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        try:
+            os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        except OSError:
+            LOGGER.warning("Saved image timestamp could not be restored: %s", destination)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _run_with_com(callback: Any) -> Any:
-    import pythoncom
-
-    pythoncom.CoInitialize()
-    try:
-        return callback()
-    finally:
-        pythoncom.CoUninitialize()
-
-
-def choose_native_folder(title: str) -> Path | None:
-    """Open the Windows folder picker in the request worker."""
-    def choose() -> Path | None:
-        from win32com.shell import shell, shellcon
-
-        flags = shellcon.BIF_RETURNONLYFSDIRS | 0x0040  # BIF_NEWDIALOGSTYLE is absent from some pywin32 builds.
-        item = shell.SHBrowseForFolder(0, None, title, flags)
-        if not item:
-            return None
-        return Path(shell.SHGetPathFromIDList(item)).resolve()
-
-    return _run_with_com(choose)
-
-
-STATE = StudioState(CACHE_DIR)
+STATE = StudioState()
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
     server_version = "LetsCensoring/1.0"
     protocol_version = "HTTP/1.1"
+
+    def _reject_unread_request(self, error: ClientError) -> None:
+        self.close_connection = True
+        raise error
+
+    def _require_mutation_request(self) -> None:
+        host = self.headers.get("Host", "")
+        expected_host = f"127.0.0.1:{self.server.server_port}"
+        if host != expected_host:
+            self._reject_unread_request(ForbiddenClientError("許可されていない接続先です。"))
+        origin = self.headers.get("Origin", "")
+        if origin != f"http://{expected_host}":
+            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
+        fetch_site = self.headers.get("Sec-Fetch-Site", "")
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
+        if self.headers.get("X-Lets-Censoring-Token", "") != STATE.session_token:
+            self._reject_unread_request(ForbiddenClientError("この画面の操作ではありません。再読み込みしてください。"))
+
+    def _require_json_request(self) -> None:
+        self._require_mutation_request()
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._reject_unread_request(ClientError("JSON形式のリクエストだけを受け付けます。"))
 
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -1967,6 +2278,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._send_static(path)
         except StaleMaskError as exc:
             self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        except ForbiddenClientError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # Keep tracebacks in the terminal, not in browser.
@@ -1975,6 +2288,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            self._require_json_request()
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             payload = self._read_json_body()
@@ -1997,12 +2311,42 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
                 self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
+            elif path == "/api/save/prepare":
+                entries = STATE.prepare_browser_save(
+                    payload.get("imageIds", []),
+                    _read_mosaic_divisor(payload.get("divisor")),
+                    str(payload.get("suffix", "_censored")),
+                    _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
+                )
+                self._json({"entries": entries})
+            elif path == "/api/save/render":
+                output, record, revision, save_token = STATE.render_browser_save(
+                    str(payload.get("imageId", "")),
+                    _read_candidate_revision(payload.get("candidateRevision")),
+                    _read_mosaic_divisor(payload.get("divisor")),
+                    payload.get("draft"),
+                )
+                self._binary(
+                    output,
+                    mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
+                    headers={
+                        "X-Lets-Censoring-Revision": str(revision),
+                        "X-Lets-Censoring-Save-Token": save_token,
+                        "X-Lets-Censoring-Relative-Path": record.relative_path,
+                        "X-Lets-Censoring-Source-Kind": record.source_kind,
+                    },
+                )
+            elif path == "/api/save/commit":
+                self._json(STATE.commit_browser_save(
+                    str(payload.get("imageId", "")),
+                    _read_candidate_revision(payload.get("candidateRevision")),
+                    payload.get("saveToken"),
+                    _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
+                ))
             elif path == "/api/apply":
                 divisor = _read_mosaic_divisor(payload.get("divisor"))
                 started = STATE.start_apply(
-                    payload.get("imageIds", []), divisor,
-                    str(payload.get("mode", "copy")), str(payload.get("suffix", "_censored")),
-                    bool(payload.get("deleteOriginal", False)), payload.get("drafts", {}),
+                    payload.get("imageIds", []), divisor, payload.get("drafts", {}),
                 )
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
@@ -2011,18 +2355,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json(STATE.resume_apply().as_dict())
             elif path == "/api/job/cancel":
                 self._json(STATE.request_cancel().as_dict())
-            elif path.endswith("/save") and path.startswith("/api/images/"):
-                image_id = path.split("/")[3]
-                record = STATE.image_for_id(image_id)
-                mask = _decode_mask(str(payload.get("mask", "")), record.width, record.height)
-                output = STATE.save_image(image_id, mask, _read_mosaic_divisor(payload.get("divisor")))
-                self._json({"ok": output is not None, "cancelled": output is None, "output": str(output) if output else ""})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 STATE.set_candidate_state(image_id, candidate_id, payload)
                 self._json({"ok": True})
             else:
                 self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
+        except ForbiddenClientError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
@@ -2031,12 +2371,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         try:
+            self._require_mutation_request()
             path = unquote(urlparse(self.path).path)
             if path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
             else:
                 self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
+        except ForbiddenClientError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
@@ -2044,7 +2387,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _read_json_body(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or not raw_length.isdigit():
+            raise ClientError("リクエストサイズが不正です。")
+        content_length = int(raw_length)
         if content_length <= 0 or content_length > MAX_BODY_BYTES:
             raise ClientError("リクエストサイズが正しくありません。")
         try:
@@ -2060,11 +2406,30 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if not thumbnail:
             self._binary(record.path.read_bytes(), mimetypes.guess_type(record.path.name)[0] or "application/octet-stream")
             return
-        with Image.open(record.path) as image:
-            image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-            output = io.BytesIO()
-            image.convert("RGB").save(output, format="JPEG", quality=82)
-        self._binary(output.getvalue(), "image/jpeg")
+        thumbnail_dir = STATE.cache_dir / "thumbnails"
+        thumbnail_dir.mkdir(parents=True, exist_ok=True)
+        thumbnail_path = thumbnail_dir / f"{record.image_id}-{record.mtime_ns}-{record.size_bytes}-{record.content_version}.jpg"
+        for stale_thumbnail in thumbnail_dir.glob(f"{record.image_id}-*.jpg"):
+            if stale_thumbnail != thumbnail_path:
+                stale_thumbnail.unlink(missing_ok=True)
+        if not thumbnail_path.is_file():
+            with Image.open(record.path) as image:
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                image.convert("RGB").save(output, format="JPEG", quality=82)
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
+                    temporary_path = Path(handle.name)
+                    handle.write(output.getvalue())
+                    handle.flush()
+                os.replace(temporary_path, thumbnail_path)
+                temporary_path = None
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+        self._binary(thumbnail_path.read_bytes(), "image/jpeg", cache_control="public, max-age=31536000, immutable")
 
     def _send_static(self, path: str) -> None:
         requested = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -2077,16 +2442,29 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if not file_path.is_file():
             self._json({"error": "見つかりません。"}, HTTPStatus.NOT_FOUND)
             return
-        self._binary(file_path.read_bytes(), mimetypes.guess_type(file_path.name)[0] or "application/octet-stream")
+        data = file_path.read_bytes()
+        if file_path.name == "index.html":
+            data = data.replace(b"{{SESSION_TOKEN}}", STATE.session_token.encode("ascii"))
+        self._binary(data, mimetypes.guess_type(file_path.name)[0] or "application/octet-stream")
 
     def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._binary(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
 
-    def _binary(self, data: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _binary(
+        self,
+        data: bytes,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        cache_control: str = "no-store",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -2113,6 +2491,21 @@ def _read_mosaic_divisor(value: Any) -> int:
     if not 1 <= divisor <= 10000:
         raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
     return divisor
+
+
+def _read_candidate_revision(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ClientError("候補の版番号が不正です。")
+    revision = value
+    if revision < 0:
+        raise ClientError("候補の版番号が不正です。")
+    return revision
+
+
+def _read_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ClientError(f"{field_name}はONまたはOFFで指定してください。")
+    return value
 
 
 def _open_browser(url: str) -> None:

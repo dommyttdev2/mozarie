@@ -7,7 +7,7 @@ function element(tagName = "") {
   const listeners = new Map();
   return {
     tagName: tagName.toUpperCase(), disabled: false, textContent: "", className: "", hidden: false, value: "", style: {}, dataset: {}, attributes: {}, children: [],
-    classList: { toggle() {} }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); listeners.get("click")?.({ currentTarget: this, target: this }); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    classList: { toggle() {} }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -55,14 +55,31 @@ elements.get("#divisor").value = "100";
 const gallery = elements.get("#gallery");
 gallery.children = [];
 let galleryAppendCount = 0;
-gallery.append = function append(child) { galleryAppendCount += 1; this.children.push(child); };
+gallery.append = function append(child) {
+  galleryAppendCount += 1;
+  const existing = this.children.indexOf(child);
+  if (existing >= 0) this.children.splice(existing, 1);
+  child.remove = () => {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+  };
+  this.children.push(child);
+};
 Object.defineProperty(gallery, "textContent", {
   get() { return this._textContent || ""; },
   set(value) { this._textContent = value; this.children = []; },
 });
 const overviewGrid = elements.get("#overviewGrid");
 overviewGrid.children = [];
-overviewGrid.append = function append(child) { this.children.push(child); };
+overviewGrid.append = function append(child) {
+  const existing = this.children.indexOf(child);
+  if (existing >= 0) this.children.splice(existing, 1);
+  child.remove = () => {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+  };
+  this.children.push(child);
+};
 Object.defineProperty(overviewGrid, "textContent", {
   get() { return this._textContent || ""; },
   set(value) { this._textContent = value; this.children = []; },
@@ -145,9 +162,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -374,6 +391,8 @@ function keyEvent(key, options = {}) {
   saveCurrent();
   state.currentId = "second";
   state.currentImage = { width: 55, height: 44 };
+  elements.get("#applyCopyMode").checked = false;
+  elements.get("#applyOverwriteMode").checked = true;
   const applying = startApplyFromDialog({ preventDefault() {} });
   resolveFetch({ ok: true, json: async () => ({ ok: true }) });
   await applying;
@@ -381,7 +400,7 @@ function keyEvent(key, options = {}) {
   assert.equal(applyRequest.path, "/api/apply");
   const applyPayload = JSON.parse(applyRequest.options.body);
   assert.deepEqual(applyPayload.imageIds, ["first"]);
-  assert.equal(applyPayload.suffix, "_censored");
+  assert.equal("suffix" in applyPayload, false);
   assert.equal(applyPayload.divisor, 100);
   assert.equal("blockSize" in applyPayload, false);
   assert.equal("prefix" in applyPayload, false);
@@ -415,13 +434,13 @@ function keyEvent(key, options = {}) {
   assert.equal(elements.get("#deleteOriginal").checked, false);
   assert.equal(elements.get("#deleteOriginal").disabled, true);
   assert.equal(elements.get("#deleteOriginalRow").hidden, true);
-  const sessionApply = startApplyFromDialog({ preventDefault() {} });
-  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
-  await sessionApply;
-  const sessionApplyPayload = JSON.parse(requests.at(-1).options.body);
-  assert.equal(sessionApplyPayload.mode, "copy");
-  assert.equal(sessionApplyPayload.suffix, "_censored");
-  assert.equal(sessionApplyPayload.deleteOriginal, false);
+  const requestCountBeforeSessionSave = requests.length;
+  context.window.showDirectoryPicker = async () => {
+    const error = new Error("cancel"); error.name = "AbortError"; throw error;
+  };
+  await startApplyFromDialog({ preventDefault() {} });
+  assert.equal(requests.length, requestCountBeforeSessionSave);
+  assert.equal(elements.get("#applyResult").textContent, "error.directoryPickerCancelled");
   assert.match(source, /async function initialise\(\)[\s\S]*?await api\("\/api\/images"\)/);
 
   state.job = { state: "paused" };
@@ -1179,11 +1198,25 @@ function keyEvent(key, options = {}) {
   assert.equal(isReviewed(state.images[0]), false);
   handleReviewStorageEvent({ key: "lets-censoring.reviewed.v1:g:\\images\\work:second.png", newValue: "true" });
   assert.equal(isReviewed(state.images[1]), true);
-  const overviewSentinel = { sentinel: true };
+  const overviewSentinel = {
+    sentinel: true,
+    dataset: { id: "sentinel" },
+    remove() {
+      const index = overviewGrid.children.indexOf(this);
+      if (index >= 0) overviewGrid.children.splice(index, 1);
+    },
+  };
   overviewGrid.children = [overviewSentinel];
   const writesBeforeNoop = storageWrites;
   state.viewMode = "edit";
-  const gallerySentinel = { sentinel: true };
+  const gallerySentinel = {
+    sentinel: true,
+    dataset: { id: "sentinel" },
+    remove() {
+      const index = gallery.children.indexOf(this);
+      if (index >= 0) gallery.children.splice(index, 1);
+    },
+  };
   gallery.children = [gallerySentinel];
   setReviewed(state.images[1], true);
   renderOverview();
@@ -1198,7 +1231,7 @@ function keyEvent(key, options = {}) {
   assert.deepEqual(JSON.parse(JSON.stringify(overviewImages().map((image) => image.id))), ["second"]);
   assert.equal(nextUnreviewedImage()?.id, "second");
   setViewMode("overview");
-  assert.equal(overviewGrid.children.length, 1);
+  assert.equal(overviewGrid.children.filter((item) => item.dataset.id === "second").length, 1);
   state.overviewFilter = "all";
   state.images = [
     { id: "nested", relativePath: "A/B/C/file.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
@@ -1218,7 +1251,7 @@ function keyEvent(key, options = {}) {
   state.currentImage = { width: 100, height: 80 };
   state.reviewedPaths = new Set(["second.png"]);
   setViewMode("overview");
-  overviewGrid.children[0].click();
+  overviewGrid.children.find((item) => item.dataset.id === "first").click();
   assert.equal(state.viewMode, "edit");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   state.navigationShortcutsEnabled = false;
@@ -1318,6 +1351,95 @@ function keyEvent(key, options = {}) {
   assert.equal(folderInput.value, "");
   const folderRequest = requests.at(-1);
   assert.equal(JSON.parse(folderRequest.options.body).files[0].relativePath, "source/nested/nested.png");
+
+  const savedFiles = new Map([["image_censored.png", { name: "image_censored.png" }]]);
+  const fakeDirectory = {
+    async getFileHandle(name, options = {}) {
+      if (savedFiles.has(name)) return savedFiles.get(name);
+      if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; }
+      const handle = {
+        name,
+        async getFile() { return { size: 0, lastModified: Date.now() }; },
+        async createWritable() { return { async write() {}, async close() { savedFiles.set(name, handle); } }; },
+      };
+      return handle;
+    },
+    async getDirectoryHandle() { return this; },
+  };
+  context.window.showDirectoryPicker = async (options) => {
+    assert.deepEqual(options, { id: "lets-censoring-output", mode: "readwrite" });
+    return fakeDirectory;
+  };
+  assert.equal(await pickOutputDirectory(), fakeDirectory);
+  assert.equal((await uniqueOutputFile(fakeDirectory, "image.png", "_censored")).name, "image_censored_2.png");
+  context.window.showDirectoryPicker = async () => { const error = new Error("cancel"); error.name = "AbortError"; throw error; };
+  await assert.rejects(pickOutputDirectory(), /error\.directoryPickerCancelled/);
+
+  // Empty editor canvases never retain a full-resolution Data URL draft.
+  state.currentId = "empty-draft";
+  state.currentImage = { width: 100, height: 80 };
+  state.candidates = [];
+  state.candidateImages.clear();
+  state.drafts.set("empty-draft", { add: "data:image/png;base64,old", exclusion: "", manualEnabled: true });
+  for (const canvas of [addMask, exclusionMask, combinedMask]) {
+    canvas._usePixelAlpha = true;
+    canvas._alpha.fill(0);
+  }
+  saveDraft();
+  assert.equal(state.drafts.has("empty-draft"), false);
+  addMask._alpha[0] = 1;
+  state.manualMaskPresent = true;
+  saveDraft();
+  assert.match(state.drafts.get("empty-draft").add, /^data:image\/png/);
+  assert.equal(state.drafts.get("empty-draft").exclusion, "");
+  for (const canvas of [addMask, exclusionMask, combinedMask]) {
+    canvas._usePixelAlpha = false;
+    canvas._alpha.fill(0);
+  }
+
+  const addContext = addMask._context;
+  const exclusionContext = exclusionMask._context;
+  state.currentImage = { width: 100, height: 80 };
+  state.candidates = [];
+  state.candidateImages.clear();
+
+  state.currentId = "restore-add-only";
+  state.imageGeneration = 701;
+  state.drafts = new Map([[state.currentId, {
+    add: "data:image/png;base64,add-only",
+    exclusion: "",
+    manualEnabled: true,
+    manualMaskPresent: true,
+  }]]);
+  addContext.drawImageCalls = [];
+  exclusionContext.drawImageCalls = [];
+  restoreDraft(state.currentId, state.imageGeneration);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(addContext.drawImageCalls.length, 1);
+  assert.equal(addContext.drawImageCalls[0][0]._src, "data:image/png;base64,add-only");
+  assert.equal(exclusionContext.drawImageCalls.length, 0);
+
+  state.currentId = "restore-exclusion-only";
+  state.imageGeneration = 702;
+  state.drafts = new Map([[state.currentId, {
+    add: "",
+    exclusion: "data:image/png;base64,exclusion-only",
+    manualEnabled: true,
+    manualMaskPresent: false,
+  }]]);
+  addContext.drawImageCalls = [];
+  exclusionContext.drawImageCalls = [];
+  restoreDraft(state.currentId, state.imageGeneration);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(addContext.drawImageCalls.length, 0);
+  assert.equal(exclusionContext.drawImageCalls.length, 1);
+  assert.equal(exclusionContext.drawImageCalls[0][0]._src, "data:image/png;base64,exclusion-only");
+
+  state.candidateUpdateVersions.set("old:row", 1);
+  state.candidateDeleting.add("old:row");
+  resetCatalog([], "");
+  assert.equal(state.candidateUpdateVersions.size, 0);
+  assert.equal(state.candidateDeleting.size, 0);
 
   console.log("test_app_js: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

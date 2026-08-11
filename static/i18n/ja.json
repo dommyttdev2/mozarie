@@ -129,12 +129,17 @@
   "apply.suffix": "ファイル名の末尾",
   "apply.deleteOriginal": "コピー成功後に元画像を削除",
   "apply.tempSource": "画像追加やドラッグで読み込んだ画像は作業用の一時コピーです。元画像の場所を取得できないため、上書きと元画像削除は利用できません。コピー保存先を選択してください。",
-  "apply.metadata": "メタデータは保持・検証します。同名時は自動連番です。",
+  "apply.metadata": "メタデータは保持・検証します。同名時は自動連番です。書込み失敗またはキャンセル時は、空の予約ファイルが残る場合があります。",
   "apply.start": "保存",
   "apply.pause": "一時停止",
   "apply.resume": "再開",
   "apply.progress": "{completed} / {total}件 完了",
   "apply.cancelled": "キャンセルしました。{completed}件は完了済みです。",
   "apply.complete": "完了しました。{completed}件を処理しました。",
-  "apply.error": "処理に失敗しました: {error}"
+  "apply.completeWithStale": "保存しました。{completed}件中{stale}件は他タブ変更の候補を残しました。",
+  "apply.error": "処理に失敗しました: {error}",
+  "error.directoryPickerUnsupported": "このブラウザは保存先フォルダーの選択に対応していません。Chrome または Edge で開いてください。",
+  "error.directoryPickerCancelled": "保存先フォルダーの選択をキャンセルしました。",
+  "error.outputNameExhausted": "同名ファイルが多すぎるため保存できません。",
+  "error.connectionLost": "Lets Censoring との通信が途切れました。アプリが起動しているか確認してください。"
 }
