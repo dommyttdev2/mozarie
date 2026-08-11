@@ -376,7 +376,13 @@ function keyEvent(key, options = {}) {
   assert.equal(state.maskStatus.get("first"), maskBeforeToggle);
   state.job = { kind: "detect", state: "complete", total: 80, completed: 80 };
   updateProgress(state.job);
-  assert.equal(elements.get("#jobProgressText").textContent, "80 / 80");
+  assert.equal(elements.get("#jobProgress").hidden, true);
+  assert.equal(elements.get("#jobProgressText").hidden, true);
+  for (const terminalState of ["cancelled", "error", "idle"]) {
+    updateProgress({ kind: "detect", state: terminalState, total: 80, completed: 80 });
+    assert.equal(elements.get("#jobProgress").hidden, true, `${terminalState} must not show stale progress`);
+    assert.equal(elements.get("#jobProgressText").hidden, true, `${terminalState} must not show stale progress`);
+  }
   assert.equal(elements.get("#loadFolder").disabled, false);
   setMosaicPreviewEnabled(false);
   assert.equal(state.mosaicPreviewEnabled, false);

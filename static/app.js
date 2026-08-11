@@ -267,13 +267,11 @@ function updateProgress(job) {
   const progress = $("#jobProgress");
   const progressText = $("#jobProgressText");
   const running = ["running", "paused"].includes(job?.state);
-  const completedDetection = job?.kind === "detect" && job?.state === "complete";
-  const visible = running || completedDetection;
-  progress.hidden = !visible;
-  progressText.hidden = !visible;
-  if (visible) {
+  progress.hidden = !running;
+  progressText.hidden = !running;
+  if (running) {
     progress.max = Math.max(1, Number(job.total) || 1);
-    progress.value = completedDetection ? progress.max : Math.min(progress.max, Number(job.completed) || 0);
+    progress.value = Math.min(progress.max, Number(job.completed) || 0);
     progressText.textContent = t("status.progressCount", { completed: progress.value, total: progress.max });
   }
   updateActionButtons();
