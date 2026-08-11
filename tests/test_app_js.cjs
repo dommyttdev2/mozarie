@@ -625,6 +625,8 @@ function keyEvent(key, options = {}) {
     exclusion: "data:image/png;base64,exclusion",
     manualEnabled: false,
     manualMaskPresent: true,
+    visibleCandidateIds: [aggregateA.id, aggregateB.id],
+    manualVisible: false,
   };
   state.drafts = new Map([[aggregateTarget.id, preservedDraft]]);
   const aggregateUpdateA = updateCandidate(aggregateA, false, false);
@@ -659,6 +661,44 @@ function keyEvent(key, options = {}) {
   assert.equal(saveTargets().includes(aggregateTarget.id), true);
   assert.equal(state.drafts.get(aggregateTarget.id), preservedDraft);
   assert.equal(state.drafts.get(aggregateTarget.id).manualEnabled, false);
+
+  // An enabled server candidate that is fully removed by the saved exclusion
+  // stays out of saveTargets after its offscreen mutation completes.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  const excludedTarget = { id: "excluded-target", relativePath: "excluded.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 };
+  const excludedOther = { id: "excluded-other", relativePath: "other.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [excludedTarget, excludedOther];
+  state.currentId = excludedTarget.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 66;
+  const excludedB = { id: "excluded-b", className: "penis", confidence: 0.9, enabled: true, color: "#ffffff" };
+  state.candidates = [excludedB];
+  state.candidateImages = new Map([[excludedB.id, {}]]);
+  state.manualMaskPresent = false;
+  state.manualEnabled = true;
+  state.maskStatus.set(excludedTarget.id, false);
+  combinedMaskPresent = false;
+  const excludedUpdate = updateCandidate(excludedB, false, false);
+  saveDraft();
+  const excludedDraft = state.drafts.get(excludedTarget.id);
+  assert.deepEqual(JSON.parse(JSON.stringify(excludedDraft.visibleCandidateIds)), []);
+  assert.equal(excludedDraft.manualVisible, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  state.currentId = excludedOther.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration += 1;
+  state.candidates = [];
+  state.candidateImages.clear();
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/excluded-target");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ ...excludedB, enabled: true }] }) });
+  await excludedUpdate;
+  assert.equal(excludedTarget.enabledCandidateCount, 1);
+  assert.equal(state.maskStatus.get(excludedTarget.id), false);
+  assert.equal(saveTargets().includes(excludedTarget.id), false);
+  assert.equal(state.drafts.get(excludedTarget.id), excludedDraft);
 
   // Save entry points wait for candidate mutations instead of opening or
   // submitting against stale server state.

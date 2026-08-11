@@ -565,8 +565,11 @@ function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, sta
 
 function syncStoredMaskStatus(imageId, candidates) {
   const draft = state.drafts.get(imageId);
-  const hasManualMask = Boolean(draft?.manualMaskPresent && draft.manualEnabled !== false);
-  state.maskStatus.set(imageId, candidates.some((candidate) => candidate.enabled) || hasManualMask);
+  if (!Array.isArray(draft?.visibleCandidateIds)) return;
+  const visibleCandidateIds = new Set(draft.visibleCandidateIds);
+  const hasVisibleCandidate = candidates.some((candidate) => candidate.enabled && visibleCandidateIds.has(candidate.id));
+  const hasManualMask = Boolean(draft.manualVisible && draft.manualEnabled !== false);
+  state.maskStatus.set(imageId, hasVisibleCandidate || hasManualMask);
 }
 
 async function refreshCandidateRecord(imageId, syncMask = false) {
@@ -590,9 +593,11 @@ function updateCandidateStatus() {
 
 function saveDraft() {
   if (!state.currentId || !state.currentImage) return;
+  const visibility = captureCurrentMaskVisibility();
   state.drafts.set(state.currentId, {
     add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png"),
     manualEnabled: state.manualEnabled, manualMaskPresent: state.manualMaskPresent,
+    visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
   });
 }
 
@@ -650,6 +655,28 @@ function composeCurrentMask() {
   combinedCtx.globalCompositeOperation = "destination-out";
   combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
+}
+
+function sourceVisibleAfterExclusion(source) {
+  combinedCtx.globalCompositeOperation = "source-over";
+  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  combinedCtx.drawImage(source, 0, 0);
+  combinedCtx.globalCompositeOperation = "destination-out";
+  combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
+  return canvasHasPixels(combinedCtx, combinedCanvas);
+}
+
+function captureCurrentMaskVisibility() {
+  const candidateIds = state.candidates
+    .filter((candidate) => {
+      const image = state.candidateImages.get(candidate.id);
+      return image && sourceVisibleAfterExclusion(image);
+    })
+    .map((candidate) => candidate.id);
+  const manual = state.manualMaskPresent && sourceVisibleAfterExclusion(addCanvas);
+  composeCurrentMask();
+  return { candidateIds, manual };
 }
 
 function maskStatusWithoutCandidate(candidateId) {
