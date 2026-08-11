@@ -195,8 +195,10 @@ function handleReviewStorageEvent(event) {
 function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;
+  const mutatingCandidates = state.candidateUpdateChains.size > 0;
   const detecting = activeDetection();
-  const hasImage = Boolean(state.currentId && state.currentImage);
+  const current = currentRecord();
+  const hasImage = Boolean(state.currentId && state.currentImage && current);
   const controls = [...document.querySelectorAll("button, input, select, textarea")];
   if (!locked) {
     for (const control of controls) {
@@ -218,8 +220,9 @@ function updateActionButtons() {
   $("#batchMoreButton").disabled = running || state.images.length === 0;
   $("#galleryAllTab").disabled = running;
   $("#galleryMaskedTab").disabled = running;
-  $("#saveAllButton").disabled = running || saveTargets().length === 0;
-  $("#saveButton").disabled = running || !hasImage || !imageHasMask(currentRecord());
+  $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
+  $("#saveButton").disabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
+  $("#applyStartButton").disabled = running || mutatingCandidates;
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || imageIndex() <= 0;
   $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
@@ -474,6 +477,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
       loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`),
       loadCandidateBundle(imageId, generation),
     ]);
+    syncCandidateRecord(imageId, candidateBundle.candidates);
     if (!isCurrentGeneration(generation)) return;
     state.currentId = imageId;
     state.pendingImageId = null;
@@ -550,11 +554,19 @@ function canvasHasPixels(context, target) {
   return context.getImageData(0, 0, target.width, target.height).data.some((value) => value > 0);
 }
 
-function syncCurrentCandidateRecord() {
-  const record = currentRecord();
+function syncCandidateRecord(imageId, candidates) {
+  const record = state.images.find((image) => image.id === imageId);
   if (!record) return;
-  record.candidateCount = state.candidates.length;
-  record.enabledCandidateCount = state.candidates.filter((candidate) => candidate.enabled).length;
+  record.candidateCount = candidates.length;
+  record.enabledCandidateCount = candidates.filter((candidate) => candidate.enabled).length;
+}
+
+function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, state.candidates); }
+
+async function refreshCandidateRecord(imageId) {
+  const data = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
+  syncCandidateRecord(imageId, data.candidates);
+  return data.candidates;
 }
 
 function updateCandidateStatus() {
@@ -631,6 +643,20 @@ function composeCurrentMask() {
   combinedCtx.globalCompositeOperation = "destination-out";
   combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
+}
+
+function maskStatusWithoutCandidate(candidateId) {
+  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  for (const candidate of state.candidates) {
+    if (candidate.id !== candidateId && candidate.enabled) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  }
+  if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "destination-out";
+  combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
+  const hasMask = canvasHasPixels(combinedCtx, combinedCanvas);
+  composeCurrentMask();
+  return hasMask;
 }
 
 function refreshMaskStatus(renderGalleryAfter = false) {
@@ -727,8 +753,9 @@ function renderCandidates() {
     enabled.addEventListener("change", async () => {
       if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
       const previousEnabled = candidate.enabled;
+      const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
       candidate.enabled = enabled.checked;
-      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled);
+      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     });
     const label = document.createElement("span"); label.className = "candidate-label";
     label.innerHTML = `<span class="candidate-class">${escapeHtml(candidate.className)}</span><span class="candidate-conf">${Math.round(candidate.confidence * 100)}%</span>`;
@@ -751,14 +778,23 @@ function enqueueCandidateMutation(key, send) {
   const queued = previous.then(send, send);
   const tracked = queued.finally(() => {
     if (state.candidateUpdateChains.get(key) === tracked) state.candidateUpdateChains.delete(key);
+    updateActionButtons();
   });
   state.candidateUpdateChains.set(key, tracked);
+  updateActionButtons();
   return tracked;
 }
 
-async function updateCandidate(candidate, previousEnabled) {
+async function waitForCandidateMutations() {
+  while (state.candidateUpdateChains.size) {
+    await Promise.allSettled([...state.candidateUpdateChains.values()]);
+  }
+}
+
+async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
+  const targetCandidates = [...state.candidates];
   const key = candidateMutationKey(imageId, candidate.id);
   const version = nextCandidateMutationVersion(key);
   const desired = candidate.enabled;
@@ -768,11 +804,29 @@ async function updateCandidate(candidate, previousEnabled) {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
       });
     } catch (error) {
-      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
-        try { await reconcileCurrentCandidates(imageId, generation); }
-        catch { candidate.enabled = previousEnabled; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render(); }
+      if (state.candidateUpdateVersions.get(key) !== version) return;
+      if (state.currentId === imageId && isCurrentGeneration(generation)) {
+        try {
+          if (await reconcileCurrentCandidates(imageId, generation)) {
+            setStatus(error.message, "error");
+            return;
+          }
+        } catch {
+          if (state.currentId === imageId && isCurrentGeneration(generation)) {
+            candidate.enabled = previousEnabled; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
+            setStatus(error.message, "error");
+            return;
+          }
+        }
       }
-      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) setStatus(error.message, "error");
+      candidate.enabled = previousEnabled;
+      syncCandidateRecord(imageId, targetCandidates);
+      if (previousMaskStatus !== undefined) state.maskStatus.set(imageId, previousMaskStatus);
+      try {
+        const candidates = await refreshCandidateRecord(imageId);
+        if (previousMaskStatus === undefined) state.maskStatus.set(imageId, candidates.some((item) => item.enabled));
+      } catch { /* The local rollback already removed the optimistic aggregate. */ }
+      renderCatalogViews();
     }
   };
   return enqueueCandidateMutation(key, send);
@@ -784,15 +838,23 @@ async function deleteCandidate(candidate) {
   const generation = state.imageGeneration;
   const key = candidateMutationKey(imageId, candidate.id);
   const version = nextCandidateMutationVersion(key);
+  const remainingCandidates = state.candidates.filter((item) => item.id !== candidate.id);
+  const remainingMaskStatus = maskStatusWithoutCandidate(candidate.id);
   state.candidateDeleting.add(key); renderCandidates();
   const send = async () => {
     try {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
-      if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateUpdateVersions.get(key) !== version) return;
-      state.candidates = state.candidates.filter((item) => item.id !== candidate.id);
-      state.candidateImages.delete(candidate.id);
-      syncCurrentCandidateRecord(); updateCandidateStatus();
-      refreshCurrentReviewAndMask(); renderCatalogViews(); renderCandidates(); render();
+      if (state.candidateUpdateVersions.get(key) !== version) return;
+      syncCandidateRecord(imageId, remainingCandidates);
+      state.maskStatus.set(imageId, remainingMaskStatus);
+      if (state.currentId === imageId && isCurrentGeneration(generation)) {
+        state.candidates = remainingCandidates;
+        state.candidateImages.delete(candidate.id);
+        updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+      } else {
+        try { await refreshCandidateRecord(imageId); } catch { /* The known deletion is already reflected locally. */ }
+      }
+      renderCatalogViews();
     } catch (error) {
       if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
         try { await reconcileCurrentCandidates(imageId, generation); } catch { /* Keep the existing coherent row. */ }
@@ -947,15 +1009,22 @@ async function cancelDetection() {
   catch (error) { state.detectCancelRequested = false; updateActionButtons(); setStatus(error.message, "error"); }
 }
 
-function saveCurrent() {
-  if (!isBusy() && !state.importing && state.currentId && imageHasMask(currentRecord())) openApplyDialog([state.currentId]);
+async function saveCurrent() {
+  const imageId = state.currentId;
+  if (isBusy() || state.importing || !imageId) return;
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+  const record = state.images.find((image) => image.id === imageId);
+  if (isBusy() || state.importing || state.currentId !== imageId || !record || !imageHasMask(record)) return;
+  await openApplyDialog([imageId]);
 }
 
-function saveAll() {
+async function saveAll() {
+  if (isBusy() || state.importing) return;
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (isBusy() || state.importing) return;
   saveDraft(); refreshMaskStatus();
   const imageIds = saveTargets();
-  if (imageIds.length) openApplyDialog(imageIds);
+  if (imageIds.length) await openApplyDialog(imageIds);
 }
 
 function setApplyResult(message, error = false) {
@@ -987,8 +1056,9 @@ function syncApplyMode() {
   $("#applyTemporarySourceNote").hidden = !containsSessionImage;
 }
 
-function openApplyDialog(imageIds) {
-  if (!imageIds.length || isBusy()) return;
+async function openApplyDialog(imageIds) {
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+  if (!imageIds.length || isBusy() || state.importing) return;
   saveDraft();
   state.applyTargetIds = imageIds;
   state.applyRunning = false;
@@ -1019,6 +1089,8 @@ function draftPayload(imageIds) {
 
 async function startApplyFromDialog(event) {
   event.preventDefault();
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+  if (isBusy() || state.importing) return;
   const imageIds = state.applyTargetIds;
   if (!imageIds.length) return;
   const copy = selectedSaveMode() === "copy" || applyTargetsContainSessionImage();

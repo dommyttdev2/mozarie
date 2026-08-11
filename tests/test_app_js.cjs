@@ -384,6 +384,7 @@ function keyEvent(key, options = {}) {
   state.currentId = "session";
   state.applyTargetIds = ["session"];
   state.applyRunning = false;
+  state.job = null;
   elements.get("#applyOverwriteMode").checked = true;
   elements.get("#deleteOriginal").checked = true;
   syncApplyMode();
@@ -469,6 +470,18 @@ function keyEvent(key, options = {}) {
   assert.equal(state.currentImage.width, 100);
   assert.equal(state.candidates[0].id, "first-candidate");
 
+  // A successful selection always replaces stale gallery aggregates with the
+  // candidate bundle returned for that image.
+  const countSyncedImage = { id: "count-sync", relativePath: "count-sync.png", width: 60, height: 40, candidateCount: 9, enabledCandidateCount: 7 };
+  state.images = [countSyncedImage];
+  state.currentId = null;
+  state.currentImage = null;
+  const countSyncedSelection = selectImage("count-sync");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
+  await countSyncedSelection;
+  assert.equal(countSyncedImage.candidateCount, 0);
+  assert.equal(countSyncedImage.enabledCandidateCount, 0);
+
   // Rapid clicks for one candidate are sent in order, never concurrently.
   state.currentId = "first";
   state.imageGeneration = 60;
@@ -525,8 +538,128 @@ function keyEvent(key, options = {}) {
   assert.equal(state.images[0].candidateCount, 1);
   assert.equal(state.images[0].enabledCandidateCount, 1);
 
+  // A deletion that finishes after navigation still updates the deleted
+  // image's aggregate counts and cached mask state, not the new editor image.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  state.candidateDeleting.clear();
+  const deleteTarget = { id: "delete-target", relativePath: "delete-target.png", width: 100, height: 80, candidateCount: 2, enabledCandidateCount: 1 };
+  const deleteOther = { id: "delete-other", relativePath: "delete-other.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 };
+  state.images = [deleteTarget, deleteOther];
+  state.currentId = deleteTarget.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 62;
+  const offscreenDeleted = { id: "offscreen-delete", className: "penis", confidence: 0.92, enabled: true, color: "#ffffff" };
+  const offscreenRemaining = { id: "offscreen-remaining", className: "pussy", confidence: 0.61, enabled: false, color: "#ffffff" };
+  state.candidates = [offscreenDeleted, offscreenRemaining];
+  state.candidateImages = new Map([[offscreenDeleted.id, {}], [offscreenRemaining.id, {}]]);
+  state.maskStatus.set(deleteTarget.id, true);
+  combinedMaskPresent = false;
+  const offscreenDelete = deleteCandidate(offscreenDeleted);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).options.method, "DELETE");
+  state.currentId = deleteOther.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration += 1;
+  state.candidates = [{ id: "other-candidate", className: "penis", confidence: 0.8, enabled: true, color: "#ffffff" }];
+  state.candidateImages = new Map([["other-candidate", {}]]);
+  resolveFetch({ ok: true, json: async () => ({ deleted: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/delete-target");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [offscreenRemaining] }) });
+  await offscreenDelete;
+  assert.equal(deleteTarget.candidateCount, 1);
+  assert.equal(deleteTarget.enabledCandidateCount, 0);
+  assert.equal(state.maskStatus.get(deleteTarget.id), false);
+  assert.equal(state.currentId, deleteOther.id);
+  assert.deepEqual(state.candidates.map((candidate) => candidate.id), ["other-candidate"]);
+
+  // A failed optimistic toggle is rolled back for its source image even when
+  // that image is no longer displayed.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  const failedUpdateTarget = { id: "failed-update", relativePath: "failed-update.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 0 };
+  const failedUpdateOther = { id: "failed-update-other", relativePath: "other.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [failedUpdateTarget, failedUpdateOther];
+  state.currentId = failedUpdateTarget.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 64;
+  const failedOffscreenCandidate = { id: "failed-offscreen", className: "penis", confidence: 0.75, enabled: false, color: "#ffffff" };
+  state.candidates = [failedOffscreenCandidate];
+  state.maskStatus.set(failedUpdateTarget.id, false);
+  const failedOffscreenUpdate = updateCandidate(failedOffscreenCandidate, true, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  state.currentId = failedUpdateOther.id;
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration += 1;
+  state.candidates = [];
+  state.candidateImages.clear();
+  resolveFetch({ ok: false, status: 500, json: async () => ({ error: "toggle failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/failed-update");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ ...failedOffscreenCandidate, enabled: true }] }) });
+  await failedOffscreenUpdate;
+  assert.equal(failedUpdateTarget.candidateCount, 1);
+  assert.equal(failedUpdateTarget.enabledCandidateCount, 1);
+  assert.equal(state.maskStatus.get(failedUpdateTarget.id), true);
+  assert.equal(state.currentId, failedUpdateOther.id);
+
+  // Save entry points wait for candidate mutations instead of opening or
+  // submitting against stale server state.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  state.images = [{ id: "save-wait", relativePath: "save-wait.png", width: 100, height: 80, candidateCount: 2, enabledCandidateCount: 2 }];
+  state.currentId = "save-wait";
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 66;
+  state.job = null;
+  state.importing = false;
+  combinedMaskPresent = true;
+  state.maskStatus.set("save-wait", true);
+  const saveWaitDeleted = { id: "save-wait-deleted", className: "penis", confidence: 0.9, enabled: true, color: "#ffffff" };
+  const saveWaitCandidate = { id: "save-wait-candidate", className: "pussy", confidence: 0.8, enabled: true, color: "#ffffff" };
+  state.candidates = [saveWaitDeleted, saveWaitCandidate];
+  state.candidateImages = new Map([[saveWaitDeleted.id, {}], [saveWaitCandidate.id, {}]]);
+  elements.get("#applyDialog").close();
+  const saveCurrentMutation = deleteCandidate(saveWaitDeleted);
+  const pendingSaveCurrent = saveCurrent();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#saveButton").disabled, true);
+  assert.equal(elements.get("#saveAllButton").disabled, true);
+  assert.equal(elements.get("#applyDialog").open, false);
+  assert.equal(requests.at(-1).path, "/api/candidate/save-wait/save-wait-deleted");
+  resolveFetch({ ok: true, json: async () => ({ deleted: true }) });
+  await Promise.all([saveCurrentMutation, pendingSaveCurrent]);
+  assert.equal(elements.get("#applyDialog").open, true);
+
+  elements.get("#applyDialog").close();
+  const saveAllMutation = updateCandidate(saveWaitCandidate, false, true);
+  const pendingSaveAll = saveAll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#applyDialog").open, false);
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await Promise.all([saveAllMutation, pendingSaveAll]);
+  assert.equal(elements.get("#applyDialog").open, true);
+
+  elements.get("#applyDialog").close();
+  state.applyTargetIds = ["save-wait"];
+  const startApplyMutation = updateCandidate(saveWaitCandidate, false, true);
+  const pendingApplyStart = startApplyFromDialog({ preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.notEqual(requests.at(-1).path, "/api/apply");
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/apply");
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await Promise.all([startApplyMutation, pendingApplyStart]);
+  state.job = null;
+  state.applyRunning = false;
+
   // Manual strokes are represented by one accessible virtual candidate. Its
   // toggle controls preview/save inclusion without clearing the stored mask.
+  state.images = [{ id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }];
+  state.currentId = "first";
+  state.currentImage = { width: 100, height: 80 };
   state.candidates = [];
   state.candidateImages.clear();
   state.manualMaskPresent = true;
