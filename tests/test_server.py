@@ -407,6 +407,22 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(state.list_candidates(image_id), [])
             self.assertEqual(path.read_bytes(), original)
 
+    def test_delete_candidate_is_idempotent_and_removes_its_mask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+
+            self.assertTrue(state.delete_candidate(image_id, "candidate"))
+            self.assertFalse(mask_path.exists())
+            self.assertEqual(state.list_candidates(image_id), [])
+            self.assertFalse(state.delete_candidate(image_id, "candidate"))
+
     def test_image_listing_reports_enabled_candidates_for_gallery_filtering(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
@@ -1015,6 +1031,28 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(payload, {"candidate": expected})
             self.assertEqual(add_candidate.call_args.args[0], "image")
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_candidate_delete_api_returns_the_idempotent_result(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(server_module.STATE, "delete_candidate", side_effect=[True, False]) as delete_candidate:
+                for expected in (True, False):
+                    connection.request("DELETE", "/api/candidate/image/candidate")
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(payload, {"deleted": expected})
+            self.assertEqual(delete_candidate.call_count, 2)
+            delete_candidate.assert_called_with("image", "candidate")
         finally:
             connection.close()
             httpd.shutdown()

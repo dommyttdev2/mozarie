@@ -77,8 +77,12 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .detection-settings { padding: 11px; border-bottom: 1px solid #3b424a; } .threshold-control { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; color: #c0c8d0; }
 .threshold-control output { min-width: 50px; padding: 2px 6px; border: 1px solid #4e5660; border-radius: 3px; color: #e7eaed; text-align: center; } #confidence { width: 100%; margin: 8px 0 3px; } .detection-settings p { margin: 0; }
 .candidates-heading { min-height: 49px; } .candidate-list { flex: 1 1 auto; min-height: 0; padding: 9px; overflow: auto; } .candidate-empty { margin: 3px 0; color: #98a2ad; }
-.candidate-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; min-height: 37px; padding: 6px 0; border-bottom: 1px solid #363c43; } .candidate-row input[type="checkbox"] { margin: 0; accent-color: #42a98f; }
+.candidate-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 28px; gap: 8px; align-items: center; min-height: 37px; padding: 6px 0; border-bottom: 1px solid #363c43; } .candidate-row input[type="checkbox"] { margin: 0; accent-color: #42a98f; }
 .candidate-label { display: flex; min-width: 0; justify-content: space-between; gap: 7px; } .candidate-class { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .candidate-conf { color: #98a2ad; font-size: 12px; white-space: nowrap; }
+.candidate-row-manual .candidate-label { color: #d9e7e2; }
+.candidate-delete { width: 28px; height: 28px; min-width: 28px; padding: 0; border-color: #70464b; color: #f08b95; font-size: 18px; line-height: 1; }
+.candidate-delete:hover:not(:disabled) { border-color: #d65f6b; background: #4b2d31; color: #ffd8dc; }
+.candidate-delete:focus-visible { outline: 2px solid #ff8e98; outline-offset: 2px; }
 
 .batch-bar { height: 44px; display: flex; gap: 7px; align-items: center; padding: 6px 14px; border-top: 1px solid #3b424a; background: #22272d; } .batch-count { min-width: 56px; color: #c0c8d0; }
 #batchMoreButton { margin-left: auto; } #batchMoreButton[aria-expanded="true"] { border-color: #72cdb3; }

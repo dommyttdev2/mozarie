@@ -12,7 +12,8 @@ const state = {
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
-  candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
+  candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(),
+  manualMaskPresent: false, manualEnabled: true,
 };
 
 const canvas = $("#editorCanvas");
@@ -444,10 +445,13 @@ function canvasSizeForImage(image) {
   for (const target of [addCanvas, exclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
+  state.manualMaskPresent = false;
+  state.manualEnabled = true;
 }
 
 function clearEditor() {
   state.history = []; state.historyIndex = -1; state.hover = null; clearBoundaryInteraction();
+  state.manualMaskPresent = false; state.manualEnabled = true;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -481,7 +485,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
-    $("#candidateStatus").textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
+    updateCandidateStatus();
     renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatus(t("status.editReady"));
   } catch (error) {
     if (isCurrentGeneration(generation)) {
@@ -538,22 +542,52 @@ async function reconcileCurrentCandidates(imageId, generation) {
     record.candidateCount = bundle.candidates.length;
     record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled).length;
   }
-  refreshMaskStatus(true); renderCandidates(); render();
+  refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
   return true;
+}
+
+function canvasHasPixels(context, target) {
+  return context.getImageData(0, 0, target.width, target.height).data.some((value) => value > 0);
+}
+
+function syncCurrentCandidateRecord() {
+  const record = currentRecord();
+  if (!record) return;
+  record.candidateCount = state.candidates.length;
+  record.enabledCandidateCount = state.candidates.filter((candidate) => candidate.enabled).length;
+}
+
+function updateCandidateStatus() {
+  const status = $("#candidateStatus");
+  if (!state.currentId) { status.textContent = t("candidates.unselected"); return; }
+  if (state.manualMaskPresent) {
+    status.textContent = state.candidates.length
+      ? t("candidates.countWithManual", { count: state.candidates.length })
+      : t("candidates.manualOnly");
+    return;
+  }
+  status.textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
 }
 
 function saveDraft() {
   if (!state.currentId || !state.currentImage) return;
-  state.drafts.set(state.currentId, { add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png") });
+  state.drafts.set(state.currentId, {
+    add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png"),
+    manualEnabled: state.manualEnabled, manualMaskPresent: state.manualMaskPresent,
+  });
 }
 
 function restoreDraft(imageId, generation) {
   const draft = state.drafts.get(imageId);
   state.history = []; state.historyIndex = -1;
-  if (!draft) return pushHistory();
+  state.manualEnabled = draft?.manualEnabled !== false;
+  state.manualMaskPresent = false;
+  if (!draft) { pushHistory(); updateCandidateStatus(); renderCandidates(); return; }
   Promise.all([loadImage(draft.add), loadImage(draft.exclusion)]).then(([addImage, exclusionImage]) => {
     if (state.currentId !== imageId || state.imageGeneration !== generation) return;
-    addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); pushHistory(); refreshMaskStatus(true); render();
+    addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0);
+    state.manualMaskPresent = draft.manualMaskPresent ?? canvasHasPixels(addCtx, addCanvas);
+    pushHistory(); refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
   });
 }
 
@@ -593,7 +627,7 @@ function composeCurrentMask() {
   if (!state.currentImage) return;
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   for (const candidate of state.candidates) if (candidate.enabled) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  combinedCtx.drawImage(addCanvas, 0, 0);
+  if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
   combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
@@ -667,31 +701,67 @@ function render() {
 function renderCandidates() {
   const list = $("#candidateList"); list.textContent = "";
   if (!state.currentId) return;
-  if (!state.candidates.length) {
+  if (!state.candidates.length && !state.manualMaskPresent) {
     const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); list.append(empty); return;
   }
+  if (state.manualMaskPresent) {
+    const row = document.createElement("div"); row.className = "candidate-row candidate-row-manual";
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = state.manualEnabled;
+    enabled.setAttribute("aria-label", t("candidates.manualToggle"));
+    enabled.addEventListener("change", () => {
+      if (isBusy() || state.importing) { enabled.checked = state.manualEnabled; return; }
+      state.manualEnabled = enabled.checked; pushHistory(); refreshCurrentReviewAndMask(); render();
+    });
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
+    remove.title = t("candidates.deleteManual"); remove.setAttribute("aria-label", t("candidates.deleteManual"));
+    remove.addEventListener("click", deleteManualMask);
+    row.append(enabled, label, remove); list.append(row);
+  }
   for (const candidate of state.candidates) {
-    const row = document.createElement("label"); row.className = "candidate-row";
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled;
+    const key = candidateMutationKey(state.currentId, candidate.id);
+    const deleting = state.candidateDeleting.has(key);
+    const row = document.createElement("div"); row.className = "candidate-row";
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled; enabled.disabled = deleting;
+    enabled.setAttribute("aria-label", t("candidates.toggle", { label: candidate.className }));
     enabled.addEventListener("change", async () => {
       if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
       const previousEnabled = candidate.enabled;
       candidate.enabled = enabled.checked;
-      refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled);
+      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled);
     });
     const label = document.createElement("span"); label.className = "candidate-label";
     label.innerHTML = `<span class="candidate-class">${escapeHtml(candidate.className)}</span><span class="candidate-conf">${Math.round(candidate.confidence * 100)}%</span>`;
-    row.append(enabled, label); list.append(row);
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting;
+    const deleteLabel = t("candidates.delete", { label: candidate.className });
+    remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
+    remove.addEventListener("click", () => deleteCandidate(candidate));
+    row.append(enabled, label, remove); list.append(row);
   }
+}
+
+function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }
+function nextCandidateMutationVersion(key) {
+  const version = (state.candidateUpdateVersions.get(key) || 0) + 1;
+  state.candidateUpdateVersions.set(key, version);
+  return version;
+}
+function enqueueCandidateMutation(key, send) {
+  const previous = state.candidateUpdateChains.get(key) || Promise.resolve();
+  const queued = previous.then(send, send);
+  const tracked = queued.finally(() => {
+    if (state.candidateUpdateChains.get(key) === tracked) state.candidateUpdateChains.delete(key);
+  });
+  state.candidateUpdateChains.set(key, tracked);
+  return tracked;
 }
 
 async function updateCandidate(candidate, previousEnabled) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
-  const key = `${imageId}:${candidate.id}`;
-  const version = (state.candidateUpdateVersions.get(key) || 0) + 1;
+  const key = candidateMutationKey(imageId, candidate.id);
+  const version = nextCandidateMutationVersion(key);
   const desired = candidate.enabled;
-  state.candidateUpdateVersions.set(key, version);
   const send = async () => {
     try {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
@@ -700,18 +770,49 @@ async function updateCandidate(candidate, previousEnabled) {
     } catch (error) {
       if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
         try { await reconcileCurrentCandidates(imageId, generation); }
-        catch { candidate.enabled = previousEnabled; refreshMaskStatus(true); renderCandidates(); render(); }
+        catch { candidate.enabled = previousEnabled; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render(); }
       }
       if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) setStatus(error.message, "error");
     }
   };
-  const previous = state.candidateUpdateChains.get(key) || Promise.resolve();
-  const queued = previous.then(send, send);
-  const tracked = queued.finally(() => {
-    if (state.candidateUpdateChains.get(key) === tracked) state.candidateUpdateChains.delete(key);
-  });
-  state.candidateUpdateChains.set(key, tracked);
-  return tracked;
+  return enqueueCandidateMutation(key, send);
+}
+
+async function deleteCandidate(candidate) {
+  if (!state.currentId || isBusy() || state.importing) return;
+  const imageId = state.currentId;
+  const generation = state.imageGeneration;
+  const key = candidateMutationKey(imageId, candidate.id);
+  const version = nextCandidateMutationVersion(key);
+  state.candidateDeleting.add(key); renderCandidates();
+  const send = async () => {
+    try {
+      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
+      if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateUpdateVersions.get(key) !== version) return;
+      state.candidates = state.candidates.filter((item) => item.id !== candidate.id);
+      state.candidateImages.delete(candidate.id);
+      syncCurrentCandidateRecord(); updateCandidateStatus();
+      refreshCurrentReviewAndMask(); renderCatalogViews(); renderCandidates(); render();
+    } catch (error) {
+      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(key) === version) {
+        try { await reconcileCurrentCandidates(imageId, generation); } catch { /* Keep the existing coherent row. */ }
+        setStatus(error.message, "error");
+      }
+    } finally {
+      if (state.candidateUpdateVersions.get(key) === version) {
+        state.candidateDeleting.delete(key);
+        if (state.currentId === imageId && isCurrentGeneration(generation)) renderCandidates();
+      }
+    }
+  };
+  return enqueueCandidateMutation(key, send);
+}
+
+function deleteManualMask() {
+  if (!state.manualMaskPresent || isBusy() || state.importing) return;
+  addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
+  state.manualMaskPresent = false; state.manualEnabled = true;
+  pushHistory(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 async function addBoundaryCandidate(point) {
@@ -770,7 +871,12 @@ function boundaryDragStarted(event) {
     event.clientY - state.boundaryStartClient.y,
   ) >= 3;
 }
-function snapshot() { return { add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png") }; }
+function snapshot() {
+  return {
+    add: addCanvas.toDataURL("image/png"), exclusion: exclusionCanvas.toDataURL("image/png"),
+    manualEnabled: state.manualEnabled, manualMaskPresent: state.manualMaskPresent,
+  };
+}
 
 function pushHistory() {
   if (!state.currentImage) return;
@@ -784,7 +890,10 @@ async function restoreSnapshot(index) {
   const entry = state.history[index]; if (!entry) return;
   const [addImage, exclusionImage] = await Promise.all([loadImage(entry.add), loadImage(entry.exclusion)]);
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0); state.historyIndex = index; updateHistoryButtons(); refreshCurrentReviewAndMask(); render();
+  addCtx.drawImage(addImage, 0, 0); exclusionCtx.drawImage(exclusionImage, 0, 0);
+  state.manualEnabled = entry.manualEnabled !== false;
+  state.manualMaskPresent = entry.manualMaskPresent ?? canvasHasPixels(addCtx, addCanvas);
+  state.historyIndex = index; updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function drawStroke(from, to, erase) {
@@ -900,7 +1009,10 @@ function draftPayload(imageIds) {
   const drafts = {};
   for (const imageId of imageIds) {
     const draft = state.drafts.get(imageId);
-    if (draft) drafts[imageId] = draft;
+    if (draft) drafts[imageId] = {
+      add: draft.manualEnabled === false ? "" : draft.add,
+      exclusion: draft.exclusion,
+    };
   }
   return drafts;
 }
@@ -1091,6 +1203,7 @@ function resetCurrentDraft() {
   if (!state.currentImage) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+  state.manualMaskPresent = false; state.manualEnabled = true;
   state.history = []; state.historyIndex = -1; updateHistoryButtons(); refreshMaskStatus(true); render();
 }
 
@@ -1381,10 +1494,19 @@ function bindEvents() {
       if (state.boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
       else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
       state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    } else if (state.drawing && event.button === 0) { pushHistory(); refreshCurrentReviewAndMask(); }
+    } else if (state.drawing && event.button === 0) {
+      state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+      pushHistory(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates();
+    }
     state.drawing = false; state.panning = false; canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair"; render();
   });
-  canvas.addEventListener("pointercancel", () => { state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render(); });
+  canvas.addEventListener("pointercancel", () => {
+    if (state.drawing && state.tool !== "boundary") {
+      state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+      pushHistory(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates();
+    }
+    state.drawing = false; state.panning = false; state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false; render();
+  });
   canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;

@@ -3,11 +3,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function element() {
+function element(tagName = "") {
   const listeners = new Map();
   return {
-    disabled: false, textContent: "", className: "", hidden: false, value: "", style: {}, dataset: {}, attributes: {},
-    classList: { toggle() {} }, append() {}, appendChild() {}, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); listeners.get("click")?.({ currentTarget: this, target: this }); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    tagName: tagName.toUpperCase(), disabled: false, textContent: "", className: "", hidden: false, value: "", style: {}, dataset: {}, attributes: {}, children: [],
+    classList: { toggle() {} }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); listeners.get("click")?.({ currentTarget: this, target: this }); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -72,6 +72,23 @@ elements.get("#canvasStage").clientWidth = 600;
 elements.get("#canvasStage").clientHeight = 400;
 elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode: galleryItem } } });
 elements.set("#overviewItemTemplate", { content: { firstElementChild: { cloneNode: overviewItem } } });
+const candidateList = elements.get("#candidateList");
+Object.defineProperty(candidateList, "textContent", {
+  get() { return this._textContent || ""; },
+  set(value) { this._textContent = value; this.children = []; },
+});
+
+const createdCanvases = [];
+function canvasElement() {
+  const context = {
+    clearRectCalls: 0, drawImageCalls: [],
+    clearRect() { this.clearRectCalls += 1; }, drawImage(...args) { this.drawImageCalls.push(args); }, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {},
+    getImageData() { return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) }; },
+  };
+  const target = { width: 1, height: 1, _context: context, getContext: () => context, toDataURL: () => "data:image/png;base64,test" };
+  createdCanvases.push(target);
+  return target;
+}
 
 const document = {
   addEventListener() {},
@@ -83,11 +100,7 @@ const document = {
     if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog"), elements.get("#detectDialog")];
     return [];
   },
-  createElement: (tag) => tag === "canvas" ? {
-    width: 1, height: 1,
-    getContext: () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, getImageData() { return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) }; } }),
-    toDataURL: () => "data:image/png;base64,test",
-  } : element(),
+  createElement: (tag) => tag === "canvas" ? canvasElement() : element(tag),
 };
 document.activeElement = null;
 let combinedMaskPresent = false;
@@ -112,9 +125,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -168,6 +181,15 @@ function keyEvent(key, options = {}) {
   state.translations["detectDialog.stopping"] = "Stopping...";
   state.translations["status.detectCancelling"] = "Stopping after current image";
   state.translations["status.detectCancelled"] = "Stopped. {completed} complete.";
+  state.translations["candidates.count"] = "{count} candidates";
+  state.translations["candidates.countWithManual"] = "{count} candidates / manual";
+  state.translations["candidates.manualOnly"] = "manual";
+  state.translations["candidates.manual"] = "手書き";
+  state.translations["candidates.manualToggle"] = "手書きモザイクを使用";
+  state.translations["candidates.toggle"] = "{label}を使用";
+  state.translations["candidates.delete"] = "{label}を削除";
+  state.translations["candidates.deleteManual"] = "手書きを削除";
+  state.translations["candidates.none"] = "候補はありません";
   state.images = [loadedImage];
   state.job = null;
   state.detectCancelRequested = false;
@@ -461,6 +483,104 @@ function keyEvent(key, options = {}) {
   await Promise.all([firstUpdate, secondUpdate]);
   const updateRequests = requests.filter((request) => request.path.endsWith("/serialized"));
   assert.deepEqual(updateRequests.map((request) => JSON.parse(request.options.body).enabled), [true, false]);
+
+  // Candidate deletion is queued behind an in-flight toggle. A stale toggle
+  // failure cannot reload and resurrect the row selected for deletion.
+  state.candidateUpdateChains.clear();
+  state.candidateUpdateVersions.clear();
+  state.candidateDeleting.clear();
+  state.images = [{ id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 2, enabledCandidateCount: 2 }];
+  state.currentId = "first";
+  state.currentImage = { width: 100, height: 80 };
+  state.imageGeneration = 61;
+  state.manualMaskPresent = false;
+  const deletingCandidate = { id: "delete-after-update", className: "penis", confidence: 0.91, enabled: false, color: "#ffffff" };
+  const remainingCandidate = { id: "remaining", className: "pussy", confidence: 0.88, enabled: true, color: "#ffffff" };
+  state.candidates = [deletingCandidate, remainingCandidate];
+  state.candidateImages = new Map([[deletingCandidate.id, {}], [remainingCandidate.id, {}]]);
+  const mutationRequestStart = requests.length;
+  const pendingUpdate = updateCandidate(deletingCandidate, true);
+  const pendingDelete = deleteCandidate(deletingCandidate);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, mutationRequestStart + 1);
+  assert.equal(requests.at(-1).options.method, "POST");
+  renderCandidates();
+  const deletingRow = candidateList.children[0];
+  const remainingRow = candidateList.children[1];
+  assert.equal(deletingRow.children[0].disabled, true);
+  assert.equal(deletingRow.children[2].disabled, true);
+  assert.equal(remainingRow.children[0].disabled, false);
+  assert.equal(remainingRow.children[2].disabled, false);
+  resolveFetch({ ok: false, status: 500, json: async () => ({ error: "stale update failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).options.method, "DELETE");
+  assert.equal(requests.at(-1).path, "/api/candidate/first/delete-after-update");
+  resolveFetch({ ok: true, json: async () => ({ deleted: true }) });
+  await Promise.all([pendingUpdate, pendingDelete]);
+  const serializedMutations = requests.slice(mutationRequestStart);
+  assert.deepEqual(serializedMutations.map((request) => request.options.method), ["POST", "DELETE"]);
+  assert.equal(serializedMutations.some((request) => request.path === "/api/candidates/first"), false);
+  assert.deepEqual(state.candidates.map((candidate) => candidate.id), ["remaining"]);
+  assert.equal(state.candidateImages.has(deletingCandidate.id), false);
+  assert.equal(state.images[0].candidateCount, 1);
+  assert.equal(state.images[0].enabledCandidateCount, 1);
+
+  // Manual strokes are represented by one accessible virtual candidate. Its
+  // toggle controls preview/save inclusion without clearing the stored mask.
+  state.candidates = [];
+  state.candidateImages.clear();
+  state.manualMaskPresent = true;
+  state.manualEnabled = true;
+  state.history = [];
+  state.historyIndex = -1;
+  renderCandidates();
+  assert.equal(candidateList.children.length, 1);
+  const manualRow = candidateList.children[0];
+  assert.equal(manualRow.tagName, "DIV");
+  assert.equal(manualRow.className, "candidate-row candidate-row-manual");
+  assert.equal(manualRow.children.length, 3);
+  assert.equal(manualRow.children[1].textContent, "手書き");
+  assert.equal(manualRow.children[0].attributes["aria-label"], "手書きモザイクを使用");
+  assert.equal(manualRow.children[2].attributes["aria-label"], "手書きを削除");
+  assert.equal(manualRow.children[2].title, "手書きを削除");
+  manualRow.children[0].checked = false;
+  manualRow.children[0].dispatch("change");
+  assert.equal(state.manualEnabled, false);
+  saveDraft();
+  const disabledManualDraft = draftPayload(["first"]).first;
+  assert.equal(disabledManualDraft.add, "");
+  assert.equal(disabledManualDraft.exclusion, "data:image/png;base64,test");
+  const combinedContext = createdCanvases[2]._context;
+  combinedContext.drawImageCalls = [];
+  buildCombinedMask();
+  assert.equal(combinedContext.drawImageCalls.some(([image]) => image === createdCanvases[0]), false);
+  manualRow.children[0].checked = true;
+  manualRow.children[0].dispatch("change");
+  combinedContext.drawImageCalls = [];
+  buildCombinedMask();
+  assert.equal(combinedContext.drawImageCalls.some(([image]) => image === createdCanvases[0]), true);
+
+  // Removing the manual row clears only the additive canvas and remains
+  // undoable; the exclusion canvas is left intact.
+  state.history = [{
+    add: "data:image/png;base64,manual-before-delete",
+    exclusion: "data:image/png;base64,exclusion-before-delete",
+    manualEnabled: true,
+    manualMaskPresent: true,
+  }];
+  state.historyIndex = 0;
+  const addClearBeforeDelete = createdCanvases[0]._context.clearRectCalls;
+  const exclusionClearBeforeDelete = createdCanvases[1]._context.clearRectCalls;
+  manualRow.children[2].click();
+  assert.equal(createdCanvases[0]._context.clearRectCalls, addClearBeforeDelete + 1);
+  assert.equal(createdCanvases[1]._context.clearRectCalls, exclusionClearBeforeDelete);
+  assert.equal(state.manualMaskPresent, false);
+  assert.equal(candidateList.children[0].className, "candidate-empty");
+  assert.equal(state.history.length, 2);
+  await restoreSnapshot(0);
+  assert.equal(state.manualMaskPresent, true);
+  assert.equal(state.manualEnabled, true);
+  assert.equal(candidateList.children[0].className, "candidate-row candidate-row-manual");
 
   // Same-tab completion reloads a target image without putting its old canvas
   // back into drafts.

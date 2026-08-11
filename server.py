@@ -914,6 +914,17 @@ class StudioState:
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
 
+    def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
+        self.image_for_id(image_id)
+        with self.lock:
+            candidates = self.candidates.get(image_id, [])
+            candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
+            if candidate is None:
+                return False
+            candidate.mask_path.unlink(missing_ok=True)
+            self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
+            return True
+
     def start_detection(self, image_ids: list[str], confidence: float = DEFAULT_DETECTION_CONFIDENCE) -> None:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         self._start_job("detect", records, self._detect_worker, confidence, expected_catalog_generation=catalog_generation)
@@ -2016,6 +2027,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
+            self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        try:
+            path = unquote(urlparse(self.path).path)
+            if path.startswith("/api/candidate/"):
+                _, _, _, image_id, candidate_id = path.split("/", 4)
+                self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
+            else:
+                self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
+        except ClientError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            LOGGER.exception("DELETE リクエストの処理に失敗: %s", self.path)
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _read_json_body(self) -> dict[str, Any]:
