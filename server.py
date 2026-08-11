@@ -1155,6 +1155,10 @@ class StudioState:
                     self._cancel_job(job_generation, catalog_generation)
                     return
                 with self.lock:
+                    if control is not None and control.cancel_requested.is_set():
+                        self._discard_candidates(candidates)
+                        self._cancel_job(job_generation, catalog_generation)
+                        return
                     if not self._job_is_current(job_generation, catalog_generation):
                         self._discard_candidates(candidates)
                         return
@@ -1166,8 +1170,8 @@ class StudioState:
                         if candidate.source != "boundary":
                             candidate.mask_path.unlink(missing_ok=True)
                     self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
+                    self._mark_image_completed(record.image_id, job_generation, catalog_generation)
+                    self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc, job_generation, catalog_generation)

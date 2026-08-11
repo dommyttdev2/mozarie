@@ -525,6 +525,56 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(state.candidates.get(second_id, []), [])
             self.assertFalse((state.cache_dir / second_id / "candidate.png").exists())
 
+    def test_detect_cancel_between_inference_and_commit_preserves_existing_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            control = server_module.JobControl()
+            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+
+            old_mask_path = state.cache_dir / image_id / "old.png"
+            old_mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(old_mask_path)
+            old_candidate = Candidate("old", "penis", 0.8, old_mask_path)
+            state.candidates[image_id] = [old_candidate]
+            new_mask_path = state.cache_dir / image_id / "new.png"
+            inject_cancel = False
+            original_lock = state.lock
+
+            class CancelBeforeCommit:
+                def __enter__(self):
+                    original_lock.__enter__()
+                    if inject_cancel:
+                        control.cancel_requested.set()
+                    return self
+
+                def __exit__(self, *args):
+                    return original_lock.__exit__(*args)
+
+            def detect_image(*_args):
+                nonlocal inject_cancel
+                Image.fromarray(self._mask(16, 16), mode="L").save(new_mask_path)
+                inject_cancel = True
+                return [Candidate("new", "penis", 0.9, new_mask_path)]
+
+            state.lock = CancelBeforeCommit()
+            try:
+                with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
+                    state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, control=control)
+            finally:
+                state.lock = original_lock
+
+            self.assertEqual(state.job.state, "cancelled")
+            self.assertEqual(state.job.completed, 0)
+            self.assertEqual(state.job.completed_image_ids, ())
+            self.assertEqual(state.candidates[image_id], [old_candidate])
+            self.assertTrue(old_mask_path.is_file())
+            self.assertFalse(new_mask_path.exists())
+
     def test_detect_job_can_be_cancelled_with_the_shared_control(self):
         state = self.new_state()
         state.job = server_module.Job(kind="detect", state="running", total=1)
