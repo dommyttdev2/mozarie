@@ -8,7 +8,8 @@ const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
 assert.match(app, /window\.showDirectoryPicker\(\{ id: "lets-censoring-output", mode: "readwrite" \}\)/);
 assert.match(app, /response\.headers\?\.get\("X-Lets-Censoring-Save-Token"\)/);
-assert.match(app, /deleteOriginal: entry\.deleteOriginal, saveToken/);
+assert.match(app, /candidateRevision: entry\.candidateRevision, deleteOriginal, sourceAction, saveToken/);
+assert.doesNotMatch(app, /deleteOriginal: entry\.deleteOriginal/);
 assert.ok(app.indexOf("await stream.close()") < app.indexOf('api("/api/save/commit"'), "commit must occur after close");
 assert.match(app, /file\.size !== 0 \|\| file\.lastModified \+ 2000 < reservedAt/);
 assert.match(app, /\$\{stem\}\$\{suffix\}\$\{number === 1 \? "" : `_\$\{number\}`\}\$\{extension\}/);

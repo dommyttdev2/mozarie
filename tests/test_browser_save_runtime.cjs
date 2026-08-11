@@ -180,9 +180,9 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
   };
 
   let source = fs.readFileSync(appPath, "utf8");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, runBrowserSave, saveTargets };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets };\n");
   vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, runBrowserSave, saveTargets } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, runBrowserSave, saveTargets } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.translations = {
     "apply.complete": "complete {completed}",
@@ -191,7 +191,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { directory, elements, lockRequests, requests, runBrowserSave, saveTargets, state };
+  return { directory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave, saveTargets, state };
 }
 
 async function runSuccessCase() {
@@ -279,6 +279,63 @@ async function runDeleteOriginalCase() {
   const payload = JSON.parse(runtime.requests.at(-1).options.body);
   assert.equal(payload.deleteOriginal, true);
   assert.equal(payload.saveToken, "runtime-render-token");
+  assert.equal(payload.sourceAction, "deleted");
+}
+
+async function runHandleOverwriteCase() {
+  const directory = new FakeDirectoryHandle();
+  let written = null;
+  const sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  const sourceHandle = {
+    async getFile() { return sourceFile; },
+    async createWritable() {
+      return { async write(bytes) { written = [...new Uint8Array(bytes)]; }, async close() {}, async abort() {} };
+    },
+  };
+  const runtime = createRuntime({ directory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.images = [{ id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
+  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
+  await runtime.runBrowserSave(null, ["image-1"], "_censored", false, "overwrite");
+  assert.deepEqual(written, [4, 5, 6]);
+  assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "overwrite");
+}
+
+async function runRepeatedHandleOverwriteCase() {
+  const image = { id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  let sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  let writes = 0;
+  const sourceHandle = {
+    async getFile() { return sourceFile; },
+    async createWritable() {
+      return {
+        async write() {},
+        async close() { writes += 1; sourceFile = { name: "source.png", size: 3, lastModified: 34 + writes }; },
+        async abort() {},
+      };
+    },
+  };
+  const runtime = createRuntime({ initialImages: [image], commit: () => jsonResponse({ cleared: false, stale: false, images: [image] }) });
+  const access = { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified };
+  runtime.state.sourceAccess.set(image.id, access);
+
+  await runtime.ensureSaveSources([image.id], "overwrite", false);
+  await runtime.runBrowserSave(null, [image.id], "_censored", false, "overwrite");
+  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, sourceFile);
+  await runtime.ensureSaveSources([image.id], "overwrite", false);
+  await runtime.runBrowserSave(null, [image.id], "_censored", false, "overwrite");
+  assert.equal(writes, 2);
+  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, sourceFile);
+}
+
+async function runHandleDeleteAfterCopyCase() {
+  const directory = new FakeDirectoryHandle();
+  let removed = false;
+  const sourceHandle = { name: "source.png", async remove() { removed = true; } };
+  const runtime = createRuntime({ directory, deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
+  await runtime.runBrowserSave(directory, ["image-1"], "_censored", true);
+  assert.equal(removed, true, "the source handle is removed only after the copy has been written");
+  assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
 }
 
 async function runForeignCollisionCase() {
@@ -355,6 +412,9 @@ async function runPartialCommitFailureReconcileCase() {
   await runCommitFailureCase();
   await runCancelCase();
   await runDeleteOriginalCase();
+  await runHandleOverwriteCase();
+  await runRepeatedHandleOverwriteCase();
+  await runHandleDeleteAfterCopyCase();
   await runForeignCollisionCase();
   await runPartialCommitFailureReconcileCase();
   console.log("test_browser_save_runtime: passed");

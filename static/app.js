@@ -15,6 +15,8 @@ const state = {
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(),
   manualMaskPresent: false, manualEnabled: true,
   galleryNodes: new Map(), overviewNodes: new Map(), browserSave: null, pollInFlight: null, pollFailures: 0,
+  // Browser file handles never leave this tab. They make imported images real save targets.
+  sourceAccess: new Map(),
 };
 
 const canvas = $("#editorCanvas");
@@ -214,20 +216,20 @@ function updateActionButtons() {
     }
   }
   $("#pickFolder").disabled = running || state.importing;
-  const detectAllButton = $("#detectAllButton");
-  detectAllButton.textContent = t(detecting ? (state.detectCancelRequested ? "detectDialog.stopping" : "detectDialog.stop") : "gallery.detectAll");
-  detectAllButton.classList.toggle("detect-stop", detecting);
-  detectAllButton.disabled = detecting ? state.detectCancelRequested : (running || state.images.length === 0);
+  const batchDetectButtons = [$("#detectAllButton"), $("#overviewDetectAllButton")];
+  for (const detectAllButton of batchDetectButtons) {
+    detectAllButton.textContent = t(detecting ? (state.detectCancelRequested ? "detectDialog.stopping" : "detectDialog.stop") : "gallery.detectAll");
+    detectAllButton.classList.toggle("detect-stop", detecting);
+    detectAllButton.disabled = detecting ? state.detectCancelRequested : (running || state.images.length === 0);
+  }
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage;
-  $("#clearAllMasksButton").disabled = running || state.images.length === 0;
-  $("#clearCatalogButton").disabled = running || state.images.length === 0;
-  $("#batchMoreButton").disabled = running || state.images.length === 0;
+  for (const id of ["#clearAllMasksButton", "#overviewClearAllMasksButton", "#clearCatalogButton", "#overviewClearCatalogButton", "#batchMoreButton", "#overviewBatchMoreButton"]) $(id).disabled = running || state.images.length === 0;
   $("#galleryAllTab").disabled = running;
   $("#galleryMaskedTab").disabled = running;
-  $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
+  for (const id of ["#saveAllButton", "#overviewSaveAllButton"]) $(id).disabled = running || mutatingCandidates || saveTargets().length === 0;
   $("#saveButton").disabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
-  $("#applyStartButton").disabled = running || mutatingCandidates;
+  $("#applyStartButton").disabled = running || mutatingCandidates || Boolean(applyRestrictionMessage());
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || imageIndex() <= 0;
   $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
@@ -237,7 +239,7 @@ function updateActionButtons() {
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
-    if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
+    if (["detectAllButton", "overviewDetectAllButton"].includes(control.id) && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
   }
@@ -265,6 +267,7 @@ function setMosaicPreviewEnabled(enabled) {
 
 function resetCatalog(images, root) {
   state.images = images;
+  state.sourceAccess.clear();
   state.reviewRoot = normaliseReviewRoot(root);
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
@@ -325,7 +328,7 @@ function renderGallery(force = false) {
   $("#galleryAllTab").setAttribute("aria-pressed", String(state.galleryFilter === "all"));
   $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
   $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
-  $("#batchImageCount").textContent = t("gallery.count", { count: state.images.length });
+  $("#galleryTargetCount").textContent = t("gallery.saveTargetCount", { count: saveTargets().length });
   const template = $("#galleryItemTemplate");
   const visibleIds = new Set(visibleImages.map((image) => image.id));
   for (const [imageId, item] of state.galleryNodes) {
@@ -1064,18 +1067,24 @@ function buildCombinedMask() {
   return combinedCanvas.toDataURL("image/png");
 }
 
+function detectionParallelism() {
+  const value = Number($("#detectParallelism").value);
+  return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
+}
+
 function openDetectionDialog(imageIds) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.pendingDetectionTargetIds = [...imageIds];
   setDetectionConfidence(detectionConfidence());
+  $("#detectParallelism").value = String(detectionParallelism());
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
   $("#detectDialog").showModal();
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1) {
   if (!imageIds.length || isBusy() || state.importing) return;
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))) }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
@@ -1088,10 +1097,11 @@ async function startDetectionFromDialog(event) {
   const imageIds = state.pendingDetectionTargetIds;
   if (!imageIds.length) return;
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
+  const parallelism = detectionParallelism();
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
-  await runDetection(imageIds, confidence);
+  await runDetection(imageIds, confidence, parallelism);
 }
 
 async function cancelDetection() {
@@ -1131,23 +1141,44 @@ function isTerminalApply(job) {
 }
 
 function selectedSaveMode() { return document.querySelector('input[name="saveMode"]:checked').value; }
-function applyTargetsContainSessionImage() {
-  return state.applyTargetIds.some((imageId) => state.images.find((image) => image.id === imageId)?.sourceKind === "session");
+function sourceAccessFor(imageId) { return state.sourceAccess.get(imageId) || null; }
+function sourceCanOverwrite(image) { return image?.sourceKind === "filesystem" || Boolean(sourceAccessFor(image?.id)?.fileHandle); }
+function sourceCanDelete(image) {
+  if (image?.sourceKind === "filesystem") return true;
+  const access = sourceAccessFor(image?.id);
+  return Boolean(access?.fileHandle && (typeof access.fileHandle.remove === "function" || access.parentHandle));
+}
+function applyTargetsSupport(capability) {
+  return state.applyTargetIds.every((imageId) => {
+    const image = state.images.find((entry) => entry.id === imageId);
+    return capability === "overwrite" ? sourceCanOverwrite(image) : sourceCanDelete(image);
+  });
+}
+function applyRestrictionMessage() {
+  const noOverwrite = state.applyTargetIds.filter((imageId) => !sourceCanOverwrite(state.images.find((image) => image.id === imageId)));
+  const noDelete = state.applyTargetIds.filter((imageId) => !sourceCanDelete(state.images.find((image) => image.id === imageId)));
+  if (selectedSaveMode() === "overwrite" && noOverwrite.length) return t("apply.overwriteUnavailable", { count: noOverwrite.length });
+  if (selectedSaveMode() === "copy" && $("#deleteOriginal").checked && noDelete.length) return t("apply.deleteUnavailable", { count: noDelete.length });
+  return "";
 }
 
 function syncApplyMode() {
-  const containsSessionImage = applyTargetsContainSessionImage();
-  if (containsSessionImage) {
-    $("#applyCopyMode").checked = true;
-    $("#deleteOriginal").checked = false;
-  }
+  const canOverwrite = applyTargetsSupport("overwrite");
+  const canDelete = applyTargetsSupport("delete");
   const copying = selectedSaveMode() === "copy";
   $("#applySuffix").disabled = !copying || state.applyRunning;
-  $("#deleteOriginalRow").hidden = !copying || containsSessionImage;
-  $("#deleteOriginal").disabled = !copying || containsSessionImage || state.applyRunning;
-  $("#applyOverwriteMode").disabled = containsSessionImage || state.applyRunning;
-  $("#applyOverwriteRow").classList.toggle("muted", containsSessionImage);
-  $("#applyTemporarySourceNote").hidden = !containsSessionImage;
+  $("#deleteOriginalRow").hidden = !copying;
+  $("#deleteOriginal").disabled = !copying || !canDelete || state.applyRunning;
+  if (!canDelete) $("#deleteOriginal").checked = false;
+  $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
+  $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
+  const restriction = applyRestrictionMessage();
+  const capabilityNote = !canOverwrite
+    ? t("apply.overwriteUnavailable", { count: state.applyTargetIds.filter((imageId) => !sourceCanOverwrite(state.images.find((image) => image.id === imageId))).length })
+    : (!canDelete ? t("apply.deleteUnavailable", { count: state.applyTargetIds.filter((imageId) => !sourceCanDelete(state.images.find((image) => image.id === imageId))).length }) : "");
+  $("#applyTemporarySourceNote").textContent = restriction || capabilityNote || t("apply.handleSource");
+  $("#applyTemporarySourceNote").hidden = !restriction && !capabilityNote;
+  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning;
 }
 
 async function openApplyDialog(imageIds) {
@@ -1297,10 +1328,58 @@ function reconcileBrowserSaveState() {
   renderCatalogViews();
 }
 
-async function runBrowserSave(directory, imageIds, suffix, deleteOriginal) {
+async function ensureHandlePermission(access, requireWrite = true) {
+  const handle = access?.fileHandle;
+  if (!handle) return;
+  const options = requireWrite ? { mode: "readwrite" } : { mode: "read" };
+  let permission = await handle.queryPermission?.(options);
+  if (permission !== "granted") permission = await handle.requestPermission?.(options);
+  if (permission && permission !== "granted") throw new Error(t("error.sourcePermissionDenied"));
+  const file = await handle.getFile();
+  if (access.size != null && (file.size !== access.size || file.lastModified !== access.lastModified)) {
+    throw new Error(t("error.sourceChanged", { name: file.name || handle.name }));
+  }
+}
+
+async function ensureSaveSources(imageIds, mode, deleteOriginal) {
+  for (const imageId of imageIds) {
+    const image = state.images.find((entry) => entry.id === imageId);
+    const access = sourceAccessFor(imageId);
+    if (mode === "overwrite" && !sourceCanOverwrite(image)) throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
+    if (mode === "copy" && deleteOriginal && !sourceCanDelete(image)) throw new Error(t("apply.deleteUnavailable", { count: 1 }));
+    if (access?.fileHandle) await ensureHandlePermission(access, mode === "overwrite" || deleteOriginal);
+  }
+}
+
+async function writeSourceHandle(access, bytes) {
+  const stream = await access.fileHandle.createWritable({ keepExistingData: false });
+  try {
+    await stream.write(bytes);
+    await stream.close();
+    const file = await access.fileHandle.getFile();
+    access.name = file.name;
+    access.size = file.size;
+    access.lastModified = file.lastModified;
+  }
+  catch (error) { try { await stream.abort?.(); } catch { /* Preserve the original whenever possible. */ } throw error; }
+}
+
+async function removeSourceHandle(access) {
+  if (typeof access.fileHandle.remove === "function") {
+    await access.fileHandle.remove();
+    return;
+  }
+  if (access.parentHandle) {
+    await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
+    return;
+  }
+  throw new Error(t("error.sourceDeleteUnavailable"));
+}
+
+async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy") {
   const result = await api("/api/save/prepare", {
     method: "POST",
-    body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal }),
+    body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
   const save = { directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false };
   state.browserSave = save;
@@ -1333,14 +1412,31 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal) {
         }
         const saveToken = response.headers?.get("X-Lets-Censoring-Save-Token") || "";
         if (!await waitForBrowserSave(save)) break;
-        const destination = await outputDirectoryFor(directory, entry.relativePath);
-        await writeBrowserSaveOutput(destination, entry, suffix, await response.arrayBuffer());
+        const bytes = await response.arrayBuffer();
+        const sourceImage = state.images.find((image) => image.id === entry.imageId);
+        const access = sourceAccessFor(entry.imageId);
+        let sourceAction = "keep";
+        if (mode === "copy") {
+          const destination = await outputDirectoryFor(directory, entry.relativePath);
+          await writeBrowserSaveOutput(destination, entry, suffix, bytes);
+          if (deleteOriginal) {
+            if (access?.fileHandle) await removeSourceHandle(access);
+            sourceAction = "deleted";
+          }
+        } else if (access?.fileHandle) {
+          await writeSourceHandle(access, bytes);
+          sourceAction = "overwrite";
+        } else if (sourceImage?.sourceKind === "filesystem") {
+          sourceAction = "overwrite";
+        } else {
+          throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
+        }
         if (!await waitForBrowserSave(save)) {
           break;
         }
         const committed = await api("/api/save/commit", {
           method: "POST",
-          body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: entry.deleteOriginal, saveToken }),
+          body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }),
         });
         if (committed.cleared) {
           state.drafts.delete(entry.imageId);
@@ -1354,6 +1450,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal) {
         }
         if (committed.stale) save.stale += 1;
         state.images = committed.images;
+        pruneSourceAccess();
         save.completed += 1;
         showBrowserSaveProgress(save, entry);
       }
@@ -1379,9 +1476,17 @@ async function startApplyFromDialog(event) {
   event.preventDefault();
   const imageIds = state.applyTargetIds;
   if (!imageIds.length) return;
-  const copy = selectedSaveMode() === "copy" || applyTargetsContainSessionImage();
+  const mode = selectedSaveMode();
+  const copy = mode === "copy";
   const suffix = $("#applySuffix").value.trim();
   if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
+  try {
+    // Permission requests must begin while this submit is still a user action.
+    await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
+  } catch (error) {
+    setApplyResult(error.message, true);
+    return;
+  }
   let outputDirectory = null;
   if (copy) {
     try {
@@ -1394,40 +1499,18 @@ async function startApplyFromDialog(event) {
   }
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (isBusy() || state.importing) return;
-  if (copy) {
-    try {
-      await runBrowserSave(outputDirectory, imageIds, suffix, $("#deleteOriginal").checked);
-    } catch (error) {
-      setApplyResult(error.message, true);
-      state.saving = false;
-      state.applyRunning = false;
-      state.browserSave = null;
-      $("#applyPauseButton").hidden = true;
-      $("#applyCancelButton").hidden = true;
-      $("#applyCloseButton").hidden = false;
-      updateActionButtons();
-    }
-    return;
-  }
   try {
-    const result = await api("/api/apply", {
-      method: "POST",
-      body: JSON.stringify({
-        imageIds, divisor: Number($("#applyDivisor").value),
-        drafts: draftPayload(imageIds),
-      }),
-    });
-    if (result.cancelled) return;
-    state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" };
-    state.applyRunning = true;
-    $("#applySettings").disabled = true;
-    $("#applyProgressPanel").hidden = false;
-    $("#applyStartButton").hidden = true;
-    $("#applyCloseButton").hidden = true;
-    $("#applyPauseButton").hidden = false;
-    $("#applyCancelButton").hidden = false;
-    updateProgress(state.job); setStatus(t("status.applyStarted"), "running");
-  } catch (error) { setApplyResult(error.message, true); }
+    await runBrowserSave(outputDirectory, imageIds, suffix, copy && $("#deleteOriginal").checked, mode);
+  } catch (error) {
+    setApplyResult(error.message, true);
+    state.saving = false;
+    state.applyRunning = false;
+    state.browserSave = null;
+    $("#applyPauseButton").hidden = true;
+    $("#applyCancelButton").hidden = true;
+    $("#applyCloseButton").hidden = false;
+    updateActionButtons();
+  }
 }
 
 async function controlApply(action) {
@@ -1470,6 +1553,7 @@ async function finishApplyJob(job) {
     const data = await api("/api/images");
     if (!isCurrentGeneration(generation)) return;
     state.images = data.images;
+    pruneSourceAccess();
     const reloadedImagesById = new Map(state.images.map((image) => [image.id, image]));
     for (const imageId of completedImageIds) {
       const previousImage = previousImagesById.get(imageId);
@@ -1523,6 +1607,7 @@ async function finishDetectionJob(job) {
   const data = await api("/api/images");
   if (!isCurrentGeneration(generation)) return;
   state.images = data.images;
+  pruneSourceAccess();
   state.maskStatus.clear();
   markImagesUnreviewed(targetIds, false);
   state.handledDetectionStartedAt = job.startedAt;
@@ -1639,7 +1724,7 @@ async function clearCatalog() {
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (state.catalogGeneration !== catalogGeneration) return;
-    state.images = []; state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
+    state.images = []; state.sourceAccess.clear(); state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.overviewFolder = ""; clearEditor(); renderCatalogViews();
     setStatus(t("status.chooseFolder"));
   } catch (error) { setStatus(error.message, "error"); }
@@ -1651,7 +1736,9 @@ function bytesToBase64(buffer) {
   return btoa(value);
 }
 
-function droppedFile(file, relativePath = file.name) { return { file, relativePath }; }
+function droppedFile(file, relativePath = file.name, fileHandle = null, parentHandle = null) {
+  return { file, relativePath, fileHandle, parentHandle };
+}
 
 async function directFilesFromDrop(dataTransfer) {
   const handles = [...dataTransfer.items]
@@ -1659,11 +1746,11 @@ async function directFilesFromDrop(dataTransfer) {
     .filter(Boolean);
   if (handles.length) {
     const files = [];
-    async function collectHandle(handle, parent = "") {
+    async function collectHandle(handle, parent = "", parentHandle = null) {
       if (!handle) return;
       const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
-      if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), relativePath));
-      else for await (const entry of handle.values()) await collectHandle(entry, relativePath);
+      if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), relativePath, handle, parentHandle));
+      else for await (const entry of handle.values()) await collectHandle(entry, relativePath, handle);
     }
     for (const handlePromise of handles) {
       const handle = await handlePromise;
@@ -1697,24 +1784,46 @@ function isSupportedImageFile(file) {
   return /\.(png|jpe?g|webp)$/i.test(file.name);
 }
 
+function newClientKey() {
+  return globalThis.crypto?.randomUUID?.() || `import-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function pruneSourceAccess() {
+  const imageIds = new Set(state.images.map((image) => image.id));
+  for (const imageId of state.sourceAccess.keys()) if (!imageIds.has(imageId)) state.sourceAccess.delete(imageId);
+}
+
 async function importFiles(files) {
   if (isBusy() || state.importing) return;
   const supportedFiles = [...files]
-    .map((entry) => entry.file ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name })
+    .map((entry) => entry.file ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name, fileHandle: null, parentHandle: null })
     .filter(({ file }) => isSupportedImageFile(file));
   if (!supportedFiles.length) return;
   state.importing = true;
   updateActionButtons();
   try {
-    let data = null;
-    for (const [index, { file, relativePath }] of supportedFiles.entries()) {
-      setStatus(t("gallery.importProgress", { completed: index + 1, total: supportedFiles.length }), "running");
-      data = await api("/api/import", {
-        method: "POST",
-        body: JSON.stringify({ files: [{ name: file.name, relativePath, data: bytesToBase64(await file.arrayBuffer()) }] }),
+    setStatus(t("gallery.importProgress", { completed: 0, total: supportedFiles.length }), "running");
+    const pendingByKey = new Map();
+    const payload = [];
+    for (const entry of supportedFiles) {
+      const clientKey = newClientKey();
+      pendingByKey.set(clientKey, entry);
+      payload.push({ clientKey, name: entry.file.name, relativePath: entry.relativePath, data: bytesToBase64(await entry.file.arrayBuffer()) });
+    }
+    const data = await api("/api/import", { method: "POST", body: JSON.stringify({ files: payload }) });
+    state.images = data.images;
+    for (const imported of data.imported || []) {
+      const entry = pendingByKey.get(imported.clientKey);
+      if (!entry?.fileHandle || !imported.imageId) continue;
+      state.sourceAccess.set(imported.imageId, {
+        fileHandle: entry.fileHandle,
+        parentHandle: entry.parentHandle || null,
+        name: entry.file.name,
+        size: entry.file.size,
+        lastModified: entry.file.lastModified,
       });
     }
-    state.images = data.images; renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
+    pruneSourceAccess(); renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
   } catch (error) {
     try {
       const latest = await api("/api/images");
@@ -1724,6 +1833,40 @@ async function importFiles(files) {
     setStatus(error.message, "error");
   }
   finally { state.importing = false; updateActionButtons(); }
+}
+
+async function importFileHandles(handles) {
+  const files = [];
+  for (const handle of handles) {
+    const file = await handle.getFile();
+    files.push(droppedFile(file, file.name, handle));
+  }
+  await importFiles(files);
+}
+
+async function importDirectoryHandle(directoryHandle) {
+  const files = [];
+  async function collect(handle, relativePath = "", parentHandle = null) {
+    const path = relativePath ? `${relativePath}/${handle.name}` : handle.name;
+    if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), path, handle, parentHandle));
+    else for await (const child of handle.values()) await collect(child, path, handle);
+  }
+  for await (const handle of directoryHandle.values()) await collect(handle, "", directoryHandle);
+  await importFiles(files);
+}
+
+async function pickImageFiles() {
+  $("#pickerMenu").hidePopover();
+  if (typeof window.showOpenFilePicker !== "function") return $("#importImagesInput").click();
+  try { await importFileHandles(await window.showOpenFilePicker({ multiple: true, types: [{ description: "Images", accept: { "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"] } }] })); }
+  catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); }
+}
+
+async function pickImageDirectory() {
+  $("#pickerMenu").hidePopover();
+  if (typeof window.showDirectoryPicker !== "function") return $("#importFolderInput").click();
+  try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "lets-censoring-source" })); }
+  catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); }
 }
 
 async function importDroppedFiles(event) {
@@ -1779,19 +1922,16 @@ function handleWindowKeydown(event) {
   handleNavigationKeydown(event);
 }
 
-function openImportPicker(inputId) {
-  $("#pickerMenu").hidePopover();
-  $(inputId).click();
-}
-
-function closeBatchMoreMenu() {
-  const menu = $("#batchMoreMenu");
-  if (menu.matches(":popover-open")) menu.hidePopover();
+function closeBatchMoreMenus() {
+  for (const id of ["#batchMoreMenu", "#overviewBatchMoreMenu"]) {
+    const menu = $(id);
+    if (menu.matches(":popover-open")) menu.hidePopover();
+  }
 }
 
 function bindEvents() {
-  $("#pickImages").addEventListener("click", () => openImportPicker("#importImagesInput"));
-  $("#pickFolderFiles").addEventListener("click", () => openImportPicker("#importFolderInput"));
+  $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
+  $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });
   for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {
     const input = event.currentTarget;
     const files = [...input.files];
@@ -1805,18 +1945,20 @@ function bindEvents() {
     if (event.dataTransfer?.files?.length) void importDroppedFiles(event);
   });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
-  $("#detectAllButton").addEventListener("click", () => {
+  const detectAll = () => {
     if (activeDetection()) void cancelDetection();
     else openDetectionDialog(state.images.map((image) => image.id));
-  });
-  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence()));
-  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  };
+  $("#detectAllButton").addEventListener("click", detectAll);
+  $("#overviewDetectAllButton").addEventListener("click", detectAll);
+  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
+  $("#saveAllButton").addEventListener("click", saveAll); $("#overviewSaveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
-  $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
-  $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearCatalog(); });
-  $("#batchMoreMenu").addEventListener("toggle", () => {
-    $("#batchMoreButton").setAttribute("aria-expanded", String($("#batchMoreMenu").matches(":popover-open")));
-  });
+  for (const id of ["#clearAllMasksButton", "#overviewClearAllMasksButton"]) $(id).addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
+  for (const id of ["#clearCatalogButton", "#overviewClearCatalogButton"]) $(id).addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
+  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"], ["#overviewBatchMoreMenu", "#overviewBatchMoreButton"]]) {
+    $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
+  }
   $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
   $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });

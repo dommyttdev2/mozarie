@@ -39,9 +39,19 @@
         <div>
           <h2 data-i18n="gallery.title">画像</h2>
           <span id="imageCount" class="muted">0件</span>
+          <span id="galleryTargetCount" class="muted">保存対象 0件</span>
         </div>
         <div class="gallery-heading-actions">
           <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧表示</button>
+        </div>
+      </div>
+      <div class="batch-toolbar" aria-label="全画像の操作">
+        <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
+        <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存</button>
+        <button id="batchMoreButton" class="text-button" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
+        <div id="batchMoreMenu" class="batch-more-menu" popover>
+          <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
+          <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
         </div>
       </div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
@@ -81,13 +91,11 @@
         </div>
         <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">ファイル保存</button>
       </div>
-      <div id="canvasStage" class="canvas-stage">
-        <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
-        <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
-      </div>
-      <div class="editor-footer">
-        <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
-        <output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
+      <div class="editor-context-bar">
+        <div class="editor-context-info">
+          <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
+          <output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
+        </div>
         <div class="navigation-controls" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
           <button id="previousImageButton" class="icon-button" type="button" title="前へ" aria-label="前へ" data-i18n-title="navigation.previous" data-i18n-aria-label="navigation.previous">‹</button>
           <output id="imagePosition" class="image-position">- / -</output>
@@ -96,6 +104,10 @@
           <button id="reviewAndNextButton" class="text-button" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
           <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span data-i18n="navigation.shortcuts">ナビゲーションショートカット</span></label>
         </div>
+      </div>
+      <div id="canvasStage" class="canvas-stage">
+        <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
+        <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
     </section>
 
@@ -135,21 +147,19 @@
           <input id="overviewQuery" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="overview.searchPlaceholder" placeholder="ファイル名・相対パスを検索">
           <select id="overviewFolder" data-i18n-aria-label="overview.folder" aria-label="フォルダで絞り込み"></select>
         </div>
+        <div class="overview-batch-toolbar" aria-label="全画像の操作">
+          <button id="overviewDetectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
+          <button id="overviewSaveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存</button>
+          <button id="overviewBatchMoreButton" class="text-button" type="button" popovertarget="overviewBatchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
+          <div id="overviewBatchMoreMenu" class="batch-more-menu" popover>
+            <button id="overviewClearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
+            <button id="overviewClearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+          </div>
+        </div>
       </header>
       <div id="overviewGrid" class="overview-grid"></div>
     </section>
   </main>
-
-  <footer class="batch-bar" aria-label="全画像の操作">
-    <output id="batchImageCount" class="batch-count">0件</output>
-    <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-    <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存...</button>
-    <button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.clear">一括クリア</button>
-    <div id="batchMoreMenu" class="batch-more-menu" popover>
-      <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
-      <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
-    </div>
-  </footer>
 
   <template id="galleryItemTemplate">
     <article class="gallery-item">
@@ -184,13 +194,17 @@
     <form id="detectForm" class="dialog-body">
       <h2 data-i18n="detectDialog.title">自動検出の設定</h2>
       <p id="detectTargetCount" class="muted"></p>
-      <label class="form-row">
+       <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
           <input id="detectConfidenceRange" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
           <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50">
         </span>
-      </label>
+       </label>
+       <label class="form-row">
+         <span data-i18n="detectDialog.parallelism">同時処理数</span>
+         <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2">
+       </label>
       <p class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
       <p class="fixed-note" data-i18n="detectDialog.rerunNote">再検出では自動候補だけを置き換え、境界候補と手描きの範囲は残ります。</p>
       <div class="dialog-actions">
@@ -209,7 +223,7 @@
         <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
         <label class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
-        <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.tempSource">ドラッグ追加画像は作業用の一時コピーです。読み込みフォルダへコピー保存します。</p>
+        <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize">-</output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>

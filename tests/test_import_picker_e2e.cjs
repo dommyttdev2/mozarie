@@ -87,6 +87,13 @@ async function main() {
     ({ server, url: fixtureUrl, detectRequests } = await startFixtureServer());
     browser = await chromium.launch();
     const page = await browser.newPage();
+    await page.addInitScript(() => {
+      window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
+      window.showDirectoryPicker = async () => {
+        window.__openDirectoryCalled = true;
+        return { async *values() {} };
+      };
+    });
     const pageErrors = [];
     const consoleErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -106,6 +113,16 @@ async function main() {
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible");
     }
     await page.setViewportSize({ width: 1440, height: 900 });
+    assert.equal(await page.locator(".editor-footer").count(), 0, "the editor footer must be removed");
+    assert.equal(await page.locator(".editor-context-bar").isVisible(), true, "the editor context bar must be visible on desktop");
+    assert.equal(await page.evaluate(() => {
+      const contextBar = document.querySelector(".editor-context-bar");
+      const canvas = document.querySelector("#editorCanvas");
+      return Boolean(contextBar?.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }), true, "the editor context bar must precede the canvas in the DOM");
+    for (const selector of ["#imageInfo", "#reviewStatus", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#navigationShortcutsEnabled"]) {
+      assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
+    }
 
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);
@@ -119,17 +136,20 @@ async function main() {
     assert.equal(detectRequests.length, 1, "current-image detection should start immediately");
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
     assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
+    assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
 
     await page.reload({ waitUntil: "networkidle" });
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
+    await page.locator("#detectParallelism").fill("3");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
     assert.equal(detectRequests.length, 2, "starting settings should call detection once");
     assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
+    assert.equal(detectRequests[1].parallelism, 3, "dialog parallelism should be submitted");
     await page.reload({ waitUntil: "networkidle" });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");
@@ -142,21 +162,18 @@ async function main() {
     assert.ok(Math.abs(pickerBox.x - triggerBox.x) <= 1, "picker left edge should align with its trigger");
     assert.ok(Math.abs(pickerBox.y - (triggerBox.y + triggerBox.height + 6)) <= 1, "picker should sit 6px below its trigger");
 
-    const imagesChooser = page.waitForEvent("filechooser");
     await page.locator("#pickImages").click();
-    assert.equal(await (await imagesChooser).element().getAttribute("id"), "importImagesInput");
+    assert.equal(await page.evaluate(() => window.__openFilesCalled), true, "native image picker should be preferred");
     await page.waitForFunction(() => !document.querySelector("#pickerMenu").matches(":popover-open"));
     assert.equal(await menu.isVisible(), false, "the picker menu should close before selecting image files");
 
     await page.locator("#pickFolder").click();
-    const folderChooser = page.waitForEvent("filechooser");
     await page.locator("#pickFolderFiles").click();
-    const folderInput = (await folderChooser).element();
-    assert.equal(await folderInput.getAttribute("id"), "importFolderInput");
-    assert.notEqual(await folderInput.getAttribute("webkitdirectory"), null, "the folder input should allow directory selection");
+    assert.equal(await page.evaluate(() => window.__openDirectoryCalled), true, "native folder picker should be preferred");
     await page.waitForFunction(() => !document.querySelector("#pickerMenu").matches(":popover-open"));
     assert.equal(await menu.isVisible(), false, "the picker menu should close before selecting a folder");
 
+    assert.equal(await page.locator("footer.batch-bar").count(), 0, "batch controls must not live below the editor");
     const batchMenu = page.locator("#batchMoreMenu");
     assert.equal(await batchMenu.isVisible(), false, "destructive batch commands should not be visible by default");
     await page.locator("#batchMoreButton").evaluate((button) => { button.disabled = false; });
