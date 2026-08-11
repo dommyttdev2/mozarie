@@ -40,7 +40,7 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectCancelButton", "detectStartButton",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectCancelButton", "detectStartButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
   "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote",
@@ -138,9 +138,9 @@ function keyEvent(key, options = {}) {
   state.currentId = "initial";
   state.currentImage = { width: 100, height: 80 };
   state.maskStatus.set("initial", true);
-  const folderLoad = loadFolder();
+  elements.get("#folderPath").dispatch("keydown", { key: "Enter" });
   resolveFetch({ ok: true, json: async () => ({ images: [loadedImage] }) });
-  await folderLoad;
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(requests.at(-1).path, "/api/folder");
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [loadedImage]);
   assert.equal(state.reviewRoot, "g:\\images\\loaded");
@@ -173,6 +173,24 @@ function keyEvent(key, options = {}) {
   state.images = [loadedImage];
   state.job = null;
   state.detectCancelRequested = false;
+  state.currentId = loadedImage.id;
+  state.currentImage = { width: loadedImage.width, height: loadedImage.height };
+  setDetectionConfidence(1.50);
+  assert.equal(elements.get("#confidence").value, "1.00", "right-pane confidence should clamp to the supported maximum");
+  updateActionButtons();
+  const requestsBeforeCurrentDetection = requests.length;
+  elements.get("#detectCurrentButton").click();
+  assert.equal(Boolean(elements.get("#detectDialog").open), false, "current-image detection must not open settings");
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, requestsBeforeCurrentDetection + 1);
+  assert.equal(requests.at(-1).path, "/api/detect");
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body).imageIds, [loadedImage.id]);
+  assert.equal(JSON.parse(requests.at(-1).options.body).confidence, 1.00);
+  state.job = null;
+  state.detectCancelRequested = false;
+  state.currentId = null;
+  state.currentImage = null;
   updateActionButtons();
   const requestsBeforeDetectionDialog = requests.length;
   elements.get("#detectAllButton").click();
@@ -364,7 +382,7 @@ function keyEvent(key, options = {}) {
   state.job = { kind: "detect", state: "running", total: 80, completed: 0 };
   updateProgress(state.job);
   assert.equal(elements.get("#jobProgressText").textContent, "0 / 80");
-  assert.equal(elements.get("#loadFolder").disabled, true);
+  assert.equal(elements.get("#pickFolder").disabled, true);
   assert.equal(elements.get("#folderPath").disabled, true);
   assert.equal(elements.get("#galleryAllTab").disabled, true);
   assert.equal(elements.get("#brushTool").disabled, true);
@@ -383,7 +401,7 @@ function keyEvent(key, options = {}) {
     assert.equal(elements.get("#jobProgress").hidden, true, `${terminalState} must not show stale progress`);
     assert.equal(elements.get("#jobProgressText").hidden, true, `${terminalState} must not show stale progress`);
   }
-  assert.equal(elements.get("#loadFolder").disabled, false);
+  assert.equal(elements.get("#pickFolder").disabled, false);
   setMosaicPreviewEnabled(false);
   assert.equal(state.mosaicPreviewEnabled, false);
   assert.equal(state.maskStatus.get("first"), maskBeforeToggle);

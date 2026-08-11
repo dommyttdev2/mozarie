@@ -22,7 +22,6 @@
         <input id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden>
         <input id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden>
       </div>
-      <button id="loadFolder" class="primary" data-i18n="folder.load">フォルダーを読み込む</button>
     </div>
     <div class="job-status">
       <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
@@ -106,7 +105,7 @@
           <span data-i18n="detection.confidence">判定しきい値</span>
           <output id="confidenceValue">0.50</output>
         </label>
-        <input id="confidence" type="range" min="0.10" max="0.90" step="0.01" value="0.50">
+        <input id="confidence" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
       </section>
       <div class="pane-heading candidates-heading">
@@ -187,8 +186,8 @@
       <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
-          <input id="detectConfidenceRange" type="range" min="0.10" max="0.90" step="0.01" value="0.50">
-          <input id="detectConfidenceNumber" type="number" min="0.10" max="0.90" step="0.01" value="0.50">
+          <input id="detectConfidenceRange" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
+          <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50">
         </span>
       </label>
       <p class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>

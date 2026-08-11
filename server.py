@@ -396,8 +396,8 @@ def read_detection_confidence(value: Any) -> float:
         confidence = float(value)
     except (TypeError, ValueError) as exc:
         raise ClientError("判定しきい値が正しくありません。") from exc
-    if not 0.10 <= confidence <= 0.90:
-        raise ClientError("判定しきい値は0.10から0.90の範囲で指定してください。")
+    if not 0.10 <= confidence <= 1.00:
+        raise ClientError("判定しきい値は0.10から1.00の範囲で指定してください。")
     return confidence
 
 

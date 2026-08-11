@@ -679,6 +679,7 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertAlmostEqual(precise_confidence(DEFAULT_DETECTION_CONFIDENCE), 0.50)
         self.assertAlmostEqual(precise_confidence(0.10), 0.10)
         self.assertEqual(read_detection_confidence("0.10"), 0.10)
+        self.assertEqual(read_detection_confidence("1.00"), 1.00)
         self.assertAlmostEqual(confidence_for_source("primary", 0.60), 0.45)
         self.assertEqual(confidence_for_source("secondary", 0.10), 0.50)
         self.assertEqual(confidence_for_source("secondary", 0.85), 0.85)
@@ -686,8 +687,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(confidence_for_class("secondary", "penis", 0.10), 0.50)
         with self.assertRaises(ClientError):
             read_detection_confidence(0.09)
-        with self.assertRaises(ClientError):
-            read_detection_confidence(0.91)
+        with self.assertRaisesRegex(ClientError, "0.10から1.00"):
+            read_detection_confidence(1.01)
 
     def test_precise_class_normalization_keeps_only_stable_genital_classes(self):
         self.assertEqual(TARGET_CLASSES, {"penis", "pussy"})
@@ -1655,6 +1656,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('async function startDetectionFromDialog', app)
         self.assertIn('data-i18n="editor.undo"', page)
         self.assertIn('id="detectCurrentButton"', page)
+        self.assertNotIn('id="loadFolder"', page)
+        self.assertEqual(page.count('max="1.00"'), 3)
         self.assertIn('id="clearCurrentMasksButton"', page)
         self.assertIn('id="mosaicPreviewButton"', page)
         self.assertIn('aria-pressed="true"', page)
@@ -1740,7 +1743,9 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn("焼き込み済みのモザイク画素は復元しません", dictionary["confirm.clearAllMasks.message"])
         self.assertNotIn("画像一覧を閉じる", page)
         self.assertEqual(dictionary["folder.browse"], "画像を追加")
-        self.assertEqual(dictionary["folder.load"], "フォルダーを読み込む")
+        self.assertNotIn("folder.load", dictionary)
+        self.assertNotIn('$("#loadFolder")', app)
+        self.assertIn('if (event.key === "Enter") loadFolder()', app)
         self.assertIn("batch.clear", dictionary)
         self.assertNotIn("batch.more", dictionary)
         self.assertIn('async function cancelDetection()', app)

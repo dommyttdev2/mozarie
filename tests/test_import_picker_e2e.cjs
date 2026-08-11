@@ -38,6 +38,11 @@ function startFixtureServer() {
       response.end(JSON.stringify({ ok: true }));
       return;
     }
+    if (requestPath === "/api/candidates/sample") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ candidates: [] }));
+      return;
+    }
     if (requestPath.startsWith("/api/thumbnail/") || requestPath.startsWith("/api/image/")) {
       response.writeHead(200, { "Content-Type": "image/svg+xml" });
       response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
@@ -101,15 +106,30 @@ async function main() {
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible");
     }
     await page.setViewportSize({ width: 1440, height: 900 });
+
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);
+    await page.locator("#confidence").evaluate((input) => {
+      input.value = "1.00";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.locator("#detectCurrentButton").click();
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator("#detectDialog").isVisible(), false, "current-image detection must not open settings");
+    assert.equal(detectRequests.length, 1, "current-image detection should start immediately");
+    assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
+    assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
+
+    await page.reload({ waitUntil: "networkidle" });
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
-    assert.equal(detectRequests.length, 0, "opening settings must not start detection");
+    assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
-    assert.equal(detectRequests.length, 1, "starting settings should call detection once");
-    assert.equal(detectRequests[0].confidence, 0.67, "dialog threshold should be submitted");
+    assert.equal(detectRequests.length, 2, "starting settings should call detection once");
+    assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
     await page.reload({ waitUntil: "networkidle" });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");

@@ -72,7 +72,7 @@ function setStatus(message, kind = "") {
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
 function isCurrentGeneration(generation) { return state.imageGeneration === generation; }
-function normaliseDetectionConfidence(value) { return Math.max(0.10, Math.min(0.90, Number(value) || 0.50)); }
+function normaliseDetectionConfidence(value) { return Math.max(0.10, Math.min(1.00, Number(value) || 0.50)); }
 function detectionConfidence() { return normaliseDetectionConfidence($("#confidence").value); }
 function setDetectionConfidence(value) {
   const confidence = normaliseDetectionConfidence(value);
@@ -1268,7 +1268,6 @@ function closeBatchMoreMenu() {
 }
 
 function bindEvents() {
-  $("#loadFolder").addEventListener("click", loadFolder);
   $("#pickImages").addEventListener("click", () => openImportPicker("#importImagesInput"));
   $("#pickFolderFiles").addEventListener("click", () => openImportPicker("#importFolderInput"));
   for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {
@@ -1288,7 +1287,7 @@ function bindEvents() {
     if (activeDetection()) void cancelDetection();
     else openDetectionDialog(state.images.map((image) => image.id));
   });
-  $("#detectCurrentButton").addEventListener("click", () => state.currentId && openDetectionDialog([state.currentId]));
+  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenu(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
