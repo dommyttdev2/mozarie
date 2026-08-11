@@ -1916,7 +1916,7 @@ def choose_native_folder(title: str) -> Path | None:
     def choose() -> Path | None:
         from win32com.shell import shell, shellcon
 
-        flags = shellcon.BIF_RETURNONLYFSDIRS | shellcon.BIF_NEWDIALOGSTYLE
+        flags = shellcon.BIF_RETURNONLYFSDIRS | 0x0040  # BIF_NEWDIALOGSTYLE is absent from some pywin32 builds.
         item = shell.SHBrowseForFolder(0, None, title, flags)
         if not item:
             return None

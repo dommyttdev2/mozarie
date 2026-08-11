@@ -345,6 +345,18 @@ function keyEvent(key, options = {}) {
   assert.equal("prefix" in applyPayload, false);
   assert.equal(state.currentId, "second");
 
+  // Files loaded from a real filesystem path keep both destructive save choices available.
+  state.images = [{ id: "filesystem", sourceKind: "filesystem", relativePath: "source.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 }];
+  state.applyTargetIds = ["filesystem"];
+  state.applyRunning = false;
+  elements.get("#applyCopyMode").checked = true;
+  elements.get("#applyOverwriteMode").checked = false;
+  syncApplyMode();
+  assert.equal(applyTargetsContainSessionImage(), false);
+  assert.equal(elements.get("#applyOverwriteMode").disabled, false);
+  assert.equal(elements.get("#deleteOriginal").disabled, false);
+  assert.equal(elements.get("#deleteOriginalRow").hidden, false);
+
   // Session imports are never offered an overwrite path and are sent as copies.
   state.images = [{ id: "session", sourceKind: "session", relativePath: "dropped.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 }];
   state.currentId = "session";

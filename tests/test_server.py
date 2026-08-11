@@ -133,6 +133,12 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertTrue(timer.daemon)
         timer.start.assert_called_once_with()
 
+    def test_native_folder_picker_uses_new_dialog_flag_without_shellcon_attribute(self):
+        with patch("server._run_with_com", side_effect=lambda callback: callback()), \
+             patch("win32com.shell.shell.SHBrowseForFolder", return_value=None) as browse:
+            self.assertIsNone(server_module.choose_native_folder("保存先"))
+        self.assertEqual(browse.call_args.args[3], 0x0001 | 0x0040)
+
     def test_main_configures_logging_and_schedules_one_browser_open(self):
         fake_server = Mock()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
