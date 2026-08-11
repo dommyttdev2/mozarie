@@ -14,11 +14,13 @@
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
       <div class="picker-anchor">
-        <button id="pickFolder" type="button" data-i18n="folder.browse">参照...</button>
-        <div id="pickerMenu" class="picker-menu" hidden>
+        <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">参照...</button>
+        <div id="pickerMenu" class="picker-menu" popover>
           <button id="pickImages" type="button" data-i18n="folder.pickImages">画像ファイルを選択</button>
-          <button id="pickNativeFolder" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
+          <button id="pickFolderFiles" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
         </div>
+        <input id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden>
+        <input id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden>
       </div>
       <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
     </div>

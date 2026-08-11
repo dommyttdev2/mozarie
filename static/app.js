@@ -238,8 +238,6 @@ function setMosaicPreviewEnabled(enabled) {
   render();
 }
 
-function closePickerMenu() { $("#pickerMenu").hidden = true; }
-
 function resetCatalog(images, root) {
   state.images = images;
   state.reviewRoot = normaliseReviewRoot(root);
@@ -249,38 +247,6 @@ function resetCatalog(images, root) {
   renderCatalogViews(); clearEditor();
 }
 
-function togglePickerMenu() {
-  if (isBusy() || state.importing) return;
-  const menu = $("#pickerMenu");
-  menu.hidden = !menu.hidden;
-}
-
-async function pickNativeSource(kind) {
-  if (isBusy() || state.importing) return;
-  closePickerMenu();
-  state.importing = true;
-  updateActionButtons();
-  try {
-    const data = await api(`/api/picker/${kind}`, { method: "POST", body: JSON.stringify({}) });
-    if (data.cancelled) return;
-    if (kind === "folder") {
-      const catalogGeneration = ++state.catalogGeneration;
-      ++state.imageGeneration;
-      $("#folderPath").value = data.root;
-      if (state.catalogGeneration === catalogGeneration) resetCatalog(data.images, data.root);
-      setStatus(t("status.imagesLoaded", { count: data.images.length }));
-    } else {
-      state.images = data.images;
-      renderCatalogViews();
-      setStatus(t("gallery.imported", { count: data.images.length }));
-    }
-  } catch (error) {
-    setStatus(error.message, "error");
-  } finally {
-    state.importing = false;
-    updateActionButtons();
-  }
-}
 function updateProgress(job) {
   const progress = $("#jobProgress");
   const progressText = $("#jobProgressText");
@@ -1122,26 +1088,31 @@ function bytesToBase64(buffer) {
   return btoa(value);
 }
 
+function droppedFile(file, relativePath = file.name) { return { file, relativePath }; }
+
 async function directFilesFromDrop(dataTransfer) {
   const handles = [...dataTransfer.items]
     .map((item) => item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null)
     .filter(Boolean);
   if (handles.length) {
     const files = [];
+    async function collectHandle(handle, parent = "") {
+      const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
+      if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), relativePath));
+      else for await (const entry of handle.values()) await collectHandle(entry, relativePath);
+    }
     for (const handlePromise of handles) {
       const handle = await handlePromise;
-      if (handle.kind === "file") files.push(await handle.getFile());
-      else if (handle.kind === "directory") {
-        for await (const entry of handle.values()) if (entry.kind === "file") files.push(await entry.getFile());
-      }
+      await collectHandle(handle);
     }
     return files;
   }
   const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
   if (entries.length) {
     const files = [];
-    for (const entry of entries) {
-      if (entry.isFile) files.push(await new Promise((resolve, reject) => entry.file(resolve, reject)));
+    async function collectEntry(entry, parent = "") {
+      const relativePath = parent ? `${parent}/${entry.name}` : entry.name;
+      if (entry.isFile) files.push(droppedFile(await new Promise((resolve, reject) => entry.file(resolve, reject)), relativePath));
       else if (entry.isDirectory) {
         const reader = entry.createReader(); const children = [];
         while (true) {
@@ -1149,12 +1120,13 @@ async function directFilesFromDrop(dataTransfer) {
           if (!batch.length) break;
           children.push(...batch);
         }
-        for (const child of children) if (child.isFile) files.push(await new Promise((resolve, reject) => child.file(resolve, reject)));
+        for (const child of children) await collectEntry(child, relativePath);
       }
     }
+    for (const entry of entries) await collectEntry(entry);
     return files;
   }
-  return [...dataTransfer.files];
+  return [...dataTransfer.files].map((file) => droppedFile(file));
 }
 
 function isSupportedImageFile(file) {
@@ -1163,17 +1135,19 @@ function isSupportedImageFile(file) {
 
 async function importFiles(files) {
   if (isBusy() || state.importing) return;
-  const supportedFiles = [...files].filter(isSupportedImageFile);
+  const supportedFiles = [...files]
+    .map((entry) => entry.file ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name })
+    .filter(({ file }) => isSupportedImageFile(file));
   if (!supportedFiles.length) return;
   state.importing = true;
   updateActionButtons();
   try {
     let data = null;
-    for (const [index, file] of supportedFiles.entries()) {
+    for (const [index, { file, relativePath }] of supportedFiles.entries()) {
       setStatus(t("gallery.importProgress", { completed: index + 1, total: supportedFiles.length }), "running");
       data = await api("/api/import", {
         method: "POST",
-        body: JSON.stringify({ files: [{ name: file.name, data: bytesToBase64(await file.arrayBuffer()) }] }),
+        body: JSON.stringify({ files: [{ name: file.name, relativePath, data: bytesToBase64(await file.arrayBuffer()) }] }),
       });
     }
     state.images = data.images; renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
@@ -1234,12 +1208,21 @@ function handleWindowKeydown(event) {
   handleNavigationKeydown(event);
 }
 
+function openImportPicker(inputId) {
+  $("#pickerMenu").hidePopover();
+  $(inputId).click();
+}
+
 function bindEvents() {
   $("#loadFolder").addEventListener("click", loadFolder);
-  $("#pickFolder").addEventListener("click", togglePickerMenu);
-  $("#pickImages").addEventListener("click", () => void pickNativeSource("images"));
-  $("#pickNativeFolder").addEventListener("click", () => void pickNativeSource("folder"));
-  document.addEventListener("click", (event) => { if (!event.target.closest(".picker-anchor")) closePickerMenu(); });
+  $("#pickImages").addEventListener("click", () => openImportPicker("#importImagesInput"));
+  $("#pickFolderFiles").addEventListener("click", () => openImportPicker("#importFolderInput"));
+  for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    const files = [...input.files];
+    input.value = "";
+    if (files.length) void importFiles(files);
+  });
   document.addEventListener("dragover", (event) => {
     if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
   });

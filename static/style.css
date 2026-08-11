@@ -49,7 +49,8 @@ input[type="range"] { accent-color: #4bb99d; }
 .folder-control label, .numeric-control { color: #bdc4cd; white-space: nowrap; }
 .folder-control input { width: 100%; }
 .picker-anchor { position: relative; }
-.picker-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; gap: 4px; padding: 5px; border: 1px solid #4a525d; border-radius: 4px; background: #20242a; box-shadow: 0 8px 22px #0008; }
+#pickFolder { anchor-name: --source-picker; }
+.picker-menu { position: fixed; position-anchor: --source-picker; z-index: 20; top: anchor(bottom); right: anchor(right); margin-top: 6px; display: grid; min-width: 190px; gap: 4px; padding: 5px; border: 1px solid #4a525d; border-radius: 4px; background: #20242a; box-shadow: 0 8px 22px #0008; }
 .picker-menu[hidden] { display: none; }
 .picker-menu button { text-align: left; white-space: nowrap; }
 .job-status { min-width: 0; display: grid; gap: 3px; }

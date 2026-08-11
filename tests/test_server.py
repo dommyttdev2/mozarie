@@ -344,42 +344,31 @@ class MosaicStudioTests(unittest.TestCase):
             copied = state.image_for_id(next(image["id"] for image in state.list_images() if image["relativePath"] == "dropped_censored.png"))
             self.assertEqual(copied.source_kind, "output")
 
-    def test_native_picker_api_uses_mocked_windows_choices(self):
-        from http.server import ThreadingHTTPServer
-
+    def test_import_preserves_safe_nested_relative_paths_and_same_names(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "folder"
-            root.mkdir()
-            selected = Path(directory) / "selected.png"
-            Image.new("RGB", (8, 8), "white").save(selected)
+            raw = io.BytesIO()
+            Image.new("RGB", (8, 8), "white").save(raw, format="PNG")
+            encoded = base64.b64encode(raw.getvalue()).decode("ascii")
             state = self.new_state()
-            with patch("server.STATE", state), \
-                 patch("server.choose_native_image_files", return_value=[selected]) as image_picker, \
-                 patch("server.choose_native_folder", return_value=root) as folder_picker:
-                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
-                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                thread.start()
-                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                try:
-                    connection.request("POST", "/api/picker/images", b"{}", {"Content-Type": "application/json"})
-                    response = connection.getresponse()
-                    image_payload = json.loads(response.read().decode("utf-8"))
-                    self.assertEqual(response.status, 200)
-                    self.assertFalse(image_payload["cancelled"])
-                    self.assertEqual(len(image_payload["images"]), 1)
-                    image_picker.assert_called_once_with()
 
-                    connection.request("POST", "/api/picker/folder", b"{}", {"Content-Type": "application/json"})
-                    response = connection.getresponse()
-                    folder_payload = json.loads(response.read().decode("utf-8"))
-                    self.assertEqual(response.status, 200)
-                    self.assertFalse(folder_payload["cancelled"])
-                    self.assertEqual(folder_payload["root"], str(root.resolve()))
-                    folder_picker.assert_called_once_with("画像フォルダーを選択")
-                finally:
-                    connection.close()
-                    httpd.shutdown()
-                    httpd.server_close()
+            images = state.import_images([
+                {"name": "same.png", "relativePath": "album/one/same.png", "data": encoded},
+                {"name": "same.png", "relativePath": "album/two/same.png", "data": encoded},
+            ])
+
+            self.assertEqual([image["relativePath"] for image in images], ["album/one/same.png", "album/two/same.png"])
+            self.assertTrue((state.session_imports_dir / "album" / "one" / "same.png").is_file())
+            self.assertTrue((state.session_imports_dir / "album" / "two" / "same.png").is_file())
+
+    def test_import_rejects_unsafe_relative_paths(self):
+        raw = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(raw, format="PNG")
+        encoded = base64.b64encode(raw.getvalue()).decode("ascii")
+        state = self.new_state()
+
+        for relative_path in ("", "/absolute.png", "C:/drive.png", "one//two.png", "./image.png", "one/../image.png"):
+            with self.subTest(relative_path=relative_path), self.assertRaisesRegex(ClientError, "^画像の相対パスが不正です。$"):
+                state.import_images([{"name": "image.png", "relativePath": relative_path, "data": encoded}])
     def test_import_keeps_original_bytes_under_the_session_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1156,7 +1145,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertTrue(output.is_file())
             self.assertFalse(session_path.exists())
 
-    def test_direct_session_save_creates_a_root_copy_without_replacing_the_temp_source(self):
+    def test_direct_session_save_preserves_nested_path_without_replacing_the_temp_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "images"
             root.mkdir()
@@ -1164,16 +1153,46 @@ class MosaicStudioTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
             state = self.new_state()
             state.set_root(str(root))
-            session_id = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]["id"]
+            session_id = state.import_images([{
+                "name": "dropped.png", "relativePath": "nested/dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii"),
+            }])[0]["id"]
             source = state.image_for_id(session_id)
 
             output = state.save_image(session_id, self._mask(16, 16), 100)
 
-            self.assertEqual(output, root / "dropped_censored.png")
+            self.assertEqual(output, root / "nested" / "dropped_censored.png")
             self.assertTrue(output.is_file())
             self.assertTrue(source.path.is_file())
             self.assertEqual(source.source_kind, "session")
-            self.assertTrue(any(image["relativePath"] == "dropped_censored.png" for image in state.list_images()))
+            self.assertTrue(any(image["relativePath"] == "nested/dropped_censored.png" for image in state.list_images()))
+
+    def test_session_apply_preserves_nested_same_name_paths_under_output_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "images"
+            root.mkdir()
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            encoded = base64.b64encode(raw_buffer.getvalue()).decode("ascii")
+            state = self.new_state()
+            state.set_root(str(root))
+            imported = state.import_images([
+                {"name": "same.png", "relativePath": "a/same.png", "data": encoded},
+                {"name": "same.png", "relativePath": "b/same.png", "data": encoded},
+            ])
+            records = [state.image_for_id(image["id"]) for image in imported if image["sourceKind"] == "session"]
+
+            state._apply_worker(
+                records, 100, "copy", "_censored", False,
+                {record.image_id: self._mask(16, 16) for record in records},
+            )
+
+            self.assertTrue((root / "a" / "same_censored.png").is_file())
+            self.assertTrue((root / "b" / "same_censored.png").is_file())
+            output_paths = {
+                image["relativePath"] for image in state.list_images()
+                if image["relativePath"].endswith("_censored.png")
+            }
+            self.assertEqual(output_paths, {"a/same_censored.png", "b/same_censored.png"})
 
     def test_mixed_apply_copies_every_source_when_a_session_image_is_present(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1555,15 +1574,20 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('aria-pressed="true"', page)
         self.assertNotIn('id="fileBrowserDialog"', page)
         self.assertIn('id="pickerMenu"', page)
+        self.assertIn('popover', page)
         self.assertIn('id="pickImages"', page)
-        self.assertIn('id="pickNativeFolder"', page)
+        self.assertIn('id="pickFolderFiles"', page)
+        self.assertNotIn('pickNativeFolder', page)
         self.assertEqual(page.count('id="pickFolder"'), 1)
+        self.assertEqual(page.count('type="file"'), 2)
+        self.assertIn('id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden', page)
+        self.assertIn('id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden', page)
         self.assertNotIn('file-browser-dialog', page)
         self.assertNotIn('file-browser-list', page)
         self.assertNotIn('id="addImagesButton"', page)
         self.assertNotIn('画像を追加', page)
         self.assertNotIn('id="browseDialog"', page)
-        self.assertNotIn('id="importFilesInput"', page)
+        self.assertNotIn('id="fileBrowserDialog"', page)
         self.assertIn('id="jobProgressText"', page)
         self.assertIn('id="clearAllMasksButton"', page)
         self.assertIn('id="clearCatalogButton"', page)
@@ -1590,8 +1614,15 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('drawBoundaryRoi()', app)
         self.assertIn('pointInBoundaryRoi(point)', app)
         self.assertIn('if (state.mosaicPreviewEnabled) paintMosaicPreview();', app)
-        self.assertIn('function togglePickerMenu()', app)
-        self.assertIn('/api/picker/${kind}', app)
+        self.assertIn('input.value = ""', app)
+        self.assertIn('$("#pickerMenu").hidePopover()', app)
+        self.assertIn('function openImportPicker(', app)
+        self.assertIn('pickFolderFiles', app)
+        self.assertNotIn('pickNativeFolder', app)
+        self.assertIn('entry.webkitRelativePath || entry.name', app)
+        self.assertIn('relativePath, data:', app)
+        self.assertNotIn('function pickNativeSource(', app)
+        self.assertNotIn('/api/picker/', app)
         self.assertNotIn('fileBrowserDialog', app)
         self.assertNotIn('/api/browser/list', app)
         self.assertNotIn('/api/catalog/select', app)
@@ -1637,8 +1668,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertNotIn('Math.sin(Date.now()', app)
         backend = (root / "server.py").read_text(encoding="utf-8")
         self.assertIn('path == "/api/import"', backend)
-        self.assertIn('path == "/api/picker/images"', backend)
-        self.assertIn('path == "/api/picker/folder"', backend)
+        self.assertNotIn('path == "/api/picker/images"', backend)
+        self.assertNotIn('path == "/api/picker/folder"', backend)
+        self.assertNotIn('choose_native_image_files', backend)
+        self.assertNotIn('import_file_paths', backend)
+        self.assertIn('def safe_import_relative_path(', backend)
         self.assertNotIn('path == "/api/browser/list"', backend)
         self.assertNotIn('path == "/api/catalog/select"', backend)
         self.assertIn('payload.get("divisor")', backend)

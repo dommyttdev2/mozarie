@@ -7,7 +7,7 @@ function element() {
   const listeners = new Map();
   return {
     disabled: false, textContent: "", className: "", hidden: false, value: "", style: {}, dataset: {}, attributes: {},
-    classList: { toggle() {} }, append() {}, appendChild() {}, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.focus(); listeners.get("click")?.({ currentTarget: this, target: this }); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    classList: { toggle() {} }, append() {}, appendChild() {}, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, showModal() { this.open = true; }, close() { this.open = false; }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); listeners.get("click")?.({ currentTarget: this, target: this }); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -40,7 +40,7 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickNativeFolder", "pickerMenu", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "loadFolder", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
   "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote",
@@ -112,9 +112,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, togglePickerMenu, pickNativeSource, closePickerMenu, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, loadCandidateBundle, selectImage, updateCandidate, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, applyTargetsContainSessionImage, bindEvents } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -147,14 +147,12 @@ function keyEvent(key, options = {}) {
   assert.equal(state.currentId, null);
   assert.equal(state.maskStatus.size, 0);
 
-  const pickedImage = { id: "picked", relativePath: "picked.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
-  const nativeFolder = pickNativeSource("folder");
-  resolveFetch({ ok: true, json: async () => ({ images: [pickedImage], root: "G:/images/picked" }) });
-  await nativeFolder;
-  assert.equal(requests.at(-1).path, "/api/picker/folder");
-  assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [pickedImage]);
-  assert.equal(state.reviewRoot, "g:\\images\\picked");
-  assert.equal(elements.get("#folderPath").value, "G:/images/picked");
+  elements.get("#pickImages").click();
+  assert.equal(elements.get("#pickerMenu").hidePopoverCalls, 1);
+  assert.equal(elements.get("#importImagesInput").clickCalls, 1);
+  elements.get("#pickFolderFiles").click();
+  assert.equal(elements.get("#pickerMenu").hidePopoverCalls, 2);
+  assert.equal(elements.get("#importFolderInput").clickCalls, 1);
 
   fetchCalls = 0;
   requests.length = 0;
@@ -166,11 +164,6 @@ function keyEvent(key, options = {}) {
   state.translations["review.unreviewed"] = "Unreviewed";
   state.translations["review.reviewedBadge"] = "Reviewed badge";
   state.translations["review.unreviewedBadge"] = "Unreviewed badge";
-  elements.get("#pickerMenu").hidden = true;
-  togglePickerMenu();
-  assert.equal(elements.get("#pickerMenu").hidden, false);
-  closePickerMenu();
-  assert.equal(elements.get("#pickerMenu").hidden, true);
   state.currentImage = { width: 100, height: 80 };
   const clampedLow = clampPoint({ x: -0.5, y: 80.5 });
   assert.equal(clampedLow.x, 0);
@@ -823,7 +816,7 @@ function keyEvent(key, options = {}) {
   saveAll();
 
   const importedFiles = [
-    { name: "first.png", arrayBuffer: async () => new Uint8Array([1]).buffer },
+    { name: "first.png", webkitRelativePath: "album/first.png", arrayBuffer: async () => new Uint8Array([1]).buffer },
     { name: "ignored.txt", arrayBuffer: async () => new Uint8Array([2]).buffer },
     { name: "second.webp", arrayBuffer: async () => new Uint8Array([3]).buffer },
   ];
@@ -836,8 +829,30 @@ function keyEvent(key, options = {}) {
   const importRequests = requests.filter((request) => request.path === "/api/import");
   assert.equal(importRequests.length, 2);
   assert.equal(JSON.parse(importRequests[0].options.body).files[0].name, "first.png");
+  assert.equal(JSON.parse(importRequests[0].options.body).files[0].relativePath, "album/first.png");
   assert.equal(JSON.parse(importRequests[1].options.body).files[0].name, "second.webp");
   assert.equal(state.importing, false);
+
+  const imageInput = elements.get("#importImagesInput");
+  const requestCountBeforeCancel = requests.length;
+  const catalogBeforeCancel = JSON.stringify(state.images);
+  imageInput.files = [];
+  imageInput.value = "previous-selection";
+  imageInput.dispatch("change");
+  assert.equal(imageInput.value, "");
+  assert.equal(requests.length, requestCountBeforeCancel);
+  assert.equal(JSON.stringify(state.images), catalogBeforeCancel);
+
+  const folderInput = elements.get("#importFolderInput");
+  folderInput.value = "same-folder";
+  const folderImport = importFiles([{ name: "nested.png", webkitRelativePath: "source/nested/nested.png", arrayBuffer: async () => new Uint8Array([4]).buffer }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
+  await folderImport;
+  folderInput.value = "";
+  assert.equal(folderInput.value, "");
+  const folderRequest = requests.at(-1);
+  assert.equal(JSON.parse(folderRequest.options.body).files[0].relativePath, "source/nested/nested.png");
 
   console.log("test_app_js: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

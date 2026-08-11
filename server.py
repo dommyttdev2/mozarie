@@ -119,6 +119,19 @@ class StaleMaskError(LookupError):
     """A candidate mask was removed while a browser still referenced it."""
 
 
+def safe_import_relative_path(value: Any) -> Path:
+    """Validate a client-provided TEMP-session relative path."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ClientError("画像の相対パスが不正です。")
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
+        raise ClientError("画像の相対パスが不正です。")
+    parts = normalized.split("/")
+    if any(not part or part in {".", ".."} or ":" in part for part in parts):
+        raise ClientError("画像の相対パスが不正です。")
+    return Path(*parts)
+
+
 @dataclass
 class ImageRecord:
     image_id: str
@@ -663,8 +676,8 @@ class StudioState:
                 for file_data in files:
                     if not isinstance(file_data, dict):
                         raise ClientError("画像データの形式が正しくありません。")
-                    name = Path(str(file_data.get("name", ""))).name
-                    if not name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
+                    relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
+                    if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                         continue
                     try:
                         raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
@@ -676,7 +689,7 @@ class StudioState:
                     with Image.open(io.BytesIO(raw)) as image:
                         width, height = image.size
                     temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
-                    pending.append((temporary, name, width, height))
+                    pending.append((temporary, relative_path.as_posix(), width, height))
                     temporary.write_bytes(raw)
 
                 with self.lock:
@@ -692,6 +705,7 @@ class StudioState:
                     try:
                         for temporary, name, width, height in pending:
                             destination = unique_destination(destination_dir / name)
+                            destination.parent.mkdir(parents=True, exist_ok=True)
                             os.replace(temporary, destination)
                             final_paths.append(destination)
                             stat = destination.stat()
@@ -699,7 +713,7 @@ class StudioState:
                                 ImageRecord(
                                     uuid.uuid4().hex,
                                     destination,
-                            destination.name,
+                                    destination.relative_to(destination_dir).as_posix(),
                             width,
                             height,
                             stat.st_mtime_ns,
@@ -718,23 +732,6 @@ class StudioState:
             finally:
                 for temporary, _name, _width, _height in pending:
                     temporary.unlink(missing_ok=True)
-
-    def import_file_paths(self, paths: list[Path]) -> list[dict[str, Any]]:
-        """Copy native-picker images into the active TEMP session unchanged."""
-        if not isinstance(paths, list) or not paths:
-            return self.list_images()
-        files: list[dict[str, Any]] = []
-        for path in paths:
-            try:
-                resolved = Path(path).resolve()
-                if not resolved.is_file() or resolved.suffix.lower() not in IMAGE_SUFFIXES:
-                    continue
-                raw = resolved.read_bytes()
-                _verify_decodable_image(raw)
-            except (OSError, UnidentifiedImageError, ValueError):
-                continue
-            files.append({"name": resolved.name, "data": base64.b64encode(raw).decode("ascii")})
-        return self.import_images(files) if files else self.list_images()
 
     def _ensure_output_root(self) -> Path | None:
         with self.lock:
@@ -968,11 +965,14 @@ class StudioState:
                 output_root = self._ensure_output_root()
             if output_root is None:
                 return None
-            destination = unique_destination(output_root / f"{record.path.stem}_censored{record.path.suffix}")
+            destination = unique_destination(
+                output_root / Path(record.relative_path).parent / f"{record.path.stem}_censored{record.path.suffix}"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
             save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
             stat = destination.stat()
             copied = ImageRecord(
-                uuid.uuid4().hex, destination, destination.name,
+                uuid.uuid4().hex, destination, destination.relative_to(output_root).as_posix(),
                 record.width, record.height, stat.st_mtime_ns, self._output_record_kind(destination),
             )
             with self.lock:
@@ -1451,7 +1451,9 @@ class StudioState:
                     destination_dir = self.output_root if record.source_kind == "session" else record.path.parent
                     if destination_dir is None:
                         raise ClientError("保存先フォルダが見つかりません。")
-                    output = unique_destination(destination_dir / f"{record.path.stem}{suffix}{record.path.suffix}")
+                    relative_parent = Path(record.relative_path).parent if record.source_kind == "session" else Path()
+                    output = unique_destination(destination_dir / relative_parent / f"{record.path.stem}{suffix}{record.path.suffix}")
+                    output.parent.mkdir(parents=True, exist_ok=True)
                 save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), output)
                 if effective_mode == "copy" and delete_original:
                     record.path.unlink()
@@ -1461,8 +1463,13 @@ class StudioState:
                     record.source_kind = self._output_record_kind(output)
                 elif effective_mode == "copy":
                     copied_stat = output.stat()
+                    copied_relative_path = (
+                        output.relative_to(destination_dir).as_posix()
+                        if record.source_kind == "session"
+                        else output.name
+                    )
                     copied = ImageRecord(
-                        uuid.uuid4().hex, output, output.name,
+                        uuid.uuid4().hex, output, copied_relative_path,
                         record.width, record.height, copied_stat.st_mtime_ns, self._output_record_kind(output),
                     )
                     with self.lock:
@@ -1895,27 +1902,6 @@ def _run_with_com(callback: Any) -> Any:
         pythoncom.CoUninitialize()
 
 
-def choose_native_image_files() -> list[Path] | None:
-    """Open the Windows multi-select image picker in the request worker."""
-    def choose() -> list[Path] | None:
-        import win32con
-        import win32ui
-
-        flags = win32con.OFN_EXPLORER | win32con.OFN_FILEMUSTEXIST | win32con.OFN_ALLOWMULTISELECT
-        dialog = win32ui.CreateFileDialog(
-            True,
-            None,
-            None,
-            flags,
-            "Image files (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp||",
-        )
-        if dialog.DoModal() != win32con.IDOK:
-            return None
-        return [Path(path).resolve() for path in dialog.GetPathNames()]
-
-    return _run_with_com(choose)
-
-
 def choose_native_folder(title: str) -> Path | None:
     """Open the Windows folder picker in the request worker."""
     def choose() -> Path | None:
@@ -1975,16 +1961,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images})
-            elif path == "/api/picker/images":
-                paths = choose_native_image_files()
-                self._json({"cancelled": paths is None, "images": STATE.list_images() if paths is None else STATE.import_file_paths(paths)})
-            elif path == "/api/picker/folder":
-                selected = choose_native_folder("画像フォルダーを選択")
-                self._json({
-                    "cancelled": selected is None,
-                    "root": "" if selected is None else str(selected),
-                    "images": STATE.list_images() if selected is None else STATE.set_root(str(selected)),
-                })
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
