@@ -3,6 +3,8 @@
   "app.brand": "Lets Censoring",
   "folder.label": "画像フォルダ",
   "folder.browse": "参照...",
+  "folder.pickImages": "画像ファイルを選択",
+  "folder.pickFolder": "フォルダーを選択",
   "folder.load": "読み込む",
   "folder.chooseSource": "画像を開く",
   "folder.up": "一つ上へ",

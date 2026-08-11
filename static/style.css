@@ -48,6 +48,10 @@ input[type="range"] { accent-color: #4bb99d; }
 .folder-control { min-width: 0; display: grid; grid-template-columns: auto minmax(120px, 1fr) auto auto; gap: 6px; align-items: center; }
 .folder-control label, .numeric-control { color: #bdc4cd; white-space: nowrap; }
 .folder-control input { width: 100%; }
+.picker-anchor { position: relative; }
+.picker-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; gap: 4px; padding: 5px; border: 1px solid #4a525d; border-radius: 4px; background: #20242a; box-shadow: 0 8px 22px #0008; }
+.picker-menu[hidden] { display: none; }
+.picker-menu button { text-align: left; white-space: nowrap; }
 .job-status { min-width: 0; display: grid; gap: 3px; }
 .status { min-width: 0; color: #b7c4cf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status.error { color: #ff9d92; }
@@ -210,17 +214,6 @@ h2 { margin: 0 0 2px; font-size: 14px; }
 .dialog-body h2 { font-size: 16px; }
 .dialog-body p { margin: 0; line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
-.file-browser-dialog { width: min(920px, calc(100vw - 32px)); max-height: min(780px, calc(100vh - 32px)); }
-.file-browser-dialog .dialog-body { grid-template-rows: auto auto minmax(280px, 1fr) auto; min-height: min(680px, calc(100vh - 80px)); }
-.file-browser-heading { min-width: 0; display: grid; gap: 4px; }
-.file-browser-heading output { color: #aeb7c1; font-size: 12px; }
-.file-browser-toolbar { display: flex; gap: 7px; }
-.file-browser-list { min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); align-content: start; gap: 6px; padding: 8px; border: 1px solid #424953; border-radius: 4px; background: #17191c; }
-.file-browser-item { min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.file-browser-item.directory::before { content: "[フォルダ] "; color: #9ec8ef; }
-.file-browser-item.image::before { content: "[画像] "; color: #bfc7d0; }
-.file-browser-item.selected { border-color: #42a98f; background: #26473f; color: #e8fff8; }
-.file-browser-dialog.loading .file-browser-list { opacity: .55; pointer-events: none; }
 .danger { color: #ffd8d4; border-color: #a15b55; background: #4a2d2b; }
 .danger:hover { background: #633632; }
 .apply-dialog fieldset { display: grid; gap: 9px; min-width: 0; margin: 0; padding: 0; border: 0; }

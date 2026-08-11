@@ -12,7 +12,6 @@ const state = {
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(),
-  browser: { path: "", parent: "", directories: [], images: [], selectedNames: new Set(), loading: false },
 };
 
 const canvas = $("#editorCanvas");
@@ -239,95 +238,40 @@ function setMosaicPreviewEnabled(enabled) {
   render();
 }
 
-function browserDialog() { return $("#fileBrowserDialog"); }
-function updateFileBrowser() {
-  const browser = state.browser;
-  const dialog = browserDialog();
-  $("#fileBrowserPath").textContent = browser.path;
-  $("#fileBrowserUpButton").disabled = browser.loading || !browser.parent;
-  $("#fileBrowserCancelButton").disabled = browser.loading;
-  const selected = browser.selectedNames.size;
-  $("#fileBrowserLoadButton").disabled = browser.loading;
-  $("#fileBrowserLoadButton").textContent = selected
-    ? t("folder.loadSelected", { count: selected })
-    : t("folder.loadCurrent");
-  const list = $("#fileBrowserList");
-  list.textContent = "";
-  for (const directory of browser.directories) {
-    const item = document.createElement("button");
-    item.type = "button"; item.className = "file-browser-item directory";
-    item.textContent = directory.name;
-    item.addEventListener("click", () => { if (!browser.loading) void loadBrowserPath(directory.path); });
-    list.append(item);
-  }
-  for (const image of browser.images) {
-    const item = document.createElement("button");
-    const selectedImage = browser.selectedNames.has(image.name);
-    item.type = "button"; item.className = "file-browser-item image";
-    item.classList.toggle("selected", selectedImage);
-    item.setAttribute("aria-selected", String(selectedImage));
-    item.textContent = image.name;
-    item.addEventListener("click", () => {
-      if (browser.loading) return;
-      if (browser.selectedNames.has(image.name)) browser.selectedNames.delete(image.name);
-      else browser.selectedNames.add(image.name);
-      updateFileBrowser();
-    });
-    list.append(item);
-  }
-  dialog.classList.toggle("loading", browser.loading);
-}
+function closePickerMenu() { $("#pickerMenu").hidden = true; }
 
-async function loadBrowserPath(path) {
-  if (state.browser.loading || isBusy() || state.importing) return;
-  state.browser.loading = true; updateFileBrowser();
-  try {
-    const data = await api("/api/browser/list", { method: "POST", body: JSON.stringify({ path }) });
-    state.browser.path = data.path;
-    state.browser.parent = data.parent;
-    state.browser.directories = data.directories;
-    state.browser.images = data.images;
-    state.browser.selectedNames = new Set();
-  } catch (error) { setStatus(error.message, "error"); }
-  finally { state.browser.loading = false; updateFileBrowser(); }
-}
-
-function resetCatalog(images, root) {
-  state.images = images;
-  state.reviewRoot = normaliseReviewRoot(root);
-  loadReviewedPaths();
-  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
-  renderCatalogViews(); clearEditor();
-}
-
-async function openFileBrowser() {
+function togglePickerMenu() {
   if (isBusy() || state.importing) return;
-  const dialog = browserDialog();
-  if (!dialog.open) dialog.showModal();
-  await loadBrowserPath($("#folderPath").value.trim() || state.reviewRoot);
+  const menu = $("#pickerMenu");
+  menu.hidden = !menu.hidden;
 }
 
-async function loadFromFileBrowser() {
-  const browser = state.browser;
-  if (browser.loading || isBusy() || state.importing || !browser.path) return;
-  state.importing = true; updateActionButtons(); updateFileBrowser();
-  const catalogGeneration = ++state.catalogGeneration;
-  ++state.imageGeneration;
+async function pickNativeSource(kind) {
+  if (isBusy() || state.importing) return;
+  closePickerMenu();
+  state.importing = true;
+  updateActionButtons();
   try {
-    const selectedNames = [...browser.selectedNames];
-    const endpoint = selectedNames.length ? "/api/catalog/select" : "/api/folder";
-    const payload = selectedNames.length ? { path: browser.path, names: selectedNames } : { path: browser.path };
-    const data = await api(endpoint, { method: "POST", body: JSON.stringify(payload) });
-    if (state.catalogGeneration !== catalogGeneration) return;
-    $("#folderPath").value = browser.path;
-    resetCatalog(data.images, browser.path);
-    browserDialog().close();
-    setStatus(t("status.imagesLoaded", { count: state.images.length }));
-  } catch (error) { setStatus(error.message, "error"); }
-  finally { state.importing = false; updateActionButtons(); updateFileBrowser(); }
+    const data = await api(`/api/picker/${kind}`, { method: "POST", body: JSON.stringify({}) });
+    if (data.cancelled) return;
+    if (kind === "folder") {
+      const catalogGeneration = ++state.catalogGeneration;
+      ++state.imageGeneration;
+      $("#folderPath").value = data.root;
+      if (state.catalogGeneration === catalogGeneration) resetCatalog(data.images, data.root);
+      setStatus(t("status.imagesLoaded", { count: data.images.length }));
+    } else {
+      state.images = data.images;
+      renderCatalogViews();
+      setStatus(t("gallery.imported", { count: data.images.length }));
+    }
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    state.importing = false;
+    updateActionButtons();
+  }
 }
-
 function updateProgress(job) {
   const progress = $("#jobProgress");
   const progressText = $("#jobProgressText");
@@ -950,7 +894,7 @@ async function startApplyFromDialog(event) {
   const suffix = $("#applySuffix").value.trim();
   if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
   try {
-    await api("/api/apply", {
+    const result = await api("/api/apply", {
       method: "POST",
       body: JSON.stringify({
         imageIds, divisor: Number($("#applyDivisor").value), mode: copy ? "copy" : "overwrite",
@@ -958,6 +902,7 @@ async function startApplyFromDialog(event) {
         drafts: draftPayload(imageIds),
       }),
     });
+    if (result.cancelled) return;
     state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" };
     state.applyRunning = true;
     $("#applySettings").disabled = true;
@@ -1281,11 +1226,17 @@ function handleWindowKeydown(event) {
 }
 
 function bindEvents() {
-  $("#loadFolder").addEventListener("click", loadFolder); $("#pickFolder").addEventListener("click", () => void openFileBrowser());
-  $("#fileBrowserUpButton").addEventListener("click", () => { if (state.browser.parent) void loadBrowserPath(state.browser.parent); });
-  $("#fileBrowserCancelButton").addEventListener("click", () => browserDialog().close());
-  $("#fileBrowserLoadButton").addEventListener("click", () => void loadFromFileBrowser());
-  browserDialog().addEventListener("cancel", (event) => { if (state.browser.loading || state.importing) event.preventDefault(); });
+  $("#loadFolder").addEventListener("click", loadFolder);
+  $("#pickFolder").addEventListener("click", togglePickerMenu);
+  $("#pickImages").addEventListener("click", () => void pickNativeSource("images"));
+  $("#pickNativeFolder").addEventListener("click", () => void pickNativeSource("folder"));
+  document.addEventListener("click", (event) => { if (!event.target.closest(".picker-anchor")) closePickerMenu(); });
+  document.addEventListener("dragover", (event) => {
+    if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+  });
+  document.addEventListener("drop", (event) => {
+    if (event.dataTransfer?.files?.length) void importDroppedFiles(event);
+  });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#detectAllButton").addEventListener("click", () => runDetection(state.images.map((image) => image.id)));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId]));

@@ -13,7 +13,13 @@
     <div class="folder-control">
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
-      <button id="pickFolder" data-i18n="folder.browse">参照...</button>
+      <div class="picker-anchor">
+        <button id="pickFolder" type="button" data-i18n="folder.browse">参照...</button>
+        <div id="pickerMenu" class="picker-menu" hidden>
+          <button id="pickImages" type="button" data-i18n="folder.pickImages">画像ファイルを選択</button>
+          <button id="pickNativeFolder" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
+        </div>
+      </div>
       <button id="loadFolder" class="primary" data-i18n="folder.load">読み込む</button>
     </div>
     <div class="job-status">
@@ -153,23 +159,6 @@
       <span class="overview-item-state"></span>
     </button>
   </template>
-
-  <dialog id="fileBrowserDialog" class="modal-dialog file-browser-dialog" aria-labelledby="fileBrowserDialogTitle">
-    <div class="dialog-body">
-      <div class="file-browser-heading">
-        <h2 id="fileBrowserDialogTitle" data-i18n="folder.chooseSource">画像を開く</h2>
-        <output id="fileBrowserPath" class="truncate"></output>
-      </div>
-      <div class="file-browser-toolbar">
-        <button id="fileBrowserUpButton" type="button" data-i18n="folder.up">一つ上へ</button>
-      </div>
-      <div id="fileBrowserList" class="file-browser-list" role="listbox" aria-multiselectable="true"></div>
-      <div class="dialog-actions">
-        <button id="fileBrowserCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
-        <button id="fileBrowserLoadButton" type="button" class="primary" data-i18n="folder.loadCurrent">このフォルダを読み込む</button>
-      </div>
-    </div>
-  </dialog>
 
   <dialog id="confirmDialog" class="modal-dialog confirm-dialog">
     <form method="dialog" class="dialog-body">

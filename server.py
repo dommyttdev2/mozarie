@@ -458,6 +458,7 @@ class StudioState:
         self.session_imports_dir: Path | None = None
         self._session_lock_handle: Any | None = None
         self.root: Path | None = None
+        self.output_root: Path | None = None
         self.images: dict[str, ImageRecord] = {}
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
@@ -547,6 +548,7 @@ class StudioState:
             self.order = [record.image_id for record in records]
             self.candidates = {}
             self.root = root
+            self.output_root = root
             self._clear_cache()
             self._invalidate_sam_cache()
             self.job = Job()
@@ -570,77 +572,6 @@ class StudioState:
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         with self.import_lock:
             return self._set_root(raw_path)
-
-    def browse_folder(self, raw_path: str) -> dict[str, Any]:
-        """Return only direct children for the in-app file browser."""
-        if raw_path and not isinstance(raw_path, str):
-            raise ClientError("フォルダの指定が正しくありません。")
-        with self.lock:
-            current_root = self.root
-        initial = Path(raw_path).expanduser() if raw_path else (current_root or Path.cwd().anchor)
-        folder = Path(initial).resolve()
-        if not folder.is_dir():
-            raise ClientError("指定フォルダが見つかりません。")
-
-        directories: list[dict[str, str]] = []
-        images: list[dict[str, str]] = []
-        try:
-            children = list(folder.iterdir())
-        except OSError as exc:
-            raise ClientError("フォルダを読み込めません。") from exc
-        for child in children:
-            try:
-                resolved = child.resolve()
-                if child.is_dir():
-                    directories.append({"name": child.name, "path": str(resolved)})
-                elif child.is_file() and child.suffix.lower() in IMAGE_SUFFIXES:
-                    with Image.open(resolved) as image:
-                        image.verify()
-                    images.append({"name": child.name, "path": str(resolved)})
-            except (OSError, UnidentifiedImageError, ValueError):
-                continue
-        directories.sort(key=lambda item: item["name"].lower())
-        images.sort(key=lambda item: item["name"].lower())
-        parent = folder.parent if folder.parent != folder else None
-        return {"path": str(folder), "parent": str(parent) if parent else "", "directories": directories, "images": images}
-
-    def set_selected_images(self, raw_path: str, names: list[str]) -> list[dict[str, Any]]:
-        """Replace the catalogue with selected direct children of one folder."""
-        if not raw_path or not isinstance(raw_path, str):
-            raise ClientError("フォルダを入力してください。")
-        if not isinstance(names, list) or not names:
-            raise ClientError("画像を選択してください。")
-        root = Path(raw_path).expanduser().resolve()
-        if not root.is_dir():
-            raise ClientError("指定フォルダが見つかりません。")
-        selected_names: list[str] = []
-        for value in names:
-            name = str(value)
-            if not name or Path(name).name != name or Path(name).suffix.lower() not in IMAGE_SUFFIXES:
-                raise ClientError("選択できない画像が含まれています。")
-            if name not in selected_names:
-                selected_names.append(name)
-
-        with self.import_lock:
-            with self.lock:
-                self._assert_catalog_mutable()
-            records: list[ImageRecord] = []
-            for name in selected_names:
-                candidate = (root / name).resolve()
-                try:
-                    candidate.relative_to(root)
-                    if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_SUFFIXES:
-                        raise ClientError("選択できない画像が含まれています。")
-                    with Image.open(candidate) as image:
-                        width, height = image.size
-                    stat = candidate.stat()
-                except (OSError, UnidentifiedImageError, ValueError) as exc:
-                    if isinstance(exc, ClientError):
-                        raise
-                    raise ClientError("選択した画像を読み込めません。") from exc
-                records.append(ImageRecord(uuid.uuid4().hex, candidate, candidate.name, width, height, stat.st_mtime_ns))
-            records.sort(key=lambda record: record.relative_path.lower())
-            return self._replace_catalog(root, records)
 
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -726,9 +657,6 @@ class StudioState:
                 catalog_generation = self.catalog_generation
                 if self.job.state in {"running", "paused"} or self._has_active_worker():
                     raise ClientError("処理中は画像を追加できません。")
-            if root is None:
-                raise ClientError("画像を追加する前に画像フォルダを読み込んでください。")
-
             destination_dir = self._ensure_session()
             pending: list[tuple[Path, str, int, int]] = []
             try:
@@ -791,6 +719,55 @@ class StudioState:
                 for temporary, _name, _width, _height in pending:
                     temporary.unlink(missing_ok=True)
 
+    def import_file_paths(self, paths: list[Path]) -> list[dict[str, Any]]:
+        """Copy native-picker images into the active TEMP session unchanged."""
+        if not isinstance(paths, list) or not paths:
+            return self.list_images()
+        files: list[dict[str, Any]] = []
+        for path in paths:
+            try:
+                resolved = Path(path).resolve()
+                if not resolved.is_file() or resolved.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                raw = resolved.read_bytes()
+                _verify_decodable_image(raw)
+            except (OSError, UnidentifiedImageError, ValueError):
+                continue
+            files.append({"name": resolved.name, "data": base64.b64encode(raw).decode("ascii")})
+        return self.import_images(files) if files else self.list_images()
+
+    def _ensure_output_root(self) -> Path | None:
+        with self.lock:
+            output_root = self.output_root
+        if output_root is not None:
+            return output_root
+        selected = choose_native_folder("保存先フォルダーを選択")
+        if selected is None:
+            return None
+        if not selected.is_dir():
+            raise ClientError("保存先フォルダーを読み込めません。")
+        with self.lock:
+            self.output_root = selected
+        return selected
+
+    def _output_record_kind(self, destination: Path) -> str:
+        with self.lock:
+            root = self.root
+            output_root = self.output_root
+        if root is not None:
+            try:
+                destination.resolve().relative_to(root.resolve())
+                return "filesystem"
+            except ValueError:
+                pass
+        if output_root is not None:
+            try:
+                destination.resolve().relative_to(output_root.resolve())
+                return "output"
+            except ValueError:
+                pass
+        raise ClientError("保存先フォルダーを確認できません。")
+
     def _clear_cache(self) -> None:
         shutil.rmtree(self.cache_dir, ignore_errors=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -826,17 +803,31 @@ class StudioState:
                 self.sam_image_id = record.image_id
             return self.sam_predictor
 
+    @staticmethod
+    def _allowed_root_for_record(
+        record: ImageRecord,
+        root: Path | None,
+        session_imports_dir: Path | None,
+        output_root: Path | None,
+    ) -> Path | None:
+        if record.source_kind == "filesystem":
+            return root
+        if record.source_kind == "session":
+            return session_imports_dir
+        if record.source_kind == "output":
+            return output_root
+        return None
+
     def image_for_id(self, image_id: str) -> ImageRecord:
         with self.lock:
             record = self.images.get(image_id)
             root = self.root
             session_imports_dir = self.session_imports_dir
-        if record is None or root is None:
+            output_root = self.output_root
+        if record is None:
             raise ClientError("画像が見つかりません。フォルダを再読込してください。")
         try:
-            if record.source_kind not in {"filesystem", "session"}:
-                raise ValueError
-            allowed_root = root if record.source_kind == "filesystem" else session_imports_dir
+            allowed_root = self._allowed_root_for_record(record, root, session_imports_dir, output_root)
             if allowed_root is None:
                 raise ValueError
             record.path.resolve().relative_to(allowed_root.resolve())
@@ -938,7 +929,7 @@ class StudioState:
         suffix: str,
         delete_original: bool,
         drafts: dict[str, dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if mode not in {"copy", "overwrite"}:
             raise ClientError("保存方法が正しくありません。")
@@ -959,25 +950,30 @@ class StudioState:
         records = [record for record in records if prepared_masks[record.image_id] is not None and np.any(prepared_masks[record.image_id])]
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
+        if requires_copy and self._ensure_output_root() is None:
+            return False
         self._start_job(
             "apply", records, self._apply_worker, divisor, effective_mode, suffix if effective_mode == "copy" else "",
             bool(delete_original and effective_mode == "copy" and not requires_copy), prepared_masks, expected_catalog_generation=catalog_generation,
         )
+        return True
 
-    def save_image(self, image_id: str, mask: np.ndarray, divisor: int) -> Path:
+    def save_image(self, image_id: str, mask: np.ndarray, divisor: int) -> Path | None:
         record = self.image_for_id(image_id)
         with self.lock:
             self._assert_catalog_mutable()
-            root = self.root
+            output_root = self.output_root
         if record.source_kind == "session":
-            if root is None:
-                raise ClientError("保存先フォルダが見つかりません。")
-            destination = unique_destination(root / f"{record.path.stem}_censored{record.path.suffix}")
+            if output_root is None:
+                output_root = self._ensure_output_root()
+            if output_root is None:
+                return None
+            destination = unique_destination(output_root / f"{record.path.stem}_censored{record.path.suffix}")
             save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor), destination)
             stat = destination.stat()
             copied = ImageRecord(
-                uuid.uuid4().hex, destination, destination.relative_to(root).as_posix(),
-                record.width, record.height, stat.st_mtime_ns, "filesystem",
+                uuid.uuid4().hex, destination, destination.name,
+                record.width, record.height, stat.st_mtime_ns, self._output_record_kind(destination),
             )
             with self.lock:
                 self.images[copied.image_id] = copied
@@ -1035,15 +1031,14 @@ class StudioState:
             records = [self.images.get(str(image_id)) for image_id in source_ids]
             root = self.root
             session_imports_dir = self.session_imports_dir
+            output_root = self.output_root
             catalog_generation = self.catalog_generation
-        if root is None or not records or any(record is None for record in records):
+        if not records or any(record is None for record in records):
             raise ClientError("処理する画像がありません。")
         verified_records = [record for record in records if record is not None]
         for record in verified_records:
             try:
-                if record.source_kind not in {"filesystem", "session"}:
-                    raise ValueError
-                allowed_root = root if record.source_kind == "filesystem" else session_imports_dir
+                allowed_root = self._allowed_root_for_record(record, root, session_imports_dir, output_root)
                 if allowed_root is None:
                     raise ValueError
                 record.path.resolve().relative_to(allowed_root.resolve())
@@ -1453,7 +1448,7 @@ class StudioState:
                 if effective_mode == "overwrite":
                     output = record.path
                 else:
-                    destination_dir = self.root if record.source_kind == "session" else record.path.parent
+                    destination_dir = self.output_root if record.source_kind == "session" else record.path.parent
                     if destination_dir is None:
                         raise ClientError("保存先フォルダが見つかりません。")
                     output = unique_destination(destination_dir / f"{record.path.stem}{suffix}{record.path.suffix}")
@@ -1461,15 +1456,14 @@ class StudioState:
                 if effective_mode == "copy" and delete_original:
                     record.path.unlink()
                     record.path = output
-                    record.relative_path = output.relative_to(self.root).as_posix() if self.root else output.name
+                    record.relative_path = output.name
                     record.mtime_ns = output.stat().st_mtime_ns
-                    record.source_kind = "filesystem"
+                    record.source_kind = self._output_record_kind(output)
                 elif effective_mode == "copy":
                     copied_stat = output.stat()
                     copied = ImageRecord(
-                        uuid.uuid4().hex, output,
-                        output.relative_to(self.root).as_posix() if self.root else output.name,
-                        record.width, record.height, copied_stat.st_mtime_ns, "filesystem",
+                        uuid.uuid4().hex, output, output.name,
+                        record.width, record.height, copied_stat.st_mtime_ns, self._output_record_kind(output),
                     )
                     with self.lock:
                         self.images[copied.image_id] = copied
@@ -1891,6 +1885,51 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int, desti
             temporary_path.unlink(missing_ok=True)
 
 
+def _run_with_com(callback: Any) -> Any:
+    import pythoncom
+
+    pythoncom.CoInitialize()
+    try:
+        return callback()
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def choose_native_image_files() -> list[Path] | None:
+    """Open the Windows multi-select image picker in the request worker."""
+    def choose() -> list[Path] | None:
+        import win32con
+        import win32ui
+
+        flags = win32con.OFN_EXPLORER | win32con.OFN_FILEMUSTEXIST | win32con.OFN_ALLOWMULTISELECT
+        dialog = win32ui.CreateFileDialog(
+            True,
+            None,
+            None,
+            flags,
+            "Image files (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp||",
+        )
+        if dialog.DoModal() != win32con.IDOK:
+            return None
+        return [Path(path).resolve() for path in dialog.GetPathNames()]
+
+    return _run_with_com(choose)
+
+
+def choose_native_folder(title: str) -> Path | None:
+    """Open the Windows folder picker in the request worker."""
+    def choose() -> Path | None:
+        from win32com.shell import shell, shellcon
+
+        flags = shellcon.BIF_RETURNONLYFSDIRS | shellcon.BIF_NEWDIALOGSTYLE
+        item = shell.SHBrowseForFolder(0, None, title, flags)
+        if not item:
+            return None
+        return Path(shell.SHGetPathFromIDList(item)).resolve()
+
+    return _run_with_com(choose)
+
+
 STATE = StudioState(CACHE_DIR)
 
 
@@ -1933,14 +1972,19 @@ class MosaicHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             payload = self._read_json_body()
-            if path == "/api/browser/list":
-                self._json(STATE.browse_folder(str(payload.get("path", ""))))
-            elif path == "/api/folder":
+            if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images})
-            elif path == "/api/catalog/select":
-                images = STATE.set_selected_images(str(payload.get("path", "")), payload.get("names", []))
-                self._json({"images": images})
+            elif path == "/api/picker/images":
+                paths = choose_native_image_files()
+                self._json({"cancelled": paths is None, "images": STATE.list_images() if paths is None else STATE.import_file_paths(paths)})
+            elif path == "/api/picker/folder":
+                selected = choose_native_folder("画像フォルダーを選択")
+                self._json({
+                    "cancelled": selected is None,
+                    "root": "" if selected is None else str(selected),
+                    "images": STATE.list_images() if selected is None else STATE.set_root(str(selected)),
+                })
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
@@ -1959,12 +2003,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
             elif path == "/api/apply":
                 divisor = _read_mosaic_divisor(payload.get("divisor"))
-                STATE.start_apply(
+                started = STATE.start_apply(
                     payload.get("imageIds", []), divisor,
                     str(payload.get("mode", "copy")), str(payload.get("suffix", "_censored")),
                     bool(payload.get("deleteOriginal", False)), payload.get("drafts", {}),
                 )
-                self._json({"ok": True})
+                self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
                 self._json(STATE.request_pause().as_dict())
             elif path == "/api/job/resume":
@@ -1976,7 +2020,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 record = STATE.image_for_id(image_id)
                 mask = _decode_mask(str(payload.get("mask", "")), record.width, record.height)
                 output = STATE.save_image(image_id, mask, _read_mosaic_divisor(payload.get("divisor")))
-                self._json({"ok": True, "output": str(output)})
+                self._json({"ok": output is not None, "cancelled": output is None, "output": str(output) if output else ""})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 STATE.set_candidate_state(image_id, candidate_id, payload)
