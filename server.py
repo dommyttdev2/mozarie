@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import argparse
+from concurrent.futures import ThreadPoolExecutor, wait
 import hashlib
 import io
 import json
@@ -178,6 +179,7 @@ class BrowserSaveToken:
     source_fingerprint: tuple[int, int]
     catalog_generation: int
     issued_at: float
+    rendered_path: Path
 
 
 @dataclass
@@ -192,6 +194,7 @@ class Job:
     outputs: list[str] = field(default_factory=list)
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
+    active_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -205,6 +208,7 @@ class Job:
             "outputs": self.outputs,
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
+            "activeCount": self.active_count,
         }
 
 
@@ -649,7 +653,7 @@ class StudioState:
             self.order = [record.image_id for record in records]
             self.candidates = {}
             self.candidate_revisions = {record.image_id: 0 for record in records}
-            self.browser_save_tokens = {}
+            self._clear_browser_save_tokens_unchecked()
             self.root = root
             self._clear_cache()
             self._invalidate_sam_cache()
@@ -719,7 +723,7 @@ class StudioState:
                 self.order = []
                 self.candidates = {}
                 self.candidate_revisions = {}
-                self.browser_save_tokens = {}
+                self._clear_browser_save_tokens_unchecked()
                 self._clear_cache()
                 self._invalidate_sam_cache()
                 self.catalog_generation += 1
@@ -730,7 +734,7 @@ class StudioState:
         with self.lock:
             worker = self.worker_thread
             control = self.job_control
-            self.browser_save_tokens = {}
+            self._clear_browser_save_tokens_unchecked()
             if control is not None:
                 control.cancel_requested.set()
                 control.pause_requested.clear()
@@ -742,7 +746,7 @@ class StudioState:
         with self.import_lock:
             with self.lock:
                 self._clear_session_unchecked()
-                self.browser_save_tokens = {}
+                self._clear_browser_save_tokens_unchecked()
                 if self._owns_process_cache:
                     self._release_directory_lock(self._cache_lock_handle)
                     self._cache_lock_handle = None
@@ -760,23 +764,46 @@ class StudioState:
         self._assert_record_fresh(record)
         return record.mtime_ns, record.size_bytes
 
+    def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
+        details = self.browser_save_tokens.pop(token, None)
+        if details is not None:
+            details.rendered_path.unlink(missing_ok=True)
+        return details
+
+    def _clear_browser_save_tokens_unchecked(self) -> None:
+        for token in tuple(self.browser_save_tokens):
+            self._discard_browser_save_token_unchecked(token)
+
     def _discard_expired_browser_save_tokens_unchecked(self) -> None:
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
-        self.browser_save_tokens = {
-            token: details
-            for token, details in self.browser_save_tokens.items()
-            if details.issued_at >= cutoff
-        }
+        for token, details in tuple(self.browser_save_tokens.items()):
+            if details.issued_at < cutoff:
+                self._discard_browser_save_token_unchecked(token)
 
-    def _issue_browser_save_token_unchecked(self, record: ImageRecord, revision: int, source_fingerprint: tuple[int, int], catalog_generation: int) -> str:
+    def _issue_browser_save_token_unchecked(
+        self,
+        record: ImageRecord,
+        revision: int,
+        source_fingerprint: tuple[int, int],
+        catalog_generation: int,
+        output: bytes,
+    ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
+        rendered_dir = self.cache_dir / "browser-save"
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+        rendered_path = rendered_dir / f"{token}{record.path.suffix.lower()}"
+        with rendered_path.open("xb") as handle:
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,
             candidate_revision=revision,
             source_fingerprint=source_fingerprint,
             catalog_generation=catalog_generation,
             issued_at=time.monotonic(),
+            rendered_path=rendered_path,
         )
         return token
 
@@ -818,6 +845,15 @@ class StudioState:
                 LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        images, _imported = self._import_images(files)
+        return images
+
+    def import_images_for_api(self, files: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not isinstance(files, list) or any(not isinstance(item, dict) or not isinstance(item.get("clientKey"), str) or not item["clientKey"] for item in files):
+            raise ClientError("追加画像のclientKeyが不正です。")
+        return self._import_images(files)
+
+    def _import_images(self, files: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
         with self.import_lock:
@@ -827,11 +863,12 @@ class StudioState:
                 if self.job.state in {"running", "paused"} or self._has_active_worker():
                     raise ClientError("処理中は画像を追加できません。")
             destination_dir = self._ensure_session()
-            pending: list[tuple[Path, str, int, int]] = []
+            pending: list[tuple[Path, str, int, int, str]] = []
             try:
                 for file_data in files:
                     if not isinstance(file_data, dict):
                         raise ClientError("画像データの形式が正しくありません。")
+                    client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
                     relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
                     if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                         continue
@@ -845,7 +882,7 @@ class StudioState:
                     with Image.open(io.BytesIO(raw)) as image:
                         width, height = oriented_image_size(image)
                     temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
-                    pending.append((temporary, relative_path.as_posix(), width, height))
+                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
                     temporary.write_bytes(raw)
 
                 with self.lock:
@@ -859,24 +896,27 @@ class StudioState:
                     added: list[ImageRecord] = []
                     final_paths: list[Path] = []
                     try:
-                        for temporary, name, width, height in pending:
+                        imported: list[dict[str, str]] = []
+                        for temporary, name, width, height, client_key in pending:
                             destination = unique_session_import_destination(destination_dir / name)
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             os.replace(temporary, destination)
                             final_paths.append(destination)
                             stat = destination.stat()
+                            image_id = uuid.uuid4().hex
                             added.append(
                                 ImageRecord(
-                                    uuid.uuid4().hex,
+                                    image_id,
                                     destination,
                                     destination.relative_to(destination_dir).as_posix(),
-                            width,
-                            height,
-                            stat.st_mtime_ns,
-                            stat.st_size,
-                            "session",
-                        )
-                    )
+                                    width,
+                                    height,
+                                    stat.st_mtime_ns,
+                                    stat.st_size,
+                                    "session",
+                                )
+                            )
+                            imported.append({"clientKey": client_key, "imageId": image_id})
                     except Exception:
                         for destination in final_paths:
                             destination.unlink(missing_ok=True)
@@ -885,9 +925,9 @@ class StudioState:
                         self.images[record.image_id] = record
                         self.order.append(record.image_id)
                     self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
-                    return self.list_images()
+                    return self.list_images(), imported
             finally:
-                for temporary, _name, _width, _height in pending:
+                for temporary, _name, _width, _height, _client_key in pending:
                     temporary.unlink(missing_ok=True)
 
     def _clear_cache(self) -> None:
@@ -1071,9 +1111,17 @@ class StudioState:
             self._touch_candidates(image_id)
             return True
 
-    def start_detection(self, image_ids: list[str], confidence: float = DEFAULT_DETECTION_CONFIDENCE) -> None:
+    def start_detection(
+        self,
+        image_ids: list[str],
+        confidence: float = DEFAULT_DETECTION_CONFIDENCE,
+        parallelism: int = 2,
+    ) -> None:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        self._start_job("detect", records, self._detect_worker, confidence, expected_catalog_generation=catalog_generation)
+        self._start_job(
+            "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
+            expected_catalog_generation=catalog_generation,
+        )
 
     def start_apply(self, image_ids: list[str], divisor: int, drafts: dict[str, dict[str, Any]]) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
@@ -1113,7 +1161,7 @@ class StudioState:
                 "relativePath": record.relative_path,
                 "sourceKind": record.source_kind,
                 "candidateRevision": self._candidate_revision(record.image_id),
-                "deleteOriginal": bool(delete_original and record.source_kind == "filesystem"),
+                "sourceAction": "deleted" if delete_original and record.source_kind == "filesystem" else "keep",
             }
             for record in records
         ]
@@ -1174,13 +1222,15 @@ class StudioState:
             if self.catalog_generation != catalog_generation:
                 raise ClientError("画像一覧が変更されました。保存をやり直してください。")
             save_token = self._issue_browser_save_token_unchecked(
-                record, current_revision, source_fingerprint, catalog_generation,
+                record, current_revision, source_fingerprint, catalog_generation, output,
             )
         return output, record, current_revision, save_token
 
-    def commit_browser_save(self, image_id: str, revision: int, save_token: str, delete_original: bool) -> dict[str, Any]:
+    def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。")
+        if source_action not in {"keep", "overwrite", "deleted"}:
+            raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
         with self.lock:
             self._discard_expired_browser_save_tokens_unchecked()
             token_details = self.browser_save_tokens.get(save_token)
@@ -1189,41 +1239,41 @@ class StudioState:
             if token_details.image_id != image_id or token_details.candidate_revision != revision:
                 raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
             if token_details.catalog_generation != self.catalog_generation:
-                self.browser_save_tokens.pop(save_token, None)
+                self._discard_browser_save_token_unchecked(save_token)
                 raise ClientError("画像一覧が変更されました。保存をやり直してください。")
             record = self.images.get(image_id)
             if record is None:
-                self.browser_save_tokens.pop(save_token, None)
+                self._discard_browser_save_token_unchecked(save_token)
                 raise ClientError("画像が見つかりません。フォルダを再読込してください。")
             if self._has_active_worker():
                 raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
             try:
                 current_fingerprint = self._source_fingerprint(record)
             except ClientError:
-                self.browser_save_tokens.pop(save_token, None)
+                self._discard_browser_save_token_unchecked(save_token)
                 raise
             if current_fingerprint != token_details.source_fingerprint:
-                self.browser_save_tokens.pop(save_token, None)
+                self._discard_browser_save_token_unchecked(save_token)
                 raise ClientError("元画像が変更されました。保存をやり直してください。")
             current_revision = self._candidate_revision(image_id)
-            if delete_original and revision != current_revision:
-                self.browser_save_tokens.pop(save_token, None)
-                raise ClientError("候補が変更されたため元画像は削除しませんでした。")
             deleted = False
-            if delete_original and record.source_kind == "filesystem":
-                try:
+            try:
+                if source_action == "overwrite":
+                    _replace_record_with_rendered_output(record, token_details.rendered_path)
+                elif source_action == "deleted":
                     record.path.unlink()
-                except OSError as exc:
-                    raise ClientError("元画像を削除できませんでした。候補は保持しています。") from exc
-            self.browser_save_tokens.pop(save_token, None)
-            cleared = revision == current_revision
-            if cleared:
-                self._clear_masks_unchecked([record])
-            if delete_original and record.source_kind == "filesystem":
-                self.images.pop(record.image_id, None)
-                self.order = [current_id for current_id in self.order if current_id != record.image_id]
-                self.candidate_revisions.pop(record.image_id, None)
-                deleted = True
+                    self.images.pop(record.image_id, None)
+                    self.order = [current_id for current_id in self.order if current_id != record.image_id]
+                    self.candidate_revisions.pop(record.image_id, None)
+                    self.candidates.pop(record.image_id, None)
+                    deleted = True
+                cleared = revision == current_revision
+                if cleared and not deleted:
+                    self._clear_masks_unchecked([record])
+            except OSError as exc:
+                raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
+            finally:
+                self._discard_browser_save_token_unchecked(save_token)
         self.invalidate_sam_image(image_id)
         return {"cleared": cleared, "stale": not cleared, "deleted": deleted, "images": self.list_images()}
 
@@ -1352,19 +1402,21 @@ class StudioState:
             self.worker_thread = thread
         thread.start()
 
-    def _ensure_models(self) -> DetectionModels:
-        with self.lock:
-            if self.models is not None:
-                return self.models
+    def _load_detection_models(self) -> DetectionModels:
         validate_model_manifest(PRECISE_MODEL)
         assert_onnx_cuda_available()
-        models = DetectionModels(
-            precise=YOLO(str(PRECISE_MODEL.path), task="segment"),
-        )
+        models = DetectionModels(precise=YOLO(str(PRECISE_MODEL.path), task="segment"))
         if MODEL_PATH.is_file():
             models.primary = YOLO(str(MODEL_PATH))
         if SECOND_MODEL_PATH.is_file():
             models.secondary = YOLO(str(SECOND_MODEL_PATH))
+        return models
+
+    def _ensure_models(self) -> DetectionModels:
+        with self.lock:
+            if self.models is not None:
+                return self.models
+        models = self._load_detection_models()
         with self.lock:
             self.models = models
         return models
@@ -1381,45 +1433,62 @@ class StudioState:
         self,
         records: list[ImageRecord],
         confidence: float,
+        parallelism: int = 2,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            models = self._ensure_models()
-            for index, record in enumerate(records, start=1):
-                if not self._job_is_current(job_generation, catalog_generation):
-                    return
-                if control is not None and control.cancel_requested.is_set():
-                    self._cancel_job(job_generation, catalog_generation)
-                    return
-                self._set_job_current(record.relative_path, index - 1, job_generation, catalog_generation)
-                with self.inference_lock:
-                    candidates = self._detect_image(models, record, confidence)
-                if control is not None and control.cancel_requested.is_set():
-                    self._discard_candidates(candidates)
-                    self._cancel_job(job_generation, catalog_generation)
-                    return
-                with self.lock:
+            worker_count = min(_read_detection_parallelism(parallelism), len(records))
+            model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
+            groups = [records[index::worker_count] for index in range(worker_count)]
+            with self.lock:
+                if self._job_is_current(job_generation, catalog_generation):
+                    self.job.active_count = worker_count
+
+            def run_slot(models: DetectionModels, assigned: list[ImageRecord]) -> None:
+                for record in assigned:
+                    if not self._job_is_current(job_generation, catalog_generation):
+                        return
+                    if control is not None and control.cancel_requested.is_set():
+                        return
+                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                    try:
+                        candidates = self._detect_image(models, record, confidence)
+                    except RuntimeError as exc:
+                        if "out of memory" in str(exc).lower():
+                            if control is not None:
+                                control.cancel_requested.set()
+                            raise ClientError("GPUメモリが不足しました。並列数を下げてください。") from exc
+                        raise
                     if control is not None and control.cancel_requested.is_set():
                         self._discard_candidates(candidates)
-                        self._cancel_job(job_generation, catalog_generation)
                         return
-                    if not self._job_is_current(job_generation, catalog_generation):
-                        self._discard_candidates(candidates)
-                        return
-                    boundary_candidates = [
-                        candidate for candidate in self.candidates.get(record.image_id, [])
-                        if candidate.source == "boundary"
-                    ]
-                    for candidate in self.candidates.get(record.image_id, []):
-                        if candidate.source != "boundary":
-                            candidate.mask_path.unlink(missing_ok=True)
-                    self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                    self._touch_candidates(record.image_id)
-                    self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                    self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
+                    with self.lock:
+                        if (control is not None and control.cancel_requested.is_set()) or not self._job_is_current(job_generation, catalog_generation):
+                            self._discard_candidates(candidates)
+                            return
+                        boundary_candidates = [
+                            candidate for candidate in self.candidates.get(record.image_id, [])
+                            if candidate.source == "boundary"
+                        ]
+                        for candidate in self.candidates.get(record.image_id, []):
+                            if candidate.source != "boundary":
+                                candidate.mask_path.unlink(missing_ok=True)
+                        self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                        self._touch_candidates(record.image_id)
+                        self._mark_image_completed(record.image_id, job_generation, catalog_generation)
+                        self._set_job_current(record.relative_path, job_generation, catalog_generation)
+
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="MosaicDetect") as executor:
+                futures = [executor.submit(run_slot, models, group) for models, group in zip(model_slots, groups) if group]
+                wait(futures)
+                for future in futures:
+                    future.result()
+            if control is not None and control.cancel_requested.is_set():
+                self._cancel_job(job_generation, catalog_generation)
+                return
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc, job_generation, catalog_generation)
@@ -1574,25 +1643,27 @@ class StudioState:
         hand_boxes = self._hand_boxes(models, rgb)
         if not hand_boxes:
             return segments
-        predictor = self._sam_predictor_for(record)
-        for segment in fallback:
-            combined_hand_mask = np.zeros_like(segment["mask"], dtype=np.uint8)
-            for box in hand_boxes:
-                if not self._box_intersects_mask(box, segment["mask"]):
-                    continue
-                masks, scores, _ = predictor.predict(
-                    point_coords=None,
-                    point_labels=None,
-                    box=np.asarray(box, dtype=np.float32),
-                    multimask_output=True,
-                )
-                hand_mask = accepted_hand_sam_mask(masks, scores, segment["mask"].shape[:2])
-                if hand_mask is not None:
-                    combined_hand_mask = np.maximum(combined_hand_mask, hand_mask)
-            refined, decision = refine_mask_with_hand(segment["mask"], combined_hand_mask)
-            if decision == "refined":
-                segment["mask"] = refined
-                segment["refinement"] = "hand"
+        # SAM caches one current image, so set_image and every predictor call share one lock.
+        with self.sam_lock:
+            predictor = self._sam_predictor_for(record)
+            for segment in fallback:
+                combined_hand_mask = np.zeros_like(segment["mask"], dtype=np.uint8)
+                for box in hand_boxes:
+                    if not self._box_intersects_mask(box, segment["mask"]):
+                        continue
+                    masks, scores, _ = predictor.predict(
+                        point_coords=None,
+                        point_labels=None,
+                        box=np.asarray(box, dtype=np.float32),
+                        multimask_output=True,
+                    )
+                    hand_mask = accepted_hand_sam_mask(masks, scores, segment["mask"].shape[:2])
+                    if hand_mask is not None:
+                        combined_hand_mask = np.maximum(combined_hand_mask, hand_mask)
+                refined, decision = refine_mask_with_hand(segment["mask"], combined_hand_mask)
+                if decision == "refined":
+                    segment["mask"] = refined
+                    segment["refinement"] = "hand"
         return segments
 
     def _detect_image(self, models: DetectionModels, record: ImageRecord, confidence: float) -> list[Candidate]:
@@ -1683,7 +1754,7 @@ class StudioState:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            for index, record in enumerate(records, start=1):
+            for record in records:
                 if not self._job_is_current(job_generation, catalog_generation):
                     return
                 if control is not None and control.cancel_requested.is_set():
@@ -1693,7 +1764,7 @@ class StudioState:
                 if control is not None and control.cancel_requested.is_set():
                     self._cancel_job(job_generation, catalog_generation)
                     return
-                self._set_job_current(record.relative_path, index - 1, job_generation, catalog_generation)
+                self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 self._assert_record_fresh(record)
                 draft_or_mask = drafts_or_masks.get(record.image_id)
                 if isinstance(draft_or_mask, np.ndarray):
@@ -1714,7 +1785,7 @@ class StudioState:
                 with self.lock:
                     self._clear_masks_unchecked([record])
                 self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                self._set_job_current(record.relative_path, index, job_generation, catalog_generation)
+                self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 if control is not None and control.pause_requested.is_set():
                     with self.lock:
                         if self._job_is_current(job_generation, catalog_generation):
@@ -1742,6 +1813,7 @@ class StudioState:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.state = "cancelled"
                 self.job.current = ""
+                self.job.active_count = 0
 
     def combined_candidate_mask(
         self,
@@ -1770,11 +1842,16 @@ class StudioState:
             combined[exclusion_mask > 0] = 0
         return combined
 
-    def _set_job_current(self, current: str, completed: int, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+    def _set_job_current(
+        self,
+        current: str,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.current = current
-                self.job.completed = completed
+                self.job.completed = len(self.job.completed_image_ids)
 
     def _mark_image_completed(
         self,
@@ -1793,6 +1870,7 @@ class StudioState:
             self.job.state = "complete"
             self.job.completed = self.job.total
             self.job.current = ""
+            self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
         LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
@@ -1805,6 +1883,7 @@ class StudioState:
             self.job.state = "error"
             self.job.error = str(exc)
             self.job.current = ""
+            self.job.active_count = 0
         LOGGER.exception("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind))
 
 
@@ -2177,6 +2256,31 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     raise ClientError("この画像形式は保存に対応していません。")
 
 
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> None:
+    """Atomically replace a catalogued source with a previously verified render."""
+    original_stat = record.path.stat()
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mosaicstudio.tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            with rendered_path.open("rb") as rendered:
+                shutil.copyfileobj(rendered, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_decodable_image(temporary_path.read_bytes())
+        os.replace(temporary_path, record.path)
+        temporary_path = None
+        if record.source_kind == "filesystem":
+            os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        stat = record.path.stat()
+        record.mtime_ns = stat.st_mtime_ns
+        record.size_bytes = stat.st_size
+        record.content_version += 1
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
     destination = record.path
     original_stat = record.path.stat()
@@ -2299,13 +2403,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 STATE.clear_catalog()
                 self._json({"images": []})
             elif path == "/api/import":
-                self._json({"images": STATE.import_images(payload.get("files", []))})
+                images, imported = STATE.import_images_for_api(payload.get("files", []))
+                self._json({"images": images, "imported": imported})
             elif path == "/api/masks/clear":
                 self._json({"cleared": STATE.clear_masks(payload.get("imageIds", []))})
             elif path == "/api/detect":
                 STATE.start_detection(
                     payload.get("imageIds", []),
                     read_detection_confidence(payload.get("confidence", DEFAULT_DETECTION_CONFIDENCE)),
+                    _read_detection_parallelism(payload.get("parallelism", 2)),
                 )
                 self._json({"ok": True})
             elif path == "/api/boundary":
@@ -2341,7 +2447,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     payload.get("saveToken"),
-                    _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
+                    payload.get("sourceAction"),
                 ))
             elif path == "/api/apply":
                 divisor = _read_mosaic_divisor(payload.get("divisor"))
@@ -2500,6 +2606,12 @@ def _read_candidate_revision(value: Any) -> int:
     if revision < 0:
         raise ClientError("候補の版番号が不正です。")
     return revision
+
+
+def _read_detection_parallelism(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        raise ClientError("並列数は1から4で指定してください。")
+    return value
 
 
 def _read_bool(value: Any, field_name: str) -> bool:
