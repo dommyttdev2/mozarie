@@ -236,7 +236,7 @@ function updateActionButtons() {
     }
   }
   $("#pickFolder").disabled = running || state.importing;
-  const batchDetectButtons = [$("#detectAllButton"), $("#overviewDetectAllButton")];
+  const batchDetectButtons = [$("#detectAllButton")];
   for (const detectAllButton of batchDetectButtons) {
     detectAllButton.textContent = t(detecting ? (state.detectCancelRequested ? "detectDialog.stopping" : "detectDialog.stop") : "gallery.detectAll");
     detectAllButton.classList.toggle("detect-stop", detecting);
@@ -245,11 +245,13 @@ function updateActionButtons() {
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
   $("#removeCurrentImageButton").disabled = running || !hasImage;
-  for (const id of ["#clearAllMasksButton", "#overviewClearAllMasksButton", "#clearCatalogButton", "#overviewClearCatalogButton", "#batchMoreButton", "#overviewBatchMoreButton"]) $(id).disabled = running || state.images.length === 0;
+  for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
   $("#galleryAllTab").disabled = running;
   $("#galleryMaskedTab").disabled = running;
-  for (const id of ["#saveAllButton", "#overviewSaveAllButton"]) $(id).disabled = running || mutatingCandidates || saveTargets().length === 0;
-  $("#saveButton").disabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
+  $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
+  const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
+  $("#saveButton").disabled = currentSaveDisabled;
+  $("#floatingSaveButton").disabled = currentSaveDisabled;
   $("#applyStartButton").disabled = running || mutatingCandidates || Boolean(applyRestrictionMessage());
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || imageIndex() <= 0;
@@ -260,7 +262,7 @@ function updateActionButtons() {
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
-    if (["detectAllButton", "overviewDetectAllButton"].includes(control.id) && detecting && !state.detectCancelRequested) continue;
+    if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
   }
@@ -327,7 +329,7 @@ async function loadFolder() {
   const path = $("#folderPath").value.trim();
   if (!path) return setStatus(t("status.enterFolder"), "error");
   const picker = $("#pickerMenu");
-  if (picker?.matches(":popover-open")) picker.hidePopover();
+  if (picker?.matches?.(":popover-open")) picker.hidePopover();
   const catalogEpoch = beginCatalogEpoch();
   ++state.imageGeneration;
   setStatus(t("status.loadingImages"), "running");
@@ -1963,8 +1965,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
   if (!imageId || isBusy() || state.importing) return;
   const image = state.images.find((item) => item.id === imageId);
   if (!image) return;
-  const hasUnsavedWork = Boolean(image.candidateCount || state.drafts.has(imageId) || imageHasMask(image));
-  if (hasUnsavedWork && !await confirmAction(t("confirm.removeImage.title"), t("confirm.removeImage.message"))) return;
+  if (!await confirmAction(t("confirm.removeImage.title"), t("confirm.removeImage.message"))) return;
 
   closeCatalogContextMenu();
   const index = state.images.findIndex((item) => item.id === imageId);
@@ -2228,7 +2229,7 @@ function handleWindowKeydown(event) {
 }
 
 function closeBatchMoreMenus() {
-  for (const id of ["#batchMoreMenu", "#overviewBatchMoreMenu"]) {
+  for (const id of ["#batchMoreMenu"]) {
     const menu = $(id);
     if (menu.matches(":popover-open")) menu.hidePopover();
   }
@@ -2256,15 +2257,14 @@ function bindEvents() {
     else openDetectionDialog(state.images.map((image) => image.id));
   };
   $("#detectAllButton").addEventListener("click", detectAll);
-  $("#overviewDetectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
-  $("#saveAllButton").addEventListener("click", saveAll); $("#overviewSaveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#floatingSaveButton").addEventListener("click", saveCurrent);
   $("#removeCurrentImageButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
-  for (const id of ["#clearAllMasksButton", "#overviewClearAllMasksButton"]) $(id).addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
-  for (const id of ["#clearCatalogButton", "#overviewClearCatalogButton"]) $(id).addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
-  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"], ["#overviewBatchMoreMenu", "#overviewBatchMoreButton"]]) {
+  $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
+  $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
+  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"]]) {
     $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
   }
   $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
@@ -2307,16 +2307,42 @@ function bindEvents() {
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
-  const revealPanel = (panel) => {
-    grid.classList.remove("focus-mode");
-    grid.classList.toggle(panel === "gallery" ? "gallery-collapsed" : "inspector-collapsed");
+  const syncWorkspaceControls = () => {
+    const focusMode = grid.classList.contains("focus-mode");
+    const galleryCollapsed = focusMode || grid.classList.contains("gallery-collapsed");
+    const inspectorCollapsed = focusMode || grid.classList.contains("inspector-collapsed");
+    const galleryPane = $("#galleryPane");
+    const candidatePane = $("#candidatePane");
+    galleryPane.inert = galleryCollapsed;
+    candidatePane.inert = inspectorCollapsed;
+    galleryPane.setAttribute("aria-hidden", String(galleryCollapsed));
+    candidatePane.setAttribute("aria-hidden", String(inspectorCollapsed));
+    $("#collapseGalleryButton").setAttribute("aria-expanded", String(!galleryCollapsed));
+    $("#collapseInspectorButton").setAttribute("aria-expanded", String(!inspectorCollapsed));
+    $("#focusModeButton").setAttribute("aria-pressed", String(focusMode));
+    $("#showGalleryButton").hidden = !galleryCollapsed;
+    $("#showInspectorButton").hidden = !inspectorCollapsed;
+  };
+  const workspaceMode = () => {
+    if (grid.classList.contains("focus-mode")) return "focus";
+    if (grid.classList.contains("gallery-collapsed")) return "inspector";
+    if (grid.classList.contains("inspector-collapsed")) return "gallery";
+    return "both";
+  };
+  const setWorkspaceMode = (mode) => {
+    grid.classList.remove("focus-mode", "gallery-collapsed", "inspector-collapsed");
+    if (mode === "focus") grid.classList.add("focus-mode");
+    if (mode === "gallery") grid.classList.add("inspector-collapsed");
+    if (mode === "inspector") grid.classList.add("gallery-collapsed");
+    syncWorkspaceControls();
     requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); });
   };
-  $("#collapseGalleryButton").addEventListener("click", () => revealPanel("gallery"));
-  $("#collapseInspectorButton").addEventListener("click", () => revealPanel("inspector"));
-  $("#showGalleryButton").addEventListener("click", () => { grid.classList.remove("focus-mode", "gallery-collapsed"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
-  $("#showInspectorButton").addEventListener("click", () => { grid.classList.remove("focus-mode", "inspector-collapsed"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
-  $("#focusModeButton").addEventListener("click", () => { grid.classList.toggle("focus-mode"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
+  $("#collapseGalleryButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "gallery" ? "focus" : "inspector"));
+  $("#collapseInspectorButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "inspector" ? "focus" : "gallery"));
+  $("#showGalleryButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "gallery" : "both"));
+  $("#showInspectorButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "inspector" : "both"));
+  $("#focusModeButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "both" : "focus"));
+  syncWorkspaceControls();
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));

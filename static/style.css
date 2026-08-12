@@ -43,11 +43,8 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .text-button:hover { border-color: #4e5660; background: #2c333b; }
 .gallery-heading > :first-child { display: flex; flex-wrap: wrap; gap: 3px 6px; align-items: baseline; min-width: 0; }
 .gallery-heading h2 { margin: 0; } .gallery-heading-actions { min-width: 0; }
-.overview-batch-toolbar { display: flex; flex-wrap: nowrap; gap: 5px; align-items: center; padding: 7px 8px; border-bottom: 1px solid #3b424a; background: #24292f; }
-.batch-actions { display: flex; gap: 5px; align-items: center; margin-left: auto; }
-#batchMoreButton { anchor-name: --batch-menu; } #overviewBatchMoreButton { anchor-name: --overview-batch-menu; }
+#batchMoreButton { anchor-name: --batch-menu; }
 #batchMoreMenu { position-anchor: --batch-menu; inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 5px; }
-#overviewBatchMoreMenu { position-anchor: --overview-batch-menu; inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 5px; }
 .gallery-tabs { display: flex; gap: 4px; align-items: center; padding: 7px 8px; border-bottom: 1px solid #3b424a; }
 .gallery-tab { min-height: 29px; padding-inline: 8px; border-color: transparent; background: transparent; color: #c3c9cf; }
 .gallery-tab:hover { border-color: #4e5660; background: #2c333b; }
@@ -88,7 +85,7 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .candidate-delete:hover:not(:disabled) { border-color: #d65f6b; background: #4b2d31; color: #ffd8dc; }
 .candidate-delete:focus-visible { outline: 2px solid #ff8e98; outline-offset: 2px; }
 
-#batchMoreButton[aria-expanded="true"], #overviewBatchMoreButton[aria-expanded="true"] { border-color: #72cdb3; }
+#batchMoreButton[aria-expanded="true"] { border-color: #72cdb3; }
 .catalog-context-menu { position: fixed; inset: auto; min-width: 172px; margin: 0; padding: 4px; border: 1px solid #505965; border-radius: 5px; background: #24292f; box-shadow: 0 12px 30px #0008; }
 .catalog-context-menu button { display: block; width: 100%; min-height: 30px; border-color: transparent; background: transparent; color: #e4e8ec; text-align: left; }
 .catalog-context-menu button:hover, .catalog-context-menu button:focus-visible { border-color: #4e5660; background: #323941; }
@@ -99,7 +96,6 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 
 .overview-pane { height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: #171a1d; } .overview-pane[hidden] { display: none; }
 .overview-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid #3b424a; background: #20252a; }
-.overview-batch-toolbar { grid-column: 1 / -1; margin: 0 -14px -10px; padding-inline: 14px; }
 .overview-heading, .overview-filters, .overview-search-controls { display: flex; gap: 6px; align-items: center; min-width: 0; } .overview-heading h2 { font-size: 15px; } .overview-filter { min-height: 29px; padding-inline: 9px; border-color: transparent; background: transparent; color: #c0c8d0; } .overview-filter.active { border-color: #3a9780; background: #26473f; color: #e8fff8; }
 .overview-search-controls input { width: min(280px, 24vw); } .overview-search-controls select { width: min(220px, 19vw); }
 .overview-grid-viewport { position: relative; min-height: 0; overflow: hidden; }
