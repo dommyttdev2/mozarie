@@ -78,6 +78,53 @@ function closeServer(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
+function overlaps(left, right) {
+  return left.x < right.x + right.width && left.x + left.width > right.x
+    && left.y < right.y + right.height && left.y + left.height > right.y;
+}
+
+async function assertInViewport(page, selector, label) {
+  const box = await page.locator(selector).boundingBox();
+  const viewport = page.viewportSize();
+  assert.ok(box, `${label} must have a layout box`);
+  assert.ok(box.x >= -1 && box.y >= -1, `${label} must not begin outside the viewport`);
+  assert.ok(box.x + box.width <= viewport.width + 1, `${label} must not extend past the viewport right edge`);
+}
+
+async function assertDesktopLayout(page, width) {
+  const viewport = { width, height: 900 };
+  await page.setViewportSize(viewport);
+  const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+  assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}px desktop width`);
+  for (const [selector, label] of [
+    ["#pickFolder", "source picker"], ["#detectAllButton", "detect-all button"],
+    ["#saveAllButton", "batch-save button"], ["#batchMoreButton", "clear menu button"],
+    ["#saveButton", "current-image save button"], ["#overviewButton", "overview button"],
+  ]) await assertInViewport(page, selector, `${label} at ${width}px`);
+
+  const batchBoxes = await Promise.all(["#detectAllButton", "#saveAllButton", "#batchMoreButton"].map((selector) => page.locator(selector).boundingBox()));
+  for (let index = 0; index < batchBoxes.length; index += 1) {
+    for (let other = index + 1; other < batchBoxes.length; other += 1) {
+      assert.equal(overlaps(batchBoxes[index], batchBoxes[other]), false, `gallery batch controls overlap at ${width}px`);
+    }
+  }
+
+  await page.locator("#overviewButton").click();
+  await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+  for (const [selector, label] of [
+    ["#overviewDetectAllButton", "overview detect-all button"], ["#overviewSaveAllButton", "overview batch-save button"],
+    ["#overviewBatchMoreButton", "overview clear menu button"], ["#overviewQuery", "overview search"],
+  ]) await assertInViewport(page, selector, `${label} at ${width}px`);
+  const overviewBoxes = await Promise.all(["#overviewDetectAllButton", "#overviewSaveAllButton", "#overviewBatchMoreButton"].map((selector) => page.locator(selector).boundingBox()));
+  for (let index = 0; index < overviewBoxes.length; index += 1) {
+    for (let other = index + 1; other < overviewBoxes.length; other += 1) {
+      assert.equal(overlaps(overviewBoxes[index], overviewBoxes[other]), false, `overview batch controls overlap at ${width}px`);
+    }
+  }
+  await page.locator("#closeOverviewButton").click();
+  await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+}
+
 async function main() {
   let server;
   let browser;
@@ -112,6 +159,7 @@ async function main() {
       assert.equal(await page.locator("#pickFolder").isVisible(), true, "source picker should remain available");
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible");
     }
+    for (const width of [900, 1024, 1279, 1280, 1366]) await assertDesktopLayout(page, width);
     await page.setViewportSize({ width: 1440, height: 900 });
     assert.equal(await page.locator(".editor-footer").count(), 0, "the editor footer must be removed");
     assert.equal(await page.locator(".editor-context-bar").isVisible(), true, "the editor context bar must be visible on desktop");
@@ -187,6 +235,21 @@ async function main() {
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
     assert.equal(await page.locator("#galleryAllTab").getAttribute("aria-pressed"), "true");
     assert.equal(await page.locator("#galleryMaskedTab").getAttribute("aria-pressed"), "false");
+    assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
+    assert.equal(await page.locator("#galleryFilteredEmptyState").count(), 1, "the gallery needs a filtered-empty state");
+    assert.equal(await page.locator("#overviewEmptyState").count(), 1, "the overview needs an empty state");
+    assert.equal(await page.locator(".overview-filters").getAttribute("role"), null, "overview filters are toggle buttons, not incomplete tabs");
+    for (const selector of ["#brushTool", "#eraserTool", "#boundaryTool", ".overview-filter"]) {
+      assert.notEqual(await page.locator(selector).first().getAttribute("aria-pressed"), null, `${selector} must expose its toggle state`);
+    }
+    assert.equal(await page.locator("#catalogContextMenu").getAttribute("role"), "menu");
+    assert.equal(await page.locator("#catalogContextMenu").getAttribute("tabindex"), "-1");
+    for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog"]) {
+      assert.ok(await page.locator(selector).getAttribute("aria-labelledby"), `${selector} must have an accessible title`);
+    }
+    for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#jobProgress", "#applyProgress"]) {
+      assert.ok(await page.locator(selector).getAttribute("aria-label"), `${selector} must have an accessible name`);
+    }
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

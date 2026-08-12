@@ -109,6 +109,41 @@ class MosaicStudioTests(unittest.TestCase):
         with self.assertRaises(ClientError):
             _read_mosaic_divisor(0)
 
+    @staticmethod
+    def _png_data_url(image: Image.Image) -> str:
+        encoded = io.BytesIO()
+        image.save(encoded, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(encoded.getvalue()).decode("ascii")
+
+    def test_decode_mask_uses_alpha_not_transparent_rgb(self):
+        rgba = np.full((8, 8, 4), 255, dtype=np.uint8)
+        rgba[..., 3] = 0
+        rgba[2:4, 3:5, 3] = 255
+
+        decoded = server_module._decode_mask(self._png_data_url(Image.fromarray(rgba, "RGBA")), 8, 8)
+
+        self.assertEqual(np.count_nonzero(decoded), 4)
+        self.assertTrue(np.all(decoded[2:4, 3:5] == 255))
+
+    def test_decode_mask_rejects_rgb_and_non_png_payloads(self):
+        with self.assertRaises(ClientError):
+            server_module._decode_mask(self._png_data_url(Image.new("RGB", (8, 8), "white")), 8, 8)
+
+        encoded = io.BytesIO()
+        Image.new("L", (8, 8), 255).save(encoded, format="JPEG")
+        data_url = "data:image/png;base64," + base64.b64encode(encoded.getvalue()).decode("ascii")
+        with self.assertRaises(ClientError):
+            server_module._decode_mask(data_url, 8, 8)
+
+    def test_rgba_mosaic_uses_alpha_aware_average(self):
+        rgba = np.zeros((2, 2, 4), dtype=np.uint8)
+        rgba[0, 0] = (255, 0, 0, 255)
+        output = server_module._apply_mosaic_to_image(
+            Image.fromarray(rgba, "RGBA"), np.full((2, 2), 255, dtype=np.uint8), 2,
+        )
+
+        self.assertEqual(tuple(np.asarray(output)[0, 0]), (255, 0, 0, 255))
+
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
         output = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT).format(record)
@@ -198,12 +233,14 @@ class MosaicStudioTests(unittest.TestCase):
     def test_main_logs_bind_failure_and_exits(self):
         with patch("server.logging.basicConfig"), \
               patch("server.ThreadingHTTPServer", side_effect=OSError("port in use")), \
+              patch.object(server_module.STATE, "shutdown") as shutdown, \
               patch.object(server_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
             with self.assertLogs(server_module.LOGGER, "ERROR") as logs:
                 with self.assertRaises(SystemExit) as raised:
                     server_module.main()
         self.assertEqual(raised.exception.code, 1)
+        shutdown.assert_called_once_with()
         self.assertIn("サーバーを起動できません", "\n".join(logs.output))
 
     def test_png_ancillary_metadata_is_byte_identical_after_save(self):
@@ -476,6 +513,65 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(state.list_images(), [])
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(state.root, Path(directory).resolve())
+
+    def test_remove_image_from_catalog_discards_working_state_but_keeps_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            original = path.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+
+            self.assertEqual(state.remove_image_from_catalog(image_id), [])
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertNotIn(image_id, state.images)
+            self.assertNotIn(image_id, state.order)
+            self.assertNotIn(image_id, state.candidates)
+            self.assertNotIn(image_id, state.candidate_revisions)
+            self.assertFalse((state.cache_dir / image_id).exists())
+
+    def test_remove_image_from_catalog_rejects_active_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            state.job.state = "running"
+
+            with self.assertRaisesRegex(ClientError, "処理が終了"):
+                state.remove_image_from_catalog(image_id)
+            self.assertIn(image_id, state.images)
+
+    def test_remove_session_image_cleans_masks_thumbnails_and_import_copy(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (16, 16), "white").save(encoded, format="PNG")
+        state = self.new_state()
+        images, _imported = state.import_images_for_api([{
+            "clientKey": "session", "name": "nested/source.png", "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
+        }])
+        image_id = images[0]["id"]
+        record = state.image_for_id(image_id)
+        mask_path = state.cache_dir / image_id / "candidate.png"
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+        state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+        thumbnail_dir = state.cache_dir / "thumbnails"
+        thumbnail_dir.mkdir(parents=True, exist_ok=True)
+        thumbnail = thumbnail_dir / f"{image_id}-test.jpg"
+        thumbnail.write_bytes(b"thumbnail")
+
+        state.remove_image_from_catalog(image_id)
+
+        self.assertFalse(record.path.exists())
+        self.assertFalse(mask_path.exists())
+        self.assertFalse(thumbnail.exists())
+        self.assertFalse((state.cache_dir / image_id).exists())
 
     def test_apply_is_overwrite_only_and_rejects_session_images(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -969,6 +1065,19 @@ class MosaicStudioTests(unittest.TestCase):
         for top, left in components[:8]:
             self.assertTrue(np.all(fluid[top:top + 4, left:left + 4] == 255))
 
+    def test_import_rejects_malformed_and_suffix_mismatched_images(self):
+        valid = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(valid, format="PNG")
+        state = self.new_state()
+        with self.assertRaises(ClientError):
+            state.import_images([{
+                "name": "wrong.jpg", "data": base64.b64encode(valid.getvalue()).decode("ascii"),
+            }])
+        with self.assertRaises(ClientError):
+            state.import_images([{
+                "name": "broken.png", "data": base64.b64encode(valid.getvalue()[:20]).decode("ascii"),
+            }])
+
     def test_model_manifest_rejects_missing_size_and_hash_mismatches(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
@@ -982,6 +1091,20 @@ class MosaicStudioTests(unittest.TestCase):
             path.unlink()
             with self.assertRaisesRegex(ClientError, "見つかりません"):
                 validate_model_manifest(manifest)
+
+    def test_model_manifest_reuses_hash_until_the_file_stat_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"verified")
+            manifest = LocalModelManifest("test", path, 8, hashlib.sha256(b"verified").hexdigest(), "r", "MIT", "https://example.invalid")
+            with patch("server.model_sha256", wraps=server_module.model_sha256) as digest:
+                validate_model_manifest(manifest)
+                validate_model_manifest(manifest)
+                self.assertEqual(digest.call_count, 1)
+                stat = path.stat()
+                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+                validate_model_manifest(manifest)
+                self.assertEqual(digest.call_count, 2)
 
     def test_onnx_provider_check_requires_cuda_without_loading_a_gpu(self):
         class FakeSession:
@@ -1324,6 +1447,29 @@ class MosaicStudioTests(unittest.TestCase):
                     self.assertEqual(payload, {"deleted": expected})
             self.assertEqual(delete_candidate.call_count, 2)
             delete_candidate.assert_called_with("image", "candidate")
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_catalog_image_delete_api_removes_only_the_catalog_record(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(server_module.STATE, "remove_image_from_catalog", return_value=[{"id": "other"}]) as remove_image:
+                connection.request("DELETE", "/api/catalog/image/current", headers={
+                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"images": [{"id": "other"}]})
+            remove_image.assert_called_once_with("current")
         finally:
             connection.close()
             httpd.shutdown()
@@ -1988,7 +2134,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('pickFolderFiles', app)
         self.assertNotIn('pickNativeFolder', app)
         self.assertIn('entry.webkitRelativePath || entry.name', app)
-        self.assertIn('relativePath, data:', app)
+        self.assertIn('async function importSingleFile(entry, clientKey)', app)
+        self.assertIn('"/api/import/file"', app)
+        self.assertIn('"application/octet-stream"', app)
+        self.assertNotIn('entry.file.arrayBuffer()', app)
+        self.assertNotIn('bytesToBase64', app)
         self.assertNotIn('function pickNativeSource(', app)
         self.assertNotIn('/api/picker/', app)
         self.assertNotIn('fileBrowserDialog', app)
@@ -2019,8 +2169,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertNotIn("folder.load", dictionary)
         self.assertNotIn('$("#loadFolder")', app)
         self.assertIn('if (event.key === "Enter") loadFolder()', app)
-        self.assertIn("batch.more", dictionary)
-        self.assertNotIn("batch.clear", dictionary)
+        self.assertIn("batch.clear", dictionary)
+        self.assertNotIn("batch.more", dictionary)
         self.assertIn('async function cancelDetection()', app)
         self.assertIn('"/api/job/cancel"', app)
         self.assertIn('control.cancel_requested.is_set()', (root / "server.py").read_text(encoding="utf-8"))
@@ -2041,6 +2191,25 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('function handleNavigationKeydown(', app)
         self.assertIn('function finishDetectionJob(', app)
         self.assertIn('function renderCatalogViews()', app)
+        self.assertIn('async function removeImageFromCatalog(', app)
+        self.assertIn('function openCatalogContextMenu(', app)
+        self.assertIn('function setGalleryDropOverlay(', app)
+        self.assertIn('DELETE" });', app)
+        self.assertIn('id="galleryEmptyState"', page)
+        self.assertIn('id="galleryDropOverlay"', page)
+        self.assertIn('id="catalogContextMenu"', page)
+        self.assertIn('id="removeCurrentImageButton"', page)
+        self.assertIn('class="batch-actions"', page)
+        self.assertIn('gallery-empty-state', styles)
+        self.assertIn('.batch-actions {', styles)
+        self.assertEqual(dictionary["gallery.saveTargetCount"], "モザイクあり {count}件")
+        self.assertEqual(dictionary["gallery.saveAll"], "モザイク画像を一括保存...")
+        self.assertEqual(dictionary["batch.clear"], "クリア")
+        self.assertNotIn('data-i18n="batch.more"', page)
+        self.assertIn('data-i18n="batch.clear"', page)
+        self.assertIn('function positionCatalogContextMenu(', app)
+        self.assertIn('menu.showPopover?.();\n  positionCatalogContextMenu(menu, event.clientX, event.clientY);', app)
+        self.assertIn("confirm.removeImage.message", dictionary)
         self.assertNotIn('Math.sin(Date.now()', app)
         backend = (root / "server.py").read_text(encoding="utf-8")
         self.assertIn('path == "/api/import"', backend)
@@ -2216,6 +2385,72 @@ class MosaicStudioTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_http_responses_prevent_framing_and_content_type_sniffing(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            connection.request("GET", "/api/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Security-Policy"), "frame-ancestors 'none'")
+            self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
+            self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+            response.read()
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_thumbnail_response_is_not_persistently_cached(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            with patch.object(server_module, "STATE", state):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                try:
+                    connection.request("GET", f"/api/thumbnail/{image_id}")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                    response.read()
+                finally:
+                    connection.close()
+                    httpd.shutdown()
+                    httpd.server_close()
+
+    def test_browser_save_overwrite_updates_state_when_timestamp_restore_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+
+            with patch("server.os.utime", side_effect=OSError("denied")):
+                committed = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+
+            self.assertTrue(committed["cleared"])
+            self.assertEqual(source.read_bytes(), output)
+            self.assertEqual(record.size_bytes, source.stat().st_size)
+            self.assertGreater(record.content_version, 0)
+
     def test_browser_save_session_overwrite_synchronizes_the_session_image(self):
         raw = io.BytesIO()
         metadata = PngImagePlugin.PngInfo()
@@ -2293,6 +2528,42 @@ class MosaicStudioTests(unittest.TestCase):
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
                 state.commit_browser_save(image_id, rendered_revision, token, "keep")
 
+    def test_browser_save_uses_1_over_100_block_size_and_keeps_png_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            width, height = 832, 1216
+            pixels = np.zeros((height, width, 3), dtype=np.uint8)
+            pixels[..., 0] = np.arange(width, dtype=np.uint16)[None, :] % 256
+            pixels[..., 1] = np.arange(height, dtype=np.uint16)[:, None] % 256
+            pixels[..., 2] = (pixels[..., 0].astype(np.uint16) + pixels[..., 1]) % 256
+            metadata = PngImagePlugin.PngInfo()
+            metadata.add_text("prompt", '{"seed": 13}')
+            Image.fromarray(pixels, "RGB").save(source, pnginfo=metadata)
+
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            rgba_mask = np.full((height, width, 4), 255, dtype=np.uint8)
+            rgba_mask[..., 3] = 0
+            rgba_mask[600:616, 400:416, 3] = 255
+            draft = {"add": self._png_data_url(Image.fromarray(rgba_mask, "RGBA"))}
+            binary_mask = np.zeros((height, width), dtype=np.uint8)
+            binary_mask[600:616, 400:416] = 255
+
+            output, _record, revision, token = state.render_browser_save(image_id, 0, 100, draft)
+            expected = server_module.render_with_mask(record, binary_mask, 13)
+
+            self.assertEqual(calculate_block_size(width, height, 100), 13)
+            self.assertEqual(output, expected)
+            self.assertTrue(token)
+            with Image.open(io.BytesIO(output)) as rendered:
+                rendered_pixels = np.asarray(rendered.convert("RGB"))
+                self.assertEqual(rendered.text["prompt"], '{"seed": 13}')
+            outside = binary_mask == 0
+            self.assertTrue(np.array_equal(rendered_pixels[outside], pixels[outside]))
+            self.assertFalse(np.array_equal(rendered_pixels[600:616, 400:416], pixels[600:616, 400:416]))
+            state.commit_browser_save(image_id, revision, token, "keep")
+
     def test_browser_save_renders_then_clears_only_matching_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2340,7 +2611,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertFalse(committed["cleared"])
             self.assertEqual(len(state.candidates[image_id]), 1)
 
-    def test_browser_save_commit_requires_a_matching_one_time_token(self):
+    def test_browser_save_commit_is_idempotent_for_matching_token(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
@@ -2363,8 +2634,12 @@ class MosaicStudioTests(unittest.TestCase):
 
             committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
             self.assertTrue(committed["cleared"])
-            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            retried = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            self.assertEqual(retried["cleared"], committed["cleared"])
+            self.assertEqual(retried["stale"], committed["stale"])
+            self.assertEqual(retried["deleted"], committed["deleted"])
+            with self.assertRaisesRegex(ClientError, "保存対象と一致"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
 
     def test_browser_save_token_expires_and_catalog_change_discards_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2463,6 +2738,30 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertEqual(record.path.read_bytes(), output)
         self.assertEqual(len(state.candidates[image_id]), 1)
         self.assertGreater(state._candidate_revision(image_id), rendered_revision)
+
+    def test_browser_save_rejects_a_token_when_content_changes_with_same_size_and_mtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            pixels = np.zeros((16, 16, 3), dtype=np.uint8)
+            pixels[..., 0] = 50
+            Image.fromarray(pixels, "RGB").save(source, compress_level=0)
+            state = self.new_state()
+            image_id = state.set_root(str(source.parent))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+            original_stat = source.stat()
+            pixels[..., 0] = 200
+            Image.fromarray(pixels, "RGB").save(source, compress_level=0)
+            self.assertEqual(source.stat().st_size, original_stat.st_size)
+            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            with self.assertRaises(ClientError):
+                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            self.assertNotIn(save_token, state.browser_save_tokens)
 
     def test_browser_save_rejects_a_token_after_the_source_fingerprint_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2627,6 +2926,46 @@ class MosaicStudioTests(unittest.TestCase):
             with Image.open(io.BytesIO(output)) as saved:
                 self.assertEqual(saved.getexif().get(274), 1)
                 self.assertEqual(ImageOps.exif_transpose(saved).size, (20, 40))
+
+    def test_browser_save_receipt_retries_without_repeating_file_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            with patch.object(state, "_clear_masks_unchecked", wraps=state._clear_masks_unchecked) as clear_masks:
+                first = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                retried = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            self.assertEqual(clear_masks.call_count, 1)
+            self.assertEqual(retried["cleared"], first["cleared"])
+            self.assertIn(token, state.browser_save_receipts)
+            state.clear_catalog()
+            self.assertIn(token, state.browser_save_receipts)
+            self.assertEqual(state.commit_browser_save(image_id, rendered_revision, token, "keep")["images"], [])
+            with self.assertRaises(ClientError):
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+
+    def test_binary_import_uses_raw_bytes_and_preserves_client_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = io.BytesIO()
+            Image.new("RGB", (12, 8), "white").save(source, format="PNG")
+            state = self.new_state()
+            images, imported = state.import_image_bytes_for_api(
+                source.getvalue(),
+                name="first.png",
+                relative_path="nested/first.png",
+                client_key="client-1",
+            )
+            self.assertEqual(imported, [{"clientKey": "client-1", "imageId": images[0]["id"]}])
+            self.assertEqual(images[0]["relativePath"], "nested/first.png")
+            self.assertEqual(state.image_for_id(images[0]["id"]).source_kind, "session")
 
 if __name__ == "__main__":
     unittest.main()

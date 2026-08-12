@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import argparse
+import atexit
 from concurrent.futures import ThreadPoolExecutor, wait
 import heapq
 import hashlib
@@ -126,6 +127,8 @@ SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+MODEL_MANIFEST_HASH_CACHE: dict[tuple[Path, int, int], str] = {}
+MODEL_MANIFEST_HASH_LOCK = threading.Lock()
 JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
 
 class ClientError(ValueError):
@@ -189,10 +192,23 @@ class Candidate:
 class BrowserSaveToken:
     image_id: str
     candidate_revision: int
-    source_fingerprint: tuple[int, int]
+    source_fingerprint: tuple[int, int, int, str]
     catalog_generation: int
     issued_at: float
     rendered_path: Path
+
+
+@dataclass(frozen=True)
+class BrowserSaveReceipt:
+    """Completed browser save kept briefly so a lost response can be retried safely."""
+
+    image_id: str
+    candidate_revision: int
+    source_action: str
+    cleared: bool
+    stale: bool
+    deleted: bool
+    completed_at: float
 
 
 @dataclass
@@ -297,12 +313,19 @@ def validate_model_manifest(manifest: LocalModelManifest) -> None:
     """Reject missing or changed model files before Ultralytics attempts to load them."""
     if not manifest.path.is_file():
         raise ClientError(f"{manifest.name}モデルが見つかりません: {manifest.path}")
-    actual_size = manifest.path.stat().st_size
+    stat = manifest.path.stat()
+    actual_size = stat.st_size
     if actual_size != manifest.size:
         raise ClientError(
             f"{manifest.name}モデルのサイズが一致しません。再ダウンロードしてください。"
         )
-    if model_sha256(manifest.path).lower() != manifest.sha256.lower():
+    cache_key = (manifest.path.resolve(), stat.st_mtime_ns, actual_size)
+    with MODEL_MANIFEST_HASH_LOCK:
+        actual_hash = MODEL_MANIFEST_HASH_CACHE.get(cache_key)
+        if actual_hash is None:
+            actual_hash = model_sha256(manifest.path)
+            MODEL_MANIFEST_HASH_CACHE[cache_key] = actual_hash
+    if actual_hash.lower() != manifest.sha256.lower():
         raise ClientError(
             f"{manifest.name}モデルのSHA-256が一致しません。再ダウンロードしてください。"
         )
@@ -597,6 +620,7 @@ class StudioState:
         self.candidates: dict[str, list[Candidate]] = {}
         self.candidate_revisions: dict[str, int] = {}
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
+        self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
@@ -780,6 +804,7 @@ class StudioState:
                 resolved = path.resolve()
                 resolved.relative_to(root)
                 with Image.open(resolved) as image:
+                    _assert_image_suffix_matches_format(resolved.suffix, image.format)
                     width, height = oriented_image_size(image)
                 stat = resolved.stat()
             except (OSError, UnidentifiedImageError, ValueError):
@@ -813,12 +838,32 @@ class StudioState:
                 self.catalog_generation += 1
                 self._clear_session_unchecked()
 
+    def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
+        """Remove one image's working state without deleting its source file."""
+        with self.import_lock:
+            with self.lock:
+                self._assert_catalog_mutable()
+                record = self.images.get(image_id)
+                if record is None:
+                    raise ClientError("画像が見つかりません。一覧を再読み込みしてください。")
+
+                self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
+                self.images.pop(image_id, None)
+                self.order = [current_id for current_id in self.order if current_id != image_id]
+                self.candidates.pop(image_id, None)
+                self.candidate_revisions.pop(image_id, None)
+                self._clear_browser_save_tokens_unchecked()
+                self.catalog_generation += 1
+        self.invalidate_sam_image(image_id)
+        return self.list_images()
+
     def shutdown(self) -> None:
         """Stop background work before releasing the session import directory."""
         with self.lock:
             worker = self.worker_thread
             control = self.job_control
             self._clear_browser_save_tokens_unchecked()
+            self.browser_save_receipts.clear()
             if control is not None:
                 control.cancel_requested.set()
                 control.pause_requested.clear()
@@ -844,9 +889,13 @@ class StudioState:
     def _candidate_revision(self, image_id: str) -> int:
         return self.candidate_revisions.get(image_id, 0)
 
-    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int]:
+    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, int, str]:
         self._assert_record_fresh(record)
-        return record.mtime_ns, record.size_bytes
+        try:
+            source_digest = model_sha256(record.path)
+        except OSError as exc:
+            raise ClientError("Could not read the source image for saving.") from exc
+        return record.mtime_ns, record.size_bytes, record.content_version, source_digest
 
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
@@ -858,11 +907,19 @@ class StudioState:
         for token in tuple(self.browser_save_tokens):
             self._discard_browser_save_token_unchecked(token)
 
+    def _discard_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
+        for token, details in tuple(self.browser_save_tokens.items()):
+            if details.image_id == image_id:
+                self._discard_browser_save_token_unchecked(token)
+
     def _discard_expired_browser_save_tokens_unchecked(self) -> None:
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
         for token, details in tuple(self.browser_save_tokens.items()):
             if details.issued_at < cutoff:
                 self._discard_browser_save_token_unchecked(token)
+        for token, receipt in tuple(self.browser_save_receipts.items()):
+            if receipt.completed_at < cutoff:
+                self.browser_save_receipts.pop(token, None)
 
     def _issue_browser_save_token_unchecked(
         self,
@@ -928,6 +985,26 @@ class StudioState:
             except OSError as exc:
                 LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
+    def _cleanup_record_working_state_unchecked(self, record: ImageRecord, *, remove_session_source: bool) -> None:
+        """Remove this image's disposable cache state without touching external sources."""
+        self._clear_masks_unchecked([record])
+        shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
+        thumbnail_dir = self.cache_dir / "thumbnails"
+        for thumbnail_path in thumbnail_dir.glob(f"{record.image_id}-*.jpg"):
+            thumbnail_path.unlink(missing_ok=True)
+        self._discard_browser_save_tokens_for_image_unchecked(record.image_id)
+        if remove_session_source and record.source_kind == "session":
+            record.path.unlink(missing_ok=True)
+            imports_dir = self.session_imports_dir
+            if imports_dir is not None:
+                parent = record.path.parent
+                while parent != imports_dir and parent.is_relative_to(imports_dir):
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         images, _imported = self._import_images(files)
         return images
@@ -956,14 +1033,19 @@ class StudioState:
                     relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
                     if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                         continue
-                    try:
-                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                    except (binascii.Error, ValueError) as exc:
-                        raise ClientError("追加画像を読み込めません。") from exc
+                    raw_value = file_data.get("raw")
+                    if isinstance(raw_value, bytes):
+                        raw = raw_value
+                    else:
+                        try:
+                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                        except (binascii.Error, ValueError) as exc:
+                            raise ClientError("追加画像を読み込めません。") from exc
                     if not raw:
                         continue
                     _verify_decodable_image(raw)
                     with Image.open(io.BytesIO(raw)) as image:
+                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
                         width, height = oriented_image_size(image)
                     temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
                     pending.append((temporary, relative_path.as_posix(), width, height, client_key))
@@ -1013,6 +1095,18 @@ class StudioState:
             finally:
                 for temporary, _name, _width, _height, _client_key in pending:
                     temporary.unlink(missing_ok=True)
+
+    def import_image_bytes_for_api(
+        self, raw: bytes, *, name: str, relative_path: str, client_key: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not isinstance(client_key, str) or not client_key:
+            raise ClientError("追加画像のclientKeyが不正です。")
+        return self._import_images([{
+            "clientKey": client_key,
+            "name": name,
+            "relativePath": relative_path,
+            "raw": raw,
+        }])
 
     def _clear_cache(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1301,7 +1395,8 @@ class StudioState:
                 mask[exclusion_mask > 0] = 0
         if mask is None or not np.any(mask):
             raise ClientError("保存するモザイク範囲がありません。")
-        output = render_with_mask(record, mask, _read_mosaic_divisor(divisor))
+        divisor = _read_mosaic_divisor(divisor)
+        output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
         with self.lock:
             if self.catalog_generation != catalog_generation:
                 raise ClientError("画像一覧が変更されました。保存をやり直してください。")
@@ -1317,6 +1412,20 @@ class StudioState:
             raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
         with self.lock:
             self._discard_expired_browser_save_tokens_unchecked()
+            receipt = self.browser_save_receipts.get(save_token)
+            if receipt is not None:
+                if (
+                    receipt.image_id != image_id
+                    or receipt.candidate_revision != revision
+                    or receipt.source_action != source_action
+                ):
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                return {
+                    "cleared": receipt.cleared,
+                    "stale": receipt.stale,
+                    "deleted": receipt.deleted,
+                    "images": self.list_images(),
+                }
             token_details = self.browser_save_tokens.get(save_token)
             if token_details is None:
                 raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
@@ -1345,7 +1454,9 @@ class StudioState:
                 if source_action == "overwrite":
                     _replace_record_with_rendered_output(record, token_details.rendered_path)
                 elif source_action == "deleted":
-                    record.path.unlink()
+                    if record.source_kind == "filesystem":
+                        record.path.unlink()
+                    self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
                     self.images.pop(record.image_id, None)
                     self.order = [current_id for current_id in self.order if current_id != record.image_id]
                     self.candidate_revisions.pop(record.image_id, None)
@@ -1355,9 +1466,21 @@ class StudioState:
                 if cleared and not deleted:
                     self._clear_masks_unchecked([record])
             except OSError as exc:
-                raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
-            finally:
                 self._discard_browser_save_token_unchecked(save_token)
+                raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
+            except Exception:
+                self._discard_browser_save_token_unchecked(save_token)
+                raise
+            self.browser_save_receipts[save_token] = BrowserSaveReceipt(
+                image_id=image_id,
+                candidate_revision=revision,
+                source_action=source_action,
+                cleared=cleared,
+                stale=not cleared,
+                deleted=deleted,
+                completed_at=time.monotonic(),
+            )
+            self._discard_browser_save_token_unchecked(save_token)
         self.invalidate_sam_image(image_id)
         return {"cleared": cleared, "stale": not cleared, "deleted": deleted, "images": self.list_images()}
 
@@ -2158,11 +2281,31 @@ def _jpeg_exif_orientation_one_segment(source: bytes) -> bytes:
     return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
 
 
-def _verify_decodable_image(raw: bytes) -> None:
+def _expected_image_format(suffix: str) -> str:
+    expected_formats = {
+        ".png": "PNG",
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".webp": "WEBP",
+    }
+    try:
+        return expected_formats[suffix.lower()]
+    except KeyError as exc:
+        raise ClientError("Unsupported image format.") from exc
+
+
+def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -> None:
+    if image_format != _expected_image_format(suffix):
+        raise ClientError("The image content does not match its file extension.")
+
+
+def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -> None:
     try:
         with Image.open(io.BytesIO(raw)) as image:
             image.load()
-    except UnidentifiedImageError as exc:
+            if expected_suffix is not None:
+                _assert_image_suffix_matches_format(expected_suffix, image.format)
+    except (OSError, UnidentifiedImageError) as exc:
         raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
@@ -2278,13 +2421,21 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
     width, height = image.size
 
     if original_mode == "RGBA":
-        rgb = image.convert("RGB")
-        pixelated = rgb.resize(
-            (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size))),
-            Image.Resampling.BOX,
-        ).resize((width, height), Image.Resampling.NEAREST)
+        target_size = (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size)))
+        alpha = image_array[..., 3].astype(np.float32) / 255.0
+        premultiplied = image_array[..., :3].astype(np.float32) * alpha[..., None]
+        small_premultiplied = cv2.resize(premultiplied, target_size, interpolation=cv2.INTER_AREA)
+        small_alpha = cv2.resize(alpha, target_size, interpolation=cv2.INTER_AREA)
+        pixelated_premultiplied = cv2.resize(small_premultiplied, (width, height), interpolation=cv2.INTER_NEAREST)
+        pixelated_alpha = cv2.resize(small_alpha, (width, height), interpolation=cv2.INTER_NEAREST)
+        pixelated_rgb = np.divide(
+            pixelated_premultiplied,
+            pixelated_alpha[..., None],
+            out=np.zeros_like(pixelated_premultiplied),
+            where=pixelated_alpha[..., None] > 0,
+        )
         output = image_array.copy()
-        output[..., :3] = np.where(mask[..., None] > 0, np.asarray(pixelated), image_array[..., :3])
+        output[..., :3] = np.where(mask[..., None] > 0, np.clip(np.rint(pixelated_rgb), 0, 255).astype(np.uint8), image_array[..., :3])
         return Image.fromarray(output, "RGBA")
 
     pixelated = image.resize(
@@ -2306,10 +2457,16 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raise ClientError("編集マスクが大きすぎます。")
     try:
         with Image.open(io.BytesIO(raw)) as image:
+            if image.format != "PNG":
+                raise ClientError("The mask must be a PNG image.")
             if image.size != (width, height):
                 raise ClientError("編集マスクのサイズが元画像と一致しません。")
-            return np.asarray(image.convert("L"), dtype=np.uint8)
-    except UnidentifiedImageError as exc:
+            if image.mode in {"RGBA", "LA"}:
+                return np.asarray(image.getchannel("A"), dtype=np.uint8)
+            if image.mode in {"L", "1"}:
+                return np.asarray(image.convert("L"), dtype=np.uint8)
+            raise ClientError("The mask must include an alpha channel or be grayscale.")
+    except (OSError, UnidentifiedImageError) as exc:
         raise ClientError("編集マスクは有効なPNGではありません。") from exc
 
 
@@ -2369,7 +2526,10 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
         os.replace(temporary_path, record.path)
         temporary_path = None
         if record.source_kind == "filesystem":
-            os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            try:
+                os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            except OSError:
+                LOGGER.warning("Saved image timestamp could not be restored: %s", record.path)
         stat = record.path.stat()
         record.mtime_ns = stat.st_mtime_ns
         record.size_bytes = stat.st_size
@@ -2426,6 +2586,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
 
 
 STATE = StudioState()
+atexit.register(STATE.shutdown)
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
@@ -2455,6 +2616,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             self._reject_unread_request(ClientError("JSON形式のリクエストだけを受け付けます。"))
+
+    def _require_binary_import_request(self) -> None:
+        self._require_mutation_request()
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/octet-stream":
+            self._reject_unread_request(ClientError("画像バイナリのリクエストだけを受け付けます。"))
 
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -2490,9 +2657,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
-            self._require_json_request()
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            if path == "/api/import/file":
+                self._require_binary_import_request()
+                raw = self._read_binary_body()
+                name = unquote(self.headers.get("X-Lets-Censoring-Name", ""))
+                relative_path = unquote(self.headers.get("X-Lets-Censoring-Relative-Path", ""))
+                client_key = unquote(self.headers.get("X-Lets-Censoring-Client-Key", ""))
+                images, imported = STATE.import_image_bytes_for_api(
+                    raw, name=name, relative_path=relative_path, client_key=client_key,
+                )
+                self._json({"images": images, "imported": imported})
+                return
+            self._require_json_request()
             payload = self._read_json_body()
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
@@ -2577,7 +2755,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
         try:
             self._require_mutation_request()
             path = unquote(urlparse(self.path).path)
-            if path.startswith("/api/candidate/"):
+            if path.startswith("/api/catalog/image/"):
+                image_id = path.removeprefix("/api/catalog/image/")
+                self._json({"images": STATE.remove_image_from_catalog(image_id)})
+            elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
             else:
@@ -2604,6 +2785,18 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ClientError("JSONオブジェクトが必要です。")
         return payload
+
+    def _read_binary_body(self) -> bytes:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or not raw_length.isdigit():
+            raise ClientError("リクエストサイズが不正です。")
+        content_length = int(raw_length)
+        if content_length <= 0 or content_length > MAX_BODY_BYTES:
+            raise ClientError("リクエストサイズが正しくありません。")
+        raw = self.rfile.read(content_length)
+        if len(raw) != content_length:
+            raise ClientError("画像データを最後まで読み込めません。")
+        return raw
 
     def _send_image(self, image_id: str, thumbnail: bool) -> None:
         record = STATE.image_for_id(image_id)
@@ -2633,7 +2826,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             finally:
                 if temporary_path is not None:
                     temporary_path.unlink(missing_ok=True)
-        self._binary(thumbnail_path.read_bytes(), "image/jpeg", cache_control="public, max-age=31536000, immutable")
+        self._binary(thumbnail_path.read_bytes(), "image/jpeg")
 
     def _send_static(self, path: str) -> None:
         requested = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -2667,6 +2860,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache_control)
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -2745,6 +2941,7 @@ def main() -> None:
         server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
     except OSError:
         LOGGER.exception("サーバーを起動できません")
+        STATE.shutdown()
         raise SystemExit(1) from None
     url = f"http://127.0.0.1:{args.port}"
     LOGGER.info("Lets Censoring を起動しました: %s", url)

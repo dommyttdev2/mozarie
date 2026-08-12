@@ -13,7 +13,7 @@ assert.doesNotMatch(app, /deleteOriginal: entry\.deleteOriginal/);
 assert.ok(app.indexOf("await stream.close()") < app.indexOf('api("/api/save/commit"'), "commit must occur after close");
 assert.match(app, /file\.size !== 0 \|\| file\.lastModified \+ 2000 < reservedAt/);
 assert.match(app, /\$\{stem\}\$\{suffix\}\$\{number === 1 \? "" : `_\$\{number\}`\}\$\{extension\}/);
-assert.doesNotMatch(app, /removeEntry\(output\.name\)/, "browser save must not delete an output with uncertain ownership");
+assert.match(app, /if \(!closed\) \{\s*try \{ await destination\.removeEntry\(output\.name\); \}/, "only an unclosed reservation may be removed after a failed write");
 assert.match(readme, /空の予約ファイルが残る場合があります/);
 
 console.log("test_browser_save_contract: passed");

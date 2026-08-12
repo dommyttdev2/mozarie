@@ -39,7 +39,7 @@
         <div>
           <h2 data-i18n="gallery.title">画像</h2>
           <span id="imageCount" class="muted">0件</span>
-          <span id="galleryTargetCount" class="muted">保存対象 0件</span>
+          <span id="galleryTargetCount" class="muted">モザイクあり 0件</span>
         </div>
         <div class="gallery-heading-actions">
           <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧表示</button>
@@ -47,26 +47,34 @@
       </div>
       <div class="batch-toolbar" aria-label="全画像の操作">
         <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-        <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存</button>
-        <button id="batchMoreButton" class="text-button" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
-        <div id="batchMoreMenu" class="batch-more-menu" popover>
-          <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
-          <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+        <div class="batch-actions">
+          <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存...</button>
+          <button id="batchMoreButton" class="text-button" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.clear">クリア</button>
+          <div id="batchMoreMenu" class="batch-more-menu" popover>
+            <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
+            <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+          </div>
         </div>
       </div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
         <button id="galleryAllTab" class="gallery-tab active" aria-pressed="true" data-i18n="gallery.tabAll">すべて</button>
         <button id="galleryMaskedTab" class="gallery-tab" aria-pressed="false" data-i18n="gallery.tabMasked">モザイクあり</button>
       </div>
-      <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">画像をドロップして追加</div>
+      <div class="gallery-viewport">
+        <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">
+          <div id="galleryEmptyState" class="gallery-empty-state" data-i18n="gallery.empty">画像を追加してください</div>
+          <div id="galleryFilteredEmptyState" class="gallery-empty-state" hidden data-i18n="gallery.filteredEmpty">該当する画像はありません</div>
+        </div>
+        <div id="galleryDropOverlay" class="gallery-drop-overlay" hidden data-i18n="gallery.drop">画像をドロップして追加</div>
+      </div>
     </aside>
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div class="editor-toolbar">
         <div class="tool-group" data-i18n-aria-label="editor.tools" aria-label="編集ツール">
-          <button id="brushTool" class="tool active" data-i18n="editor.brush" data-i18n-title="editor.brush">ブラシ</button>
-          <button id="eraserTool" class="tool" data-i18n="editor.eraser" data-i18n-title="editor.eraser">消しゴム</button>
-          <button id="boundaryTool" class="tool" data-i18n="editor.boundary" data-i18n-title="editor.boundary">境界</button>
+          <button id="brushTool" class="tool active" type="button" aria-pressed="true" data-i18n="editor.brush" data-i18n-title="editor.brush">ブラシ</button>
+          <button id="eraserTool" class="tool" type="button" aria-pressed="false" data-i18n="editor.eraser" data-i18n-title="editor.eraser">消しゴム</button>
+          <button id="boundaryTool" class="tool" type="button" aria-pressed="false" data-i18n="editor.boundary" data-i18n-title="editor.boundary">境界</button>
           <button id="fitButton" class="tool" data-i18n="editor.fit" data-i18n-title="editor.fit">全体表示</button>
           <button id="undoButton" class="tool" data-i18n="editor.undo" data-i18n-title="editor.undo">元に戻す</button>
           <button id="redoButton" class="tool" data-i18n="editor.redo" data-i18n-title="editor.redo">やり直す</button>
@@ -89,6 +97,7 @@
             <output id="blockSizeValue">-</output>
           </label>
         </div>
+        <button id="removeCurrentImageButton" class="danger tool remove-current-image" disabled data-i18n="editor.removeFromCatalog">一覧から削除</button>
         <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">ファイル保存</button>
       </div>
       <div class="editor-context-bar">
@@ -137,11 +146,11 @@
           <h2 data-i18n="overview.title">画像一覧</h2>
           <output id="overviewCount" class="muted">0 / 0</output>
         </div>
-        <div class="overview-filters" role="tablist" data-i18n-aria-label="overview.filters" aria-label="一覧の絞り込み">
-          <button class="overview-filter active" type="button" data-overview-filter="all" role="tab" aria-selected="true" data-i18n="overview.filterAll">全体</button>
-          <button class="overview-filter" type="button" data-overview-filter="unreviewed" role="tab" aria-selected="false" data-i18n="overview.filterUnreviewed">未確認</button>
-          <button class="overview-filter" type="button" data-overview-filter="reviewed" role="tab" aria-selected="false" data-i18n="overview.filterReviewed">確認済み</button>
-          <button class="overview-filter" type="button" data-overview-filter="masked" role="tab" aria-selected="false" data-i18n="overview.filterMasked">モザイク適用済</button>
+        <div class="overview-filters" data-i18n-aria-label="overview.filters" aria-label="一覧の絞り込み">
+          <button class="overview-filter active" type="button" data-overview-filter="all" aria-pressed="true" data-i18n="overview.filterAll">全体</button>
+          <button class="overview-filter" type="button" data-overview-filter="unreviewed" aria-pressed="false" data-i18n="overview.filterUnreviewed">未確認</button>
+          <button class="overview-filter" type="button" data-overview-filter="reviewed" aria-pressed="false" data-i18n="overview.filterReviewed">確認済み</button>
+          <button class="overview-filter" type="button" data-overview-filter="masked" aria-pressed="false" data-i18n="overview.filterMasked">モザイクあり</button>
         </div>
         <div class="overview-search-controls">
           <input id="overviewQuery" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="overview.searchPlaceholder" placeholder="ファイル名・相対パスを検索">
@@ -149,25 +158,30 @@
         </div>
         <div class="overview-batch-toolbar" aria-label="全画像の操作">
           <button id="overviewDetectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-          <button id="overviewSaveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">対象画像を保存</button>
-          <button id="overviewBatchMoreButton" class="text-button" type="button" popovertarget="overviewBatchMoreMenu" aria-expanded="false" data-i18n="batch.more">その他</button>
-          <div id="overviewBatchMoreMenu" class="batch-more-menu" popover>
-            <button id="overviewClearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
-            <button id="overviewClearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+          <div class="batch-actions">
+            <button id="overviewSaveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存...</button>
+            <button id="overviewBatchMoreButton" class="text-button" type="button" popovertarget="overviewBatchMoreMenu" aria-expanded="false" data-i18n="batch.clear">クリア</button>
+            <div id="overviewBatchMoreMenu" class="batch-more-menu" popover>
+              <button id="overviewClearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
+              <button id="overviewClearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+            </div>
           </div>
         </div>
       </header>
-      <div id="overviewGrid" class="overview-grid"></div>
+      <div class="overview-grid-viewport">
+        <div id="overviewGrid" class="overview-grid"></div>
+        <p id="overviewEmptyState" class="overview-empty-state" hidden data-i18n="overview.empty">該当する画像はありません</p>
+      </div>
     </section>
   </main>
 
   <template id="galleryItemTemplate">
-    <article class="gallery-item">
+    <button class="gallery-item" type="button" aria-haspopup="menu">
       <img loading="lazy" alt="">
       <span class="gallery-review-badge"></span>
       <div class="gallery-name"></div>
       <div class="gallery-meta"></div>
-    </article>
+    </button>
   </template>
 
   <template id="overviewItemTemplate">
@@ -179,7 +193,12 @@
     </button>
   </template>
 
-  <dialog id="confirmDialog" class="modal-dialog confirm-dialog">
+  <div id="catalogContextMenu" class="catalog-context-menu" popover="manual" role="menu" tabindex="-1" data-i18n-aria-label="context.menu" aria-label="画像の操作">
+    <button id="toggleReviewMenuItem" type="button" role="menuitem"></button>
+    <button id="removeImageMenuItem" class="danger" type="button" role="menuitem" data-i18n="editor.removeFromCatalog">一覧から削除</button>
+  </div>
+
+  <dialog id="confirmDialog" class="modal-dialog confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
     <form method="dialog" class="dialog-body">
       <h2 id="confirmTitle"></h2>
       <p id="confirmMessage"></p>
@@ -190,23 +209,23 @@
     </form>
   </dialog>
 
-  <dialog id="detectDialog" class="modal-dialog detect-dialog">
+  <dialog id="detectDialog" class="modal-dialog detect-dialog" aria-labelledby="detectDialogTitle" aria-describedby="detectTargetCount detectDialogHelp detectDialogRerunNote">
     <form id="detectForm" class="dialog-body">
-      <h2 data-i18n="detectDialog.title">自動検出の設定</h2>
+      <h2 id="detectDialogTitle" data-i18n="detectDialog.title">自動検出の設定</h2>
       <p id="detectTargetCount" class="muted"></p>
        <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
-          <input id="detectConfidenceRange" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
-          <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50">
+          <input id="detectConfidenceRange" type="range" min="0.10" max="1.00" step="0.01" value="0.50" data-i18n-aria-label="detectDialog.confidenceSlider" aria-label="判定しきい値">
+          <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50" data-i18n-aria-label="detectDialog.confidenceNumber" aria-label="判定しきい値の数値">
         </span>
        </label>
        <label class="form-row">
          <span data-i18n="detectDialog.parallelism">同時処理数</span>
-         <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2">
+         <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2" data-i18n-aria-label="detectDialog.parallelism" aria-label="同時処理数">
        </label>
-      <p class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-      <p class="fixed-note" data-i18n="detectDialog.rerunNote">再検出では自動候補だけを置き換え、境界候補と手描きの範囲は残ります。</p>
+      <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
+      <p id="detectDialogRerunNote" class="fixed-note" data-i18n="detectDialog.rerunNote">再検出では自動候補だけを置き換え、境界候補と手描きの範囲は残ります。</p>
       <div class="dialog-actions">
         <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
         <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>
@@ -214,9 +233,9 @@
     </form>
   </dialog>
 
-  <dialog id="applyDialog" class="modal-dialog apply-dialog">
+  <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount applyMetadataNote">
     <form id="applyForm" class="dialog-body">
-      <h2 data-i18n="apply.title">ファイルを保存</h2>
+      <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
@@ -227,9 +246,9 @@
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize">-</output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>
-      <section id="applyProgressPanel" hidden>
+      <section id="applyProgressPanel" hidden data-i18n-aria-label="apply.progressPanel" aria-label="ファイル保存の進行状況">
         <p id="applyCurrentName" class="truncate"></p>
-        <progress id="applyProgress" value="0" max="1"></progress>
+        <progress id="applyProgress" value="0" max="1" data-i18n-aria-label="apply.progressAria" aria-label="ファイル保存の進行状況"></progress>
         <p id="applyProgressText" class="muted"></p>
       </section>
       <p id="applyResult" class="dialog-result" aria-live="polite"></p>

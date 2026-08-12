@@ -236,8 +236,8 @@ async function runCreateWritableFailureCase() {
   await assert.rejects(runtime.runBrowserSave(directory, ["image-1"], "_censored", false), /write failed/);
 
   const nested = directory.directories.get("nested");
-  assert.deepEqual(nested.removed, []);
-  assert.equal(nested.files.has("source_censored.png"), true, "failed reservations are left untouched");
+  assert.deepEqual(nested.removed, ["source_censored.png"]);
+  assert.equal(nested.files.has("source_censored.png"), false, "failed reservations are removed before they become a visible output");
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
 }
 
@@ -249,7 +249,9 @@ async function runCommitFailureCase() {
   const output = directory.directories.get("nested").files.get("source_censored.png");
   assert.equal(output.closed, true);
   assert.equal(runtime.state.images.length, 1);
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
+  const paths = runtime.requests.map((request) => request.path);
+  assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
+  assert.equal(paths.filter((path) => path === "/api/save/commit").length, 12);
 }
 
 async function runCancelCase() {
@@ -263,8 +265,8 @@ async function runCancelCase() {
   const nested = directory.directories.get("nested");
   assert.deepEqual(nested.removed, []);
   assert.equal(nested.files.get("source_censored.png").closed, true, "cancel keeps the completed browser output");
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
-  assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 0");
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
+  assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 1");
 }
 
 async function runDeleteOriginalCase() {

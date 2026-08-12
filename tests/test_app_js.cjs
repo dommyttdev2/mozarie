@@ -40,9 +40,9 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "overviewDetectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "overviewClearAllMasksButton", "clearCatalogButton", "overviewClearCatalogButton", "saveAllButton", "overviewSaveAllButton", "saveButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
+  "editorCanvas", "canvasStage", "detectAllButton", "overviewDetectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "overviewClearAllMasksButton", "clearCatalogButton", "overviewClearCatalogButton", "saveAllButton", "overviewSaveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
-  "status", "jobProgress", "jobProgressText", "gallery", "imageCount", "galleryTargetCount", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "overviewBatchMoreButton", "batchMoreMenu", "overviewBatchMoreMenu",
+  "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "overviewBatchMoreButton", "batchMoreMenu", "overviewBatchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote",
 ]) {
   const value = element();
@@ -100,7 +100,7 @@ const createdCanvases = [];
 function canvasElement() {
   let target;
   const context = {
-    clearRectCalls: 0, drawImageCalls: [], globalCompositeOperation: "source-over",
+    clearRectCalls: 0, drawImageCalls: [], strokeCalls: 0, globalCompositeOperation: "source-over",
     clearRect() {
       this.clearRectCalls += 1;
       if (target._usePixelAlpha) target._alpha.fill(0);
@@ -117,13 +117,16 @@ function canvasElement() {
         }
       }
     },
-    setTransform() {}, save() {}, restore() {}, translate() {}, scale() {},
+    setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() { this.strokeCalls += 1; },
     getImageData() {
       if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) };
       return { data: new Uint8ClampedArray([...target._alpha].flatMap((alpha) => [0, 0, 0, alpha ? 255 : 0])) };
     },
   };
-  target = { width: 1, height: 1, _alpha: new Uint8Array(2), _usePixelAlpha: false, _context: context, getContext: () => context, toDataURL: () => "data:image/png;base64,test" };
+  target = {
+    width: 1, height: 1, _alpha: new Uint8Array(2), _usePixelAlpha: false, _context: context, getContext: () => context,
+    toDataURL: () => target._usePixelAlpha ? `data:image/png;base64,alpha:${[...target._alpha].join(".")}` : "data:image/png;base64,test",
+  };
   createdCanvases.push(target);
   return target;
 }
@@ -155,7 +158,14 @@ const context = {
     setItem(key, value) { storageWrites += 1; storage.set(key, value); },
     removeItem(key) { storageWrites += 1; storage.delete(key); },
   },
-  Image: class { set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); } },
+  Image: class {
+    set src(value) {
+      this._src = value;
+      const match = /^data:image\/png;base64,alpha:([\d.]*)$/.exec(value);
+      if (match) this._alpha = new Uint8Array(match[1] ? match[1].split(".").map(Number) : []);
+      queueMicrotask(() => this.onload?.());
+    }
+  },
   URL: { createObjectURL() { return "blob:test"; }, revokeObjectURL() {} },
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   fetch: (path, options) => { fetchCalls += 1; requests.push({ path, options }); return new Promise((resolve) => { resolveFetch = resolve; }); },
@@ -163,9 +173,9 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave };\n");
+source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, setGalleryDropOverlay };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave } = context.__mosaicTest;
+const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
 bindEvents();
 
 function keyEvent(key, options = {}) {
@@ -228,6 +238,25 @@ function keyEvent(key, options = {}) {
   state.translations["candidates.delete"] = "{label}を削除";
   state.translations["candidates.deleteManual"] = "手書きを削除";
   state.translations["candidates.none"] = "候補はありません";
+  state.translations["status.editReady"] = "Ready";
+  state.translations["status.chooseFolder"] = "Choose folder";
+  state.images = [
+    { id: "remove", relativePath: "remove.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "keep", relativePath: "keep.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+  ];
+  state.currentId = "keep";
+  state.currentImage = { width: 100, height: 80 };
+  state.sourceAccess.set("remove", { fileHandle: { name: "remove.png" } });
+  const removeRequest = removeImageFromCatalog("remove");
+  assert.equal(requests.at(-1).path, "/api/catalog/image/remove");
+  resolveFetch({ ok: true, json: async () => ({ images: [state.images[1]] }) });
+  await removeRequest;
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images.map((image) => image.id))), ["keep"]);
+  assert.equal(state.sourceAccess.has("remove"), false);
+  setGalleryDropOverlay(true);
+  assert.equal(elements.get("#galleryDropOverlay").hidden, false);
+  setGalleryDropOverlay(false);
+  assert.equal(elements.get("#galleryDropOverlay").hidden, true);
   state.images = [loadedImage];
   state.job = null;
   state.detectCancelRequested = false;
@@ -823,15 +852,9 @@ function keyEvent(key, options = {}) {
   buildCombinedMask();
   assert.equal(combinedContext.drawImageCalls.some(([image]) => image === createdCanvases[0]), true);
 
-  // Removing the manual row clears only the additive canvas and remains
-  // undoable; the exclusion canvas is left intact.
-  state.history = [{
-    add: "data:image/png;base64,manual-before-delete",
-    exclusion: "data:image/png;base64,exclusion-before-delete",
-    manualEnabled: true,
-    manualMaskPresent: true,
-  }];
-  state.historyIndex = 0;
+  // Undo/Redo is deliberately limited to brush/eraser stroke completion. A
+  // manual-toggle or clear starts a fresh baseline and cannot restore it.
+  resetHistoryToCurrentManualMask();
   const addClearBeforeDelete = createdCanvases[0]._context.clearRectCalls;
   const exclusionClearBeforeDelete = createdCanvases[1]._context.clearRectCalls;
   manualRow.children[2].click();
@@ -839,11 +862,59 @@ function keyEvent(key, options = {}) {
   assert.equal(createdCanvases[1]._context.clearRectCalls, exclusionClearBeforeDelete);
   assert.equal(state.manualMaskPresent, false);
   assert.equal(candidateList.children[0].className, "candidate-empty");
-  assert.equal(state.history.length, 2);
-  await restoreSnapshot(0);
-  assert.equal(state.manualMaskPresent, true);
-  assert.equal(state.manualEnabled, true);
-  assert.equal(candidateList.children[0].className, "candidate-row candidate-row-manual");
+  assert.equal(state.history.length, 0);
+  assert.equal(elements.get("#undoButton").disabled, true);
+
+  // A brush completion immediately enables Undo. History keeps semantic
+  // strokes only, never full-canvas data URLs.
+  const strokeAdd = createdCanvases[0];
+  const strokeExclusion = createdCanvases[1];
+  for (const target of [strokeAdd, strokeExclusion]) {
+    target._usePixelAlpha = true;
+    target._alpha.fill(0);
+  }
+  state.currentId = "first";
+  state.currentImage = { width: 100, height: 80 };
+  resetHistoryToCurrentManualMask();
+  beginManualStroke({ x: 4, y: 4 });
+  appendManualStrokePoint({ x: 12, y: 4 });
+  completeManualStroke();
+  assert.equal(elements.get("#undoButton").disabled, false);
+  assert.equal(state.history.length, 1);
+  assert.equal(state.history[0].tool, "brush");
+  assert.ok(state.history[0].points.length >= 2);
+  assert.doesNotMatch(JSON.stringify(state.history), /data:image|base64/i);
+  restoreSnapshot(0);
+  assert.equal(elements.get("#redoButton").disabled, false);
+  restoreSnapshot(1);
+  assert.equal(elements.get("#undoButton").disabled, false);
+
+  // Once the 12-stroke history cap is crossed, the dropped oldest stroke is
+  // baked into the single baseline canvas instead of disappearing on Undo.
+  resetHistoryToCurrentManualMask();
+  const historyBaselineStrokeCalls = createdCanvases[6]._context.strokeCalls;
+  for (let index = 0; index < 13; index += 1) {
+    beginManualStroke({ x: index, y: 10 });
+    completeManualStroke();
+  }
+  assert.equal(state.history.length, 12);
+  assert.equal(state.history[0].points[0].x, 1);
+  assert.ok(createdCanvases[6]._context.strokeCalls > historyBaselineStrokeCalls);
+  restoreSnapshot(11);
+  assert.equal(state.historyIndex, 11);
+  for (const target of [strokeAdd, strokeExclusion]) {
+    target._usePixelAlpha = false;
+    target._alpha.fill(0);
+  }
+
+  // A transient commit failure retries the same idempotency token. A definitive
+  // 4xx response does not retry it.
+  const retryPromise = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "retry", sourceAction: "keep" });
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/save/commit");
+  resolveFetch({ ok: true, status: 200, json: async () => ({ cleared: true }) });
+  assert.equal((await retryPromise).cleared, true);
 
   // Same-tab completion reloads a target image without putting its old canvas
   // back into drafts.
@@ -1284,33 +1355,33 @@ function keyEvent(key, options = {}) {
   saveAll();
 
   const importedFiles = [
-    { name: "first.png", webkitRelativePath: "album/first.png", arrayBuffer: async () => new Uint8Array([1]).buffer },
-    { name: "ignored.txt", arrayBuffer: async () => new Uint8Array([2]).buffer },
-    { name: "second.webp", arrayBuffer: async () => new Uint8Array([3]).buffer },
+    { name: "first.png", webkitRelativePath: "album/first.png" },
+    { name: "ignored.txt" },
+    { name: "second.webp" },
   ];
   const importing = importFiles(importedFiles);
   assert.equal(state.importing, true);
   resolveFetch({ ok: true, json: async () => ({ images: state.images, imported: [] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: state.images, imported: [] }) });
   await importing;
-  const importRequests = requests.filter((request) => request.path === "/api/import");
-  assert.equal(importRequests.length, 1);
-  const importedPayload = JSON.parse(importRequests[0].options.body).files;
-  assert.equal(importedPayload.length, 2);
-  assert.equal(importedPayload[0].name, "first.png");
-  assert.equal(importedPayload[0].relativePath, "album/first.png");
-  assert.ok(importedPayload[0].clientKey);
-  assert.equal(importedPayload[1].name, "second.webp");
+  const importRequests = requests.filter((request) => request.path === "/api/import/file");
+  assert.equal(importRequests.length, 2);
+  assert.equal(importRequests[0].options.headers["Content-Type"], "application/octet-stream");
+  assert.equal(importRequests[0].options.headers["X-Lets-Censoring-Relative-Path"], "album%2Ffirst.png");
+  assert.equal(importRequests[0].options.body, importedFiles[0]);
+  assert.equal(importRequests[1].options.body, importedFiles[2]);
   assert.equal(state.importing, false);
 
   // Import mappings bind browser-only source handles to the returned image id.
   let clientKeyCounter = 0;
   context.crypto.randomUUID = () => `mapped-${++clientKeyCounter}`;
-  const handledFile = { name: "handled.png", size: 9, lastModified: 77, arrayBuffer: async () => new Uint8Array([9]).buffer };
+  const handledFile = { name: "handled.png", size: 9, lastModified: 77 };
   const handledSource = { kind: "file", name: handledFile.name, async getFile() { return handledFile; }, async queryPermission() { return "granted"; } };
   const mappedImport = importFiles([{ file: handledFile, relativePath: "nested/handled.png", fileHandle: handledSource, parentHandle: { name: "nested" } }]);
   await new Promise((resolve) => setImmediate(resolve));
   const mappedRequest = requests.at(-1);
-  const mappedClientKey = JSON.parse(mappedRequest.options.body).files[0].clientKey;
+  const mappedClientKey = decodeURIComponent(mappedRequest.options.headers["X-Lets-Censoring-Client-Key"]);
   resolveFetch({ ok: true, json: async () => ({ images: [{ id: "handled", sourceKind: "session", relativePath: "nested/handled.png", width: 10, height: 10 }], imported: [{ clientKey: mappedClientKey, imageId: "handled" }] }) });
   await mappedImport;
   assert.equal(state.sourceAccess.get("handled").fileHandle, handledSource);
@@ -1343,14 +1414,14 @@ function keyEvent(key, options = {}) {
 
   const folderInput = elements.get("#importFolderInput");
   folderInput.value = "same-folder";
-  const folderImport = importFiles([{ name: "nested.png", webkitRelativePath: "source/nested/nested.png", arrayBuffer: async () => new Uint8Array([4]).buffer }]);
+  const folderImport = importFiles([{ name: "nested.png", webkitRelativePath: "source/nested/nested.png" }]);
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
   await folderImport;
   folderInput.value = "";
   assert.equal(folderInput.value, "");
   const folderRequest = requests.at(-1);
-  assert.equal(JSON.parse(folderRequest.options.body).files[0].relativePath, "source/nested/nested.png");
+  assert.equal(folderRequest.options.headers["X-Lets-Censoring-Relative-Path"], "source%2Fnested%2Fnested.png");
 
   const savedFiles = new Map([["image_censored.png", { name: "image_censored.png" }]]);
   const fakeDirectory = {
@@ -1367,7 +1438,8 @@ function keyEvent(key, options = {}) {
     async getDirectoryHandle() { return this; },
   };
   context.window.showDirectoryPicker = async (options) => {
-    assert.deepEqual(options, { id: "lets-censoring-output", mode: "readwrite" });
+    assert.equal(options.id, "lets-censoring-output");
+    assert.equal(options.mode, "readwrite");
     return fakeDirectory;
   };
   assert.equal(await pickOutputDirectory(), fakeDirectory);
