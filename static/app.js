@@ -18,6 +18,8 @@ const state = {
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
+  // This handle is scoped to this browser tab and reused for copy saves.
+  outputDirectory: null, outputDirectoryName: "",
 };
 
 const canvas = $("#editorCanvas");
@@ -324,6 +326,8 @@ async function loadFolder() {
   if (isBusy() || state.importing) return;
   const path = $("#folderPath").value.trim();
   if (!path) return setStatus(t("status.enterFolder"), "error");
+  const picker = $("#pickerMenu");
+  if (picker?.matches(":popover-open")) picker.hidePopover();
   const catalogEpoch = beginCatalogEpoch();
   ++state.imageGeneration;
   setStatus(t("status.loadingImages"), "running");
@@ -341,12 +345,12 @@ function renderGallery(force = false) {
   const gallery = $("#gallery");
   const scrollTop = gallery.scrollTop;
   const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
-  $("#imageCount").textContent = t("gallery.count", { count: visibleImages.length });
+  const imageCount = t("gallery.count", { count: visibleImages.length });
+  for (const element of document.querySelectorAll(".gallery-local-count")) element.textContent = imageCount;
   $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
   $("#galleryAllTab").setAttribute("aria-pressed", String(state.galleryFilter === "all"));
   $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
   $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
-  $("#galleryTargetCount").textContent = t("gallery.saveTargetCount", { count: saveTargets().length });
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
   const template = $("#galleryItemTemplate");
@@ -513,7 +517,8 @@ function runNavigationAction(action) {
 }
 function updateNavigationControls() {
   const index = imageIndex();
-  $("#imagePosition").textContent = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
+  const position = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
+  $("#imagePosition").textContent = position;
   $("#navigationShortcutsEnabled").checked = state.navigationShortcutsEnabled;
   const status = $("#reviewStatus");
   const record = currentRecord();
@@ -709,10 +714,12 @@ function restoreDraft(imageId, generation) {
 
 function fitImage() {
   if (!state.currentImage) return;
-  const padding = 28;
-  state.view.scale = Math.min(Math.max(1, stage.clientWidth - padding * 2) / state.currentImage.width, Math.max(1, stage.clientHeight - padding * 2) / state.currentImage.height);
-  state.view.x = (stage.clientWidth - state.currentImage.width * state.view.scale) / 2;
-  state.view.y = (stage.clientHeight - state.currentImage.height * state.view.scale) / 2;
+  const inset = { left: 76, right: 20, top: 58, bottom: 62 };
+  const width = Math.max(1, stage.clientWidth - inset.left - inset.right);
+  const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
+  state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
+  state.view.x = inset.left + (width - state.currentImage.width * state.view.scale) / 2;
+  state.view.y = inset.top + (height - state.currentImage.height * state.view.scale) / 2;
   render();
 }
 
@@ -1261,6 +1268,11 @@ function syncApplyMode() {
   const copying = selectedSaveMode() === "copy";
   $("#applySuffix").disabled = !copying || state.applyRunning;
   $("#deleteOriginalRow").hidden = !copying;
+  $("#applyOutputDirectoryRow").hidden = !copying;
+  $("#chooseOutputDirectoryButton").disabled = !copying || state.applyRunning || state.saveStarting;
+  $("#applyOutputDirectoryStatus").textContent = state.outputDirectoryName
+    ? t("apply.outputDirectorySelected", { name: state.outputDirectoryName })
+    : t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !copying || !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
@@ -1314,6 +1326,41 @@ async function pickOutputDirectory() {
   } catch (error) {
     if (error?.name === "AbortError") throw new Error(t("error.directoryPickerCancelled"));
     throw error;
+  }
+}
+
+function rememberOutputDirectory(directory) {
+  state.outputDirectory = directory;
+  state.outputDirectoryName = String(directory?.name || "");
+  syncApplyMode();
+  return directory;
+}
+
+async function outputDirectoryForSave() {
+  const directory = state.outputDirectory;
+  if (directory) {
+    try {
+      const options = { mode: "readwrite" };
+      const permission = await directory.queryPermission?.(options);
+      if (!permission || permission === "granted") return directory;
+      const requested = await directory.requestPermission?.(options);
+      if (!requested || requested === "granted") return directory;
+    } catch {
+      // A stale handle is replaced by the normal picker below.
+    }
+    state.outputDirectory = null;
+    state.outputDirectoryName = "";
+  }
+  return rememberOutputDirectory(await pickOutputDirectory());
+}
+
+async function chooseOutputDirectory() {
+  if (state.applyRunning || state.saveStarting) return;
+  try {
+    rememberOutputDirectory(await pickOutputDirectory());
+    setApplyResult("");
+  } catch (error) {
+    setApplyResult(error.message, true);
   }
 }
 
@@ -1610,8 +1657,9 @@ async function startApplyFromDialog(event) {
   let outputDirectory = null;
   if (copy) {
     try {
-      // This must remain directly inside the submit event for browser user activation.
-      outputDirectory = await pickOutputDirectory();
+      // An existing tab-scoped handle is reused. The picker only opens on the
+      // first copy save or after the user explicitly changes the destination.
+      outputDirectory = await outputDirectoryForSave();
     } catch (error) {
       setApplyResult(error.message, true);
       return finishSaveStart();
@@ -1801,8 +1849,8 @@ function updateBrushSize(value) {
 function updateBlockSizeDisplay() {
   const currentBlockSize = calculatedBlockSize(currentRecord(), mosaicDivisor());
   const applyBlockSize = calculatedBlockSize(currentRecord(), normaliseDivisor($("#applyDivisor").value));
-  $("#blockSizeValue").textContent = currentBlockSize ? t("editor.calculatedPixels", { value: currentBlockSize }) : "-";
-  $("#applyBlockSize").textContent = applyBlockSize ? t("editor.calculatedPixels", { value: applyBlockSize }) : "-";
+  $("#blockSizeValue").textContent = currentBlockSize ? t("editor.calculatedPixels", { value: currentBlockSize }) : "";
+  $("#applyBlockSize").textContent = applyBlockSize ? t("editor.calculatedPixels", { value: applyBlockSize }) : "";
 }
 
 function confirmAction(title, message) {
@@ -2202,6 +2250,7 @@ function bindEvents() {
     if (event.dataTransfer?.files?.length) void importDroppedFiles(event);
   });
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
+  $("#loadFolderButton").addEventListener("click", loadFolder);
   const detectAll = () => {
     if (activeDetection()) void cancelDetection();
     else openDetectionDialog(state.images.map((image) => image.id));
@@ -2210,6 +2259,7 @@ function bindEvents() {
   $("#overviewDetectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
   $("#saveAllButton").addEventListener("click", saveAll); $("#overviewSaveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  $("#floatingSaveButton").addEventListener("click", saveCurrent);
   $("#removeCurrentImageButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   for (const id of ["#clearAllMasksButton", "#overviewClearAllMasksButton"]) $(id).addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -2256,7 +2306,19 @@ function bindEvents() {
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
+  const grid = $(".studio-grid");
+  const revealPanel = (panel) => {
+    grid.classList.remove("focus-mode");
+    grid.classList.toggle(panel === "gallery" ? "gallery-collapsed" : "inspector-collapsed");
+    requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); });
+  };
+  $("#collapseGalleryButton").addEventListener("click", () => revealPanel("gallery"));
+  $("#collapseInspectorButton").addEventListener("click", () => revealPanel("inspector"));
+  $("#showGalleryButton").addEventListener("click", () => { grid.classList.remove("focus-mode", "gallery-collapsed"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
+  $("#showInspectorButton").addEventListener("click", () => { grid.classList.remove("focus-mode", "inspector-collapsed"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
+  $("#focusModeButton").addEventListener("click", () => { grid.classList.toggle("focus-mode"); requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); }); });
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
+  $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {

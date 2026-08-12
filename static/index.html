@@ -9,14 +9,25 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="topbar">
+  <header class="appbar">
     <div class="brand" data-i18n="app.brand">Lets Censoring</div>
-    <div class="folder-control">
+    <nav class="appbar-commands" aria-label="全画像の操作">
+      <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を追加</button>
+      <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
+      <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
+      <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button>
+      <button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.actions">全画像操作</button>
+      <div id="batchMoreMenu" class="batch-more-menu" popover>
+        <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button>
+        <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button>
+      </div>
+    </nav>
+    <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
       <div class="picker-anchor">
-        <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を追加</button>
-        <div id="pickerMenu" class="picker-menu" popover>
+        <button id="loadFolderButton" type="button" data-i18n="folder.load">読み込む</button>
+        <div class="picker-actions">
           <button id="pickImages" type="button" data-i18n="folder.pickImages">画像ファイルを選択</button>
           <button id="pickFolderFiles" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
         </div>
@@ -38,22 +49,10 @@
       <div class="pane-heading gallery-heading">
         <div>
           <h2 data-i18n="gallery.title">画像</h2>
-          <span id="imageCount" class="muted">0件</span>
-          <span id="galleryTargetCount" class="muted">モザイクあり 0件</span>
+          <span class="gallery-local-count muted">0件</span>
         </div>
         <div class="gallery-heading-actions">
-          <button id="overviewButton" class="text-button" type="button" data-i18n="navigation.overview">一覧表示</button>
-        </div>
-      </div>
-      <div class="batch-toolbar" aria-label="全画像の操作">
-        <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-        <div class="batch-actions">
-          <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存...</button>
-          <button id="batchMoreButton" class="text-button" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.clear">クリア</button>
-          <div id="batchMoreMenu" class="batch-more-menu" popover>
-            <button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
-            <button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
-          </div>
+          <button id="collapseGalleryButton" class="pane-collapse" type="button" aria-label="画像一覧を折り畳む" title="画像一覧を折り畳む">‹</button>
         </div>
       </div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
@@ -70,57 +69,49 @@
     </aside>
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
-      <div class="editor-toolbar">
-        <div class="tool-group" data-i18n-aria-label="editor.tools" aria-label="編集ツール">
-          <button id="brushTool" class="tool active" type="button" aria-pressed="true" data-i18n="editor.brush" data-i18n-title="editor.brush">ブラシ</button>
-          <button id="eraserTool" class="tool" type="button" aria-pressed="false" data-i18n="editor.eraser" data-i18n-title="editor.eraser">消しゴム</button>
-          <button id="boundaryTool" class="tool" type="button" aria-pressed="false" data-i18n="editor.boundary" data-i18n-title="editor.boundary">境界</button>
-          <button id="fitButton" class="tool" data-i18n="editor.fit" data-i18n-title="editor.fit">全体表示</button>
-          <button id="undoButton" class="tool" data-i18n="editor.undo" data-i18n-title="editor.undo">元に戻す</button>
-          <button id="redoButton" class="tool" data-i18n="editor.redo" data-i18n-title="editor.redo">やり直す</button>
-          <button id="mosaicPreviewButton" class="tool active" type="button" aria-pressed="true" data-i18n="editor.mosaicPreview" data-i18n-title="editor.mosaicPreviewHelp">モザイク表示</button>
-        </div>
-        <div class="tool-group command-actions" data-i18n-aria-label="editor.currentActions" aria-label="現在の画像">
-          <button id="detectCurrentButton" class="tool detect-current" disabled data-i18n="editor.detectCurrent">自動検出</button>
-          <button id="clearCurrentMasksButton" class="tool" disabled data-i18n="editor.clearMasks">候補を消去</button>
-        </div>
-        <div class="numeric-controls">
-          <label class="numeric-control" for="brushSize">
-            <span data-i18n="editor.brushSize">ブラシ径</span>
-            <input id="brushSize" type="range" min="2" max="500" value="48">
-            <output id="brushSizeValue">48 px</output>
-          </label>
-          <label class="numeric-control block-control" for="divisor">
-            <span data-i18n="editor.blockSize">モザイク粗さ</span>
-            <span class="ratio-prefix">1 /</span>
-            <input id="divisor" type="number" min="1" max="10000" value="100">
-            <output id="blockSizeValue">-</output>
-          </label>
-        </div>
-        <button id="removeCurrentImageButton" class="danger tool remove-current-image" disabled data-i18n="editor.removeFromCatalog">一覧から削除</button>
-        <button id="saveButton" class="primary save" disabled data-i18n="editor.applyCurrent">ファイル保存</button>
-      </div>
-      <div class="editor-context-bar">
-        <div class="editor-context-info">
-          <span id="imageInfo" data-i18n="editor.none">画像未選択</span>
-          <output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
-        </div>
-        <div class="navigation-controls" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
-          <button id="previousImageButton" class="icon-button" type="button" title="前へ" aria-label="前へ" data-i18n-title="navigation.previous" data-i18n-aria-label="navigation.previous">‹</button>
-          <output id="imagePosition" class="image-position">- / -</output>
-          <button id="nextImageButton" class="icon-button" type="button" title="次へ" aria-label="次へ" data-i18n-title="navigation.next" data-i18n-aria-label="navigation.next">›</button>
-          <button id="nextUnreviewedButton" class="text-button" type="button" data-i18n="navigation.nextUnreviewed">次の未確認</button>
-          <button id="reviewAndNextButton" class="text-button" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
-          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span data-i18n="navigation.shortcuts">ナビゲーションショートカット</span></label>
-        </div>
-      </div>
       <div id="canvasStage" class="canvas-stage">
+        <div class="canvas-corner-actions" aria-label="表示の切り替え">
+          <button id="showGalleryButton" class="icon-button" type="button" aria-label="画像一覧を表示" title="画像一覧を表示">☰</button>
+          <button id="focusModeButton" class="icon-button" type="button" aria-label="集中モード" title="集中モード">⌘</button>
+          <button id="showInspectorButton" class="icon-button" type="button" aria-label="検出候補を表示" title="検出候補を表示">☷</button>
+          <button id="floatingSaveButton" class="primary" type="button" aria-label="ファイル保存" title="ファイル保存">保存</button>
+        </div>
+        <div class="canvas-tool-rail" aria-label="編集ツール">
+          <button id="brushTool" class="tool icon-button active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ">筆</button>
+          <button id="eraserTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム">消</button>
+          <button id="boundaryTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="境界" title="境界">囲</button>
+          <span class="tool-separator" aria-hidden="true"></span>
+          <button id="fitButton" class="tool icon-button" type="button" aria-label="全体表示" title="全体表示">⊙</button>
+          <button id="undoButton" class="tool icon-button" type="button" aria-label="元に戻す" title="元に戻す">↶</button>
+          <button id="redoButton" class="tool icon-button" type="button" aria-label="やり直す" title="やり直す">↷</button>
+          <button id="mosaicPreviewButton" class="tool icon-button active" type="button" aria-pressed="true" aria-label="モザイク表示" title="モザイク表示">▦</button>
+        </div>
+        <div class="canvas-settings-bar" aria-label="編集設定">
+          <label class="numeric-control" for="brushSize"><span>ブラシ径</span><input id="brushSize" type="range" min="2" max="500" value="48"><output id="brushSizeValue">48 px</output></label>
+          <label class="numeric-control block-control" for="divisor"><span>モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
+        </div>
+        <div class="canvas-navigation-bar" aria-label="画像移動">
+          <span id="imageInfo" hidden>画像未選択</span><output id="reviewStatus" hidden>未確認</output>
+          <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ">›</button>
+          <button id="nextUnreviewedButton" type="button">次の未確認</button><button id="reviewAndNextButton" class="primary" type="button">確認済みにして次へ</button>
+          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span>ショートカット</span></label>
+        </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
         <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
     </section>
 
     <aside class="candidate-pane" data-i18n-aria-label="candidates.aria">
+      <div class="pane-heading inspector-heading">
+        <h2>現在画像</h2>
+        <button id="collapseInspectorButton" class="pane-collapse" type="button" aria-label="検出候補を折り畳む" title="検出候補を折り畳む">›</button>
+      </div>
+      <div class="inspector-current-actions" aria-label="現在の画像">
+        <button id="detectCurrentButton" type="button">自動検出</button>
+        <button id="saveButton" class="primary" type="button">ファイル保存</button>
+        <button id="clearCurrentMasksButton" type="button">モザイククリア</button>
+        <button id="removeCurrentImageButton" class="danger" type="button">画像削除</button>
+      </div>
       <section class="detection-settings">
         <h2 data-i18n="detection.title">検出設定</h2>
         <label class="threshold-control" for="confidence">
@@ -159,11 +150,11 @@
         <div class="overview-batch-toolbar" aria-label="全画像の操作">
           <button id="overviewDetectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
           <div class="batch-actions">
-            <button id="overviewSaveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存...</button>
+            <button id="overviewSaveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button>
             <button id="overviewBatchMoreButton" class="text-button" type="button" popovertarget="overviewBatchMoreMenu" aria-expanded="false" data-i18n="batch.clear">クリア</button>
             <div id="overviewBatchMoreMenu" class="batch-more-menu" popover>
-              <button id="overviewClearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア...</button>
-              <button id="overviewClearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア...</button>
+              <button id="overviewClearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button>
+              <button id="overviewClearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button>
             </div>
           </div>
         </div>
@@ -195,7 +186,7 @@
 
   <div id="catalogContextMenu" class="catalog-context-menu" popover="manual" role="menu" tabindex="-1" data-i18n-aria-label="context.menu" aria-label="画像の操作">
     <button id="toggleReviewMenuItem" type="button" role="menuitem"></button>
-    <button id="removeImageMenuItem" class="danger" type="button" role="menuitem" data-i18n="editor.removeFromCatalog">一覧から削除</button>
+    <button id="removeImageMenuItem" class="danger" type="button" role="menuitem" data-i18n="editor.removeFromCatalog">画像削除</button>
   </div>
 
   <dialog id="confirmDialog" class="modal-dialog confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
@@ -242,8 +233,12 @@
         <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
         <label class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
+        <div id="applyOutputDirectoryRow" class="output-directory-row">
+          <span id="applyOutputDirectoryStatus" class="fixed-note" data-i18n="apply.outputDirectoryUnset">保存先: 未選択</span>
+          <button id="chooseOutputDirectoryButton" type="button" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
+        </div>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
-        <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize">-</output></span></label>
+        <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize"></output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>
       <section id="applyProgressPanel" hidden data-i18n-aria-label="apply.progressPanel" aria-label="ファイル保存の進行状況">

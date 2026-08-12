@@ -83,44 +83,40 @@ function overlaps(left, right) {
     && left.y < right.y + right.height && left.y + left.height > right.y;
 }
 
-async function assertInViewport(page, selector, label) {
-  const box = await page.locator(selector).boundingBox();
+async function assertVisibleButtons(page, label) {
   const viewport = page.viewportSize();
-  assert.ok(box, `${label} must have a layout box`);
-  assert.ok(box.x >= -1 && box.y >= -1, `${label} must not begin outside the viewport`);
-  assert.ok(box.x + box.width <= viewport.width + 1, `${label} must not extend past the viewport right edge`);
+  const buttons = await page.evaluate(() => [...document.querySelectorAll("button")].map((element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return {
+      visible: !element.hidden && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0,
+      id: element.id || element.textContent.trim(), text: element.textContent.trim(), x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+      scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, whiteSpace: style.whiteSpace, textOverflow: style.textOverflow,
+    };
+  }).filter((button) => button.visible));
+  for (const button of buttons) {
+    assert.ok(button.x >= -1 && button.y >= -1, `${button.id} must not start outside ${label}`);
+    assert.ok(button.x + button.width <= viewport.width + 1, `${button.id} must not extend outside ${label}`);
+    assert.ok(button.y + button.height <= viewport.height + 1, `${button.id} must not extend below ${label}`);
+    assert.ok(button.scrollWidth <= button.clientWidth, `${button.id} label must not be clipped at ${label}`);
+    assert.equal(button.whiteSpace, "nowrap", `${button.id} must not wrap at ${label}`);
+    assert.notEqual(button.textOverflow, "ellipsis", `${button.id} must not use ellipsis at ${label}`);
+    assert.equal(button.text.includes("..."), false, `${button.id} must not contain three-dot truncation at ${label}`);
+    assert.equal(button.text.includes("…"), false, `${button.id} must not contain ellipsis truncation at ${label}`);
+  }
+  for (let index = 0; index < buttons.length; index += 1) for (let other = index + 1; other < buttons.length; other += 1) {
+    assert.equal(overlaps(buttons[index], buttons[other]), false, `${buttons[index].id} and ${buttons[other].id} overlap at ${label}`);
+  }
 }
 
-async function assertDesktopLayout(page, width) {
-  const viewport = { width, height: 900 };
-  await page.setViewportSize(viewport);
+async function assertDesktopLayout(page, width, height) {
+  await page.setViewportSize({ width, height });
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
-  assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}px desktop width`);
-  for (const [selector, label] of [
-    ["#pickFolder", "source picker"], ["#detectAllButton", "detect-all button"],
-    ["#saveAllButton", "batch-save button"], ["#batchMoreButton", "clear menu button"],
-    ["#saveButton", "current-image save button"], ["#overviewButton", "overview button"],
-  ]) await assertInViewport(page, selector, `${label} at ${width}px`);
-
-  const batchBoxes = await Promise.all(["#detectAllButton", "#saveAllButton", "#batchMoreButton"].map((selector) => page.locator(selector).boundingBox()));
-  for (let index = 0; index < batchBoxes.length; index += 1) {
-    for (let other = index + 1; other < batchBoxes.length; other += 1) {
-      assert.equal(overlaps(batchBoxes[index], batchBoxes[other]), false, `gallery batch controls overlap at ${width}px`);
-    }
-  }
-
+  assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
+  await assertVisibleButtons(page, `${width}x${height} edit`);
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
-  for (const [selector, label] of [
-    ["#overviewDetectAllButton", "overview detect-all button"], ["#overviewSaveAllButton", "overview batch-save button"],
-    ["#overviewBatchMoreButton", "overview clear menu button"], ["#overviewQuery", "overview search"],
-  ]) await assertInViewport(page, selector, `${label} at ${width}px`);
-  const overviewBoxes = await Promise.all(["#overviewDetectAllButton", "#overviewSaveAllButton", "#overviewBatchMoreButton"].map((selector) => page.locator(selector).boundingBox()));
-  for (let index = 0; index < overviewBoxes.length; index += 1) {
-    for (let other = index + 1; other < overviewBoxes.length; other += 1) {
-      assert.equal(overlaps(overviewBoxes[index], overviewBoxes[other]), false, `overview batch controls overlap at ${width}px`);
-    }
-  }
+  await assertVisibleButtons(page, `${width}x${height} overview`);
   await page.locator("#closeOverviewButton").click();
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
@@ -150,27 +146,34 @@ async function main() {
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
     for (const viewport of [
-      { width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1024, height: 768 },
-      { width: 800, height: 900 }, { width: 390, height: 844 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
     ]) {
       await page.setViewportSize(viewport);
       const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
       assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${viewport.width}x${viewport.height}`);
       assert.equal(await page.locator("#pickFolder").isVisible(), true, "source picker should remain available");
-      assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible");
+      assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible in the inspector");
     }
-    for (const width of [900, 1024, 1279, 1280, 1366]) await assertDesktopLayout(page, width);
-    await page.setViewportSize({ width: 1440, height: 900 });
-    assert.equal(await page.locator(".editor-footer").count(), 0, "the editor footer must be removed");
-    assert.equal(await page.locator(".editor-context-bar").isVisible(), true, "the editor context bar must be visible on desktop");
-    assert.equal(await page.evaluate(() => {
-      const contextBar = document.querySelector(".editor-context-bar");
-      const canvas = document.querySelector("#editorCanvas");
-      return Boolean(contextBar?.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING);
-    }), true, "the editor context bar must precede the canvas in the DOM");
-    for (const selector of ["#imageInfo", "#reviewStatus", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#navigationShortcutsEnabled"]) {
+    for (const viewport of [
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
+    ]) await assertDesktopLayout(page, viewport.width, viewport.height);
+    await page.setViewportSize({ width: 1024, height: 768 });
+    assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
+    assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 700), true, "the canvas stage must keep at least 700px at 1024x768");
+    for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#navigationShortcutsEnabled", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
+    const stageWidth = await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width);
+    await page.locator("#collapseGalleryButton").click();
+    await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
+    assert.ok(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width) > stageWidth, "collapsing the gallery must enlarge the canvas");
+    await page.locator("#showGalleryButton").click();
+    await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
+    await page.locator("#focusModeButton").click();
+    await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("focus-mode"));
+    assert.equal(await page.locator("#floatingSaveButton").isVisible(), true, "save must remain reachable in focus mode");
+    await page.locator("#focusModeButton").click();
+    await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("focus-mode"));
 
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);

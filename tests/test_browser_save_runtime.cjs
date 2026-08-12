@@ -144,6 +144,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
       };
     },
   };
+  const browserWindow = { devicePixelRatio: 1, addEventListener() {} };
   const context = {
     console,
     document,
@@ -159,7 +160,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
     Image: class {},
     URL: { createObjectURL() { return "blob:runtime-test"; }, revokeObjectURL() {} },
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
-    window: { devicePixelRatio: 1, addEventListener() {} },
+    window: browserWindow,
     navigator: {
       locks: {
         async request(name, options, callback) {
@@ -180,9 +181,9 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
   };
 
   let source = fs.readFileSync(appPath, "utf8");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory };\n");
   vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, ensureSaveSources, runBrowserSave, saveTargets } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.translations = {
     "apply.complete": "complete {completed}",
@@ -191,7 +192,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { directory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave, saveTargets, state };
+  return { directory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
@@ -407,6 +408,28 @@ async function runPartialCommitFailureReconcileCase() {
   assert.equal(runtime.state.galleryNodes.has(exclusionOnly.id), false, "the masked gallery excludes an exclusion-only draft");
 }
 
+async function runOutputDirectoryReuseCase() {
+  const firstDirectory = new FakeDirectoryHandle();
+  const secondDirectory = new FakeDirectoryHandle();
+  const runtime = createRuntime({ directory: firstDirectory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  let pickerCalls = 0;
+  runtime.window.showDirectoryPicker = async () => {
+    pickerCalls += 1;
+    return pickerCalls === 1 ? firstDirectory : secondDirectory;
+  };
+  firstDirectory.queryPermission = async () => "granted";
+
+  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
+  assert.equal(pickerCalls, 1, "the first copy save selects a destination");
+  assert.equal(runtime.state.outputDirectory, firstDirectory);
+  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
+  assert.equal(pickerCalls, 1, "the selected destination is reused within the tab");
+
+  await runtime.chooseOutputDirectory();
+  assert.equal(pickerCalls, 2, "saving settings can explicitly replace the destination");
+  assert.equal(runtime.state.outputDirectory, secondDirectory);
+}
+
 (async () => {
   await runSuccessCase();
   await runStaleCommitCase();
@@ -419,5 +442,6 @@ async function runPartialCommitFailureReconcileCase() {
   await runHandleDeleteAfterCopyCase();
   await runForeignCollisionCase();
   await runPartialCommitFailureReconcileCase();
+  await runOutputDirectoryReuseCase();
   console.log("test_browser_save_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
