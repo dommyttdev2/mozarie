@@ -17,6 +17,16 @@ function startFixtureServer() {
   const detectRequests = [];
   const server = http.createServer(async (request, response) => {
     const requestPath = new URL(request.url, "http://127.0.0.1").pathname;
+    if (requestPath === "/api/settings") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ settings: {
+        general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
+        models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", provider: "gpu" },
+        display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true },
+        detection: { mode: "standard", threshold: 0.5, parallelism: 2 },
+      }, status: { models: {} } }));
+      return;
+    }
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
@@ -40,7 +50,7 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/candidates/sample") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ candidates: [] }));
+      response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
       return;
     }
     if (requestPath.startsWith("/api/thumbnail/") || requestPath.startsWith("/api/image/")) {

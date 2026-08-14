@@ -22,6 +22,8 @@ const state = {
   // This handle is scoped to this browser tab and reused for copy saves.
   outputDirectory: null, outputDirectoryName: "",
   galleryCollapsed: false, inspectorCollapsed: false,
+  settings: null, settingsStatus: null,
+  imageCache: new Map(), candidateBundleCache: new Map(),
 };
 
 const canvas = $("#editorCanvas");
@@ -54,7 +56,8 @@ function t(key, params = {}) {
 
 async function loadTranslations() {
   try {
-    state.translations = await fetch("/i18n/ja.json").then((response) => response.ok ? response.json() : {});
+    const language = state.settings?.general?.language === "en" ? "en" : "ja";
+    state.translations = await fetch(`/i18n/${language}.json`).then((response) => response.ok ? response.json() : {});
   } catch {
     state.translations = {};
   }
@@ -70,6 +73,12 @@ async function loadTranslations() {
   document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
     const value = state.translations[element.dataset.i18nPlaceholder]; if (value) element.placeholder = value;
   });
+  const sectionHeadings = document.querySelectorAll(".candidate-section h3");
+  if (sectionHeadings[0]) sectionHeadings[0].textContent = t("candidates.applyRanges");
+  if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
+  const polygonDetect = $("#polygonDetectButton"); const polygonCancel = $("#polygonCancelButton");
+  if (polygonDetect) polygonDetect.textContent = t("polygon.detect");
+  if (polygonCancel) polygonCancel.textContent = t("polygon.cancel");
 }
 
 function api(path, options = {}) {
@@ -81,7 +90,8 @@ function api(path, options = {}) {
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const error = new Error(data.error || t("error.requestFailed"));
+        const localized = data.error_code ? t(`errorCode.${data.error_code}`, data.params || {}) : "";
+        const error = new Error(localized && localized !== `errorCode.${data.error_code}` ? localized : (data.error || t("error.requestFailed")));
         error.status = response.status;
         throw error;
       }
@@ -292,6 +302,7 @@ function setMosaicPreviewEnabled(enabled) {
 }
 
 function resetCatalog(images, root) {
+  releaseImageCaches();
   state.images = images;
   state.sourceAccess.clear();
   state.reviewRoot = normaliseReviewRoot(root);
@@ -562,7 +573,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   setStatus(t("status.loadingImages"), "running");
   try {
     const [image, candidateBundle] = await Promise.all([
-      loadImage(`/api/image/${encodeURIComponent(imageId)}?t=${Date.now()}`),
+      cachedImage(record),
       loadCandidateBundle(imageId, generation),
     ]);
     syncCandidateRecord(imageId, candidateBundle.candidates);
@@ -579,6 +590,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     updateCandidateStatus();
     renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatus(t("status.editReady"));
+    prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
       state.pendingImageId = null;
@@ -594,6 +606,42 @@ function loadImage(source) {
     image.onerror = () => reject(new Error(t("error.imageLoad")));
     image.src = source;
   });
+}
+
+function lruRemember(cache, key, value, limit) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) cache.delete(cache.keys().next().value);
+  return value;
+}
+
+function imageCacheKey(record) { return `${record.id}:${record.contentVersion || record.mtimeNs || 0}`; }
+function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }
+
+async function cachedImage(record) {
+  const key = imageCacheKey(record);
+  const cached = state.imageCache.get(key);
+  if (cached) return lruRemember(state.imageCache, key, cached, 6);
+  const image = await loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`);
+  return lruRemember(state.imageCache, key, image, 6);
+}
+
+function prefetchNeighbors(record) {
+  const index = state.images.findIndex((item) => item.id === record.id);
+  for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
+    if (!neighbor || state.imageCache.has(imageCacheKey(neighbor))) continue;
+    void cachedImage(neighbor).catch(() => {});
+  }
+}
+
+function releaseImageCaches(imageId = null) {
+  const matches = (key) => !imageId || key.startsWith(`${imageId}:`);
+  for (const [key, image] of state.imageCache) {
+    if (!matches(key)) continue;
+    image.src = "";
+    state.imageCache.delete(key);
+  }
+  for (const key of state.candidateBundleCache.keys()) if (matches(key)) state.candidateBundleCache.delete(key);
 }
 
 async function loadCandidateMask(source) {
@@ -612,12 +660,15 @@ async function loadCandidateMask(source) {
 
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
+  const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
+  const cached = state.candidateBundleCache.get(cacheKey);
+  if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12);
   try {
     const candidateImages = new Map();
     await Promise.all(candidateData.candidates.map(async (candidate) => {
-      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`));
+      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?v=${encodeURIComponent(candidateData.candidateRevision || 0)}`));
     }));
-    return { candidates: candidateData.candidates, candidateImages };
+    return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages }, 12);
   } catch (error) {
     if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
       return loadCandidateBundle(imageId, generation, true);
@@ -963,6 +1014,7 @@ function renderCandidates() {
     enabled.addEventListener("change", () => {
       if (isBusy() || state.importing) { enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled; return; }
       if (isApply) state.manualEnabled = enabled.checked; else state.manualExclusionEnabled = enabled.checked;
+      setReviewed(currentRecord(), false);
       resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
     const spacer = document.createElement("span"); spacer.setAttribute("aria-hidden", "true");
@@ -988,6 +1040,7 @@ function renderCandidates() {
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
       candidate.enabled = enabled.checked;
+      setReviewed(currentRecord(), false);
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     });
     const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
@@ -1088,6 +1141,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
 async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
   const imageId = state.currentId;
+  setReviewed(currentRecord(), false);
   const generation = state.imageGeneration;
   const mutationKey = candidateMutationKey(imageId, candidate.id);
   const version = nextCandidateMutationVersion(mutationKey);
@@ -1127,6 +1181,7 @@ function deleteManualMask() {
   if (!state.manualMaskPresent || isBusy() || state.importing) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   state.manualMaskPresent = false; state.manualEnabled = true;
+  setReviewed(currentRecord(), false);
   resetHistoryToCurrentManualMask(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -1134,6 +1189,7 @@ function deleteManualExclusion() {
   if (!canvasHasPixels(exclusionCtx, exclusionCanvas) || isBusy() || state.importing) return;
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   state.manualExclusionEnabled = true;
+  setReviewed(currentRecord(), false);
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -1274,6 +1330,7 @@ function completeManualStroke() {
   }
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+  setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates();
 }
 
@@ -1281,6 +1338,7 @@ function restoreSnapshot(index) {
   if (isBusy() || state.importing || index < 0 || index > state.history.length) return;
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
+  setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -1304,12 +1362,12 @@ function openDetectionDialog(imageIds) {
   $("#detectDialog").showModal();
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, mode = selectedDetectionMode()) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.detectionStarting = true;
   updateActionButtons();
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))) }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), mode }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
@@ -1324,10 +1382,16 @@ async function startDetectionFromDialog(event) {
   if (!imageIds.length) return;
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
+  const mode = selectedDetectionMode();
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
-  await runDetection(imageIds, confidence, parallelism);
+  if (state.settings) {
+    state.settings.detection = { threshold: confidence, parallelism, mode };
+    try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
+    catch (error) { setStatus(error.message, "error"); return; }
+  }
+  await runDetection(imageIds, confidence, parallelism, mode);
 }
 
 async function cancelDetection() {
@@ -2100,6 +2164,7 @@ async function clearCatalog() {
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
+    releaseImageCaches();
     state.images = []; state.sourceAccess.clear(); state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.overviewFolder = ""; clearEditor(); renderCatalogViews();
     setStatus(t("status.chooseFolder"));
@@ -2167,6 +2232,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
     const data = await api(`/api/catalog/image/${encodeURIComponent(imageId)}`, { method: "DELETE" });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     state.images = data.images;
+    releaseImageCaches(imageId);
     state.sourceAccess.delete(imageId);
     state.drafts.delete(imageId);
     state.maskStatus.delete(imageId);
@@ -2423,7 +2489,91 @@ function closeBatchMoreMenus() {
   }
 }
 
+function selectedDetectionMode() {
+  return document.querySelector('input[name="detectMode"]:checked')?.value || state.settings?.detection?.mode || "standard";
+}
+
+function ensureDetectionModeControl() {
+  if (document.querySelector('input[name="detectMode"]')) return;
+  const form = $("#detectForm");
+  if (!form?.insertAdjacentHTML) return;
+  form.insertAdjacentHTML("beforeend", `
+    <fieldset class="mode-choice" id="detectMode" aria-label="${t("detectDialog.mode")}">
+      <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span>${t("detectDialog.standard")}</span></label>
+      <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span>${t("detectDialog.highPrecision")}</span></label>
+    </fieldset>`);
+}
+
+function setSettingsForm(settings, status = null) {
+  state.settings = settings; state.settingsStatus = status;
+  $("#settingsLanguage").value = settings.general.language;
+  $("#settingsShortcuts").checked = settings.general.shortcuts_enabled;
+  $("#settingsTargetModel").value = settings.models.target_segmentation;
+  $("#settingsHandModel").value = settings.models.hand_detection;
+  $("#settingsSamModel").value = settings.models.sam_checkpoint;
+  $("#settingsProvider").value = settings.models.provider;
+  $("#settingsApplyColor").value = settings.display.apply_color;
+  $("#settingsExcludeColor").value = settings.display.exclude_color;
+  $("#settingsOpacity").value = settings.display.overlay_opacity;
+  $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
+  setDetectionConfidence(settings.detection.threshold);
+  $("#detectParallelism").value = String(settings.detection.parallelism);
+  const mode = settings.detection.mode;
+  const radio = document.querySelector(`input[name="detectMode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  const modelStatus = Object.values(status?.models || {});
+  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every((model) => model.valid)
+    ? t("settings.modelsReady") : t("settings.modelsRequired");
+}
+
+function settingsPayload() {
+  return {
+    general: { ...state.settings.general, language: $("#settingsLanguage").value, shortcuts_enabled: $("#settingsShortcuts").checked },
+    models: {
+      target_segmentation: $("#settingsTargetModel").value.trim(), hand_detection: $("#settingsHandModel").value.trim(),
+      sam_checkpoint: $("#settingsSamModel").value.trim(), provider: $("#settingsProvider").value,
+    },
+    display: {
+      apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
+      overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
+    },
+    detection: { threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value), parallelism: detectionParallelism(), mode: selectedDetectionMode() },
+  };
+}
+
+function selectSettingsTab(name) {
+  document.querySelectorAll(".settings-tab").forEach((button) => button.classList.toggle("active", button.dataset.settingsTab === name));
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
+}
+
+async function openSettings() {
+  if (isBusy()) return;
+  try {
+    const data = await api("/api/settings");
+    setSettingsForm(data.settings, data.status);
+    selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
+  } catch (error) { setStatus(error.message, "error"); }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
+  try {
+    const data = await api("/api/settings", { method: "POST", body: JSON.stringify(settingsPayload()) });
+    const languageChanged = state.settings?.general?.language !== data.settings.general.language;
+    setSettingsForm(data.settings, data.status);
+    state.navigationShortcutsEnabled = data.settings.general.shortcuts_enabled;
+    setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
+    result.textContent = t("settings.saved");
+    if (languageChanged) await loadTranslations();
+  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
+}
+
 function bindEvents() {
+  $("#settingsButton").addEventListener("click", () => { void openSettings(); });
+  $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
+  $("#settingsForm").addEventListener("submit", saveSettings);
+  document.querySelectorAll(".settings-tab").forEach((button) => button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab)));
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });
   for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {
@@ -2647,8 +2797,12 @@ function bindEvents() {
 }
 
 async function initialise() {
-  await loadTranslations(); bindEvents();
-  try { state.navigationShortcutsEnabled = localStorage.getItem("lets-censoring.navigation-shortcuts.v1") !== "false"; } catch { state.navigationShortcutsEnabled = true; }
+  try {
+    const settings = await api("/api/settings");
+    setSettingsForm(settings.settings, settings.status);
+  } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
+  await loadTranslations(); ensureDetectionModeControl(); bindEvents();
+  try { state.navigationShortcutsEnabled = state.settings?.general?.shortcuts_enabled ?? (localStorage.getItem("lets-censoring.navigation-shortcuts.v1") !== "false"); } catch { state.navigationShortcutsEnabled = true; }
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();

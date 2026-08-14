@@ -1371,7 +1371,9 @@ class MosaicStudioTests(unittest.TestCase):
             state.root = Path(directory)
             state.images = {record.image_id: record}
             state.order = [record.image_id]
-            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
+            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
+                 patch.object(state, "_refine_detected_segments", side_effect=lambda _models, _record, _rgb, segments: segments), \
+                 patch.object(state, "_ensure_models", return_value=DetectionModels(precise=object())):
                 created = state.add_boundary_candidate(
                     record.image_id,
                     {"roi": {"left": 3, "top": 3, "right": 9, "bottom": 9}, "point": {"x": 5, "y": 5}},
@@ -1384,6 +1386,52 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertTrue(np.any(combined[3:9, 3:9]))
             self.assertFalse(np.any(combined[:3]))
             self.assertFalse(np.any(combined[:, :3]))
+
+    def test_boundary_candidate_keeps_hand_fluid_as_an_independent_exclusion(self):
+        class FakePredictor:
+            def predict(self, **_kwargs):
+                masks = np.zeros((1, 12, 12), dtype=bool)
+                masks[0, 2:10, 2:10] = True
+                return masks, np.asarray([0.9]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
+
+            def refine(_models, _record, _rgb, segments):
+                segments[0]["mask"][4:8, 4:8] = 0
+                segments[0]["refinement"] = "hand_fluid"
+                return segments
+
+            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
+                 patch.object(state, "_refine_detected_segments", side_effect=refine), \
+                 patch.object(state, "_ensure_models", return_value=DetectionModels(precise=object())):
+                state.add_boundary_candidate(record.image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
+
+            candidates = state.list_candidates(record.image_id)
+            self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude"])
+            self.assertEqual(candidates[1]["source"], "hand_fluid_exclusion")
+            self.assertFalse(np.any(state.combined_candidate_mask(record.image_id)[4:8, 4:8]))
+
+    def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
+        class FakePredictor:
+            def predict(self, **_kwargs):
+                masks = np.zeros((1, 12, 12), dtype=bool)
+                masks[0, 0:2, 0:2] = True
+                return masks, np.asarray([0.99]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            mask = np.zeros((12, 12), dtype=np.uint8); mask[3:9, 3:9] = 255
+            segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "precise"}
+            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
+                refined = state._high_precision_segments(DetectionModels(precise=object()), record, [segment])[0]
+            self.assertTrue(np.array_equal(refined["mask"], mask))
+            self.assertEqual(refined["refinement"], "sam_fallback")
 
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:

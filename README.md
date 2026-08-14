@@ -1,121 +1,63 @@
-# Lets Censoring
+# Mozarie
 
-Lets Censoring は、ローカルの画像を確認し、モザイク候補の検出・調整・保存を行うブラウザアプリです。ComfyUI とは独立して動作し、ComfyUI 本体や `custom_nodes` を起動・停止・変更しません。
+Mozarie is a local desktop-oriented image review and mosaic editor. It loads images from a folder or browser import, proposes mosaic and exclusion ranges, lets you refine them by hand, and saves images without discarding their existing PNG, JPEG, or WebP metadata.
 
-対応形式は PNG、JPEG（`.jpg` / `.jpeg`）、WebP です。自動検出の結果は候補であり、検出精度を保証するものではありません。販売用などに使う前には、すべての画像を人間が確認してください。
+## What is included
 
-## 必要環境と起動
+- Local HTTP server and browser UI.
+- Direct ONNX Runtime adapters for target segmentation and hand detection.
+- A local PyTorch Segment Anything checkpoint for rectangle and four-point boundary refinement.
+- Manual apply/exclude brushes, per-range enable, delete, and blink review aids.
+- Japanese and English UI dictionaries.
 
-このアプリは、既存の ComfyUI Portable に含まれる Python を使用します。`run.bat` を実行するとサーバーを起動し、既定のブラウザで次のアドレスを開きます。
+No model file, image, cache, personal path, or local configuration is included in this repository.
 
-`http://127.0.0.1:8765`
+## Requirements
 
-`run.bat` は現在、次の Python を参照しています。
+- Windows 10 or later.
+- Python 3.11 or later.
+- A browser with the File System Access API is recommended for browser copy saves (Chrome or Edge).
+- Python packages listed in `requirements.txt`.
+- Three local model files selected in **Settings > Models**:
+  - Target segmentation model in ONNX format.
+  - Hand detection model in ONNX format.
+  - A compatible Segment Anything checkpoint.
 
-`G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\python_embeded\python.exe`
+GPU execution requires an ONNX Runtime GPU build and a compatible CUDA provider. CPU is available in Settings for environments without GPU inference.
 
-Python 環境には `Pillow`、`numpy`、`opencv-python`、`torch`、`ultralytics`、`segment_anything` が必要です。Lets Censoring 自身は、起動時にパッケージを追加インストールしません。
+## Setup
 
-## 自動検出モデル
+1. Create and activate a Python environment.
+2. Install dependencies: `pip install -r requirements.txt`.
+3. Start the application with `python server.py`.
+4. Open **Settings > Models** and select the three local files. Mozarie validates their presence before use; it never downloads or bundles models.
 
-自動検出では、精密性器セグメンテーションを最優先で使います。精密モデルは全画像を一度だけ 1280 px で検出し、`penis` と `vagina`（画面上は従来どおり `pussy`）だけを候補にします。旧モデルはタイル検出の補助として残るため、精密モデルが取りこぼした部位も候補になります。
+Local options are written to `config/local.json`, which is ignored by Git. Defaults are in `config/defaults.json`.
 
-同じクラスの候補が重なった場合は、精密モデルのマスクを採用し、旧モデルの広いマスクと合成しません。これにより、精液・手・周囲の衣服まで一緒にモザイクされる量を減らします。陰茎候補の内側だけでは、HSV の低彩度・高輝度成分を小さな連結領域に限定して白い体液として除外します。これは色ベースの限定的な補正であり、追加モデルは使いません。
+## Model and license responsibilities
 
-| 種別 | パス |
-| --- | --- |
-| precise genital segmentation | `models\ultralytics\nsfw-anime-xl-x1280.onnx` |
-| anime hand detection | `models\ultralytics\anime-hand-v1.0-s.onnx` |
-| optional primary fallback | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt` |
-| optional secondary fallback | `G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt` |
+Mozarie does not distribute detection or SAM model weights. You are responsible for obtaining each model from its official source and confirming that its license permits your intended use. `THIRD_PARTY_NOTICES.md` identifies the runtime libraries used by Mozarie; it does not grant rights to any model.
 
-精密モデルと手モデルは起動中に自動ダウンロードしません。初回読込前にファイルサイズと SHA-256 を検証し、不一致なら検出を止めます。ONNX Runtime の `CUDAExecutionProvider` が実際に選ばれなかった場合も、CPUで長時間実行せず日本語エラーで停止します。
+## Verification
 
-| モデル | 入手元（固定revision） | サイズ | SHA-256 | ライセンス |
-| --- | --- | ---: | --- | --- |
-| precise | `https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx` | 126350117 | `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a` | MIT |
-| hand | `https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx` | 44583229 | `408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0` | OpenRAIL |
-
-旧primary/secondaryは精密モデルの検出漏れを補います。手検出は画像ごとに一度だけ実行し、全性器候補と重なる手だけを対象にします。手の矩形は長辺の3%（2〜16 px）だけ広げ、予測品質0.88以上で矩形内に十分収まるSAM輪郭だけを全候補へ共通して減算します。候補の70%超を除去する場合、または元面積の15%か32 pxの大きい方を残せない場合は手の除外を適用しません。白い体液の除外は陰茎候補だけに行い、低彩度・高輝度の小成分を最大8件・候補面積の合計20%までに制限します。
-
-## 境界選択用の SAM
-
-「境界」ツールは SAM ViT-B を使います。Meta の公式チェックポイントをダウンロードして、次の場所へ配置してください。
-
-- 入手元: [Segment Anything の公式モデルチェックポイント](https://github.com/facebookresearch/segment-anything#model-checkpoints)
-- 直接ダウンロード: `https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth`
-- 配置先: `G:\AI\doujin-ai-lab\tools\MosaicStudio\models\sam_vit_b_01ec64.pth`
-
-## 基本操作
-
-1. 上部の「画像を追加」を押すと、小さなメニューから「画像ファイルを選択」または「フォルダーを選択」を選べます。ブラウザのファイル選択を使い、画像ファイルは複数選択して一覧へ追加できます。フォルダーは配下の PNG / JPEG / WebP を再帰的に読み込み、一覧を置き換えます。
-2. 画像は画面へドラッグ＆ドロップでも追加できます。フォルダーをドロップした場合は、その配下にある対応画像を追加します。フォルダーを先に読み込む必要はありません。ドラッグ追加・画像ファイル選択の画像は元ファイルを変更せず、`%TEMP%\LetsCensoring\session-...\imports` の作業用セッションへ原バイト列のまま一時保存します。
-3. 画像選択画面で選んだ画像は、移動やコピーをせず、同じフォルダ内の元ファイルをそのまま一覧へ追加します。
-4. 「自動検出」で現在の画像を検出し、「全画像を自動検出」で一覧全体を検出します。右側の候補一覧で、適用する候補を ON / OFF でき、各行の赤い×でその候補だけを削除できます。判定しきい値は 0.10～1.00、初期値は 0.50 で、精密モデルにはこの値をそのまま適用します。自動候補に出すクラスは `penis` と `pussy` だけです。
-5. 「境界」を選び、対象の周囲をドラッグして白い範囲を作ります。その範囲内の対象をクリックすると、SAM が輪郭候補を追加します。候補の追加に成功すると範囲は消え、失敗した場合は同じ範囲で再試行できます。境界候補も通常の候補一覧で ON / OFF できます。
-6. 中央ツールバーの「モザイク表示」で実際のモザイクプレビューだけを表示・非表示にできます。候補、手描き、除外、保存対象は変わりません。
-7. 「ブラシ」はモザイクを追加する範囲を描きます。手描き範囲は右側に「手書き」として1件表示され、チェックで一時的に無効化、赤い×で追加範囲だけを削除できます。「ブラシ」と「消しゴム」の描画だけは「元に戻す」「やり直す」の対象です。
-8. 編集中は候補・手描き範囲に実際のモザイクがプレビューされます。「モザイク適用済」タブには、最終合成マスクが残っている画像だけが出ます。「モザイク画像を一括保存」はモザイク指定のある画像だけを対象にし、現在画像は「ファイル保存」から個別に保存できます。
-
-画像一覧の各画像は右クリックから確認状態を切り替えたり、作業一覧から外したりできます。「画像削除」は候補・手描き指定・一時キャッシュだけを破棄し、元画像ファイルは削除しません。
-
-現在画像の「モザイククリア」と、全画像操作の「クリア」にある「全画像のモザイク指定をクリア」は、未適用の自動検出候補・境界候補・手描き範囲を消します。すでに画像ファイルへ焼き込んで保存したモザイクを元に戻す機能ではありません。
-
-全画像操作の「クリア」にある「読み込んだ画像をすべてクリア」は、画面上の画像一覧だけを空にします。通常の参照画像は削除しません。ドラッグ追加画像の作業用セッションだけを削除します。アプリを正常に終了した場合や別のフォルダを読み込んだ場合も、そのセッションは自動で削除されます。異常終了時の残骸は次回起動時に清掃します。
-
-## 保存モーダル
-
-ファイル保存では次を設定できます。
-
-- **コピー保存**: 初回だけブラウザの保存先フォルダー選択が開きます。同じタブでは選んだ保存先を再利用し、変更が必要なときだけ「保存先を変更」を使います。読込元のサブフォルダー構成を維持して `_censored` を拡張子の直前へ付けたコピーを保存します。`image.png` は `image_censored.png`、同名があれば `image_censored_2.png` になります。
-- **ファイル名の末尾**: コピー保存時に拡張子の直前へ付ける文字列を指定します。`image.sample.png` のような複数ドットの名前も保ちます。
-- **元画像を上書き**: フォルダー読込画像に加え、参照・フォルダー参照・対応ブラウザでのドラッグ読込画像も、元ファイルの書込み権限を保持できた場合に直接保存できます。読込後に元ファイルが変更されていた場合は中止します。
-- **コピー保存後に元画像を削除**: コピー保存が成功した場合だけ、元画像を削除します。参照元の削除権限を持たない画像を含む場合は選べません。権限が取れない通常のファイル入力はコピー保存だけです。
-- **モザイク粗さ**: `1 / 100` のように分母を指定します。画像ごとに `max(4, ceil(長辺 / 分母))` のブロックサイズを自動で使います。たとえば 832×1216 の画像では `1 / 100` が 13 px です。
-
-コピー名が既に存在する場合は、自動で連番を付け、存在を確認できた既存ファイルには触れません。コピー保存はChrome/Edgeのフォルダー選択と書込み許可を利用します。参照元への上書き・削除も、同じブラウザのファイルハンドル権限を使います。保存先を選択できないブラウザでは、日本語のエラーを表示して保存しません。サーバーは保存先パスを受け取らず、1枚ずつメタデータ検証済みの出力バイト列を返します。ブラウザ側の書込みまたはコピー後の削除が成功した画像だけが確定され、候補と手書き範囲がクリアされます。書込み失敗またはキャンセル時も他のファイルを消さないため、空の予約ファイルが残る場合があります。ブラウザAPIだけでは外部アプリとの厳密な排他はできないため、同じ保存先へ別アプリから同時に書き込まないでください。保存中は進捗と現在処理中のファイル名を表示し、「一時停止」「再開」「キャンセル」を利用できます。
-
-## ショートカットとキャンバス操作
-
-- 中ボタンドラッグ: 画像を移動
-- ホイール: 拡大・縮小
-- `Shift` + ホイール: ブラシ径を変更
-- `Ctrl` + `Z`: 元に戻す
-- `Ctrl` + `Shift` + `Z`: やり直す
-- 左クリック／ドラッグ: 選択中のブラシ、消しゴム、境界ツールを操作
-- 右クリック: 描画しない
-
-## 保存時の安全性
-
-保存ではモザイク部分だけを書き換え、元画像のメタデータ保持とデコード確認を行ってから置き換えます。
-
-- PNG: `IDAT` だけを置換し、ComfyUI の `prompt` / `workflow` を含む ancillary chunks を保持・検証します。
-- JPEG: APP0-APP15 と COM セグメントを保持・検証します。
-- WebP: ICCP / EXIF / XMP を保持・検証します。アニメーション WebP と未対応・未知のチャンク構成を持つ WebP は保存を拒否します。
-- 元画像を上書きした場合は、保存後も元のタイムスタンプを引き継ぎます。コピー保存したファイルは保存時刻になります。
-- 一時ファイルを検証してから原子的な置換を行います。メタデータ不一致やデコード失敗時は、置換前に中止するため原本は変更しません。
-
-ただし、画像形式やファイルシステムのすべての障害を防げるわけではありません。重要な原本は別途バックアップを残した上で使ってください。
-
-## 別の PC で使う場合
-
-現在の実装は Windows の絶対パスに依存しています。別の PC や別のフォルダへ移す場合は、環境に合わせて以下を確認・変更してください。
-
-- `run.bat` の `PYTHON`
-- `server.py` の `MODEL_PATH`
-- `server.py` の `SECOND_MODEL_PATH`
-- 必要に応じて SAM の配置先 `models\sam_vit_b_01ec64.pth`
-
-## テスト
-
-リポジトリのルートで実行します。
+Run the non-inference test suite from this directory:
 
 ```powershell
-& 'G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\python_embeded\python.exe' -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 node tests/test_app_js.cjs
 node tests/test_browser_save_contract.cjs
 node tests/test_browser_save_runtime.cjs
 node tests/test_import_picker_e2e.cjs
-node --check static/app.js
-git diff --check
 ```
+
+The tests use fixtures and mocks. They do not run model inference.
+
+## Data handling
+
+- Imported browser files are kept in a temporary session folder until removed or saved.
+- Process cache files are written under `.mozarie-cache/` and are ignored by Git.
+- Saving preserves image metadata using the existing save pipeline. Always inspect output before publishing.
+
+## License
+
+Source license selection is intentionally left to the repository owner. Do not publish this repository until you have selected a license compatible with every dependency and your distribution plan.

@@ -1,4 +1,4 @@
-"""Lets Censoring local image-review and mosaic editor.
+"""Mozarie local image-review and mosaic editor.
 
 The server never accepts a client supplied file path.  Files are first found
 under a user-selected root, then addressed through opaque catalogue ids.
@@ -42,7 +42,7 @@ import torch
 from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
-from mozarie.config import SettingsStore
+from mozarie.config import SettingsError, SettingsStore
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -68,21 +68,21 @@ class LocalModelManifest:
 
 PRECISE_MODEL = LocalModelManifest(
     name="精密性器セグメンテーション",
-    path=APP_DIR / "models" / "ultralytics" / "nsfw-anime-xl-x1280.onnx",
+    path=Path(),
     size=126_350_117,
     sha256="92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a",
     revision="1697d5d1827b6a818b350b44bf3ec27f08837a2a",
     license="MIT",
-    url="https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx",
+    url="",
 )
 HAND_MODEL = LocalModelManifest(
     name="アニメ手検出",
-    path=APP_DIR / "models" / "ultralytics" / "anime-hand-v1.0-s.onnx",
+    path=Path(),
     size=44_583_229,
     sha256="408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
     revision="0c4ab4d58aafbd56794c82a9c1fe424f86c5780d",
     license="OpenRAIL",
-    url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx",
+    url="",
 )
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis"}
@@ -134,6 +134,11 @@ JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
 
 class ClientError(ValueError):
     """An invalid request that can be shown directly in the UI."""
+
+    def __init__(self, message: str, code: str = "invalid_request", params: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.params = params or {}
 
 
 class ForbiddenClientError(ClientError):
@@ -283,7 +288,7 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def normalize_precise_class(class_name: str) -> str | None:
-    """Map the precise model's labels onto Lets Censoring's stable class names."""
+    """Map target-model labels onto Mozarie's stable class names."""
     normalized = class_name.strip().lower()
     if normalized == "vagina":
         return "pussy"
@@ -598,7 +603,7 @@ def confidence_for_class(source: str, class_name: str, confidence: float) -> flo
 class DetectionModels:
     precise: TargetSegmenter
     # These are retained as inert attributes only so old in-memory sessions can
-    # be shut down safely. New detection never reads legacy .pt models.
+    # be shut down safely. New detection never reads legacy fallback models.
     primary: Any | None = None
     secondary: Any | None = None
     hand: HandDetector | None = None
@@ -644,6 +649,37 @@ class StudioState:
         self.sam_lock = threading.RLock()
         self.inference_lock = threading.Lock()
         self._cleanup_stale_sessions()
+
+    def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
+        """Persist user-selected options and release only model objects that changed."""
+        if not isinstance(update, dict):
+            raise ClientError("設定の形式が正しくありません。", "invalid_settings")
+        with self.lock:
+            if self._has_active_worker():
+                raise ClientError("処理中は設定を変更できません。", "job_running")
+            previous_models = dict(self.settings.get("models", {}))
+            try:
+                settings = self.settings_store.save(update)
+            except SettingsError as exc:
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+            self.settings = settings
+            if settings["models"] != previous_models:
+                self.models = None
+                self.sam_predictor = None
+                self.sam_image_id = None
+            return self.settings
+
+    def settings_status(self) -> dict[str, Any]:
+        """Report local path readiness without opening a model or running inference."""
+        models = self.settings["models"]
+        result: dict[str, dict[str, Any]] = {}
+        for key, required_suffix in (("target_segmentation", ".onnx"), ("hand_detection", ".onnx"), ("sam_checkpoint", None)):
+            raw = str(models.get(key, "")).strip()
+            path = Path(raw).expanduser() if raw else None
+            exists = bool(path and path.is_file())
+            valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
+            result[key] = {"configured": bool(raw), "exists": exists, "valid": valid}
+        return {"models": result, "provider": models["provider"]}
 
     @staticmethod
     def _lock_directory(directory: Path) -> Any:
@@ -1309,8 +1345,13 @@ class StudioState:
         image_ids: list[str],
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
+        mode: str | None = None,
     ) -> None:
+        mode = mode or str(self.settings.get("detection", {}).get("mode", "standard"))
+        if mode not in {"standard", "high_precision"}:
+            raise ClientError("検出モードが正しくありません。", "invalid_detection_mode")
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
+        self._active_detection_mode = mode
         self._start_job(
             "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
             expected_catalog_generation=catalog_generation,
@@ -1685,12 +1726,14 @@ class StudioState:
         records: list[ImageRecord],
         confidence: float,
         parallelism: int = 2,
+        mode: str | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
+            mode = mode or getattr(self, "_active_detection_mode", "standard")
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
             model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
             groups = [records[index::worker_count] for index in range(worker_count)]
@@ -1806,7 +1849,7 @@ class StudioState:
     def _detect_legacy_segments(
         self, models: DetectionModels, rgb: Image.Image, confidence: float
     ) -> list[dict[str, Any]]:
-        # Legacy Ultralytics/.pt fallback was deliberately removed. Keeping this
+        # Legacy fallback inference was deliberately removed. Keeping this
         # method preserves the stable detection pipeline shape for callers.
         return []
 
@@ -1873,7 +1916,49 @@ class StudioState:
             segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
         return segments
 
-    def _detect_image(self, models: DetectionModels, record: ImageRecord, confidence: float) -> list[Candidate]:
+    def _high_precision_segments(
+        self, models: DetectionModels, record: ImageRecord, segments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Refine each detector region once with SAM, keeping the detector result on weak matches."""
+        del models  # The refinement is intentionally model-independent after target detection.
+        if not segments:
+            return segments
+        with self.sam_lock:
+            predictor = self._sam_predictor_for(record)
+            for segment in segments:
+                source_mask = (np.asarray(segment["mask"]) > 0).astype(np.uint8)
+                points = np.argwhere(source_mask > 0)
+                if not len(points):
+                    continue
+                top, left = points.min(axis=0)
+                bottom, right = points.max(axis=0) + 1
+                height, width = source_mask.shape
+                padding = max(2, int(max(bottom - top, right - left) * 0.05))
+                roi = (max(0, int(left - padding)), max(0, int(top - padding)),
+                       min(width, int(right + padding)), min(height, int(bottom + padding)))
+                distances = cv2.distanceTransform(source_mask, cv2.DIST_L2, 3)
+                y, x = np.unravel_index(int(np.argmax(distances)), distances.shape)
+                masks, scores, _ = predictor.predict(
+                    point_coords=np.asarray([[x, y]], dtype=np.float32),
+                    point_labels=np.asarray([1], dtype=np.int32),
+                    box=np.asarray(roi, dtype=np.float32),
+                    multimask_output=True,
+                )
+                refined, _score = select_best_sam_mask(masks, scores)
+                refined = clip_mask_to_roi(refined, roi)
+                overlap = mask_iou(source_mask, refined)
+                source_area = int(np.count_nonzero(source_mask))
+                refined_area = int(np.count_nonzero(refined))
+                if overlap < 0.20 or refined_area < max(8, source_area // 4) or refined_area > source_area * 3:
+                    segment["refinement"] = "sam_fallback"
+                    continue
+                segment["mask"] = refined
+                segment["refinement"] = "sam_high_precision"
+        return segments
+
+    def _detect_image(
+        self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None
+    ) -> list[Candidate]:
         self._assert_record_fresh(record)
         with Image.open(record.path) as image:
             rgb = ImageOps.exif_transpose(image).convert("RGB")
@@ -1881,6 +1966,8 @@ class StudioState:
             *self._detect_precise_segments(models, rgb, confidence),
             *self._detect_legacy_segments(models, rgb, confidence),
         ])
+        if (mode or getattr(self, "_active_detection_mode", "standard")) == "high_precision":
+            segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
         segments = self._refine_detected_segments(models, record, rgb, segments)
         candidates: list[Candidate] = []
@@ -1961,6 +2048,31 @@ class StudioState:
         if not np.any(clipped):
             raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
 
+        with self.lock:
+            if self.images.get(image_id) is not record:
+                raise ClientError("フォルダの再読み込み後に境界の検出結果を受け取ったため、破棄しました。", "catalog_changed")
+
+        # Keep the selected SAM shape as APPLY. Hand/fluid removal is represented
+        # by an independently toggleable EXCLUDE candidate just as in auto detect.
+        original_mask = clipped.copy()
+        with Image.open(record.path) as image:
+            rgb = ImageOps.exif_transpose(image).convert("RGB")
+        boundary_segment = {
+            "class_name": "penis",
+            "confidence": confidence,
+            "mask": clipped.copy(),
+            "source": "boundary",
+        }
+        refined_boundary = self._refine_detected_segments(
+            self._ensure_models(), record, rgb, [boundary_segment]
+        )[0]
+        exclusion_mask = ((original_mask > 0) & (np.asarray(refined_boundary["mask"]) == 0)).astype(np.uint8) * 255
+        exclusion_source = {
+            "hand": "hand_exclusion",
+            "fluid": "fluid_exclusion",
+            "hand_fluid": "hand_fluid_exclusion",
+        }.get(str(refined_boundary.get("refinement") or ""))
+
         candidate_id = uuid.uuid4().hex
         candidate = Candidate(
             candidate_id=candidate_id,
@@ -1976,6 +2088,19 @@ class StudioState:
             candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
             self.candidates.setdefault(image_id, []).append(candidate)
+            if exclusion_source is not None and np.any(exclusion_mask):
+                exclusion_id = uuid.uuid4().hex
+                exclusion = Candidate(
+                    candidate_id=exclusion_id,
+                    class_name=SOURCE_LABELS[exclusion_source],
+                    confidence=None,
+                    mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png",
+                    color="#4ac3df",
+                    source=exclusion_source,
+                    role=CandidateRole.EXCLUDE,
+                )
+                Image.fromarray(exclusion_mask, mode="L").save(exclusion.mask_path, format="PNG")
+                self.candidates[image_id].append(exclusion)
             self._touch_candidates(image_id)
         return candidate.as_api_dict(SOURCE_LABELS.get(candidate.source, candidate.source))
 
@@ -2647,6 +2772,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "modelsConfigured": all(str(models.get(key, "")).strip() for key in ("target_segmentation", "hand_detection", "sam_checkpoint")),
                     "device": inference_device_name(),
                 })
+            elif path == "/api/settings":
+                self._json({"settings": STATE.settings, "status": STATE.settings_status()})
             elif path == "/api/images":
                 self._json({"root": str(STATE.root) if STATE.root else "", "images": STATE.list_images()})
             elif path == "/api/job":
@@ -2657,21 +2784,22 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/thumbnail/"):
                 self._send_image(path.removeprefix("/api/thumbnail/"), thumbnail=True)
             elif path.startswith("/api/candidates/"):
-                self._json({"candidates": STATE.list_candidates(path.removeprefix("/api/candidates/"))})
+                image_id = path.removeprefix("/api/candidates/")
+                self._json({"candidates": STATE.list_candidates(image_id), "candidateRevision": STATE._candidate_revision(image_id)})
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._binary(STATE.read_candidate_mask_png(image_id, candidate_id), "image/png")
             else:
                 self._send_static(path)
         except StaleMaskError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            self._client_error(exc, HTTPStatus.NOT_FOUND, "mask_not_found")
         except ForbiddenClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
+            self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # Keep tracebacks in the terminal, not in browser.
             LOGGER.exception("GET リクエストの処理に失敗: %s", self.path)
-            self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_POST(self) -> None:  # noqa: N802
         try:
@@ -2704,12 +2832,19 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/masks/clear":
                 self._json({"cleared": STATE.clear_masks(payload.get("imageIds", []))})
             elif path == "/api/detect":
-                STATE.start_detection(
+                detect_args = (
                     payload.get("imageIds", []),
-                    read_detection_confidence(payload.get("confidence", DEFAULT_DETECTION_CONFIDENCE)),
-                    _read_detection_parallelism(payload.get("parallelism", 2)),
+                    read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
+                    _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
+                if "mode" in payload:
+                    STATE.start_detection(*detect_args, str(payload["mode"]))
+                else:
+                    STATE.start_detection(*detect_args)
                 self._json({"ok": True})
+            elif path == "/api/settings":
+                settings = STATE.update_settings(payload)
+                self._json({"settings": settings, "status": STATE.settings_status()})
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
                 self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
@@ -2765,12 +2900,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
+            self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
-            self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_DELETE(self) -> None:  # noqa: N802
         try:
@@ -2785,12 +2920,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
+            self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             LOGGER.exception("DELETE リクエストの処理に失敗: %s", self.path)
-            self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def _read_json_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
@@ -2867,6 +3002,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         self._binary(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
+
+    def _client_error(self, error: Exception, status: HTTPStatus, default_code: str | None = None) -> None:
+        code = getattr(error, "code", default_code or "request_failed")
+        params = getattr(error, "params", {})
+        self._json({"error": str(error), "error_code": code, "params": params}, status)
 
     def _binary(
         self,
@@ -2954,7 +3094,7 @@ def _schedule_browser_open(url: str) -> threading.Timer:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
-    parser = argparse.ArgumentParser(description="Run Lets Censoring locally.")
+    parser = argparse.ArgumentParser(description="Run Mozarie locally.")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     STATE.cache_dir.mkdir(parents=True, exist_ok=True)
