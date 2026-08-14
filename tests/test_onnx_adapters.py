@@ -182,6 +182,9 @@ class OnnxAdapterTests(unittest.TestCase):
                 {"names": "{0: 'hand'}"},
                 {"names": "{0: 'person'}", "stride": "32"},
                 {"names": "{1: 'hand'}", "stride": "32"},
+                {"names": "{False: 'hand'}", "stride": "32"},
+                {"names": "{0.0: 'hand'}", "stride": "32"},
+                {"names": "{0: 'hand', 1: 'hand'}", "stride": "32"},
                 {"names": "{0: 'hand'}", "stride": "16"},
                 {"names": "{0: 'hand'}", "stride": "32", "task": "segment"},
             ]

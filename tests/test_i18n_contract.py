@@ -61,12 +61,16 @@ def translation_calls(source: str) -> list[tuple[str, set[str]]]:
     return calls
 
 
+def placeholders(value: str) -> set[str]:
+    return set(re.findall(r"\{([^}]+)\}", value))
+
+
 class TranslationContractTests(unittest.TestCase):
     def test_translation_call_parser_recognizes_shorthand_and_named_properties(self) -> None:
         calls = translation_calls('t("sample", { completed, total: count, current });')
         self.assertEqual(calls, [("sample", {"completed", "total", "current"})])
 
-    def test_every_parameterized_translation_preserves_caller_values_in_both_languages(self) -> None:
+    def test_parameterized_translations_match_caller_values_exactly_in_both_languages(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "static" / "app.js").read_text(encoding="utf-8")
         dictionaries = {
@@ -74,18 +78,30 @@ class TranslationContractTests(unittest.TestCase):
             for language in ("ja", "en")
         }
         for key, parameter_names in translation_calls(source):
-            self.assertTrue(parameter_names, key)
             for language, dictionary in dictionaries.items():
                 self.assertIn(key, dictionary, f"{language}: {key}")
-                placeholders = set(re.findall(r"\{([^}]+)\}", dictionary[key]))
-                self.assertTrue(
-                    parameter_names <= placeholders,
-                    f"{language}: {key} drops caller values {sorted(parameter_names - placeholders)}",
+                self.assertEqual(
+                    placeholders(dictionary[key]),
+                    parameter_names,
+                    f"{language}: {key} caller/translation parameters differ",
                 )
+
+    def test_every_shared_translation_key_uses_the_same_placeholders_in_both_languages(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dictionaries = {
+            language: json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for language in ("ja", "en")
+        }
+        for key in sorted(dictionaries["ja"].keys() & dictionaries["en"].keys()):
+            self.assertEqual(
+                placeholders(dictionaries["ja"][key]),
+                placeholders(dictionaries["en"][key]),
+                key,
+            )
 
     def test_detect_progress_uses_the_same_complete_contract_in_both_languages(self) -> None:
         root = Path(__file__).resolve().parents[1]
         expected = {"completed", "total", "current"}
         for language in ("ja", "en"):
             dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
-            self.assertEqual(set(re.findall(r"\{([^}]+)\}", dictionary["status.detectProgress"])), expected)
+            self.assertEqual(placeholders(dictionary["status.detectProgress"]), expected)

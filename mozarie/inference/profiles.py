@@ -113,7 +113,10 @@ def _validate_dynamic_hand_metadata(output_name: str, metadata: dict[str, str]) 
         names = ast.literal_eval(metadata["names"])
     except (KeyError, SyntaxError, ValueError, TypeError) as exc:
         raise ModelProfileError("Dynamic hand output requires parseable hand names metadata") from exc
-    if not isinstance(names, dict) or set(names) != {0} or _normalise_class_name(names[0]) != "hand":
+    if not isinstance(names, dict) or len(names) != 1:
+        raise ModelProfileError("Dynamic hand output requires names metadata {0: 'hand'}")
+    class_id, class_name = next(iter(names.items()))
+    if type(class_id) is not int or class_id != 0 or _normalise_class_name(class_name) != "hand":
         raise ModelProfileError("Dynamic hand output requires names metadata {0: 'hand'}")
     try:
         stride = int(metadata["stride"])
