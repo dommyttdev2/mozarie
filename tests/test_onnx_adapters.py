@@ -18,10 +18,15 @@ from mozarie.inference.profiles import ModelProfileError, validate_hand_profile,
 
 
 class OnnxAdapterTests(unittest.TestCase):
-    def _write_model(self, directory: Path, name: str, inputs, outputs) -> Path:
+    def _write_model(self, directory: Path, name: str, inputs, outputs, *, metadata: dict[str, str] | None = None) -> Path:
         path = directory / name
         graph = helper.make_graph([], "profile", inputs, outputs)
-        onnx.save(helper.make_model(graph), path)
+        model = helper.make_model(graph)
+        for key, value in (metadata or {}).items():
+            entry = model.metadata_props.add()
+            entry.key = key
+            entry.value = value
+        onnx.save(model, path)
         return path
 
     def test_restore_box_reverses_letterbox_coordinates(self) -> None:
@@ -52,6 +57,32 @@ class OnnxAdapterTests(unittest.TestCase):
         detector.run = lambda _tensor: [np.asarray([[[320.0, 320.0, 100.0, 100.0, 0.9]]], dtype=np.float32)]
         with patch("mozarie.inference.yolo_detect.letterbox_bgr", return_value=(tensor, Letterbox(1, 0, 0, 640, 640, 640, 640))):
             self.assertEqual(len(detector.detect_boxes(np.zeros((640, 640, 3), dtype=np.uint8), 0.5)), 1)
+
+    def test_hand_decoder_rejects_unsupported_runtime_outputs(self) -> None:
+        valid = np.zeros((1, 5, 1), dtype=np.float32)
+        valid[0, 4, 0] = 0.5
+        invalid_outputs = [
+            [valid, valid],
+            [np.zeros((5, 1), dtype=np.float32)],
+            [np.zeros((1, 1, 5, 1), dtype=np.float32)],
+            [np.zeros((2, 5, 1), dtype=np.float32)],
+            [valid.astype(np.float16)],
+            [np.zeros((1, 4, 1), dtype=np.float32)],
+            [np.zeros((1, 5, 0), dtype=np.float32)],
+            [np.full((1, 5, 1), np.nan, dtype=np.float32)],
+            [np.full((1, 5, 1), np.inf, dtype=np.float32)],
+            [np.zeros((1, 5, 5), dtype=np.float32)],
+        ]
+        invalid_outputs[-1][0][0, 4, :] = 0.5
+        for outputs in invalid_outputs:
+            with self.subTest(shape=[list(item.shape) for item in outputs]):
+                with self.assertRaises(ValueError):
+                    HandDetector._prediction_rows(outputs)
+
+        bad_score = valid.copy()
+        bad_score[0, 4, 0] = 1.1
+        with self.assertRaises(ValueError):
+            HandDetector._prediction_rows([bad_score])
 
     def test_target_profile_requires_nchw_43_channel_prediction_and_32_channel_prototype(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -110,6 +141,9 @@ class OnnxAdapterTests(unittest.TestCase):
             self.assertEqual(validate_hand_profile(path).kind, "hand_detection")
             transposed = self._write_model(root, "hand-transposed.onnx", [image], [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 5, None])])
             self.assertEqual(validate_hand_profile(transposed).kind, "hand_detection")
+            ambiguous = self._write_model(root, "hand-ambiguous.onnx", [image], [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 5, 5])])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(ambiguous)
             incompatible = self._write_model(root, "bad-hand.onnx", [image], [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, None, 6])])
             with self.assertRaises(ModelProfileError):
                 validate_hand_profile(incompatible)
@@ -131,3 +165,35 @@ class OnnxAdapterTests(unittest.TestCase):
             wrong_rank_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 5])
             with self.assertRaises(ModelProfileError):
                 validate_hand_profile(self._write_model(root, "hand-wrong-rank-output.onnx", [image], [wrong_rank_output]))
+
+    def test_hand_profile_allows_dynamic_orientation_only_for_confirmed_hand_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 640, 640])
+            output = helper.make_tensor_value_info("output0", TensorProto.FLOAT, [1, None, None])
+            metadata = {"names": "{0: ' hand '}", "stride": "32", "task": "detect"}
+            self.assertEqual(
+                validate_hand_profile(self._write_model(root, "hand-dynamic.onnx", [image], [output], metadata=metadata)).kind,
+                "hand_detection",
+            )
+
+            invalid_metadata = [
+                {"names": "{not valid", "stride": "32"},
+                {"names": "{0: 'hand'}"},
+                {"names": "{0: 'person'}", "stride": "32"},
+                {"names": "{1: 'hand'}", "stride": "32"},
+                {"names": "{0: 'hand'}", "stride": "16"},
+                {"names": "{0: 'hand'}", "stride": "32", "task": "segment"},
+            ]
+            for index, values in enumerate(invalid_metadata):
+                with self.subTest(values=values):
+                    with self.assertRaises(ModelProfileError):
+                        validate_hand_profile(self._write_model(root, f"hand-dynamic-bad-{index}.onnx", [image], [output], metadata=values))
+
+            wrong_name = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, None, None])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-dynamic-name.onnx", [image], [wrong_name], metadata=metadata))
+
+            static_unknown = helper.make_tensor_value_info("output0", TensorProto.FLOAT, [1, 6, 7])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-static-unknown.onnx", [image], [static_unknown], metadata=metadata))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,11 +49,12 @@ def _tensor_profile(value_info: onnx.ValueInfoProto) -> TensorProfile:
     return TensorProfile(value_info.name, _dimensions(value_info), tensor.elem_type)
 
 
-def _load(path: Path, *, expected_size: int) -> tuple[TensorProfile, tuple[TensorProfile, ...]]:
+def _load(path: Path, *, expected_size: int) -> tuple[TensorProfile, tuple[TensorProfile, ...], dict[str, str]]:
     try:
-        graph = onnx.load(str(path), load_external_data=False).graph
+        model = onnx.load(str(path), load_external_data=False)
     except Exception as exc:
         raise ModelProfileError(f"Could not read ONNX file: {exc}") from exc
+    graph = model.graph
     inputs = tuple(_tensor_profile(item) for item in graph.input)
     outputs = tuple(_tensor_profile(item) for item in graph.output)
     if len(inputs) != 1:
@@ -67,7 +69,7 @@ def _load(path: Path, *, expected_size: int) -> tuple[TensorProfile, tuple[Tenso
     height, width = image_input.dimensions[2:]
     if (height is not None and height != expected_size) or (width is not None and width != expected_size):
         raise ModelProfileError(f"Input size must be dynamic or {expected_size}x{expected_size}")
-    return image_input, outputs
+    return image_input, outputs, {item.key: item.value for item in model.metadata_props}
 
 
 def _is_float32_single_batch(profile: TensorProfile) -> bool:
@@ -80,7 +82,7 @@ def _is_float32_single_batch(profile: TensorProfile) -> bool:
 
 def validate_target_profile(path: Path) -> ModelProfile:
     """Validate Mozarie's fixed 7-class, 32-mask YOLO segmentation profile."""
-    image_input, outputs = _load(path, expected_size=1280)
+    image_input, outputs, _ = _load(path, expected_size=1280)
     if len(outputs) != 2:
         raise ModelProfileError("Target segmentation needs prediction and 32-channel prototype outputs")
     prediction = next(
@@ -100,14 +102,45 @@ def validate_target_profile(path: Path) -> ModelProfile:
     return ModelProfile("target_segmentation", image_input, outputs)
 
 
+def _normalise_class_name(value: object) -> str:
+    return " ".join(str(value).strip().lower().replace("_", " ").replace("-", " ").split())
+
+
+def _validate_dynamic_hand_metadata(output_name: str, metadata: dict[str, str]) -> None:
+    if output_name != "output0":
+        raise ModelProfileError("Dynamic hand output must be named output0")
+    try:
+        names = ast.literal_eval(metadata["names"])
+    except (KeyError, SyntaxError, ValueError, TypeError) as exc:
+        raise ModelProfileError("Dynamic hand output requires parseable hand names metadata") from exc
+    if not isinstance(names, dict) or set(names) != {0} or _normalise_class_name(names[0]) != "hand":
+        raise ModelProfileError("Dynamic hand output requires names metadata {0: 'hand'}")
+    try:
+        stride = int(metadata["stride"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ModelProfileError("Dynamic hand output requires integer stride metadata") from exc
+    if stride != 32:
+        raise ModelProfileError("Dynamic hand output requires stride 32")
+    task = metadata.get("task")
+    if task is not None and task.strip().lower() != "detect":
+        raise ModelProfileError("Dynamic hand output task must be detect")
+
+
 def validate_hand_profile(path: Path) -> ModelProfile:
     """Validate one-class hand detector profiles in either supported orientation."""
-    image_input, outputs = _load(path, expected_size=640)
+    image_input, outputs, metadata = _load(path, expected_size=640)
     if len(outputs) != 1:
         raise ModelProfileError("Hand detection needs one output")
     output = outputs[0]
-    if not _is_float32_single_batch(output) or len(output.dimensions) != 3 or (output.dimensions[1] != 5 and output.dimensions[2] != 5):
+    if not _is_float32_single_batch(output) or len(output.dimensions) != 3:
         raise ModelProfileError("Hand output must be [batch, 5, anchors] or [batch, anchors, 5]")
+    non_batch_dimensions = output.dimensions[1:]
+    static_five_axes = sum(dimension == 5 for dimension in non_batch_dimensions)
+    if static_five_axes == 1:
+        return ModelProfile("hand_detection", image_input, outputs)
+    if static_five_axes > 1 or all(dimension is not None for dimension in non_batch_dimensions):
+        raise ModelProfileError("Hand output must have exactly one 5-channel axis")
+    _validate_dynamic_hand_metadata(output.name, metadata)
     return ModelProfile("hand_detection", image_input, outputs)
 
 
