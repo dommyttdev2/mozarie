@@ -57,6 +57,7 @@ function t(key, params = {}) {
 async function loadTranslations() {
   try {
     const language = state.settings?.general?.language === "en" ? "en" : "ja";
+    document.documentElement.lang = language;
     state.translations = await fetch(`/i18n/${language}.json`).then((response) => response.ok ? response.json() : {});
   } catch {
     state.translations = {};
@@ -222,9 +223,25 @@ function focusElement(element) { element?.focus({ preventScroll: true }); }
 function focusCanvas() { focusElement(canvas); }
 function setNavigationShortcutsEnabled(enabled) {
   state.navigationShortcutsEnabled = Boolean(enabled);
-  try { localStorage.setItem("mozarie.navigation-shortcuts.v1", String(state.navigationShortcutsEnabled)); } catch { /* Session setting still applies. */ }
+  if (state.settings?.general) state.settings.general.shortcuts_enabled = state.navigationShortcutsEnabled;
+  const topControl = $("#navigationShortcutsEnabled");
+  const settingsControl = $("#settingsShortcuts");
+  if (topControl) topControl.checked = state.navigationShortcutsEnabled;
+  if (settingsControl) settingsControl.checked = state.navigationShortcutsEnabled;
   updateNavigationControls();
   focusCanvas();
+}
+
+async function persistNavigationShortcuts(enabled) {
+  setNavigationShortcutsEnabled(enabled);
+  if (!state.settings) return;
+  try {
+    const payload = structuredClone(state.settings);
+    payload.general.shortcuts_enabled = Boolean(enabled);
+    const data = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
+    setSettingsForm(data.settings, data.status);
+    setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
+  } catch (error) { setStatus(error.message, "error"); }
 }
 function handleReviewStorageEvent(event) {
   const prefix = reviewStoragePrefix();
@@ -1260,7 +1277,13 @@ async function addBoundaryCandidate(point = null, polygonPoints = null) {
     });
     const created = Array.isArray(data.candidates) ? data.candidates : [];
     if (!created.length || !Number.isInteger(data.candidateRevision)) throw new Error(t("error.boundaryResponse"));
-    state.maskStatus.delete(imageId);
+    const record = state.images.find((item) => item.id === imageId);
+    if (record) {
+      record.candidateCount = (record.candidateCount || 0) + created.length;
+      record.enabledCandidateCount = (record.enabledCandidateCount || 0) + created.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+      record.candidateRevision = data.candidateRevision;
+      state.maskStatus.set(imageId, true);
+    }
     invalidateCandidateBundles(imageId);
     catalogChanged = true;
     markImagesUnreviewed([imageId], false);
@@ -2552,7 +2575,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
-  $("#settingsShortcuts").checked = settings.general.shortcuts_enabled;
+  setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsHandModel").value = settings.models.hand_detection;
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
@@ -2612,7 +2635,7 @@ async function saveSettings(event) {
     const data = await api("/api/settings", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;
     setSettingsForm(data.settings, data.status);
-    state.navigationShortcutsEnabled = data.settings.general.shortcuts_enabled;
+    setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     result.textContent = t("settings.saved");
     if (languageChanged) await loadTranslations();
@@ -2624,7 +2647,7 @@ async function resetSettings() {
   try {
     const data = await api("/api/settings/reset", { method: "POST", body: JSON.stringify({}) });
     setSettingsForm(data.settings, data.status);
-    state.navigationShortcutsEnabled = data.settings.general.shortcuts_enabled;
+    setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     await loadTranslations();
     result.textContent = t("settings.resetDone");
@@ -2675,9 +2698,8 @@ function bindEvents() {
   $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
   $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
   $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
-  $("#navigationShortcutsEnabled").addEventListener("change", (event) => {
-    setNavigationShortcutsEnabled(event.target.checked);
-  });
+  $("#navigationShortcutsEnabled").addEventListener("change", (event) => { void persistNavigationShortcuts(event.target.checked); });
+  $("#settingsShortcuts").addEventListener("change", (event) => { void persistNavigationShortcuts(event.target.checked); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
     if (isBusy() || state.importing) return;
     state.overviewFilter = button.dataset.overviewFilter; renderOverview();
@@ -2776,9 +2798,14 @@ function bindEvents() {
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
-      if (vertex >= 0) { state.polygonDragIndex = vertex; state.drawing = true; }
-      else if (state.polygonPoints.length < 4) state.polygonPoints.push(point);
-      state.drawing = false; updatePolygonActions(); render(); return;
+      if (vertex >= 0) {
+        state.polygonDragIndex = vertex;
+        state.drawing = true;
+      } else {
+        if (state.polygonPoints.length < 4) state.polygonPoints.push(point);
+        state.drawing = false;
+      }
+      updatePolygonActions(); render(); return;
     }
     beginManualStroke(point); render();
   });
@@ -2860,12 +2887,13 @@ function bindEvents() {
 }
 
 async function initialise() {
+  ensureDetectionModeControl();
   try {
     const settings = await api("/api/settings");
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
-  await loadTranslations(); ensureDetectionModeControl(); bindEvents();
-  try { state.navigationShortcutsEnabled = state.settings?.general?.shortcuts_enabled ?? (localStorage.getItem("mozarie.navigation-shortcuts.v1") !== "false"); } catch { state.navigationShortcutsEnabled = true; }
+  await loadTranslations(); bindEvents();
+  setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();

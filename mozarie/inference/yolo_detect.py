@@ -18,7 +18,12 @@ class HandDetector(BaseOnnxModel):
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         output = self.run(tensor)[0]
         rows = np.asarray(output)[0]
-        rows = rows.T if rows.shape[0] < rows.shape[1] else rows
+        if rows.ndim != 2:
+            raise ValueError("Hand output must be rank 3")
+        if rows.shape[0] == 5:
+            rows = rows.T
+        elif rows.shape[1] != 5:
+            raise ValueError("Hand output must have a 5-channel axis")
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []
         for row in rows:

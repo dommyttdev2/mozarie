@@ -655,7 +655,7 @@ class MozarieTests(unittest.TestCase):
             control = server_module.JobControl()
             state.job = server_module.Job(kind="detect", state="running", total=2, image_ids=(first_id, second_id))
 
-            def detect_image(_models, record, _confidence):
+            def detect_image(_models, record, _confidence, _mode="standard"):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
@@ -750,7 +750,7 @@ class MozarieTests(unittest.TestCase):
             second_models = object()
             seen_models: list[int] = []
 
-            def detect_image(models, record, _confidence):
+            def detect_image(models, record, _confidence, _mode="standard"):
                 seen_models.append(id(models))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -790,7 +790,7 @@ class MozarieTests(unittest.TestCase):
                     first_completed.set()
                 return result
 
-            def detect_image(_models, record, _confidence):
+            def detect_image(_models, record, _confidence, _mode="standard"):
                 if record is records[0]:
                     self.assertTrue(second_started.wait(2))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
@@ -823,7 +823,7 @@ class MozarieTests(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def detect_image(_models, record, _confidence):
+            def detect_image(_models, record, _confidence, _mode="standard"):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
@@ -1614,12 +1614,28 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
         self.assertEqual(start.call_args.args[0], "detect")
-        self.assertEqual(start.call_args.args[-2:], (0.65, 2))
+        self.assertEqual(start.call_args.args[-3:], (0.65, 2, "standard"))
         self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 7)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 8)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"])
-        self.assertEqual(start.call_args.args[-2:], (DEFAULT_DETECTION_CONFIDENCE, 2))
+        self.assertEqual(start.call_args.args[-3:], (DEFAULT_DETECTION_CONFIDENCE, 2, "standard"))
         self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 8)
+
+    def test_rejected_detection_request_cannot_change_a_running_job_mode(self):
+        state = self.new_state()
+        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        state.job = server_module.Job(kind="detect", state="running", total=1)
+        with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 1)):
+            with self.assertRaises(ClientError):
+                state.start_detection(["test"], mode="high_precision")
+        self.assertFalse(hasattr(state, "_active_detection_mode"))
+
+        seen_modes: list[str] = []
+        state.job = server_module.Job()
+        with patch.object(state, "_ensure_models", return_value=object()), \
+             patch.object(state, "_detect_image", side_effect=lambda _models, _record, _confidence, mode: seen_modes.append(mode) or []):
+            state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1, "standard")
+        self.assertEqual(seen_modes, ["standard"])
 
     def test_detection_start_rejects_a_catalog_switch_after_records_are_captured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2296,7 +2312,7 @@ class MozarieTests(unittest.TestCase):
         self.assertIn("apply.handleSource", dictionary)
         self.assertIn("apply.removeAfterSave", dictionary)
         self.assertIn("apply.overwriteNote", dictionary)
-        self.assertIn('mozarie.navigation-shortcuts.v1', app)
+        self.assertNotIn('mozarie.navigation-shortcuts.v1', app)
         self.assertIn('function clearBoundaryInteraction()', app)
         self.assertIn('state.polygonPoints = [];', app)
         self.assertNotIn('?t=${Date.now()}', app)

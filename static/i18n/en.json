@@ -20,5 +20,7 @@
   ,"candidates.applyRanges": "Mosaic ranges",
   "candidates.excludeRanges": "Exclusion ranges",
   "polygon.detect": "Detect",
-  "polygon.cancel": "Cancel"
+  "polygon.cancel": "Cancel",
+  "polygon.tool": "Four-point boundary",
+  "editor.settings": "Editor settings"
 }

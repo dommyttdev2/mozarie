@@ -21,7 +21,21 @@ class TargetSegmenter(BaseOnnxModel):
     @staticmethod
     def _prediction_rows(output: np.ndarray) -> np.ndarray:
         rows = np.asarray(output)[0]
-        return rows.T if rows.shape[0] == 43 or rows.shape[0] < rows.shape[1] else rows
+        if rows.ndim != 2:
+            raise ValueError("Target prediction output must be rank 3")
+        if rows.shape[0] == 43:
+            return rows.T
+        if rows.shape[1] == 43:
+            return rows
+        raise ValueError("Target prediction output has no 43-channel axis")
+
+    @staticmethod
+    def _outputs(values: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        prediction = next((value for value in values if np.asarray(value).ndim == 3 and 43 in np.asarray(value).shape[1:]), None)
+        prototype = next((value for value in values if np.asarray(value).ndim == 4 and np.asarray(value).shape[1] == 32), None)
+        if prediction is None or prototype is None:
+            raise ValueError("Target model outputs do not match Mozarie's segmentation profile")
+        return np.asarray(prediction), np.asarray(prototype)
 
     @staticmethod
     def _mask_from_coefficients(coefficients: np.ndarray, proto: np.ndarray, box: tuple[int, int, int, int], letterbox: Letterbox) -> np.ndarray:
@@ -41,7 +55,7 @@ class TargetSegmenter(BaseOnnxModel):
 
     def detect(self, rgb: np.ndarray, confidence: float) -> list[dict[str, object]]:
         tensor, transform = letterbox_bgr(rgb, self.input_size)
-        prediction, prototype = self.run(tensor)
+        prediction, prototype = self._outputs(self.run(tensor))
         rows = self._prediction_rows(prediction)
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []

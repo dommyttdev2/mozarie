@@ -4,6 +4,8 @@ Mozarie is a local, desktop-oriented image review and mosaic editor. It keeps im
 
 ## 日本語
 
+動作環境は Windows 10 / 11 と Python 3.11 以降です。
+
 ### できること
 
 - フォルダまたはブラウザで追加した画像の確認
@@ -42,7 +44,7 @@ Mozarie is a local, desktop-oriented image review and mosaic editor. It keeps im
 
 ### Setup and operation
 
-1. Create a Python 3.11+ environment and run `pip install -r requirements.txt`.
+1. Use Windows 10 or 11, create a Python 3.11+ environment, and run `pip install -r requirements.txt`.
 2. Start with `python server.py`. `--port` overrides the saved port for that start only.
 3. In **Settings > Models**, select compatible local target-segmentation ONNX, hand-detection ONNX, and SAM checkpoint files.
 4. Load images, review proposed apply and exclusion ranges, refine them with the editor, then save and inspect the result.

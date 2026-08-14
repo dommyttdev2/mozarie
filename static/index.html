@@ -11,7 +11,7 @@
 <body>
   <header class="appbar">
     <div class="brand" data-i18n="app.brand">Mozarie</div>
-    <nav class="appbar-commands" aria-label="全画像の操作">
+    <nav class="appbar-commands" data-i18n-aria-label="navigation.aria" aria-label="全画像の操作">
       <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を追加</button>
       <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
       <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
@@ -75,22 +75,22 @@
           <button id="brushTool" class="tool icon-button active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush">筆</button>
           <button id="eraserTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser">消</button>
           <button id="boundaryTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary">囲</button>
-          <button id="polygonTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="4点境界" title="4点境界">◇</button>
+          <button id="polygonTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="4点境界" title="4点境界" data-i18n-aria-label="polygon.tool" data-i18n-title="polygon.tool">◇</button>
           <span class="tool-separator" aria-hidden="true"></span>
           <button id="fitButton" class="tool icon-button" type="button" aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
           <button id="undoButton" class="tool icon-button" type="button" aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
           <button id="redoButton" class="tool icon-button" type="button" aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
           <button id="mosaicPreviewButton" class="tool icon-button active" type="button" aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
         </div>
-        <div class="canvas-settings-bar" aria-label="編集設定">
-          <label class="numeric-control" for="brushSize"><span>ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48"><output id="brushSizeValue">48 px</output></label>
+        <div class="canvas-settings-bar" data-i18n-aria-label="editor.settings" aria-label="編集設定">
+          <label class="numeric-control" for="brushSize"><span data-i18n="editor.brushSize">ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48" data-i18n-aria-label="editor.brushSize" aria-label="ブラシ径"><output id="brushSizeValue">48 px</output></label>
           <label class="numeric-control block-control" for="divisor"><span>モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
         </div>
-        <div class="canvas-navigation-bar" aria-label="画像移動">
-          <span id="imageInfo" hidden>画像未選択</span><output id="reviewStatus" class="review-status">未確認</output>
-          <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ">›</button>
-          <button id="nextUnreviewedButton" type="button">次の未確認</button><button id="reviewAndNextButton" class="primary" type="button">確認済みにして次へ</button>
-          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span>ショートカット</span></label>
+        <div class="canvas-navigation-bar" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
+          <span id="imageInfo" hidden data-i18n="editor.none">画像未選択</span><output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
+          <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ" data-i18n-aria-label="navigation.previous" data-i18n-title="navigation.previous">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ" data-i18n-aria-label="navigation.next" data-i18n-title="navigation.next">›</button>
+          <button id="nextUnreviewedButton" type="button" data-i18n="navigation.nextUnreviewed">次の未確認</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
+          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked data-i18n-aria-label="navigation.shortcuts" aria-label="ショートカット"><span data-i18n="navigation.shortcuts">ショートカット</span></label>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
         <div id="polygonActions" class="polygon-actions" hidden>

@@ -50,8 +50,8 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
-  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "polygonTool", "polygonActions", "polygonDetectButton", "polygonCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
+  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
   "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave",
 ]) {
@@ -95,7 +95,11 @@ Object.defineProperty(overviewGrid, "textContent", {
   get() { return this._textContent || ""; },
   set(value) { this._textContent = value; this.children = []; },
 });
-elements.get("#editorCanvas").getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, strokeRect() {}, beginPath() {}, arc() {}, stroke() {}, setLineDash() {} });
+elements.get("#editorCanvas").getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, arc() {}, fill() {}, stroke() {}, setLineDash() {} });
+elements.get("#editorCanvas").getBoundingClientRect = () => ({ left: 0, top: 0 });
+elements.get("#editorCanvas").setPointerCapture = () => {};
+elements.get("#editorCanvas").hasPointerCapture = () => true;
+elements.get("#editorCanvas").releasePointerCapture = () => {};
 elements.get("#canvasStage").clientWidth = 600;
 elements.get("#canvasStage").clientHeight = 400;
 elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode: galleryItem } } });
@@ -163,7 +167,7 @@ const storage = new Map();
 let storageWrites = 0;
 const windowListeners = new Map();
 const context = {
-  console, document, Date, Math, Promise, Uint8Array, ArrayBuffer, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} },
+  console, document, Date, Math, Promise, Uint8Array, ArrayBuffer, structuredClone, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} },
   localStorage: {
     getItem(key) { return storage.get(key) || null; },
     setItem(key, value) { storageWrites += 1; storage.set(key, value); },
@@ -184,10 +188,21 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
+  const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
   bindEvents();
+  const lru = new Map();
+  const firstImage = { src: "blob:first" };
+  const secondImage = { src: "blob:second" };
+  lruRemember(lru, "first", firstImage, 1, releaseImageResource);
+  lruRemember(lru, "second", secondImage, 1, releaseImageResource);
+  assert.equal(lru.size, 1);
+  assert.equal(firstImage.src, "");
+  const staleBundleImage = { src: "blob:mask" };
+  state.candidateBundleCache = new Map([["first:1", { candidateImages: new Map([["mask", staleBundleImage]]) }]]);
+  invalidateCandidateBundles("first");
+  assert.equal(staleBundleImage.src, "");
   const workspaceGrid = document.querySelector(".studio-grid");
   elements.get("#collapseGalleryButton").click();
   assert.equal(workspaceGrid.classList.contains("gallery-collapsed"), true);
@@ -246,6 +261,19 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   await initialiseRun;
   assert.equal(requests.at(-1).path, "/api/images");
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [initialImage]);
+  state.settings = {
+    general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
+    display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true },
+    detection: { threshold: 0.5, parallelism: 2, mode: "high_precision" },
+  };
+  const persistShortcuts = persistNavigationShortcuts(false);
+  resolveFetch({ ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
+  await persistShortcuts;
+  assert.equal(elements.get("#navigationShortcutsEnabled").checked, false);
+  assert.equal(elements.get("#settingsShortcuts").checked, false);
+  assert.equal(state.settings.general.shortcuts_enabled, false);
+  assert.equal(requests.at(-1).path, "/api/settings");
   assert.equal(state.reviewRoot, "g:\\images\\initial");
   assert.notEqual(elements.get("#status").className, "status error");
 
@@ -417,6 +445,20 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints)), []);
   assert.equal(state.polygonDragIndex, -1);
 
+  // Four-point boundary vertices must remain draggable after pointerdown.
+  state.currentImage = { width: 100, height: 80 };
+  state.tool = "polygon";
+  state.view = { x: 0, y: 0, scale: 1 };
+  state.polygonPoints = [{ x: 10, y: 10 }, { x: 40, y: 10 }, { x: 40, y: 40 }, { x: 10, y: 40 }];
+  const polygonCanvas = elements.get("#editorCanvas");
+  polygonCanvas.dispatch("pointerdown", { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+  assert.equal(state.polygonDragIndex, 0);
+  assert.equal(state.drawing, true);
+  polygonCanvas.dispatch("pointermove", { buttons: 1, pointerId: 7, clientX: 18, clientY: 22 });
+  polygonCanvas.dispatch("pointerup", { button: 0, pointerId: 7, clientX: 18, clientY: 22 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints[0])), { x: 18, y: 22 });
+  assert.equal(state.polygonDragIndex, -1);
+
   state.images = [
     { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
     { id: "second", relativePath: "second.png", width: 100, height: 80, candidateCount: 4, enabledCandidateCount: 2 },
@@ -433,7 +475,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   state.imageGeneration += 1;
   state.currentId = "first";
   state.imageGeneration += 1;
-  resolveFetch({ ok: true, json: async () => ({ candidate: { id: "boundary", enabled: true, confidence: 0.9, color: "#fff" } }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 1 }) });
   await pending;
   assert.equal(state.images[0].candidateCount, 1);
   assert.equal(state.images[0].enabledCandidateCount, 1);
@@ -468,9 +510,9 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const galleryAppendsBeforeBoundary = galleryAppendCount;
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
   const boundarySuccess = addBoundaryCandidate({ x: 8, y: 7 });
-  resolveFetch({ ok: true, json: async () => ({ candidate: { id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff" } }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 2 }) });
   await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: true, blob: async () => ({}) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 2 }) });
   await boundarySuccess;
   assert.equal(state.boundaryRoi, null);
   assert.equal(state.images[0].candidateCount, candidateCountBeforeBoundary + 1);
@@ -485,9 +527,9 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const maskFailureAppends = galleryAppendCount;
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
   const boundaryMaskFailure = addBoundaryCandidate({ x: 8, y: 7 });
-  resolveFetch({ ok: true, json: async () => ({ candidate: { id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff" } }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 3 }) });
   await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: false, status: 500, blob: async () => ({}) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 3 }) });
   await boundaryMaskFailure;
   assert.equal(state.images[0].candidateCount, candidateCountBeforeMaskFailure + 1);
   assert.equal(isReviewed(state.images[0]), false);

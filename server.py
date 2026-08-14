@@ -1324,9 +1324,9 @@ class StudioState:
         if mode not in {"standard", "high_precision"}:
             raise ClientError("検出モードが正しくありません。", "invalid_detection_mode")
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        self._active_detection_mode = mode
         self._start_job(
             "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
+            mode,
             expected_catalog_generation=catalog_generation,
         )
 
@@ -1712,7 +1712,6 @@ class StudioState:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            mode = mode or getattr(self, "_active_detection_mode", "standard")
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
             model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
             groups = [records[index::worker_count] for index in range(worker_count)]
@@ -1728,7 +1727,7 @@ class StudioState:
                         return
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                     try:
-                        candidates = self._detect_image(models, record, confidence)
+                        candidates = self._detect_image(models, record, confidence, mode)
                     except RuntimeError as exc:
                         if "out of memory" in str(exc).lower():
                             if control is not None:
@@ -1953,7 +1952,7 @@ class StudioState:
             *self._detect_precise_segments(models, rgb, confidence),
             *self._detect_legacy_segments(models, rgb, confidence),
         ])
-        if (mode or getattr(self, "_active_detection_mode", "standard")) == "high_precision":
+        if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
         segments = self._refine_detected_segments(models, record, rgb, segments)
