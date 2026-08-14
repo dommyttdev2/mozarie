@@ -1,0 +1,69 @@
+"""Decoder for the target YOLO segmentation ONNX export."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from .onnx import BaseOnnxModel, Letterbox, letterbox_bgr, nms_indices, restore_box, sigmoid
+
+
+CLASS_NAMES = ("anus", "nipple", "penis", "vagina", "female face", "male face", "pubic hair")
+
+
+class TargetSegmenter(BaseOnnxModel):
+    def __init__(self, path: Path, *, device: str = "gpu", input_size: int = 1280) -> None:
+        super().__init__(path, device=device)
+        self.input_size = input_size
+
+    @staticmethod
+    def _prediction_rows(output: np.ndarray) -> np.ndarray:
+        rows = np.asarray(output)[0]
+        return rows.T if rows.shape[0] == 43 or rows.shape[0] < rows.shape[1] else rows
+
+    @staticmethod
+    def _mask_from_coefficients(coefficients: np.ndarray, proto: np.ndarray, box: tuple[int, int, int, int], letterbox: Letterbox) -> np.ndarray:
+        prototype = np.asarray(proto)[0]
+        logits = coefficients @ prototype.reshape(prototype.shape[0], -1)
+        low_res = sigmoid(logits).reshape(prototype.shape[1:])
+        full = cv2.resize(low_res, (letterbox.input_width, letterbox.input_height), interpolation=cv2.INTER_LINEAR)
+        cropped = full[
+            letterbox.pad_y:letterbox.pad_y + round(letterbox.source_height * letterbox.scale),
+            letterbox.pad_x:letterbox.pad_x + round(letterbox.source_width * letterbox.scale),
+        ]
+        restored = cv2.resize(cropped, (letterbox.source_width, letterbox.source_height), interpolation=cv2.INTER_LINEAR)
+        left, top, right, bottom = box
+        constrained = np.zeros_like(restored, dtype=np.uint8)
+        constrained[top:bottom, left:right] = (restored[top:bottom, left:right] >= 0.5).astype(np.uint8) * 255
+        return constrained
+
+    def detect(self, rgb: np.ndarray, confidence: float) -> list[dict[str, object]]:
+        tensor, transform = letterbox_bgr(rgb, self.input_size)
+        prediction, prototype = self.run(tensor)
+        rows = self._prediction_rows(prediction)
+        boxes: list[tuple[int, int, int, int]] = []
+        scores: list[float] = []
+        class_ids: list[int] = []
+        coefficients: list[np.ndarray] = []
+        for row in rows:
+            if row.shape[0] < 4 + len(CLASS_NAMES) + 32:
+                continue
+            class_id = int(np.argmax(row[4:4 + len(CLASS_NAMES)]))
+            score = float(row[4 + class_id])
+            if class_id not in {2, 3} or score < confidence:
+                continue
+            box = restore_box(row[:4], transform, xywh=True)
+            if box is None:
+                continue
+            boxes.append(box); scores.append(score); class_ids.append(class_id); coefficients.append(np.asarray(row[-32:], dtype=np.float32))
+        return [
+            {
+                "class_name": "penis" if class_ids[index] == 2 else "pussy",
+                "confidence": scores[index],
+                "mask": self._mask_from_coefficients(coefficients[index], prototype, boxes[index], transform),
+                "source": "precise",
+            }
+            for index in nms_indices(boxes, scores, 0.85)
+        ]

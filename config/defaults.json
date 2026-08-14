@@ -1,0 +1,20 @@
+{
+  "general": {
+    "language": "ja",
+    "open_browser": true,
+    "port": 8766,
+    "shortcuts_enabled": true
+  },
+  "models": {
+    "target_segmentation": "",
+    "hand_detection": "",
+    "sam_checkpoint": "",
+    "provider": "gpu"
+  },
+  "display": {
+    "apply_color": "#ff3d4d",
+    "exclude_color": "#28d3ff",
+    "overlay_opacity": 0.78,
+    "mosaic_preview": true
+  }
+}

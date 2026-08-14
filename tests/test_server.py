@@ -1146,40 +1146,35 @@ class MosaicStudioTests(unittest.TestCase):
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
         precise = Mock()
-        primary = Mock()
-        secondary = Mock()
-        with patch.object(server_module, "validate_model_manifest") as validate, patch.object(
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "YOLO", side_effect=[precise, primary, secondary]):
+        ), patch.object(server_module, "TargetSegmenter", return_value=precise) as segmenter:
             first = state._ensure_models()
             second = state._ensure_models()
         self.assertIs(first, second)
-        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(segmenter.call_count, 1)
 
     def test_precise_model_loads_without_optional_legacy_models(self):
         state = self.new_state()
-        missing = Path(tempfile.gettempdir()) / "mosaicstudio-missing-model.pt"
-        with patch.object(server_module, "validate_model_manifest"), patch.object(
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "MODEL_PATH", missing), patch.object(
-            server_module, "SECOND_MODEL_PATH", missing
-        ), patch.object(server_module, "YOLO", return_value=Mock()) as yolo:
+        ), patch.object(server_module, "TargetSegmenter", return_value=Mock()) as segmenter:
             models = state._ensure_models()
         self.assertIsNone(models.primary)
         self.assertIsNone(models.secondary)
-        self.assertEqual(yolo.call_count, 1)
+        self.assertEqual(segmenter.call_count, 1)
 
     def test_hand_model_verification_occurs_once_after_first_load(self):
         state = self.new_state()
         models = DetectionModels(Mock(), Mock())
         hand = Mock()
-        with patch.object(server_module, "validate_model_manifest") as validate, patch.object(
+        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "YOLO", return_value=hand):
+        ), patch.object(server_module, "HandDetector", return_value=hand) as detector:
             first = state._ensure_hand_model(models)
             second = state._ensure_hand_model(models)
         self.assertIs(first, second)
-        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(detector.call_count, 1)
 
     def test_precise_segments_receive_hand_refinement(self):
         state = self.new_state()
@@ -2289,7 +2284,9 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertNotIn('path == "/api/catalog/select"', backend)
         self.assertIn('payload.get("divisor")', backend)
         self.assertNotIn('payload.get("blockSize")', backend)
-        self.assertIn('iou=0.85', backend)
+        self.assertIn('TargetSegmenter', backend)
+        self.assertIn('HandDetector', backend)
+        self.assertNotIn('from ultralytics import YOLO', backend)
         self.assertIn('path == "/api/masks/clear"', backend)
         self.assertIn('path == "/api/job/pause"', backend)
         self.assertIn('inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 6px;', styles)

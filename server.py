@@ -39,10 +39,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 import torch
-from ultralytics import YOLO  # Removed after the ONNX Runtime adapter passes parity tests.
 from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
+from mozarie.config import SettingsStore
+from mozarie.inference.yolo_detect import HandDetector
+from mozarie.inference.yolo_segment import TargetSegmenter
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -82,13 +84,6 @@ HAND_MODEL = LocalModelManifest(
     license="OpenRAIL",
     url="https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx",
 )
-MODEL_PATH = Path(
-    r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\segm\ntd11_anime_nsfw_segm_v5-variant1.pt"
-)
-SECOND_MODEL_PATH = Path(
-    r"G:\AI\doujin-ai-lab\tools\ComfyUI_windows_portable\ComfyUI\models\ultralytics\sensitive_detect_v07.pt"
-)
-SAM_MODEL_PATH = APP_DIR / "models" / "sam_vit_b_01ec64.pth"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis"}
 SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
@@ -342,15 +337,18 @@ def assert_onnx_cuda_available() -> None:
         raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
 
 
-def assert_onnx_cuda_active(model: YOLO, manifest: LocalModelManifest) -> None:
-    """Confirm Ultralytics did not silently select the CPU execution provider."""
-    backend = getattr(getattr(model, "predictor", None), "model", None)
-    session = getattr(getattr(backend, "backend", backend), "session", None)
-    providers = list(session.get_providers()) if session is not None else []
+def assert_onnx_cuda_active(model: Any, manifest: LocalModelManifest | str) -> None:
+    """Confirm a direct ONNX Runtime adapter did not silently use the CPU."""
+    providers = list(getattr(model, "providers", ()) or ())
+    if not providers:
+        backend = getattr(getattr(model, "predictor", None), "model", None)
+        session = getattr(getattr(backend, "backend", backend), "session", None)
+        providers = list(session.get_providers()) if session is not None else []
     if not providers or providers[0] != "CUDAExecutionProvider":
         detail = ", ".join(providers) if providers else "取得できません"
+        name = manifest.name if isinstance(manifest, LocalModelManifest) else manifest
         raise ClientError(
-            f"{manifest.name}モデルがCUDAで実行されていません（現在: {detail}）。"
+            f"{name}モデルがCUDAで実行されていません（現在: {detail}）。"
             "ONNX RuntimeのCUDA設定を確認してください。"
         )
 
@@ -598,16 +596,20 @@ def confidence_for_class(source: str, class_name: str, confidence: float) -> flo
 
 @dataclass
 class DetectionModels:
-    precise: YOLO
-    primary: YOLO | None = None
-    secondary: YOLO | None = None
-    hand: YOLO | None = None
+    precise: TargetSegmenter
+    # These are retained as inert attributes only so old in-memory sessions can
+    # be shut down safely. New detection never reads legacy .pt models.
+    primary: Any | None = None
+    secondary: Any | None = None
+    hand: HandDetector | None = None
     precise_provider_checked: bool = False
     hand_provider_checked: bool = False
 
 
 class StudioState:
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
+        self.settings_store = SettingsStore(APP_DIR)
+        self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
         self._cache_lock_handle: Any | None = None
@@ -1154,16 +1156,12 @@ class StudioState:
     def _sam_predictor_for(self, record: ImageRecord) -> Any:
         with self.sam_lock:
             if self.sam_predictor is None:
-                if not SAM_MODEL_PATH.is_file():
-                    raise ClientError(
-                        f"SAMモデルが見つかりません: {SAM_MODEL_PATH}。"
-                        "READMEの案内に従って配置してください。"
-                    )
+                sam_path = self._configured_sam_path()
                 try:
                     from segment_anything import SamPredictor, sam_model_registry
                 except ImportError as exc:
                     raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
-                model = sam_model_registry["vit_b"](checkpoint=str(SAM_MODEL_PATH))
+                model = sam_model_registry["vit_b"](checkpoint=str(sam_path))
                 model.to(device="cuda" if torch.cuda.is_available() else "cpu")
                 self.sam_predictor = SamPredictor(model)
 
@@ -1637,14 +1635,31 @@ class StudioState:
         thread.start()
 
     def _load_detection_models(self) -> DetectionModels:
-        validate_model_manifest(PRECISE_MODEL)
-        assert_onnx_cuda_available()
-        models = DetectionModels(precise=YOLO(str(PRECISE_MODEL.path), task="segment"))
-        if MODEL_PATH.is_file():
-            models.primary = YOLO(str(MODEL_PATH))
-        if SECOND_MODEL_PATH.is_file():
-            models.secondary = YOLO(str(SECOND_MODEL_PATH))
-        return models
+        model_path = self._configured_model_path("target_segmentation", "対象セグメンテーション")
+        provider = str(self.settings["models"].get("provider", "gpu"))
+        if provider == "gpu":
+            assert_onnx_cuda_available()
+        return DetectionModels(precise=TargetSegmenter(model_path, device=provider))
+
+    def _configured_model_path(self, key: str, label: str) -> Path:
+        raw_path = str(self.settings.get("models", {}).get(key, "")).strip()
+        if not raw_path:
+            raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。")
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            raise ClientError(f"{label}モデルが見つかりません: {path}")
+        if path.suffix.lower() != ".onnx":
+            raise ClientError(f"{label}モデルにはONNXファイルを指定してください。")
+        return path
+
+    def _configured_sam_path(self) -> Path:
+        raw_path = str(self.settings.get("models", {}).get("sam_checkpoint", "")).strip()
+        if not raw_path:
+            raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。")
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            raise ClientError(f"SAMモデルが見つかりません: {path}")
+        return path
 
     def _ensure_models(self) -> DetectionModels:
         with self.lock:
@@ -1655,12 +1670,14 @@ class StudioState:
             self.models = models
         return models
 
-    def _ensure_hand_model(self, models: DetectionModels) -> YOLO:
+    def _ensure_hand_model(self, models: DetectionModels) -> HandDetector:
         if models.hand is not None:
             return models.hand
-        validate_model_manifest(HAND_MODEL)
-        assert_onnx_cuda_available()
-        models.hand = YOLO(str(HAND_MODEL.path), task="detect")
+        model_path = self._configured_model_path("hand_detection", "手の検出")
+        provider = str(self.settings["models"].get("provider", "gpu"))
+        if provider == "gpu":
+            assert_onnx_cuda_available()
+        models.hand = HandDetector(model_path, device=provider)
         return models.hand
 
     def _detect_worker(
@@ -1779,85 +1796,27 @@ class StudioState:
         self, models: DetectionModels, rgb: Image.Image, confidence: float
     ) -> list[dict[str, Any]]:
         width, height = rgb.size
-        results = models.precise.predict(
-            rgb,
-            device=0,
-            conf=precise_confidence(confidence),
-            imgsz=1280,
-            retina_masks=True,
-            verbose=False,
-            max_det=300,
-            iou=0.85,
-        )
+        segments = models.precise.detect(np.asarray(rgb), precise_confidence(confidence))
         if not models.precise_provider_checked:
-            assert_onnx_cuda_active(models.precise, PRECISE_MODEL)
+            if str(self.settings["models"].get("provider", "gpu")) == "gpu":
+                assert_onnx_cuda_active(models.precise, "対象セグメンテーション")
             models.precise_provider_checked = True
-        return self._segments_from_results(
-            results,
-            source="precise",
-            width=width,
-            height=height,
-            precise_only=True,
-            confidence=confidence,
-        )
+        return [segment for segment in segments if segment["mask"].shape == (height, width)]
 
     def _detect_legacy_segments(
         self, models: DetectionModels, rgb: Image.Image, confidence: float
     ) -> list[dict[str, Any]]:
-        width, height = rgb.size
-        segments: list[dict[str, Any]] = []
-        legacy_models: list[tuple[str, YOLO]] = []
-        if models.primary is not None:
-            legacy_models.append(("primary", models.primary))
-        if models.secondary is not None:
-            legacy_models.append(("secondary", models.secondary))
-        for source, model in legacy_models:
-            for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
-                crop = rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height))
-                results = model.predict(
-                    crop,
-                    device=0,
-                    conf=confidence_for_source(source, confidence),
-                    imgsz=1024,
-                    retina_masks=True,
-                    verbose=False,
-                    max_det=300,
-                    iou=0.85,
-                )
-                for segment in self._segments_from_results(
-                    results,
-                    source=source,
-                    width=tile_width,
-                    height=tile_height,
-                    x_offset=x_offset,
-                    y_offset=y_offset,
-                    full_width=width,
-                    full_height=height,
-                    confidence=confidence,
-                ):
-                    merge_segment(
-                        segments,
-                        segment["class_name"],
-                        segment["confidence"],
-                        segment["mask"],
-                        segment["source"],
-                    )
-        return segments
+        # Legacy Ultralytics/.pt fallback was deliberately removed. Keeping this
+        # method preserves the stable detection pipeline shape for callers.
+        return []
 
     def _hand_boxes(self, models: DetectionModels, rgb: Image.Image) -> list[tuple[int, int, int, int]]:
         hand_model = self._ensure_hand_model(models)
-        results = hand_model.predict(rgb, device=0, conf=HAND_CONFIDENCE, imgsz=640, verbose=False, max_det=100, iou=0.70)
+        boxes = hand_model.detect_boxes(np.asarray(rgb), HAND_CONFIDENCE)
         if not models.hand_provider_checked:
-            assert_onnx_cuda_active(hand_model, HAND_MODEL)
+            if str(self.settings["models"].get("provider", "gpu")) == "gpu":
+                assert_onnx_cuda_active(hand_model, "手の検出")
             models.hand_provider_checked = True
-        boxes: list[tuple[int, int, int, int]] = []
-        for result in results:
-            if result.boxes is None:
-                continue
-            for box in result.boxes.cpu():
-                left, top, right, bottom = (int(round(value)) for value in box.xyxy[0].tolist())
-                if right > left and bottom > top:
-                    boxes.append((left, top, right, bottom))
         return boxes
 
     @staticmethod
@@ -2682,7 +2641,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             if path == "/api/health":
-                self._json({"ok": True, "modelExists": MODEL_PATH.is_file(), "device": inference_device_name()})
+                models = STATE.settings.get("models", {})
+                self._json({
+                    "ok": True,
+                    "modelsConfigured": all(str(models.get(key, "")).strip() for key in ("target_segmentation", "hand_detection", "sam_checkpoint")),
+                    "device": inference_device_name(),
+                })
             elif path == "/api/images":
                 self._json({"root": str(STATE.root) if STATE.root else "", "images": STATE.list_images()})
             elif path == "/api/job":

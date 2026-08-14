@@ -1,9 +1,11 @@
 # アプリ実行時の一時データ
 .mosaicstudio-cache/
+.mozarie-cache/
 .ui-fixture/
 
 # 大容量のローカルモデル
 models/
+config/local.json
 
 # Python の生成物と仮想環境
 __pycache__/
