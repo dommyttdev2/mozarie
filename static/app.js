@@ -80,6 +80,8 @@ async function loadTranslations() {
   const polygonDetect = $("#polygonDetectButton"); const polygonCancel = $("#polygonCancelButton");
   if (polygonDetect) polygonDetect.textContent = t("polygon.detect");
   if (polygonCancel) polygonCancel.textContent = t("polygon.cancel");
+  ensureDetectionModeControl();
+  renderModelStatus();
 }
 
 function api(path, options = {}) {
@@ -2560,14 +2562,29 @@ function selectedDetectionMode() {
 }
 
 function ensureDetectionModeControl() {
-  if (document.querySelector('input[name="detectMode"]')) return;
+  const existing = document.querySelector('input[name="detectMode"]');
+  if (existing) {
+    const mode = $("#detectMode");
+    if (mode) mode.setAttribute("aria-label", t("detectDialog.mode"));
+    const standard = $("#detectModeStandard"); const highPrecision = $("#detectModeHighPrecision");
+    if (standard) standard.textContent = t("detectDialog.standard");
+    if (highPrecision) highPrecision.textContent = t("detectDialog.highPrecision");
+    return;
+  }
   const form = $("#detectForm");
   if (!form?.insertAdjacentHTML) return;
   form.insertAdjacentHTML("beforeend", `
     <fieldset class="mode-choice" id="detectMode" aria-label="${t("detectDialog.mode")}">
-      <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span>${t("detectDialog.standard")}</span></label>
-      <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span>${t("detectDialog.highPrecision")}</span></label>
+      <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span id="detectModeStandard">${t("detectDialog.standard")}</span></label>
+      <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span id="detectModeHighPrecision">${t("detectDialog.highPrecision")}</span></label>
     </fieldset>`);
+}
+
+function renderModelStatus() {
+  const modelStatus = Object.entries(state.settingsStatus?.models || {});
+  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every(([, model]) => model.valid)
+    ? t("settings.modelsReady")
+    : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
 }
 
 function setSettingsForm(settings, status = null) {
@@ -2593,10 +2610,7 @@ function setSettingsForm(settings, status = null) {
   const mode = settings.detection.mode;
   const radio = document.querySelector(`input[name="detectMode"][value="${mode}"]`);
   if (radio) radio.checked = true;
-  const modelStatus = Object.entries(status?.models || {});
-  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every(([, model]) => model.valid)
-    ? t("settings.modelsReady")
-    : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
+  renderModelStatus();
 }
 
 function settingsPayload() {

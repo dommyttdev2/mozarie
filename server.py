@@ -497,9 +497,11 @@ def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> t
         raise ClientError("境界のクリック座標が正しくありません。")
     if not (0 <= left < right <= width and 0 <= top < bottom <= height):
         raise ClientError("境界の範囲は画像内にドラッグしてください。")
-    if not (left <= point[0] < right and top <= point[1] < bottom):
+    inside_x = left <= point[0] < right or (right == width and point[0] == width)
+    inside_y = top <= point[1] < bottom or (bottom == height and point[1] == height)
+    if not (inside_x and inside_y):
         raise ClientError("クリック位置は選択範囲の内側にしてください。")
-    return (left, top, right, bottom), point
+    return (left, top, right, bottom), (min(point[0], width - 1), min(point[1], height - 1))
 
 
 def read_polygon_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[float, float], np.ndarray]:

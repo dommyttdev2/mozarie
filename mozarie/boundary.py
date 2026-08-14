@@ -30,7 +30,7 @@ def validate_polygon(points: Sequence[Point], width: int, height: int, minimum_a
     if len(points) != 4:
         raise ValueError("four points are required")
     normalised = tuple((float(x), float(y)) for x, y in points)
-    if not all(math.isfinite(x) and math.isfinite(y) and 0 <= x < width and 0 <= y < height for x, y in normalised):
+    if not all(math.isfinite(x) and math.isfinite(y) and 0 <= x <= width and 0 <= y <= height for x, y in normalised):
         raise ValueError("polygon points must be inside the image")
     if len({(round(x, 4), round(y, 4)) for x, y in normalised}) != 4:
         raise ValueError("polygon points must be distinct")

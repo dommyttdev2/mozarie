@@ -38,3 +38,10 @@ class MozarieDomainTests(unittest.TestCase):
         _roi, _point, mask = polygon_roi_and_point(((2, 2), (12, 2), (11, 9), (3, 9)), 16, 16)
         self.assertEqual(int(mask[0, 0]), 0)
         self.assertEqual(int(mask[5, 6]), 255)
+
+    def test_polygon_accepts_right_and_bottom_image_edges(self) -> None:
+        roi, point, mask = polygon_roi_and_point(((2, 2), (20, 2), (20, 20), (2, 20)), 20, 20)
+        self.assertEqual(roi, (2, 2, 20, 20))
+        self.assertGreater(mask[int(point[1]), int(point[0])], 0)
+        with self.assertRaises(ValueError):
+            validate_polygon(((2, 2), (21, 2), (20, 20), (2, 20)), 20, 20)

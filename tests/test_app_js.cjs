@@ -2,6 +2,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const translationFixtures = Object.fromEntries(["en", "ja"].map((language) => [
+  language,
+  JSON.parse(fs.readFileSync(path.join(__dirname, "..", "static", "i18n", `${language}.json`), "utf8")),
+]));
 
 function element(tagName = "") {
   const listeners = new Map();
@@ -50,7 +54,7 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "polygonTool", "polygonActions", "polygonDetectButton", "polygonCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "polygonTool", "polygonActions", "polygonDetectButton", "polygonCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
   "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave",
@@ -148,9 +152,12 @@ function canvasElement() {
 const studioGrid = element();
 const document = {
   addEventListener() {},
-  querySelector: (selector) => selector === 'input[name="saveMode"]:checked'
-    ? { value: elements.get("#applyOverwriteMode").checked ? "overwrite" : "copy" }
-    : (selector === ".studio-grid" ? studioGrid : (elements.get(selector) || element())),
+  querySelector: (selector) => {
+    if (selector === 'input[name="saveMode"]:checked') return { value: elements.get("#applyOverwriteMode").checked ? "overwrite" : "copy" };
+    if (selector === 'input[name="detectMode"]') return elements.get("#detectModeRadio");
+    if (selector.startsWith('input[name="detectMode"][value=')) return elements.get("#detectModeRadio");
+    return selector === ".studio-grid" ? studioGrid : (elements.get(selector) || element());
+  },
   querySelectorAll: (selector) => {
     if (selector === "button, input, select, textarea") return [...elements.values()].filter((item) => item.id);
     if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog"), elements.get("#detectDialog")];
@@ -159,8 +166,22 @@ const document = {
   createElement: (tag) => tag === "canvas" ? canvasElement() : element(tag),
 };
 document.activeElement = null;
+document.documentElement = { lang: "ja" };
+elements.set("#detectModeRadio", { checked: true, value: "standard" });
 let combinedMaskPresent = false;
 let resolveFetch;
+const pendingFetches = [];
+function settlePendingFetch(pending, response) {
+  const index = pendingFetches.indexOf(pending);
+  assert.notEqual(index, -1, `unexpected fetch response for ${pending.path}`);
+  pendingFetches.splice(index, 1);
+  pending.resolve(response);
+}
+function resolvePendingFetch(pathPrefix, response) {
+  const pending = pendingFetches.find((item) => item.path.startsWith(pathPrefix));
+  assert.ok(pending, `expected pending fetch for ${pathPrefix}; found ${pendingFetches.map((item) => item.path).join(", ")}`);
+  settlePendingFetch(pending, response);
+}
 let fetchCalls = 0;
 const requests = [];
 const storage = new Map();
@@ -183,14 +204,23 @@ const context = {
   },
   URL: { createObjectURL() { return "blob:test"; }, revokeObjectURL() {} },
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
-  fetch: (path, options) => { fetchCalls += 1; requests.push({ path, options }); return new Promise((resolve) => { resolveFetch = resolve; }); },
+  fetch: (path, options) => {
+    fetchCalls += 1; requests.push({ path, options });
+    return new Promise((resolve) => {
+      const pending = { path: `${path}#${fetchCalls}`, resolve };
+      pendingFetches.push(pending);
+      resolveFetch = (response) => {
+        settlePendingFetch(pending, response);
+      };
+    });
+  },
 };
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
   bindEvents();
   const lru = new Map();
   const firstImage = { src: "blob:first" };
@@ -252,8 +282,18 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   return { key, code: options.code || key, shiftKey: Boolean(options.shiftKey), ctrlKey: Boolean(options.ctrlKey), metaKey: Boolean(options.metaKey), altKey: Boolean(options.altKey), prevented: false, preventDefault() { this.prevented = true; } };
 }
 
+let testReachedEnd = false;
+const completionWatchdog = setTimeout(() => {
+  if (!testReachedEnd) {
+    console.error(`test_app_js did not reach its final assertion; pending fetches: ${pendingFetches.map((item) => item.path).join(", ")}`);
+    process.exitCode = 1;
+  }
+}, 250);
+
 (async () => {
   const initialiseRun = initialise();
+  resolveFetch({ ok: true, json: async () => ({}) });
+  await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({}) });
   await new Promise((resolve) => setImmediate(resolve));
   const initialImage = { id: "initial", relativePath: "initial.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
@@ -398,6 +438,9 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(elements.get("#detectTargetCount").textContent, "Target: 1");
   elements.get("#detectConfidenceNumber").value = "0.67";
   const startDetection = startDetectionFromDialog({ preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ ok: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ ok: true }) });
   await startDetection;
   assert.equal(requests.at(-1).path, "/api/detect");
@@ -458,6 +501,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   polygonCanvas.dispatch("pointerup", { button: 0, pointerId: 7, clientX: 18, clientY: 22 });
   assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints[0])), { x: 18, y: 22 });
   assert.equal(state.polygonDragIndex, -1);
+  state.tool = "brush";
 
   state.images = [
     { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
@@ -510,9 +554,14 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const galleryAppendsBeforeBoundary = galleryAppendCount;
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
   const boundarySuccess = addBoundaryCandidate({ x: 8, y: 7 });
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 2 }) });
+  const existingBoundary = { id: "boundary-existing", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
+  const boundarySuccessCandidate = { id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
+  resolveFetch({ ok: true, json: async () => ({ candidates: [boundarySuccessCandidate], candidateRevision: 2 }) });
   await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 2 }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [existingBoundary, boundarySuccessCandidate], candidateRevision: 2 }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/mask/first/boundary-existing", { ok: true, blob: async () => ({}) });
+  resolvePendingFetch("/api/mask/first/boundary-success", { ok: true, blob: async () => ({}) });
   await boundarySuccess;
   assert.equal(state.boundaryRoi, null);
   assert.equal(state.images[0].candidateCount, candidateCountBeforeBoundary + 1);
@@ -527,9 +576,14 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const maskFailureAppends = galleryAppendCount;
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
   const boundaryMaskFailure = addBoundaryCandidate({ x: 8, y: 7 });
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 3 }) });
+  const boundaryMaskFailureCandidate = { id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
+  resolveFetch({ ok: true, json: async () => ({ candidates: [boundaryMaskFailureCandidate], candidateRevision: 3 }) });
   await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" }], candidateRevision: 3 }) });
+  resolveFetch({ ok: true, json: async () => ({ candidates: [existingBoundary, boundarySuccessCandidate, boundaryMaskFailureCandidate], candidateRevision: 3 }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/mask/first/boundary-mask-failure", { ok: false, status: 500, blob: async () => ({}) });
+  resolvePendingFetch("/api/mask/first/boundary-existing", { ok: true, blob: async () => ({}) });
+  resolvePendingFetch("/api/mask/first/boundary-success", { ok: true, blob: async () => ({}) });
   await boundaryMaskFailure;
   assert.equal(state.images[0].candidateCount, candidateCountBeforeMaskFailure + 1);
   assert.equal(isReviewed(state.images[0]), false);
@@ -649,7 +703,8 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const staleMask = loadCandidateBundle("first", 30);
   resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "stale-one" }, { id: "stale-two" }] }) });
   await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: false, status: 404 });
+  resolvePendingFetch("/api/mask/first/stale-one", { ok: false, status: 404 });
+  resolvePendingFetch("/api/mask/first/stale-two", { ok: false, status: 404 });
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
   const reconciled = await staleMask;
@@ -1473,6 +1528,9 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   shortcutCheckbox.focus();
   shortcutCheckbox.checked = true;
   shortcutCheckbox.dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   runNavigationAction(() => {});
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
@@ -1496,11 +1554,14 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(handleNavigationKeydown(shiftRight), true);
   assert.equal(shiftRight.prevented, true);
   assert.equal(requests.at(-1).path, "/api/candidates/third");
+  resolvePendingFetch("/api/candidates/third", { ok: true, json: async () => ({ candidates: [] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const requestCountBeforeEnter = requests.length;
   const enter = keyEvent("Enter");
   assert.equal(handleNavigationKeydown(enter), true);
   assert.equal(enter.prevented, true);
-  assert.equal(isReviewed(state.images[0]), true);
-  assert.equal(requests.at(-1).path, "/api/candidates/second");
+  assert.equal(isReviewed(state.images[2]), true);
+  assert.equal(requests.length, requestCountBeforeEnter, "reviewing the last image must not start another selection request");
   rebuildMosaicPreview();
   paintMosaicPreview();
   saveAll();
@@ -1664,5 +1725,36 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(state.candidateUpdateVersions.size, 0);
   assert.equal(state.candidateDeleting.size, 0);
 
-  console.log("test_app_js: passed");
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+  // Loading either language refreshes dynamic detection labels and model status,
+  // and parameterized strings never leak unresolved placeholders to the UI.
+  state.settings = { general: { language: "en" } };
+  state.settingsStatus = { models: { target: { configured: true, valid: true, detail: "ready" } } };
+  const englishLoad = loadTranslations();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
+  await englishLoad;
+  assert.equal(document.documentElement.lang, "en");
+  assert.equal(elements.get("#detectModeStandard").textContent, "Standard");
+  assert.equal(elements.get("#detectModeHighPrecision").textContent, "High precision");
+  assert.equal(elements.get("#settingsModelStatus").textContent, "Required models are ready.");
+  for (const rendered of [
+    t("apply.complete", { completed: 3 }),
+    t("apply.completeWithStale", { completed: 3, stale: 1 }),
+    t("overview.count", { visible: 2, total: 7 }),
+    t("editor.calculatedPixels", { value: 13 }),
+  ]) assert.doesNotMatch(rendered, /\{[^}]+\}/, `English UI leaked an unresolved placeholder: ${rendered}`);
+
+  state.settings.general.language = "ja";
+  const japaneseLoad = loadTranslations();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/ja.json", { ok: true, json: async () => translationFixtures.ja });
+  await japaneseLoad;
+  assert.equal(document.documentElement.lang, "ja");
+  assert.equal(elements.get("#detectModeStandard").textContent, translationFixtures.ja["detectDialog.standard"]);
+  assert.equal(elements.get("#settingsModelStatus").textContent, translationFixtures.ja["settings.modelsReady"]);
+
+  assert.equal(pendingFetches.length, 0, `every mocked fetch must be resolved before this test completes: ${pendingFetches.map((item) => item.path).join(", ")}`);
+  testReachedEnd = true;
+  clearTimeout(completionWatchdog);
+  console.log("test_app_js: passed (reached end with no pending fetches)");
+})().catch((error) => { clearTimeout(completionWatchdog); console.error(error); process.exitCode = 1; });

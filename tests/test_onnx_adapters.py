@@ -77,6 +77,23 @@ class OnnxAdapterTests(unittest.TestCase):
             float16 = helper.make_tensor_value_info("images", TensorProto.FLOAT16, [1, 3, None, None])
             with self.assertRaises(ModelProfileError):
                 validate_target_profile(self._write_model(root, "target-f16.onnx", [float16], [prediction, prototype]))
+            batch_two = helper.make_tensor_value_info("images", TensorProto.FLOAT, [2, 3, 1280, 1280])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-batch-two.onnx", [batch_two], [prediction, prototype]))
+            prediction_batch_axis = helper.make_tensor_value_info("prediction", TensorProto.FLOAT, [43, 1, None])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-batch-axis.onnx", [image], [prediction_batch_axis, prototype]))
+            bad_prototype = helper.make_tensor_value_info("prototype", TensorProto.FLOAT, [1, 31, None, None])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-prototype-channels.onnx", [image], [prediction, bad_prototype]))
+            float16_prediction = helper.make_tensor_value_info("prediction", TensorProto.FLOAT16, [1, 43, None])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-f16-output.onnx", [image], [float16_prediction, prototype]))
+            batch_two_prediction = helper.make_tensor_value_info("prediction", TensorProto.FLOAT, [2, 43, None])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-output-batch-two.onnx", [image], [batch_two_prediction, prototype]))
+            dynamic = helper.make_tensor_value_info("images", TensorProto.FLOAT, [None, 3, None, None])
+            self.assertEqual(validate_target_profile(self._write_model(root, "target-dynamic.onnx", [dynamic], [prediction, prototype])).kind, "target_segmentation")
 
     def test_hand_profile_requires_single_xywh_score_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -93,3 +110,12 @@ class OnnxAdapterTests(unittest.TestCase):
             wrong_size = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 1280, 1280])
             with self.assertRaises(ModelProfileError):
                 validate_hand_profile(self._write_model(root, "hand-size.onnx", [wrong_size], [output]))
+            batch_two = helper.make_tensor_value_info("images", TensorProto.FLOAT, [2, 3, 640, 640])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-batch-two.onnx", [batch_two], [output]))
+            bad_dtype = helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, None, 5])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-f16-output.onnx", [image], [bad_dtype]))
+            batch_two_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, None, 5])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-output-batch-two.onnx", [image], [batch_two_output]))

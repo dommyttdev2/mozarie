@@ -62,14 +62,16 @@ def _load(path: Path, *, expected_size: int) -> tuple[TensorProfile, tuple[Tenso
         raise ModelProfileError("Input must be NCHW with exactly 3 RGB channels")
     if image_input.dtype != TensorProto.FLOAT:
         raise ModelProfileError("Input must use float32 tensors")
+    if image_input.dimensions[0] not in {None, 1}:
+        raise ModelProfileError("Input batch size must be 1 or dynamic")
     height, width = image_input.dimensions[2:]
     if (height is not None and height != expected_size) or (width is not None and width != expected_size):
         raise ModelProfileError(f"Input size must be dynamic or {expected_size}x{expected_size}")
     return image_input, outputs
 
 
-def _has_dimension(profile: TensorProfile, value: int) -> bool:
-    return value in profile.dimensions
+def _is_float32_single_batch(profile: TensorProfile) -> bool:
+    return profile.dtype == TensorProto.FLOAT and profile.dimensions[0] in {None, 1}
 
 
 def validate_target_profile(path: Path) -> ModelProfile:
@@ -77,8 +79,16 @@ def validate_target_profile(path: Path) -> ModelProfile:
     image_input, outputs = _load(path, expected_size=1280)
     if len(outputs) != 2:
         raise ModelProfileError("Target segmentation needs prediction and 32-channel prototype outputs")
-    prediction = next((item for item in outputs if len(item.dimensions) == 3 and _has_dimension(item, TARGET_ROW_CHANNELS)), None)
-    prototype = next((item for item in outputs if len(item.dimensions) == 4 and item.dimensions[1] == 32), None)
+    prediction = next(
+        (
+            item for item in outputs
+            if len(item.dimensions) == 3
+            and _is_float32_single_batch(item)
+            and (item.dimensions[1] == TARGET_ROW_CHANNELS or item.dimensions[2] == TARGET_ROW_CHANNELS)
+        ),
+        None,
+    )
+    prototype = next((item for item in outputs if len(item.dimensions) == 4 and _is_float32_single_batch(item) and item.dimensions[1] == 32), None)
     if prediction is None:
         raise ModelProfileError(f"Target prediction must be rank 3 with a {TARGET_ROW_CHANNELS}-channel axis")
     if prototype is None:
@@ -92,7 +102,7 @@ def validate_hand_profile(path: Path) -> ModelProfile:
     if len(outputs) != 1:
         raise ModelProfileError("Hand detection needs one output")
     output = outputs[0]
-    if len(output.dimensions) != 3 or (output.dimensions[1] != 5 and output.dimensions[2] != 5):
+    if not _is_float32_single_batch(output) or len(output.dimensions) != 3 or (output.dimensions[1] != 5 and output.dimensions[2] != 5):
         raise ModelProfileError("Hand output must be [batch, 5, anchors] or [batch, anchors, 5]")
     return ModelProfile("hand_detection", image_input, outputs)
 

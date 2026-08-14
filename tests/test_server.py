@@ -1277,6 +1277,13 @@ class MozarieTests(unittest.TestCase):
             20,
         )
         self.assertEqual(fractional_point, (9.6, 8.4))
+        edge_roi, edge_point = read_boundary_request(
+            {"roi": {"left": 2, "top": 3, "right": 20, "bottom": 20}, "point": {"x": 20, "y": 20}},
+            20,
+            20,
+        )
+        self.assertEqual(edge_roi, (2, 3, 20, 20))
+        self.assertEqual(edge_point, (19, 19))
         with self.assertRaises(ClientError):
             read_boundary_request(
                 {"roi": {"left": 2, "top": 3, "right": 12, "bottom": 15}, "point": {"x": 12, "y": 9}},
@@ -2227,6 +2234,7 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('id="saveButton"', page)
         self.assertIn('id="galleryMaskedTab"', page)
         self.assertIn('id="saveAllButton"', page)
+
         self.assertIn('class="appbar"', page)
         self.assertNotIn('class="global-action-bar"', page)
         self.assertIn('class="canvas-tool-rail"', page)
@@ -2381,6 +2389,22 @@ class MozarieTests(unittest.TestCase):
         referenced_keys = set(re.findall(r'data-i18n(?:-title|-aria-label|-placeholder)?="([^"]+)"', page))
         referenced_keys.update(re.findall(r'\bt\("([^"]+)"', app))
         self.assertEqual(referenced_keys - dictionary.keys(), set())
+
+    def test_run_batch_uses_only_python_311_or_newer_in_documented_fallback_order(self):
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "run.bat").read_text(encoding="utf-8")
+        self.assertIn('if defined MOZARIE_PYTHON', launcher)
+        self.assertIn('%APP_DIR%.venv\\Scripts\\python.exe', launcher)
+        self.assertIn('%APP_DIR%..\\ComfyUI_windows_portable\\python_embeded\\python.exe', launcher)
+        self.assertIn('py -0p', launcher)
+        self.assertIn('findstr /r /c:"-V:3\\.[0-9][0-9]*"', launcher)
+        self.assertIn('where python', launcher)
+        self.assertIn('sys.version_info >= (3, 11)', launcher)
+        self.assertIn('Python 3.11 or newer was not found', launcher)
+        self.assertLess(launcher.index('MOZARIE_PYTHON'), launcher.index('.venv\\Scripts\\python.exe'))
+        self.assertLess(launcher.index('.venv\\Scripts\\python.exe'), launcher.index('ComfyUI_windows_portable\\python_embeded\\python.exe'))
+        self.assertLess(launcher.index('python_embeded\\python.exe'), launcher.index('py -0p'))
+        self.assertLess(launcher.index('py -0p'), launcher.index('where python'))
 
     def test_api_returns_utf8_japanese_client_error(self):
         from http.server import ThreadingHTTPServer
