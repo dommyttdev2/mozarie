@@ -3105,16 +3105,16 @@ def main() -> None:
         STATE.shutdown()
         raise SystemExit(1) from None
     url = f"http://127.0.0.1:{args.port}"
-    LOGGER.info("Lets Censoring を起動しました: %s", url)
+    LOGGER.info("Mozarie を起動しました: %s", url)
     _schedule_browser_open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        LOGGER.info("Lets Censoring を停止します")
+        LOGGER.info("Mozarie を停止します")
     finally:
         server.server_close()
         STATE.shutdown()
-        LOGGER.info("Lets Censoring を停止しました")
+        LOGGER.info("Mozarie を停止しました")
 
 
 if __name__ == "__main__":
