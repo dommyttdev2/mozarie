@@ -6,8 +6,8 @@ const root = path.resolve(__dirname, "..");
 const app = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
-assert.match(app, /window\.showDirectoryPicker\(\{ id: "lets-censoring-output", mode: "readwrite" \}\)/);
-assert.match(app, /response\.headers\?\.get\("X-Lets-Censoring-Save-Token"\)/);
+assert.match(app, /window\.showDirectoryPicker\(\{ id: "mozarie-output", mode: "readwrite" \}\)/);
+assert.match(app, /response\.headers\?\.get\("X-Mozarie-Save-Token"\)/);
 assert.match(app, /candidateRevision: entry\.candidateRevision, deleteOriginal, sourceAction, saveToken/);
 assert.doesNotMatch(app, /deleteOriginal: entry\.deleteOriginal/);
 assert.ok(app.indexOf("await stream.close()") < app.indexOf('api("/api/save/commit"'), "commit must occur after close");

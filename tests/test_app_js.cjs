@@ -336,7 +336,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(state.sourceAccess.has("batch-b"), false);
   assert.equal(state.drafts.has("batch-b"), false);
   assert.equal(state.maskStatus.has("batch-b"), false);
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\batch:batch-b.png"), false);
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\batch:batch-b.png"), false);
   setGalleryDropOverlay(true);
   assert.equal(elements.get("#galleryDropOverlay").hidden, false);
   setGalleryDropOverlay(false);
@@ -406,6 +406,16 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(boundaryDragStarted({ clientX: 122.9, clientY: 140 }), false);
   state.view.scale = 12;
   assert.equal(boundaryDragStarted({ clientX: 123, clientY: 140 }), true);
+  state.boundaryRoi = { left: 1, top: 1, right: 3, bottom: 3 };
+  state.boundaryStart = { x: 1, y: 1 };
+  state.boundaryDragging = true;
+  state.polygonPoints = [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }];
+  state.polygonDragIndex = 2;
+  clearBoundaryInteraction();
+  assert.equal(state.boundaryRoi, null);
+  assert.equal(state.boundaryDragging, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints)), []);
+  assert.equal(state.polygonDragIndex, -1);
 
   state.images = [
     { id: "first", relativePath: "first.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
@@ -1119,21 +1129,21 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   state.currentImage = null;
   state.reviewRoot = "g:\\images\\apply";
   state.reviewedPaths = new Set(["old.png"]);
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\apply:old.png", "true");
+  storage.set("mozarie.reviewed.v1:g:\\images\\apply:old.png", "true");
   state.applyFinishing = false;
   const reviewedPathMigration = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["migrated"], completedImageIds: ["migrated"], startedAt: 302 });
   resolveFetch({ ok: true, json: async () => ({ images: [reviewedNewPath] }) });
   await reviewedPathMigration;
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\apply:old.png"), false);
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\apply:old_censored.png"), "true");
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\apply:old.png"), false);
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\apply:old_censored.png"), "true");
   assert.equal(isReviewed(reviewedNewPath), true);
 
   // A second tab can finish the same copy-delete job after the first one has
   // already removed the old key. The reviewed result must remain intact.
   const idempotentOldPath = { id: "idempotent", relativePath: "idempotent.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   const idempotentNewPath = { ...idempotentOldPath, relativePath: "idempotent_censored.png" };
-  const idempotentOldKey = "lets-censoring.reviewed.v1:g:\\images\\apply:idempotent.png";
-  const idempotentNewKey = "lets-censoring.reviewed.v1:g:\\images\\apply:idempotent_censored.png";
+  const idempotentOldKey = "mozarie.reviewed.v1:g:\\images\\apply:idempotent.png";
+  const idempotentNewKey = "mozarie.reviewed.v1:g:\\images\\apply:idempotent_censored.png";
   storage.set(idempotentOldKey, "true");
   storage.delete(idempotentNewKey);
   state.reviewedPaths = new Set(["idempotent.png"]);
@@ -1160,12 +1170,12 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const storageWinsNewPath = { ...storageWinsOldPath, relativePath: "storage-wins_censored.png" };
   state.images = [storageWinsOldPath];
   state.reviewedPaths = new Set();
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\apply:storage-wins.png", "true");
+  storage.set("mozarie.reviewed.v1:g:\\images\\apply:storage-wins.png", "true");
   state.applyFinishing = false;
   const storageWinsMigration = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["storage-wins"], completedImageIds: ["storage-wins"], startedAt: 307 });
   resolveFetch({ ok: true, json: async () => ({ images: [storageWinsNewPath] }) });
   await storageWinsMigration;
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\apply:storage-wins_censored.png"), "true");
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\apply:storage-wins_censored.png"), "true");
   assert.equal(isReviewed(storageWinsNewPath), true);
 
   // If another tab already migrated the state, the new key is authoritative
@@ -1174,13 +1184,13 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const storageMissingNewPath = { ...storageMissingOldPath, relativePath: "storage-missing_censored.png" };
   state.images = [storageMissingOldPath];
   state.reviewedPaths = new Set(["storage-missing.png"]);
-  storage.delete("lets-censoring.reviewed.v1:g:\\images\\apply:storage-missing.png");
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\apply:storage-missing_censored.png", "true");
+  storage.delete("mozarie.reviewed.v1:g:\\images\\apply:storage-missing.png");
+  storage.set("mozarie.reviewed.v1:g:\\images\\apply:storage-missing_censored.png", "true");
   state.applyFinishing = false;
   const storageMissingMigration = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["storage-missing"], completedImageIds: ["storage-missing"], startedAt: 308 });
   resolveFetch({ ok: true, json: async () => ({ images: [storageMissingNewPath] }) });
   await storageMissingMigration;
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\apply:storage-missing_censored.png"), "true");
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\apply:storage-missing_censored.png"), "true");
   assert.equal(isReviewed(storageMissingNewPath), true);
 
   // An unreviewed source remains unreviewed at its new path, while any stale
@@ -1189,14 +1199,14 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const unreviewedNewPath = { ...unreviewedOldPath, relativePath: "plain_censored.png" };
   state.images = [unreviewedOldPath];
   state.reviewedPaths = new Set();
-  storage.delete("lets-censoring.reviewed.v1:g:\\images\\apply:plain.png");
-  storage.delete("lets-censoring.reviewed.v1:g:\\images\\apply:plain_censored.png");
+  storage.delete("mozarie.reviewed.v1:g:\\images\\apply:plain.png");
+  storage.delete("mozarie.reviewed.v1:g:\\images\\apply:plain_censored.png");
   state.applyFinishing = false;
   const unreviewedPathMigration = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["unreviewed"], completedImageIds: ["unreviewed"], startedAt: 303 });
   resolveFetch({ ok: true, json: async () => ({ images: [unreviewedNewPath] }) });
   await unreviewedPathMigration;
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\apply:plain.png"), false);
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\apply:plain_censored.png"), false);
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\apply:plain.png"), false);
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\apply:plain_censored.png"), false);
   assert.equal(isReviewed(unreviewedNewPath), false);
 
   // Storage failures do not prevent the in-session reviewed state from moving.
@@ -1225,12 +1235,12 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const copiedOutput = { id: "copy", relativePath: "source_censored.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   state.images = [copiedSource];
   state.reviewedPaths = new Set(["source.png"]);
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\apply:source.png", "true");
+  storage.set("mozarie.reviewed.v1:g:\\images\\apply:source.png", "true");
   state.applyFinishing = false;
   const normalCopy = finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["source"], completedImageIds: ["source"], startedAt: 305 });
   resolveFetch({ ok: true, json: async () => ({ images: [copiedSource, copiedOutput] }) });
   await normalCopy;
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\apply:source.png"), "true");
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\apply:source.png"), "true");
   assert.equal(isReviewed(copiedOutput), false);
 
   // Overwrite retains the same path, so reviewed state remains untouched.
@@ -1250,7 +1260,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   state.currentImage = null;
   state.reviewRoot = "g:\\images\\detect";
   state.reviewedPaths = new Set(["detected.png", "fallback.png"]);
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\detect", '["detected.png", "fallback.png"]');
+  storage.set("mozarie.reviewed.v1:g:\\images\\detect", '["detected.png", "fallback.png"]');
   state.detectionTargetIds = ["fallback"];
   state.pageLoadedAt = 1000;
   state.handledDetectionStartedAt = null;
@@ -1314,8 +1324,8 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   setReviewed(state.images[0], true);
   assert.equal(isReviewed(state.images[0]), true);
   assert.equal(isReviewed(state.images[1]), false);
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\work:first.png"), "true");
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\work:second.png"), false);
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\work:first.png"), "true");
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\work:second.png"), false);
   state.reviewedPaths = new Set();
   loadReviewedPaths();
   assert.equal(isReviewed(state.images[0]), true);
@@ -1324,19 +1334,19 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(isReviewed(state.images[0]), false);
   state.reviewRoot = "g:\\images\\work";
   loadReviewedPaths();
-  storage.set("lets-censoring.reviewed.v1:g:\\images\\work:second.png", "true");
+  storage.set("mozarie.reviewed.v1:g:\\images\\work:second.png", "true");
   state.reviewedPaths = new Set();
   setReviewed(state.images[0], true);
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\work:first.png"), "true");
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\work:second.png"), "true");
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\work:first.png"), "true");
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\work:second.png"), "true");
   markImagesUnreviewed(["first"]);
-  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\work:first.png"), false);
-  assert.equal(storage.get("lets-censoring.reviewed.v1:g:\\images\\work:second.png"), "true");
-  handleReviewStorageEvent({ key: "lets-censoring.reviewed.v1:g:\\images\\work:first.png", newValue: "true" });
+  assert.equal(storage.has("mozarie.reviewed.v1:g:\\images\\work:first.png"), false);
+  assert.equal(storage.get("mozarie.reviewed.v1:g:\\images\\work:second.png"), "true");
+  handleReviewStorageEvent({ key: "mozarie.reviewed.v1:g:\\images\\work:first.png", newValue: "true" });
   assert.equal(isReviewed(state.images[0]), true);
-  handleReviewStorageEvent({ key: "lets-censoring.reviewed.v1:g:\\images\\work:first.png", newValue: null });
+  handleReviewStorageEvent({ key: "mozarie.reviewed.v1:g:\\images\\work:first.png", newValue: null });
   assert.equal(isReviewed(state.images[0]), false);
-  handleReviewStorageEvent({ key: "lets-censoring.reviewed.v1:g:\\images\\work:second.png", newValue: "true" });
+  handleReviewStorageEvent({ key: "mozarie.reviewed.v1:g:\\images\\work:second.png", newValue: "true" });
   assert.equal(isReviewed(state.images[1]), true);
   const overviewSentinel = {
     sentinel: true,
@@ -1467,7 +1477,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const importRequests = requests.filter((request) => request.path === "/api/import/file");
   assert.equal(importRequests.length, 2);
   assert.equal(importRequests[0].options.headers["Content-Type"], "application/octet-stream");
-  assert.equal(importRequests[0].options.headers["X-Lets-Censoring-Relative-Path"], "album%2Ffirst.png");
+  assert.equal(importRequests[0].options.headers["X-Mozarie-Relative-Path"], "album%2Ffirst.png");
   assert.equal(importRequests[0].options.body, importedFiles[0]);
   assert.equal(importRequests[1].options.body, importedFiles[2]);
   assert.equal(state.importing, false);
@@ -1480,7 +1490,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const mappedImport = importFiles([{ file: handledFile, relativePath: "nested/handled.png", fileHandle: handledSource, parentHandle: { name: "nested" } }]);
   await new Promise((resolve) => setImmediate(resolve));
   const mappedRequest = requests.at(-1);
-  const mappedClientKey = decodeURIComponent(mappedRequest.options.headers["X-Lets-Censoring-Client-Key"]);
+  const mappedClientKey = decodeURIComponent(mappedRequest.options.headers["X-Mozarie-Client-Key"]);
   resolveFetch({ ok: true, json: async () => ({ images: [{ id: "handled", sourceKind: "session", relativePath: "nested/handled.png", width: 10, height: 10 }], imported: [{ clientKey: mappedClientKey, imageId: "handled" }] }) });
   await mappedImport;
   assert.equal(state.sourceAccess.get("handled").fileHandle, handledSource);
@@ -1520,7 +1530,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   folderInput.value = "";
   assert.equal(folderInput.value, "");
   const folderRequest = requests.at(-1);
-  assert.equal(folderRequest.options.headers["X-Lets-Censoring-Relative-Path"], "source%2Fnested%2Fnested.png");
+  assert.equal(folderRequest.options.headers["X-Mozarie-Relative-Path"], "source%2Fnested%2Fnested.png");
 
   const savedFiles = new Map([["image_censored.png", { name: "image_censored.png" }]]);
   const fakeDirectory = {
@@ -1537,7 +1547,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
     async getDirectoryHandle() { return this; },
   };
   context.window.showDirectoryPicker = async (options) => {
-    assert.equal(options.id, "lets-censoring-output");
+    assert.equal(options.id, "mozarie-output");
     assert.equal(options.mode, "readwrite");
     return fakeDirectory;
   };

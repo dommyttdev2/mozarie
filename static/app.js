@@ -82,16 +82,19 @@ async function loadTranslations() {
 }
 
 function api(path, options = {}) {
-  const token = document.querySelector('meta[name="lets-censoring-token"]')?.content || "";
+  const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   return fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", "X-Lets-Censoring-Token": token, ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", "X-Mozarie-Token": token, ...(options.headers || {}) },
   })
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         const localized = data.error_code ? t(`errorCode.${data.error_code}`, data.params || {}) : "";
-        const error = new Error(localized && localized !== `errorCode.${data.error_code}` ? localized : (data.error || t("error.requestFailed")));
+        const message = data.error_code
+          ? (localized && localized !== `errorCode.${data.error_code}` ? localized : t("error.requestFailed"))
+          : (data.error || t("error.requestFailed"));
+        const error = new Error(message);
         error.status = response.status;
         throw error;
       }
@@ -133,7 +136,7 @@ function isGestureActive() { return state.drawing || state.panning || state.boun
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
 function saveTargets() { return state.images.filter(imageHasMask).map((image) => image.id); }
 function normaliseReviewRoot(value) { return String(value || "").trim().replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
-function reviewStoragePrefix() { return state.reviewRoot ? `lets-censoring.reviewed.v1:${state.reviewRoot}:` : ""; }
+function reviewStoragePrefix() { return state.reviewRoot ? `mozarie.reviewed.v1:${state.reviewRoot}:` : ""; }
 function reviewPath(image) { return String(image?.relativePath || "").replaceAll("\\", "/").toLowerCase(); }
 function reviewStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}${path}` : ""; }
 function isReviewed(image) { return state.reviewedPaths.has(reviewPath(image)); }
@@ -219,7 +222,7 @@ function focusElement(element) { element?.focus({ preventScroll: true }); }
 function focusCanvas() { focusElement(canvas); }
 function setNavigationShortcutsEnabled(enabled) {
   state.navigationShortcutsEnabled = Boolean(enabled);
-  try { localStorage.setItem("lets-censoring.navigation-shortcuts.v1", String(state.navigationShortcutsEnabled)); } catch { /* Session setting still applies. */ }
+  try { localStorage.setItem("mozarie.navigation-shortcuts.v1", String(state.navigationShortcutsEnabled)); } catch { /* Session setting still applies. */ }
   updateNavigationControls();
   focusCanvas();
 }
@@ -290,6 +293,9 @@ function clearBoundaryInteraction() {
   state.boundaryStartClient = null;
   state.boundaryPoint = null;
   state.boundaryDragging = false;
+  state.polygonPoints = [];
+  state.polygonDragIndex = -1;
+  updatePolygonActions();
 }
 
 function setMosaicPreviewEnabled(enabled) {
@@ -608,10 +614,23 @@ function loadImage(source) {
   });
 }
 
-function lruRemember(cache, key, value, limit) {
+function releaseImageResource(image) {
+  if (image && image !== state.currentImage) image.src = "";
+}
+
+function releaseCandidateBundle(bundle) {
+  for (const image of bundle?.candidateImages?.values?.() || []) releaseImageResource(image);
+}
+
+function lruRemember(cache, key, value, limit, release = null) {
   if (cache.has(key)) cache.delete(key);
   cache.set(key, value);
-  while (cache.size > limit) cache.delete(cache.keys().next().value);
+  while (cache.size > limit) {
+    const oldest = cache.keys().next().value;
+    const evicted = cache.get(oldest);
+    cache.delete(oldest);
+    release?.(evicted);
+  }
   return value;
 }
 
@@ -621,9 +640,9 @@ function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`;
 async function cachedImage(record) {
   const key = imageCacheKey(record);
   const cached = state.imageCache.get(key);
-  if (cached) return lruRemember(state.imageCache, key, cached, 6);
+  if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
   const image = await loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`);
-  return lruRemember(state.imageCache, key, image, 6);
+  return lruRemember(state.imageCache, key, image, 6, releaseImageResource);
 }
 
 function prefetchNeighbors(record) {
@@ -641,12 +660,24 @@ function releaseImageCaches(imageId = null) {
     image.src = "";
     state.imageCache.delete(key);
   }
-  for (const key of state.candidateBundleCache.keys()) if (matches(key)) state.candidateBundleCache.delete(key);
+  for (const [key, bundle] of state.candidateBundleCache) {
+    if (!matches(key)) continue;
+    releaseCandidateBundle(bundle);
+    state.candidateBundleCache.delete(key);
+  }
+}
+
+function invalidateCandidateBundles(imageId) {
+  for (const [key, bundle] of state.candidateBundleCache) {
+    if (!key.startsWith(`${imageId}:`)) continue;
+    if (bundle.candidateImages !== state.candidateImages) releaseCandidateBundle(bundle);
+    state.candidateBundleCache.delete(key);
+  }
 }
 
 async function loadCandidateMask(source) {
   const response = await fetch(source, {
-    headers: { "X-Lets-Censoring-Token": document.querySelector('meta[name="lets-censoring-token"]')?.content || "" },
+    headers: { "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
   });
   if (!response.ok) {
     const error = new Error(t("error.imageLoad"));
@@ -662,13 +693,13 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
   const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
   const cached = state.candidateBundleCache.get(cacheKey);
-  if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12);
+  if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
   try {
     const candidateImages = new Map();
     await Promise.all(candidateData.candidates.map(async (candidate) => {
       candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?v=${encodeURIComponent(candidateData.candidateRevision || 0)}`));
     }));
-    return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages }, 12);
+    return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages, candidateRevision: Number(candidateData.candidateRevision || 0) }, 12, releaseCandidateBundle);
   } catch (error) {
     if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
       return loadCandidateBundle(imageId, generation, true);
@@ -686,10 +717,12 @@ async function reconcileCurrentCandidates(imageId, generation) {
   if (record) {
     record.candidateCount = bundle.candidates.length;
     record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+    record.candidateRevision = bundle.candidateRevision;
   }
   refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
   return true;
 }
+
 
 function canvasHasPixels(context, target) {
   return context.getImageData(0, 0, target.width, target.height).data.some((value) => value > 0);
@@ -961,21 +994,28 @@ function drawPolygonBoundary() {
 }
 
 function drawCandidateBlinkOverlay() {
-  if (!state.blinkCandidateIds.size || !state.currentImage || performance.now() % 320 > 160) return;
+  if (!state.blinkCandidateIds.size || !state.currentImage || performance.now() % 400 > 200) return;
   blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
+  const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
+  const paintMask = (image, color) => {
+    if (!image) return;
+    blinkCtx.save();
+    blinkCtx.drawImage(image, 0, 0);
+    blinkCtx.globalCompositeOperation = "source-in";
+    blinkCtx.fillStyle = color;
+    blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
+    blinkCtx.restore();
+  };
+  if (state.blinkCandidateIds.has("manual:apply")) paintMask(addCanvas, settings.apply_color);
+  if (state.blinkCandidateIds.has("manual:exclude")) paintMask(exclusionCanvas, settings.exclude_color);
   for (const candidate of state.candidates) {
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
     const image = state.candidateImages.get(candidate.id);
     if (!image) continue;
-    blinkCtx.save();
-    blinkCtx.drawImage(image, 0, 0);
-    blinkCtx.globalCompositeOperation = "source-in";
-    blinkCtx.fillStyle = candidate.role === "exclude" ? "#28d3ff" : "#ff3d4d";
-    blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
-    blinkCtx.restore();
+    paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color);
   }
-  ctx.save(); ctx.globalAlpha = 0.78; ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
+  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
 }
 
@@ -1010,20 +1050,28 @@ function renderCandidates() {
     if (!exists) return;
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-manual ${isApply ? "candidate-row-manual-apply" : "candidate-row-manual-exclude"}`;
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled;
-    enabled.setAttribute("aria-label", isApply ? t("candidates.manualToggle") : "手描き除外を切り替え");
+    enabled.setAttribute("aria-label", isApply ? t("candidates.manualToggle") : t("candidates.manualExcludeToggle"));
     enabled.addEventListener("change", () => {
       if (isBusy() || state.importing) { enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled; return; }
       if (isApply) state.manualEnabled = enabled.checked; else state.manualExclusionEnabled = enabled.checked;
       setReviewed(currentRecord(), false);
       resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
-    const spacer = document.createElement("span"); spacer.setAttribute("aria-hidden", "true");
-    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : "手描き除外";
+    const blinkId = `manual:${role}`;
+    const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
+    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
+    blink.classList.toggle("active", state.blinkCandidateIds.has(blinkId));
+    blink.addEventListener("click", () => {
+      if (state.blinkCandidateIds.has(blinkId)) state.blinkCandidateIds.delete(blinkId);
+      else state.blinkCandidateIds.add(blinkId);
+      renderCandidates(); render();
+    });
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
-    remove.title = isApply ? t("candidates.deleteManual") : "手描き除外を削除";
+    remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
     remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", isApply ? deleteManualMask : deleteManualExclusion);
-    row.append(enabled, spacer, label, remove); list.append(row);
+    row.append(enabled, blink, label, remove); list.append(row);
   };
   appendManual(applyList, "apply");
   appendManual(excludeList, "exclude");
@@ -1044,7 +1092,7 @@ function renderCandidates() {
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     });
     const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
-    blink.textContent = "◉"; blink.title = "この範囲を点滅表示"; blink.setAttribute("aria-label", blink.title);
+    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
     blink.classList.toggle("active", state.blinkCandidateIds.has(candidate.id));
     blink.addEventListener("click", () => {
       if (state.blinkCandidateIds.has(candidate.id)) state.blinkCandidateIds.delete(candidate.id);
@@ -1101,6 +1149,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
       });
+      invalidateCandidateBundles(imageId);
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
@@ -1151,6 +1200,7 @@ async function deleteCandidate(candidate) {
   const send = async () => {
     try {
       await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
+      invalidateCandidateBundles(imageId);
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       syncCandidateRecord(imageId, remainingCandidates);
       state.maskStatus.set(imageId, remainingMaskStatus);
@@ -1181,6 +1231,7 @@ function deleteManualMask() {
   if (!state.manualMaskPresent || isBusy() || state.importing) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   state.manualMaskPresent = false; state.manualEnabled = true;
+  state.blinkCandidateIds.delete("manual:apply");
   setReviewed(currentRecord(), false);
   resetHistoryToCurrentManualMask(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
@@ -1189,6 +1240,7 @@ function deleteManualExclusion() {
   if (!canvasHasPixels(exclusionCtx, exclusionCanvas) || isBusy() || state.importing) return;
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   state.manualExclusionEnabled = true;
+  state.blinkCandidateIds.delete("manual:exclude");
   setReviewed(currentRecord(), false);
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
@@ -1206,26 +1258,17 @@ async function addBoundaryCandidate(point = null, polygonPoints = null) {
       method: "POST",
       body: JSON.stringify(polygonPoints ? { imageId, points: polygonPoints } : { imageId, roi, point: targetPoint }),
     });
-    const candidate = data.candidate;
-    const record = state.images.find((image) => image.id === imageId);
-    if (record) {
-      record.candidateCount = Number(record.candidateCount || 0) + 1;
-      record.enabledCandidateCount = Number(record.enabledCandidateCount || 0) + 1;
-    }
+    const created = Array.isArray(data.candidates) ? data.candidates : [];
+    if (!created.length || !Number.isInteger(data.candidateRevision)) throw new Error(t("error.boundaryResponse"));
     state.maskStatus.delete(imageId);
+    invalidateCandidateBundles(imageId);
     catalogChanged = true;
     markImagesUnreviewed([imageId], false);
     if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
 
-    const maskImage = await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?t=${Date.now()}`);
-    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
-    if (state.candidates.some((item) => item.id === candidate.id)) return;
-    state.candidates.push(candidate);
-    state.candidateImages.set(candidate.id, maskImage);
-    state.boundaryRoi = null; state.polygonPoints = []; state.polygonDragIndex = -1;
-    $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
-    refreshMaskStatus(false);
-    renderCandidates(); render(); setStatus(t("status.boundaryDone"));
+    await reconcileCurrentCandidates(imageId, viewGeneration);
+    clearBoundaryInteraction();
+    setStatus(t("status.boundaryDone"));
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
   finally {
     state.boundaryPending = false;
@@ -1512,7 +1555,7 @@ async function pickOutputDirectory() {
     throw new Error(t("error.directoryPickerUnsupported"));
   }
   try {
-    return await window.showDirectoryPicker({ id: "lets-censoring-output", mode: "readwrite" });
+    return await window.showDirectoryPicker({ id: "mozarie-output", mode: "readwrite" });
   } catch (error) {
     if (error?.name === "AbortError") throw new Error(t("error.directoryPickerCancelled"));
     throw error;
@@ -1776,7 +1819,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
   $("#applyCancelButton").hidden = false;
   updateActionButtons();
   try {
-    await navigator.locks.request("lets-censoring-output", { mode: "exclusive" }, async () => {
+    await navigator.locks.request("mozarie-output", { mode: "exclusive" }, async () => {
       for (const entry of save.entries) {
         // Cancellation is observed only before an entry starts. Once an output or source has
         // changed, commit that entry so browser files and catalog state remain consistent.
@@ -1787,7 +1830,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Lets-Censoring-Token": document.querySelector('meta[name="lets-censoring-token"]')?.content || "",
+            "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "",
           },
           body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
         });
@@ -1795,7 +1838,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
           const body = await response.json().catch(() => ({}));
           throw new Error(body.error || t("error.requestFailed"));
         }
-        const saveToken = response.headers?.get("X-Lets-Censoring-Save-Token") || "";
+        const saveToken = response.headers?.get("X-Mozarie-Save-Token") || "";
         const bytes = await response.arrayBuffer();
         const sourceImage = state.images.find((image) => image.id === entry.imageId);
         const access = sourceAccessFor(entry.imageId);
@@ -2349,15 +2392,15 @@ async function importFiles(files) {
 }
 
 async function importSingleFile(entry, clientKey) {
-  const token = document.querySelector('meta[name="lets-censoring-token"]')?.content || "";
+  const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   const response = await fetch("/api/import/file", {
     method: "POST",
     headers: {
       "Content-Type": "application/octet-stream",
-      "X-Lets-Censoring-Token": token,
-      "X-Lets-Censoring-Name": encodeURIComponent(entry.file.name),
-      "X-Lets-Censoring-Relative-Path": encodeURIComponent(entry.relativePath),
-      "X-Lets-Censoring-Client-Key": encodeURIComponent(clientKey),
+      "X-Mozarie-Token": token,
+      "X-Mozarie-Name": encodeURIComponent(entry.file.name),
+      "X-Mozarie-Relative-Path": encodeURIComponent(entry.relativePath),
+      "X-Mozarie-Client-Key": encodeURIComponent(clientKey),
     },
     body: entry.file,
   });
@@ -2418,7 +2461,7 @@ async function pickImageDirectory() {
   $("#pickerMenu").hidePopover();
   if (typeof window.showDirectoryPicker !== "function") return $("#importFolderInput").click();
   const session = beginImportSession(); if (!session) return;
-  try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "lets-censoring-source" }), session); }
+  try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-source" }), session); }
   catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); finishImportSession(session); }
 }
 
@@ -2507,31 +2550,38 @@ function ensureDetectionModeControl() {
 function setSettingsForm(settings, status = null) {
   state.settings = settings; state.settingsStatus = status;
   $("#settingsLanguage").value = settings.general.language;
+  $("#settingsOpenBrowser").checked = settings.general.open_browser;
+  $("#settingsPort").value = String(settings.general.port);
   $("#settingsShortcuts").checked = settings.general.shortcuts_enabled;
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsHandModel").value = settings.models.hand_detection;
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
+  $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
   $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
+  state.mosaicPreviewEnabled = settings.display.mosaic_preview;
+  $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
+  $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
   $("#detectParallelism").value = String(settings.detection.parallelism);
   const mode = settings.detection.mode;
   const radio = document.querySelector(`input[name="detectMode"][value="${mode}"]`);
   if (radio) radio.checked = true;
-  const modelStatus = Object.values(status?.models || {});
-  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every((model) => model.valid)
-    ? t("settings.modelsReady") : t("settings.modelsRequired");
+  const modelStatus = Object.entries(status?.models || {});
+  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every(([, model]) => model.valid)
+    ? t("settings.modelsReady")
+    : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
 }
 
 function settingsPayload() {
   return {
-    general: { ...state.settings.general, language: $("#settingsLanguage").value, shortcuts_enabled: $("#settingsShortcuts").checked },
+    general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcuts").checked },
     models: {
       target_segmentation: $("#settingsTargetModel").value.trim(), hand_detection: $("#settingsHandModel").value.trim(),
-      sam_checkpoint: $("#settingsSamModel").value.trim(), provider: $("#settingsProvider").value,
+      sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value,
     },
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
@@ -2569,10 +2619,23 @@ async function saveSettings(event) {
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
+async function resetSettings() {
+  const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
+  try {
+    const data = await api("/api/settings/reset", { method: "POST", body: JSON.stringify({}) });
+    setSettingsForm(data.settings, data.status);
+    state.navigationShortcutsEnabled = data.settings.general.shortcuts_enabled;
+    setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
+    await loadTranslations();
+    result.textContent = t("settings.resetDone");
+  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
+}
+
 function bindEvents() {
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
   $("#settingsForm").addEventListener("submit", saveSettings);
+  $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   document.querySelectorAll(".settings-tab").forEach((button) => button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab)));
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });
@@ -2802,7 +2865,7 @@ async function initialise() {
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); ensureDetectionModeControl(); bindEvents();
-  try { state.navigationShortcutsEnabled = state.settings?.general?.shortcuts_enabled ?? (localStorage.getItem("lets-censoring.navigation-shortcuts.v1") !== "false"); } catch { state.navigationShortcutsEnabled = true; }
+  try { state.navigationShortcutsEnabled = state.settings?.general?.shortcuts_enabled ?? (localStorage.getItem("mozarie.navigation-shortcuts.v1") !== "false"); } catch { state.navigationShortcutsEnabled = true; }
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();

@@ -94,7 +94,7 @@ function binaryResponse(bytes, saveToken = "runtime-render-token") {
   return {
     ok: true,
     status: 200,
-    headers: { get: (name) => name === "X-Lets-Censoring-Save-Token" ? saveToken : null },
+    headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : null },
     arrayBuffer: async () => Uint8Array.from(bytes).buffer,
     json: async () => ({}),
   };
@@ -128,7 +128,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
   const lockRequests = [];
   const document = {
     querySelector(selector) {
-      if (selector === 'meta[name="lets-censoring-token"]') return { content: "runtime-test-token" };
+      if (selector === 'meta[name="mozarie-token"]') return { content: "runtime-test-token" };
       return getElement(selector);
     },
     querySelectorAll() { return []; },
@@ -209,7 +209,7 @@ async function runSuccessCase() {
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
 
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
-  assert.deepEqual(JSON.parse(JSON.stringify(runtime.lockRequests)), [{ name: "lets-censoring-output", options: { mode: "exclusive" } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.lockRequests)), [{ name: "mozarie-output", options: { mode: "exclusive" } }]);
   const nested = directory.directories.get("nested");
   const output = nested.files.get("source_censored.png");
   assert.equal(output.closed, true);

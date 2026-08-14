@@ -1,46 +1,59 @@
 # Mozarie
 
-Mozarie is a local desktop-oriented image review and mosaic editor. It loads images from a folder or browser import, proposes mosaic and exclusion ranges, lets you refine them by hand, and saves images without discarding their existing PNG, JPEG, or WebP metadata.
+Mozarie is a local, desktop-oriented image review and mosaic editor. It keeps image work on your machine, proposes mosaic and exclusion ranges, supports hand edits and boundary refinement, and saves PNG/JPEG/WebP through the existing metadata-preserving pipeline.
 
-## What is included
+## 日本語
 
-- Local HTTP server and browser UI.
-- Direct ONNX Runtime adapters for target segmentation and hand detection.
-- A local PyTorch Segment Anything checkpoint for rectangle and four-point boundary refinement.
-- Manual apply/exclude brushes, per-range enable, delete, and blink review aids.
-- Japanese and English UI dictionaries.
+### できること
 
-No model file, image, cache, personal path, or local configuration is included in this repository.
+- フォルダまたはブラウザで追加した画像の確認
+- ONNX Runtimeによるモザイク対象候補と手の除外候補の検出
+- 矩形・4点境界とSAMによる範囲の追加
+- 手描きのモザイク追加・除外、候補ごとの有効化、削除、点滅確認
+- 適用範囲の合成から除外範囲を差し引く保存処理
+- PNG/JPEG/WebPの既存メタデータを保持する保存処理
 
-## Requirements
+### セットアップ
 
-- Windows 10 or later.
-- Python 3.11 or later.
-- A browser with the File System Access API is recommended for browser copy saves (Chrome or Edge).
-- Python packages listed in `requirements.txt`.
-- Three local model files selected in **Settings > Models**:
-  - Target segmentation model in ONNX format.
-  - Hand detection model in ONNX format.
-  - A compatible Segment Anything checkpoint.
+1. Python 3.11以降の仮想環境を用意します。
+2. `pip install -r requirements.txt` を実行します。
+3. `python server.py` で起動します。`--port` を付けると、その起動だけ保存済みポートを上書きできます。
+4. **設定 > モデル** で、対応プロファイルのローカルモデルを選びます。
 
-GPU execution requires an ONNX Runtime GPU build and a compatible CUDA provider. CPU is available in Settings for environments without GPU inference.
+必要なローカルファイルは次の3つです。モデルは同梱も自動ダウンロードもしません。
 
-## Setup
+- 7クラス・32マスク係数の対応YOLOセグメンテーションONNX
+- `[batch, anchors, 5]` 出力の対応1クラス手検出ONNX
+- `vit_b`、`vit_l`、`vit_h` のいずれかに対応するSAMチェックポイント
 
-1. Create and activate a Python environment.
-2. Install dependencies: `pip install -r requirements.txt`.
-3. Start the application with `python server.py`.
-4. Open **Settings > Models** and select the three local files. Mozarie validates their presence before use; it never downloads or bundles models.
+設定はGit管理しない `config/local.json` に保存されます。設定画面でCPUを選ぶと、ONNX RuntimeとSAMのどちらもCPUを使います。GPUを選んだ場合はCUDAプロバイダーが必要です。
 
-Local options are written to `config/local.json`, which is ignored by Git. Defaults are in `config/defaults.json`.
+### 操作
 
-## Model and license responsibilities
+1. 画像を読み込み、左の一覧または画像一覧で対象を開きます。
+2. 自動検出を実行し、右の「モザイク範囲」と「除外範囲」を確認します。
+3. 必要に応じてブラシ、除外ブラシ、矩形境界、4点境界で修正します。
+4. 点滅ボタンで範囲を確認し、確認済みにします。
+5. ファイル保存でコピー保存または元画像上書きを選びます。公開前に必ず保存結果を目視確認してください。
 
-Mozarie does not distribute detection or SAM model weights. You are responsible for obtaining each model from its official source and confirming that its license permits your intended use. `THIRD_PARTY_NOTICES.md` identifies the runtime libraries used by Mozarie; it does not grant rights to any model.
+キャッシュは `.mozarie-cache/`、ブラウザ追加画像の一時データはOSの一時フォルダに置かれます。どちらもGit管理されません。
 
-## Verification
+## English
 
-Run the non-inference test suite from this directory:
+### Setup and operation
+
+1. Create a Python 3.11+ environment and run `pip install -r requirements.txt`.
+2. Start with `python server.py`. `--port` overrides the saved port for that start only.
+3. In **Settings > Models**, select compatible local target-segmentation ONNX, hand-detection ONNX, and SAM checkpoint files.
+4. Load images, review proposed apply and exclusion ranges, refine them with the editor, then save and inspect the result.
+
+Mozarie accepts only its documented ONNX profiles; arbitrary ONNX exports are rejected before inference. It never downloads or bundles models. Select CPU in Settings to force both ONNX Runtime and SAM to CPU. Local settings live in ignored `config/local.json`.
+
+Saving preserves image metadata through the existing PNG, JPEG, and WebP pipeline; inspect every output before publishing.
+
+## Tests
+
+Run the non-inference suite from this directory:
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -52,12 +65,6 @@ node tests/test_import_picker_e2e.cjs
 
 The tests use fixtures and mocks. They do not run model inference.
 
-## Data handling
+## Licensing and models
 
-- Imported browser files are kept in a temporary session folder until removed or saved.
-- Process cache files are written under `.mozarie-cache/` and are ignored by Git.
-- Saving preserves image metadata using the existing save pipeline. Always inspect output before publishing.
-
-## License
-
-Source license selection is intentionally left to the repository owner. Do not publish this repository until you have selected a license compatible with every dependency and your distribution plan.
+Mozarie source code is licensed under [MIT](LICENSE). Runtime dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Model weights are neither bundled nor downloaded by Mozarie; their licenses are independent, and the person selecting each local model is responsible for confirming permitted use.
