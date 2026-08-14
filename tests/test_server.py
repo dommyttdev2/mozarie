@@ -10,6 +10,7 @@ import re
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -29,9 +30,7 @@ from server import (  # noqa: E402
     DetectionModels,
     ImageRecord,
     JOB_LABELS,
-    LocalModelManifest,
     MosaicHandler,
-    PRECISE_MODEL,
     StudioState,
     TARGET_CLASSES,
     accepted_hand_sam_mask,
@@ -57,7 +56,6 @@ from server import (  # noqa: E402
     _read_mosaic_divisor,
     save_with_mask,
     select_best_sam_mask,
-    validate_model_manifest,
     webp_metadata_manifest,
     white_fluid_mask,
     LOG_DATE_FORMAT,
@@ -67,7 +65,7 @@ from server import (  # noqa: E402
 )
 
 
-class MosaicStudioTests(unittest.TestCase):
+class MozarieTests(unittest.TestCase):
     def setUp(self) -> None:
         self._cache_directory = tempfile.TemporaryDirectory()
         self.cache_dir = Path(self._cache_directory.name) / "cache"
@@ -186,6 +184,22 @@ class MosaicStudioTests(unittest.TestCase):
         fake_server.server_close.assert_called_once_with()
         shutdown.assert_called_once_with()
 
+    def test_main_uses_saved_port_and_respects_open_browser_setting(self):
+        fake_server = Mock(); fake_server.serve_forever.side_effect = KeyboardInterrupt
+        original_settings = server_module.STATE.settings
+        server_module.STATE.settings = {**original_settings, "general": {**original_settings["general"], "port": 9123, "open_browser": False}}
+        try:
+            with patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
+                   patch("server._schedule_browser_open") as schedule_browser, \
+                   patch.object(server_module.STATE, "shutdown"), \
+                   patch.object(server_module.STATE, "cache_dir", self.cache_dir), \
+                   patch.object(sys, "argv", ["server.py"]):
+                server_module.main()
+            server_class.assert_called_once_with(("127.0.0.1", 9123), MosaicHandler)
+            schedule_browser.assert_not_called()
+        finally:
+            server_module.STATE.settings = original_settings
+
     def test_http_log_message_logs_successful_api_posts_and_errors_only(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
@@ -274,16 +288,16 @@ class MosaicStudioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.jpg"
             exif = Image.Exif()
-            exif[0x010E] = "MosaicStudio test"
+            exif[0x010E] = "Mozarie test"
             Image.new("RGB", (16, 16), "#6688aa").save(
                 path,
                 format="JPEG",
                 exif=exif.tobytes(),
-                icc_profile=b"MosaicStudio ICC profile",
+                icc_profile=b"Mozarie ICC profile",
             )
             original = path.read_bytes()
-            xmp = b"http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta>MosaicStudio</x:xmpmeta>"
-            original = b"\xff\xd8" + self._jpeg_segment(0xE1, xmp) + self._jpeg_segment(0xFE, b"MosaicStudio comment") + original[2:]
+            xmp = b"http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta>Mozarie</x:xmpmeta>"
+            original = b"\xff\xd8" + self._jpeg_segment(0xE1, xmp) + self._jpeg_segment(0xFE, b"Mozarie comment") + original[2:]
             path.write_bytes(original)
             manifest = jpeg_metadata_manifest(original)
             self.assertTrue(any(entry.startswith("FFE1:") for entry in manifest))
@@ -299,13 +313,13 @@ class MosaicStudioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.webp"
             exif = Image.Exif()
-            exif[0x010E] = "MosaicStudio test"
+            exif[0x010E] = "Mozarie test"
             Image.new("RGB", (16, 16), "#6688aa").save(
                 path,
                 format="WEBP",
                 exif=exif.tobytes(),
-                icc_profile=b"MosaicStudio ICC profile",
-                xmp=b"<x:xmpmeta>MosaicStudio</x:xmpmeta>",
+                icc_profile=b"Mozarie ICC profile",
+                xmp=b"<x:xmpmeta>Mozarie</x:xmpmeta>",
             )
             original = path.read_bytes()
             manifest = webp_metadata_manifest(original)
@@ -449,7 +463,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(imported.read_bytes(), raw)
             state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
             self.assertTrue((state.session_imports_dir / "dropped_2.png").is_file())
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
 
     def test_clear_masks_removes_candidates_without_touching_image(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1097,34 +1111,6 @@ class MosaicStudioTests(unittest.TestCase):
                 "name": "broken.png", "data": base64.b64encode(valid.getvalue()[:20]).decode("ascii"),
             }])
 
-    def test_model_manifest_rejects_missing_size_and_hash_mismatches(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "model.onnx"
-            path.write_bytes(b"verified")
-            manifest = LocalModelManifest("test", path, 8, hashlib.sha256(b"verified").hexdigest(), "r", "MIT", "https://example.invalid")
-            validate_model_manifest(manifest)
-            with self.assertRaisesRegex(ClientError, "サイズ"):
-                validate_model_manifest(LocalModelManifest("test", path, 7, manifest.sha256, "r", "MIT", "https://example.invalid"))
-            with self.assertRaisesRegex(ClientError, "SHA-256"):
-                validate_model_manifest(LocalModelManifest("test", path, 8, "0" * 64, "r", "MIT", "https://example.invalid"))
-            path.unlink()
-            with self.assertRaisesRegex(ClientError, "見つかりません"):
-                validate_model_manifest(manifest)
-
-    def test_model_manifest_reuses_hash_until_the_file_stat_changes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "model.onnx"
-            path.write_bytes(b"verified")
-            manifest = LocalModelManifest("test", path, 8, hashlib.sha256(b"verified").hexdigest(), "r", "MIT", "https://example.invalid")
-            with patch("server.model_sha256", wraps=server_module.model_sha256) as digest:
-                validate_model_manifest(manifest)
-                validate_model_manifest(manifest)
-                self.assertEqual(digest.call_count, 1)
-                stat = path.stat()
-                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-                validate_model_manifest(manifest)
-                self.assertEqual(digest.call_count, 2)
-
     def test_onnx_provider_check_requires_cuda_without_loading_a_gpu(self):
         class FakeSession:
             def __init__(self, providers): self.providers = providers
@@ -1134,14 +1120,31 @@ class MosaicStudioTests(unittest.TestCase):
                 onnx_backend = type("OnnxBackend", (), {"session": FakeSession(providers)})()
                 auto_backend = type("AutoBackend", (), {"backend": onnx_backend})()
                 self.predictor = type("Predictor", (), {"model": auto_backend})()
-        assert_onnx_cuda_active(FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"]), PRECISE_MODEL)
+        assert_onnx_cuda_active(FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"]), "対象セグメンテーション")
         with self.assertRaisesRegex(ClientError, "CUDA"):
-            assert_onnx_cuda_active(FakeModel(["CPUExecutionProvider"]), PRECISE_MODEL)
+            assert_onnx_cuda_active(FakeModel(["CPUExecutionProvider"]), "対象セグメンテーション")
 
     def test_onnx_provider_preflight_rejects_cpu_only_runtime(self):
         with patch("onnxruntime.get_available_providers", return_value=["CPUExecutionProvider"]):
             with self.assertRaisesRegex(ClientError, "CUDAExecutionProvider"):
                 assert_onnx_cuda_available()
+
+    def test_sam_cpu_setting_never_selects_cuda(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            checkpoint = Path(directory) / "sam.pth"; checkpoint.write_bytes(b"checkpoint")
+            record = self._record(image_path, 8, 8)
+            state = self.new_state()
+            state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
+            state.settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_l", "provider": "cpu"})
+            model = Mock(); predictor = Mock()
+            fake_segment_anything = types.SimpleNamespace(
+                SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_l": Mock(return_value=model)}
+            )
+            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
+                state._sam_predictor_for(record)
+            model.to.assert_called_once_with(device="cpu")
+            fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
@@ -1379,9 +1382,10 @@ class MosaicStudioTests(unittest.TestCase):
                     {"roi": {"left": 3, "top": 3, "right": 9, "bottom": 9}, "point": {"x": 5, "y": 5}},
                 )
 
-            self.assertEqual(created["source"], "boundary")
-            self.assertEqual(created["className"], "境界")
-            self.assertEqual(state.list_candidates(record.image_id), [created | {"role": "apply"}])
+            self.assertEqual(created["candidates"][0]["source"], "boundary")
+            self.assertEqual(created["candidates"][0]["className"], "境界")
+            self.assertEqual(created["candidateRevision"], 1)
+            self.assertEqual(state.list_candidates(record.image_id), created["candidates"])
             combined = state.combined_candidate_mask(record.image_id)
             self.assertTrue(np.any(combined[3:9, 3:9]))
             self.assertFalse(np.any(combined[:3]))
@@ -1401,7 +1405,10 @@ class MosaicStudioTests(unittest.TestCase):
             state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
 
             def refine(_models, _record, _rgb, segments):
+                hand = np.zeros((12, 12), dtype=np.uint8); hand[4:6, 4:8] = 255
+                fluid = np.zeros((12, 12), dtype=np.uint8); fluid[6:8, 4:8] = 255
                 segments[0]["mask"][4:8, 4:8] = 0
+                segments[0]["exclusions"] = {"hand": hand, "fluid": fluid}
                 segments[0]["refinement"] = "hand_fluid"
                 return segments
 
@@ -1411,8 +1418,9 @@ class MosaicStudioTests(unittest.TestCase):
                 state.add_boundary_candidate(record.image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
 
             candidates = state.list_candidates(record.image_id)
-            self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude"])
-            self.assertEqual(candidates[1]["source"], "hand_fluid_exclusion")
+            self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude", "exclude"])
+            self.assertEqual([candidate["source"] for candidate in candidates[1:]], ["hand_exclusion", "fluid_exclusion"])
+            self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
             self.assertFalse(np.any(state.combined_candidate_mask(record.image_id)[4:8, 4:8]))
 
     def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
@@ -1442,31 +1450,35 @@ class MosaicStudioTests(unittest.TestCase):
             cache = root / "cache"
             cache.mkdir()
             boundary_path = cache / "boundary.png"
+            boundary_hand_path = cache / "boundary-hand.png"
             old_auto_path = cache / "old-auto.png"
             new_auto_path = cache / "new-auto.png"
             Image.fromarray(self._mask(12, 12), mode="L").save(boundary_path)
+            Image.fromarray(self._mask(12, 12), mode="L").save(boundary_hand_path)
             Image.fromarray(self._mask(12, 12), mode="L").save(old_auto_path)
             Image.fromarray(self._mask(12, 12), mode="L").save(new_auto_path)
-            boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary")
+            boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary", origin="boundary")
+            boundary_hand = Candidate("boundary-hand", "手を除外", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=server_module.CandidateRole.EXCLUDE)
             old_auto = Candidate("old-auto", "penis", 0.8, old_auto_path)
             new_auto = Candidate("new-auto", "penis", 0.7, new_auto_path)
             state = self.new_state()
             state.root = root
             state.images = {record.image_id: record}
             state.order = [record.image_id]
-            state.candidates = {record.image_id: [boundary, old_auto]}
+            state.candidates = {record.image_id: [boundary, boundary_hand, old_auto]}
             with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", return_value=[new_auto]):
                 state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
 
-            self.assertEqual(state.candidates[record.image_id], [boundary, new_auto])
+            self.assertEqual(state.candidates[record.image_id], [boundary, boundary_hand, new_auto])
             self.assertTrue(boundary_path.is_file())
+            self.assertTrue(boundary_hand_path.is_file())
             self.assertFalse(old_auto_path.exists())
             self.assertTrue(new_auto_path.is_file())
 
     def test_boundary_api_returns_the_created_candidate(self):
         from http.server import ThreadingHTTPServer
 
-        expected = {"id": "boundary", "className": "境界", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary"}
+        expected = {"candidates": [{"id": "boundary", "className": "境界", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary", "role": "apply"}], "candidateRevision": 4}
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -1476,13 +1488,13 @@ class MosaicStudioTests(unittest.TestCase):
                 body = json.dumps({"imageId": "image", "roi": {"left": 1, "top": 2, "right": 3, "bottom": 4}, "point": {"x": 2, "y": 3}}).encode("utf-8")
                 connection.request("POST", "/api/boundary", body, {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 200)
-            self.assertEqual(payload, {"candidate": expected})
+            self.assertEqual(payload, expected)
             self.assertEqual(add_candidate.call_args.args[0], "image")
         finally:
             connection.close()
@@ -1500,7 +1512,7 @@ class MosaicStudioTests(unittest.TestCase):
             with patch.object(server_module.STATE, "delete_candidate", side_effect=[True, False]) as delete_candidate:
                 for expected in (True, False):
                     connection.request("DELETE", "/api/candidate/image/candidate", headers={
-                        "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                        "X-Mozarie-Token": server_module.STATE.session_token,
                         "Origin": f"http://127.0.0.1:{httpd.server_port}",
                     })
                     response = connection.getresponse()
@@ -1524,7 +1536,7 @@ class MosaicStudioTests(unittest.TestCase):
         try:
             with patch.object(server_module.STATE, "remove_image_from_catalog", return_value=[{"id": "other"}]) as remove_image:
                 connection.request("DELETE", "/api/catalog/image/current", headers={
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
@@ -1549,7 +1561,7 @@ class MosaicStudioTests(unittest.TestCase):
             with patch.object(server_module.STATE, "remove_images_from_catalog", return_value=expected) as remove_images:
                 connection.request("POST", "/api/catalog/remove", json.dumps({"imageIds": ["first", "second"]}).encode("utf-8"), {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
@@ -1574,12 +1586,12 @@ class MosaicStudioTests(unittest.TestCase):
             ({
                 "Content-Type": "application/json",
                 "Origin": "http://127.0.0.1:1",
-                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                "X-Mozarie-Token": server_module.STATE.session_token,
             }, 403),
             ({
                 "Content-Type": "text/plain",
                 "Origin": origin,
-                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                "X-Mozarie-Token": server_module.STATE.session_token,
             }, 400),
         ]
         try:
@@ -1708,7 +1720,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertTrue(imported.is_set())
             self.assertTrue(reloaded.is_set())
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
             self.assertEqual([image["relativePath"] for image in state.list_images()], ["source.png"])
             self.assertIsNone(state.session_dir)
 
@@ -1744,7 +1756,7 @@ class MosaicStudioTests(unittest.TestCase):
             assert destination_dir is not None
             self.assertEqual((destination_dir / "same.png").read_bytes(), raw)
             self.assertEqual((destination_dir / "same_2.png").read_bytes(), raw)
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
             self.assertEqual(len(state.list_images()), 2)
 
     def test_drag_import_uses_a_session_without_writing_to_the_source_root(self):
@@ -1766,7 +1778,7 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertEqual(imported["sourceKind"], "session")
             self.assertEqual(record.path.read_bytes(), raw)
             self.assertEqual(Image.open(record.path).text["workflow"], "kept exactly")
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
             self.assertTrue(record.path.is_relative_to(state.session_imports_dir))
 
     def test_clear_catalog_removes_only_session_imports(self):
@@ -1785,7 +1797,7 @@ class MosaicStudioTests(unittest.TestCase):
             state.clear_catalog()
 
             self.assertTrue(source.is_file())
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
             self.assertFalse(session_dir.exists())
             self.assertEqual(state.list_images(), [])
 
@@ -1931,7 +1943,7 @@ class MosaicStudioTests(unittest.TestCase):
                 importer.join(2)
 
             self.assertEqual(errors, [])
-            self.assertFalse((root / ".mosaicstudio_imports").exists())
+            self.assertFalse((root / ".mozarie_imports").exists())
             self.assertIsNotNone(state.session_imports_dir)
 
     def test_job_api_exposes_immutable_target_image_ids(self):
@@ -2210,6 +2222,7 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="navigationShortcutsEnabled" type="checkbox"', page)
         self.assertIn('id="reviewAndNextButton"', page)
         self.assertIn('id="reviewStatus"', page)
+        self.assertNotIn('id="reviewStatus" hidden', page)
         self.assertIn('gallery-review-badge', page)
         self.assertIn('id="previousImageButton"', page)
         self.assertIn('id="nextImageButton"', page)
@@ -2277,13 +2290,22 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('event.preventDefault(); if (!state.applyRunning)', app)
         self.assertIn('paintMosaicPreview()', app)
         self.assertIn('saveTargets()', app)
-        self.assertIn('lets-censoring.reviewed.v1:', app)
+        self.assertIn('mozarie.reviewed.v1:', app)
         self.assertIn('state.sourceAccess', app)
         self.assertIn('await api("/api/images")', app)
         self.assertIn("apply.handleSource", dictionary)
         self.assertIn("apply.removeAfterSave", dictionary)
         self.assertIn("apply.overwriteNote", dictionary)
-        self.assertIn('lets-censoring.navigation-shortcuts.v1', app)
+        self.assertIn('mozarie.navigation-shortcuts.v1', app)
+        self.assertIn('function clearBoundaryInteraction()', app)
+        self.assertIn('state.polygonPoints = [];', app)
+        self.assertNotIn('?t=${Date.now()}', app)
+        self.assertIn('candidateRevision', app)
+        self.assertIn('settingsOpenBrowser', page)
+        self.assertIn('settingsSamType', page)
+        self.assertIn('settingsResetButton', page)
+        self.assertIn('settings.display', dictionary)
+        self.assertEqual(dictionary['settings.display'], '表示・操作')
         self.assertIn('function renderOverview(', app)
         self.assertIn('function markImagesUnreviewed(', app)
         self.assertIn('function handleNavigationKeydown(', app)
@@ -2356,13 +2378,14 @@ class MosaicStudioTests(unittest.TestCase):
             body = json.dumps({"path": ""}).encode("utf-8")
             connection.request("POST", "/api/folder", body, {
                 "Content-Type": "application/json",
-                "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                "X-Mozarie-Token": server_module.STATE.session_token,
                 "Origin": f"http://127.0.0.1:{httpd.server_port}",
             })
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
             self.assertEqual(payload["error"], "Windowsフォルダを入力してください。")
+            self.assertEqual(payload["error_code"], "invalid_request")
         finally:
             if connection is not None:
                 connection.close()
@@ -2383,12 +2406,12 @@ class MosaicStudioTests(unittest.TestCase):
                 body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None}).encode("utf-8")
                 connection.request("POST", "/api/save/render", body, {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
-                self.assertEqual(response.getheader("X-Lets-Censoring-Save-Token"), "one-time-token")
+                self.assertEqual(response.getheader("X-Mozarie-Save-Token"), "one-time-token")
                 response.read()
         finally:
             if connection is not None:
@@ -2414,7 +2437,7 @@ class MosaicStudioTests(unittest.TestCase):
                 }).encode("utf-8")
                 connection.request("POST", "/api/save/commit", body, {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
@@ -2458,7 +2481,7 @@ class MosaicStudioTests(unittest.TestCase):
                 body = json.dumps({"files": [{"clientKey": "client-a"}]}).encode("utf-8")
                 connection.request("POST", "/api/import", body, {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()
@@ -2484,7 +2507,7 @@ class MosaicStudioTests(unittest.TestCase):
                 body = json.dumps({"imageIds": ["image-a"], "confidence": 0.65, "parallelism": 3}).encode("utf-8")
                 connection.request("POST", "/api/detect", body, {
                     "Content-Type": "application/json",
-                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "X-Mozarie-Token": server_module.STATE.session_token,
                     "Origin": f"http://127.0.0.1:{httpd.server_port}",
                 })
                 response = connection.getresponse()

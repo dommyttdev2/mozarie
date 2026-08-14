@@ -25,6 +25,7 @@ class Candidate:
     enabled: bool = True
     color: str = "#5bb6d5"
     source: str = "auto"
+    origin: str = "auto"
     refinement: str | None = None
     role: CandidateRole = CandidateRole.APPLY
 
@@ -36,6 +37,7 @@ class Candidate:
             "enabled": self.enabled,
             "color": self.color,
             "source": self.source,
+            "origin": self.origin,
             "sourceLabel": source_label,
             "refinement": self.refinement,
             "refinementLabel": refinement_label,

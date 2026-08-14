@@ -43,6 +43,7 @@ from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
+from mozarie.inference.profiles import ModelProfileError, profile_summary, validate_hand_profile, validate_target_profile
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -53,37 +54,6 @@ CACHE_BASE_DIR = APP_DIR / ".mozarie-cache"
 SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
 
 
-@dataclass(frozen=True)
-class LocalModelManifest:
-    """Pinned local model metadata. Files remain local and are never downloaded by the app."""
-
-    name: str
-    path: Path
-    size: int
-    sha256: str
-    revision: str
-    license: str
-    url: str
-
-
-PRECISE_MODEL = LocalModelManifest(
-    name="精密性器セグメンテーション",
-    path=Path(),
-    size=126_350_117,
-    sha256="92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a",
-    revision="1697d5d1827b6a818b350b44bf3ec27f08837a2a",
-    license="MIT",
-    url="",
-)
-HAND_MODEL = LocalModelManifest(
-    name="アニメ手検出",
-    path=Path(),
-    size=44_583_229,
-    sha256="408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
-    revision="0c4ab4d58aafbd56794c82a9c1fe424f86c5780d",
-    license="OpenRAIL",
-    url="",
-)
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis"}
 SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
@@ -107,7 +77,6 @@ SOURCE_LABELS = {
     "boundary": "境界選択",
     "hand_exclusion": "手を除外",
     "fluid_exclusion": "白い体液を除外",
-    "hand_fluid_exclusion": "手と白い体液を除外",
 }
 REFINEMENT_LABELS = {
     "hand": "手の重なりを除外",
@@ -128,16 +97,14 @@ SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-MODEL_MANIFEST_HASH_CACHE: dict[tuple[Path, int, int], str] = {}
-MODEL_MANIFEST_HASH_LOCK = threading.Lock()
 JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
 
 class ClientError(ValueError):
     """An invalid request that can be shown directly in the UI."""
 
-    def __init__(self, message: str, code: str = "invalid_request", params: dict[str, Any] | None = None) -> None:
+    def __init__(self, message: str, error_code: str = "invalid_request", params: dict[str, Any] | None = None) -> None:
         super().__init__(message)
-        self.code = code
+        self.error_code = error_code
         self.params = params or {}
 
 
@@ -305,28 +272,6 @@ def model_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_model_manifest(manifest: LocalModelManifest) -> None:
-    """Reject missing or changed model files before Ultralytics attempts to load them."""
-    if not manifest.path.is_file():
-        raise ClientError(f"{manifest.name}モデルが見つかりません: {manifest.path}")
-    stat = manifest.path.stat()
-    actual_size = stat.st_size
-    if actual_size != manifest.size:
-        raise ClientError(
-            f"{manifest.name}モデルのサイズが一致しません。再ダウンロードしてください。"
-        )
-    cache_key = (manifest.path.resolve(), stat.st_mtime_ns, actual_size)
-    with MODEL_MANIFEST_HASH_LOCK:
-        actual_hash = MODEL_MANIFEST_HASH_CACHE.get(cache_key)
-        if actual_hash is None:
-            actual_hash = model_sha256(manifest.path)
-            MODEL_MANIFEST_HASH_CACHE[cache_key] = actual_hash
-    if actual_hash.lower() != manifest.sha256.lower():
-        raise ClientError(
-            f"{manifest.name}モデルのSHA-256が一致しません。再ダウンロードしてください。"
-        )
-
-
 def assert_onnx_cuda_available() -> None:
     """Fail early instead of allowing an ONNX model to take an accidental CPU path."""
     try:
@@ -342,7 +287,7 @@ def assert_onnx_cuda_available() -> None:
         raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
 
 
-def assert_onnx_cuda_active(model: Any, manifest: LocalModelManifest | str) -> None:
+def assert_onnx_cuda_active(model: Any, name: str) -> None:
     """Confirm a direct ONNX Runtime adapter did not silently use the CPU."""
     providers = list(getattr(model, "providers", ()) or ())
     if not providers:
@@ -351,7 +296,6 @@ def assert_onnx_cuda_active(model: Any, manifest: LocalModelManifest | str) -> N
         providers = list(session.get_providers()) if session is not None else []
     if not providers or providers[0] != "CUDAExecutionProvider":
         detail = ", ".join(providers) if providers else "取得できません"
-        name = manifest.name if isinstance(manifest, LocalModelManifest) else manifest
         raise ClientError(
             f"{name}モデルがCUDAで実行されていません（現在: {detail}）。"
             "ONNX RuntimeのCUDA設定を確認してください。"
@@ -669,17 +613,42 @@ class StudioState:
                 self.sam_image_id = None
             return self.settings
 
+    def reset_settings(self) -> dict[str, Any]:
+        with self.lock:
+            if self._has_active_worker():
+                raise ClientError("処理中は設定を変更できません。", "job_running")
+            self.settings = self.settings_store.reset()
+            self.models = None
+            self.sam_predictor = None
+            self.sam_image_id = None
+            return self.settings
+
     def settings_status(self) -> dict[str, Any]:
-        """Report local path readiness without opening a model or running inference."""
+        """Report model compatibility without constructing inference sessions."""
         models = self.settings["models"]
         result: dict[str, dict[str, Any]] = {}
+        validators = {
+            "target_segmentation": validate_target_profile,
+            "hand_detection": validate_hand_profile,
+        }
         for key, required_suffix in (("target_segmentation", ".onnx"), ("hand_detection", ".onnx"), ("sam_checkpoint", None)):
             raw = str(models.get(key, "")).strip()
             path = Path(raw).expanduser() if raw else None
             exists = bool(path and path.is_file())
             valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
-            result[key] = {"configured": bool(raw), "exists": exists, "valid": valid}
-        return {"models": result, "provider": models["provider"]}
+            detail = ""
+            profile: dict[str, object] | None = None
+            if valid and key in validators:
+                try:
+                    profile = profile_summary(validators[key](path))
+                except ModelProfileError as exc:
+                    valid = False
+                    detail = str(exc)
+            if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
+                valid = False
+                detail = "SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください"
+            result[key] = {"configured": bool(raw), "exists": exists, "valid": valid, "detail": detail, "profile": profile}
+        return {"models": result, "provider": models["provider"], "samModelType": models["sam_model_type"]}
 
     @staticmethod
     def _lock_directory(directory: Path) -> Any:
@@ -1106,7 +1075,7 @@ class StudioState:
                     with Image.open(io.BytesIO(raw)) as image:
                         _assert_image_suffix_matches_format(relative_path.suffix, image.format)
                         width, height = oriented_image_size(image)
-                    temporary = destination_dir / f".mosaicstudio-import-{uuid.uuid4().hex}.tmp"
+                    temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
                     pending.append((temporary, relative_path.as_posix(), width, height, client_key))
                     temporary.write_bytes(raw)
 
@@ -1197,8 +1166,12 @@ class StudioState:
                     from segment_anything import SamPredictor, sam_model_registry
                 except ImportError as exc:
                     raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
-                model = sam_model_registry["vit_b"](checkpoint=str(sam_path))
-                model.to(device="cuda" if torch.cuda.is_available() else "cpu")
+                model_type = self.settings["models"]["sam_model_type"]
+                provider = self.settings["models"]["provider"]
+                if provider == "gpu" and not torch.cuda.is_available():
+                    raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
+                model = sam_model_registry[model_type](checkpoint=str(sam_path))
+                model.to(device="cuda" if provider == "gpu" else "cpu")
                 self.sam_predictor = SamPredictor(model)
 
             if self.sam_image_id != record.image_id:
@@ -1691,6 +1664,10 @@ class StudioState:
             raise ClientError(f"{label}モデルが見つかりません: {path}")
         if path.suffix.lower() != ".onnx":
             raise ClientError(f"{label}モデルにはONNXファイルを指定してください。")
+        try:
+            (validate_target_profile if key == "target_segmentation" else validate_hand_profile)(path)
+        except ModelProfileError as exc:
+            raise ClientError(f"{label}モデルの互換プロファイルが一致しません: {exc}", "model_profile_invalid") from exc
         return path
 
     def _configured_sam_path(self) -> Path:
@@ -1700,6 +1677,8 @@ class StudioState:
         path = Path(raw_path).expanduser()
         if not path.is_file():
             raise ClientError(f"SAMモデルが見つかりません: {path}")
+        if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
+            raise ClientError("SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください。", "sam_checkpoint_invalid")
         return path
 
     def _ensure_models(self) -> DetectionModels:
@@ -1765,10 +1744,10 @@ class StudioState:
                             return
                         boundary_candidates = [
                             candidate for candidate in self.candidates.get(record.image_id, [])
-                            if candidate.source == "boundary"
+                            if candidate.origin == "boundary"
                         ]
                         for candidate in self.candidates.get(record.image_id, []):
-                            if candidate.source != "boundary":
+                            if candidate.origin != "boundary":
                                 candidate.mask_path.unlink(missing_ok=True)
                         self.candidates[record.image_id] = [*boundary_candidates, *candidates]
                         self._touch_candidates(record.image_id)
@@ -1903,17 +1882,25 @@ class StudioState:
                         hand_mask = np.maximum(hand_mask, confirmed)
 
         for segment in detected:
+            original_mask = np.asarray(segment["mask"]).copy()
             refined, decision = refine_mask_with_hand(segment["mask"], hand_mask)
+            hand_exclusion = ((original_mask > 0) & (np.asarray(refined) == 0)).astype(np.uint8) * 255
+            exclusions: dict[str, np.ndarray] = {}
             if decision == "refined":
                 segment["mask"] = refined
                 segment["refinement"] = "hand"
+            if np.any(hand_exclusion):
+                exclusions["hand"] = hand_exclusion
             if segment["class_name"] != "penis":
+                segment["exclusions"] = exclusions
                 continue
             fluid_mask = white_fluid_mask(rgb, segment["mask"])
-            if not np.any(fluid_mask):
-                continue
-            segment["mask"] = np.where(fluid_mask > 0, 0, segment["mask"]).astype(np.uint8)
-            segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
+            if np.any(fluid_mask):
+                before_fluid = np.asarray(segment["mask"]).copy()
+                segment["mask"] = np.where(fluid_mask > 0, 0, before_fluid).astype(np.uint8)
+                exclusions["fluid"] = ((before_fluid > 0) & (segment["mask"] == 0)).astype(np.uint8) * 255
+                segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
+            segment["exclusions"] = exclusions
         return segments
 
     def _high_precision_segments(
@@ -1994,32 +1981,23 @@ class StudioState:
                     refinement=segment.get("refinement"),
                 )
             )
-            removed = np.asarray(original_mask > 0, dtype=np.uint8)
-            removed &= np.asarray(refined_mask == 0, dtype=np.uint8)
-            if not np.any(removed):
-                continue
-            refinement = str(segment.get("refinement") or "")
-            exclusion_source = {
-                "hand": "hand_exclusion",
-                "fluid": "fluid_exclusion",
-                "hand_fluid": "hand_fluid_exclusion",
-            }.get(refinement)
-            if exclusion_source is None:
-                continue
-            exclusion_id = uuid.uuid4().hex
-            exclusion_path = destination / f"{exclusion_id}.png"
-            Image.fromarray(removed * 255, mode="L").save(exclusion_path, format="PNG")
-            candidates.append(
-                Candidate(
+            for exclusion_kind, exclusion_mask in dict(segment.get("exclusions", {})).items():
+                if not np.any(exclusion_mask):
+                    continue
+                exclusion_source = f"{exclusion_kind}_exclusion"
+                exclusion_id = uuid.uuid4().hex
+                exclusion_path = destination / f"{exclusion_id}.png"
+                Image.fromarray(exclusion_mask, mode="L").save(exclusion_path, format="PNG")
+                candidates.append(Candidate(
                     candidate_id=exclusion_id,
                     class_name=SOURCE_LABELS[exclusion_source],
                     confidence=None,
                     mask_path=exclusion_path,
                     color="#4ac3df",
                     source=exclusion_source,
+                    origin="auto",
                     role=CandidateRole.EXCLUDE,
-                )
-            )
+                ))
         return candidates
 
     def add_boundary_candidate(self, image_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2066,13 +2044,6 @@ class StudioState:
         refined_boundary = self._refine_detected_segments(
             self._ensure_models(), record, rgb, [boundary_segment]
         )[0]
-        exclusion_mask = ((original_mask > 0) & (np.asarray(refined_boundary["mask"]) == 0)).astype(np.uint8) * 255
-        exclusion_source = {
-            "hand": "hand_exclusion",
-            "fluid": "fluid_exclusion",
-            "hand_fluid": "hand_fluid_exclusion",
-        }.get(str(refined_boundary.get("refinement") or ""))
-
         candidate_id = uuid.uuid4().hex
         candidate = Candidate(
             candidate_id=candidate_id,
@@ -2081,14 +2052,19 @@ class StudioState:
             mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
             color="#ffffff",
             source="boundary",
+            origin="boundary",
         )
         with self.lock:
             if self.images.get(image_id) is not record:
                 raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
             candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
+            created = [candidate]
             self.candidates.setdefault(image_id, []).append(candidate)
-            if exclusion_source is not None and np.any(exclusion_mask):
+            for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
+                if not np.any(exclusion_mask):
+                    continue
+                exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
                 exclusion = Candidate(
                     candidate_id=exclusion_id,
@@ -2097,12 +2073,20 @@ class StudioState:
                     mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png",
                     color="#4ac3df",
                     source=exclusion_source,
+                    origin="boundary",
                     role=CandidateRole.EXCLUDE,
                 )
                 Image.fromarray(exclusion_mask, mode="L").save(exclusion.mask_path, format="PNG")
                 self.candidates[image_id].append(exclusion)
-            self._touch_candidates(image_id)
-        return candidate.as_api_dict(SOURCE_LABELS.get(candidate.source, candidate.source))
+                created.append(exclusion)
+            revision = self._touch_candidates(image_id)
+        return {
+            "candidates": [
+                item.as_api_dict(SOURCE_LABELS.get(item.source, item.source), REFINEMENT_LABELS.get(item.refinement or "", ""))
+                for item in created
+            ],
+            "candidateRevision": revision,
+        }
 
     def _apply_worker(
         self,
@@ -2654,7 +2638,7 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
     original_stat = record.path.stat()
     temporary_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mosaicstudio.tmp", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             with rendered_path.open("rb") as rendered:
                 shutil.copyfileobj(rendered, handle)
@@ -2699,7 +2683,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
 
     temporary_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mosaicstudio.tmp", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)
             handle.flush()
@@ -2728,7 +2712,7 @@ atexit.register(STATE.shutdown)
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
-    server_version = "LetsCensoring/1.0"
+    server_version = "Mozarie/1.0"
     protocol_version = "HTTP/1.1"
 
     def _reject_unread_request(self, error: ClientError) -> None:
@@ -2746,7 +2730,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         fetch_site = self.headers.get("Sec-Fetch-Site", "")
         if fetch_site and fetch_site not in {"same-origin", "none"}:
             self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
-        if self.headers.get("X-Lets-Censoring-Token", "") != STATE.session_token:
+        if self.headers.get("X-Mozarie-Token", "") != STATE.session_token:
             self._reject_unread_request(ForbiddenClientError("この画面の操作ではありません。再読み込みしてください。"))
 
     def _require_json_request(self) -> None:
@@ -2808,9 +2792,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             if path == "/api/import/file":
                 self._require_binary_import_request()
                 raw = self._read_binary_body()
-                name = unquote(self.headers.get("X-Lets-Censoring-Name", ""))
-                relative_path = unquote(self.headers.get("X-Lets-Censoring-Relative-Path", ""))
-                client_key = unquote(self.headers.get("X-Lets-Censoring-Client-Key", ""))
+                name = unquote(self.headers.get("X-Mozarie-Name", ""))
+                relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
+                client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
                 images, imported = STATE.import_image_bytes_for_api(
                     raw, name=name, relative_path=relative_path, client_key=client_key,
                 )
@@ -2845,9 +2829,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
                 self._json({"settings": settings, "status": STATE.settings_status()})
+            elif path == "/api/settings/reset":
+                settings = STATE.reset_settings()
+                self._json({"settings": settings, "status": STATE.settings_status()})
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
-                self._json({"candidate": STATE.add_boundary_candidate(image_id, payload)})
+                self._json(STATE.add_boundary_candidate(image_id, payload))
             elif path == "/api/save/prepare":
                 entries = STATE.prepare_browser_save(
                     payload.get("imageIds", []),
@@ -2867,10 +2854,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     output,
                     mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
                     headers={
-                        "X-Lets-Censoring-Revision": str(revision),
-                        "X-Lets-Censoring-Save-Token": save_token,
-                        "X-Lets-Censoring-Relative-Path": record.relative_path,
-                        "X-Lets-Censoring-Source-Kind": record.source_kind,
+                        "X-Mozarie-Revision": str(revision),
+                        "X-Mozarie-Save-Token": save_token,
+                        "X-Mozarie-Relative-Path": record.relative_path,
+                        "X-Mozarie-Source-Kind": record.source_kind,
                     },
                 )
             elif path == "/api/save/commit":
@@ -2898,7 +2885,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 STATE.set_candidate_state(image_id, candidate_id, payload)
                 self._json({"ok": True})
             else:
-                self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
+                self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
@@ -2918,7 +2905,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
             else:
-                self._json({"error": "APIが見つかりません。"}, HTTPStatus.NOT_FOUND)
+                self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
@@ -3004,7 +2991,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self._binary(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
 
     def _client_error(self, error: Exception, status: HTTPStatus, default_code: str | None = None) -> None:
-        code = getattr(error, "code", default_code or "request_failed")
+        code = getattr(error, "error_code", default_code or "request_failed")
         params = getattr(error, "params", {})
         self._json({"error": str(error), "error_code": code, "params": params}, status)
 
@@ -3095,18 +3082,20 @@ def _schedule_browser_open(url: str) -> threading.Timer:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
     parser = argparse.ArgumentParser(description="Run Mozarie locally.")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=None, help="Override the saved local port for this start only.")
     args = parser.parse_args()
+    port = args.port if args.port is not None else int(STATE.settings["general"]["port"])
     STATE.cache_dir.mkdir(parents=True, exist_ok=True)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), MosaicHandler)
+        server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
     except OSError:
         LOGGER.exception("サーバーを起動できません")
         STATE.shutdown()
         raise SystemExit(1) from None
-    url = f"http://127.0.0.1:{args.port}"
+    url = f"http://127.0.0.1:{port}"
     LOGGER.info("Mozarie を起動しました: %s", url)
-    _schedule_browser_open(url)
+    if STATE.settings["general"]["open_browser"]:
+        _schedule_browser_open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

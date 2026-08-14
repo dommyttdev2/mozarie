@@ -39,6 +39,11 @@ class SettingsStore:
         self.local_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return settings
 
+    def reset(self) -> dict[str, Any]:
+        """Forget only this machine's override and return tracked defaults."""
+        self.local_path.unlink(missing_ok=True)
+        return self.load()
+
 
 def _expect_dict(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -82,6 +87,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
     provider = models.get("provider")
     if provider not in {"cpu", "gpu"}:
         raise SettingsError("models.provider must be cpu or gpu")
+    sam_model_type = models.get("sam_model_type")
+    if sam_model_type not in {"vit_b", "vit_l", "vit_h"}:
+        raise SettingsError("models.sam_model_type must be vit_b, vit_l, or vit_h")
     mode = detection.get("mode")
     if mode not in {"standard", "high_precision"}:
         raise SettingsError("detection.mode must be standard or high_precision")
@@ -98,7 +106,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "port": int(port),
             "shortcuts_enabled": _expect_bool(general.get("shortcuts_enabled"), "general.shortcuts_enabled"),
         },
-        "models": {**paths, "provider": provider},
+        "models": {**paths, "sam_model_type": sam_model_type, "provider": provider},
         "display": {
             "apply_color": _expect_color(display.get("apply_color"), "display.apply_color"),
             "exclude_color": _expect_color(display.get("exclude_color"), "display.exclude_color"),

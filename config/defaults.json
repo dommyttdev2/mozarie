@@ -9,6 +9,7 @@
     "target_segmentation": "",
     "hand_detection": "",
     "sam_checkpoint": "",
+    "sam_model_type": "vit_b",
     "provider": "gpu"
   },
   "display": {
