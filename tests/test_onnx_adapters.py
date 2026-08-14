@@ -92,6 +92,12 @@ class OnnxAdapterTests(unittest.TestCase):
             batch_two_prediction = helper.make_tensor_value_info("prediction", TensorProto.FLOAT, [2, 43, None])
             with self.assertRaises(ModelProfileError):
                 validate_target_profile(self._write_model(root, "target-output-batch-two.onnx", [image], [batch_two_prediction, prototype]))
+            scalar_prediction = helper.make_tensor_value_info("prediction", TensorProto.FLOAT, [])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-scalar-output.onnx", [image], [scalar_prediction, prototype]))
+            wrong_rank_prediction = helper.make_tensor_value_info("prediction", TensorProto.FLOAT, [1, 43])
+            with self.assertRaises(ModelProfileError):
+                validate_target_profile(self._write_model(root, "target-wrong-rank-output.onnx", [image], [wrong_rank_prediction, prototype]))
             dynamic = helper.make_tensor_value_info("images", TensorProto.FLOAT, [None, 3, None, None])
             self.assertEqual(validate_target_profile(self._write_model(root, "target-dynamic.onnx", [dynamic], [prediction, prototype])).kind, "target_segmentation")
 
@@ -119,3 +125,9 @@ class OnnxAdapterTests(unittest.TestCase):
             batch_two_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, None, 5])
             with self.assertRaises(ModelProfileError):
                 validate_hand_profile(self._write_model(root, "hand-output-batch-two.onnx", [image], [batch_two_output]))
+            scalar_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-scalar-output.onnx", [image], [scalar_output]))
+            wrong_rank_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 5])
+            with self.assertRaises(ModelProfileError):
+                validate_hand_profile(self._write_model(root, "hand-wrong-rank-output.onnx", [image], [wrong_rank_output]))

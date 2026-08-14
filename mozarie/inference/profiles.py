@@ -71,7 +71,11 @@ def _load(path: Path, *, expected_size: int) -> tuple[TensorProfile, tuple[Tenso
 
 
 def _is_float32_single_batch(profile: TensorProfile) -> bool:
-    return profile.dtype == TensorProto.FLOAT and profile.dimensions[0] in {None, 1}
+    return (
+        len(profile.dimensions) >= 1
+        and profile.dtype == TensorProto.FLOAT
+        and profile.dimensions[0] in {None, 1}
+    )
 
 
 def validate_target_profile(path: Path) -> ModelProfile:

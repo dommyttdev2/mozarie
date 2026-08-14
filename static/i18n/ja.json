@@ -170,9 +170,9 @@
   "error.directoryPickerUnsupported": "このブラウザは保存先フォルダーの選択に対応していません。Chrome または Edge で開いてください。",
   "error.directoryPickerCancelled": "保存先フォルダーの選択をキャンセルしました。",
   "error.outputNameExhausted": "同名ファイルが多すぎるため保存できません。",
-  "error.sourcePermissionDenied": "元画像への書込み権限が許可されませんでした。",
+  "error.sourcePermissionDenied": "元画像への書込み権限が許可されませんでした: {name}",
   "error.sourceChanged": "元画像が読み込み後に変更されています: {name}",
-  "error.sourceDeleteUnavailable": "元画像を削除する権限がありません。",
+  "error.sourceDeleteUnavailable": "元画像を削除する権限がありません: {name}",
   "error.connectionLost": "Mozarie との通信が途切れました。アプリが起動しているか確認してください。"
   ,"settings.open": "設定",
   "settings.title": "設定",

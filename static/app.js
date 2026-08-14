@@ -1737,7 +1737,7 @@ async function ensureHandlePermission(access, requireWrite = true) {
   const options = requireWrite ? { mode: "readwrite" } : { mode: "read" };
   let permission = await handle.queryPermission?.(options);
   if (permission !== "granted") permission = await handle.requestPermission?.(options);
-  if (permission && permission !== "granted") throw new Error(t("error.sourcePermissionDenied"));
+  if (permission && permission !== "granted") throw new Error(t("error.sourcePermissionDenied", { name: handle.name || access.name || "" }));
   const file = await handle.getFile();
   if (access.size != null && (file.size !== access.size || file.lastModified !== access.lastModified)) {
     throw new Error(t("error.sourceChanged", { name: file.name || handle.name }));
@@ -1776,7 +1776,7 @@ async function removeSourceHandle(access) {
     await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
     return;
   }
-  throw new Error(t("error.sourceDeleteUnavailable"));
+  throw new Error(t("error.sourceDeleteUnavailable", { name: access.fileHandle.name || access.name || "" }));
 }
 
 async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsById) {
@@ -2651,8 +2651,8 @@ async function saveSettings(event) {
     setSettingsForm(data.settings, data.status);
     setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
-    result.textContent = t("settings.saved");
     if (languageChanged) await loadTranslations();
+    result.textContent = t("settings.saved");
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
