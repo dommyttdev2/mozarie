@@ -46,13 +46,11 @@
 
   <main class="studio-grid">
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
+      <div id="galleryPaneContent" class="pane-content">
       <div class="pane-heading gallery-heading">
         <div>
           <h2 data-i18n="gallery.title">画像</h2>
           <span class="gallery-local-count muted">0件</span>
-        </div>
-        <div class="gallery-heading-actions">
-          <button id="collapseGalleryButton" class="pane-collapse" type="button" aria-label="画像一覧を折り畳む" title="画像一覧を折り畳む" data-i18n-aria-label="workspace.collapseGallery" data-i18n-title="workspace.collapseGallery" aria-controls="galleryPane" aria-expanded="true">‹</button>
         </div>
       </div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
@@ -66,16 +64,12 @@
         </div>
         <div id="galleryDropOverlay" class="gallery-drop-overlay" hidden data-i18n="gallery.drop">画像をドロップして追加</div>
       </div>
+      </div>
+      <button id="collapseGalleryButton" class="pane-rail" type="button" aria-controls="galleryPaneContent" aria-expanded="true" aria-label="画像一覧を閉じる" title="画像一覧を閉じる" data-i18n-aria-label="workspace.collapseGallery" data-i18n-title="workspace.collapseGallery">‹</button>
     </aside>
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div id="canvasStage" class="canvas-stage">
-        <div class="canvas-corner-actions" aria-label="表示の切り替え" data-i18n-aria-label="workspace.viewControls">
-          <button id="showGalleryButton" class="icon-button" type="button" aria-label="画像一覧を表示" title="画像一覧を表示" data-i18n-aria-label="workspace.showGallery" data-i18n-title="workspace.showGallery" aria-controls="galleryPane" hidden>☰</button>
-          <button id="focusModeButton" class="icon-button" type="button" aria-label="集中モード" title="集中モード" data-i18n-aria-label="workspace.focusMode" data-i18n-title="workspace.focusMode" aria-pressed="false">⌘</button>
-          <button id="showInspectorButton" class="icon-button" type="button" aria-label="検出候補を表示" title="検出候補を表示" data-i18n-aria-label="workspace.showInspector" data-i18n-title="workspace.showInspector" aria-controls="candidatePane" hidden>☷</button>
-          <button id="floatingSaveButton" class="primary" type="button" aria-label="ファイル保存" title="ファイル保存" data-i18n="editor.applyCurrent" data-i18n-aria-label="editor.applyCurrent" data-i18n-title="editor.applyCurrent">ファイル保存</button>
-        </div>
         <div class="canvas-tool-rail" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
           <button id="brushTool" class="tool icon-button active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush">筆</button>
           <button id="eraserTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser">消</button>
@@ -102,9 +96,10 @@
     </section>
 
     <aside id="candidatePane" class="candidate-pane" data-i18n-aria-label="candidates.aria">
+      <button id="collapseInspectorButton" class="pane-rail" type="button" aria-controls="candidatePaneContent" aria-expanded="true" aria-label="検出候補を閉じる" title="検出候補を閉じる" data-i18n-aria-label="workspace.collapseInspector" data-i18n-title="workspace.collapseInspector">›</button>
+      <div id="candidatePaneContent" class="pane-content">
       <div class="pane-heading inspector-heading">
         <h2 data-i18n="editor.currentImage">現在画像</h2>
-        <button id="collapseInspectorButton" class="pane-collapse" type="button" aria-label="検出候補を折り畳む" title="検出候補を折り畳む" data-i18n-aria-label="workspace.collapseInspector" data-i18n-title="workspace.collapseInspector" aria-controls="candidatePane" aria-expanded="true">›</button>
       </div>
       <div class="inspector-current-actions" aria-label="現在の画像" data-i18n-aria-label="editor.currentActions">
         <button id="detectCurrentButton" type="button" data-i18n="editor.detectCurrent">自動検出</button>
@@ -128,6 +123,7 @@
         </div>
       </div>
       <div id="candidateList" class="candidate-list"></div>
+      </div>
     </aside>
 
     <section id="overviewPane" class="overview-pane" tabindex="-1" hidden data-i18n-aria-label="overview.aria" aria-label="画像一覧">
@@ -213,20 +209,22 @@
     </form>
   </dialog>
 
-  <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount applyMetadataNote">
+  <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount applyOverwriteNote applyMetadataNote">
     <form id="applyForm" class="dialog-body">
       <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
         <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
-        <label class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
-        <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
+        <label id="applySuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required aria-describedby="applyOverwriteNote"></label>
+        <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox" aria-describedby="applyOverwriteNote"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
         <div id="applyOutputDirectoryRow" class="output-directory-row">
           <span id="applyOutputDirectoryStatus" class="fixed-note" data-i18n="apply.outputDirectoryUnset">保存先: 未選択</span>
-          <button id="chooseOutputDirectoryButton" type="button" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
+          <button id="chooseOutputDirectoryButton" type="button" aria-describedby="applyOverwriteNote" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
         </div>
+        <p id="applyOverwriteNote" class="fixed-note" hidden data-i18n="apply.overwriteNote">元画像を上書きするため、ファイル名・保存先・元画像削除は変更できません。</p>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
+        <label class="choice-row"><input id="removeAfterSave" type="checkbox"><span data-i18n="apply.removeAfterSave">完了後、一覧から削除</span></label>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize"></output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">メタデータは保持・検証します。同名時は自動連番です。</p>
       </fieldset>

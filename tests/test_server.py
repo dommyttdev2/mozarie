@@ -536,6 +536,25 @@ class MosaicStudioTests(unittest.TestCase):
             self.assertNotIn(image_id, state.candidate_revisions)
             self.assertFalse((state.cache_dir / image_id).exists())
 
+    def test_remove_saved_images_from_catalog_keeps_all_source_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.png"
+            second = root / "second.png"
+            Image.new("RGB", (16, 16), "white").save(first)
+            Image.new("RGB", (16, 16), "black").save(second)
+            originals = {first: first.read_bytes(), second: second.read_bytes()}
+            state = self.new_state()
+            images = state.set_root(directory)
+            first_id, second_id = (image["id"] for image in images)
+
+            result = state.remove_images_from_catalog([first_id, second_id, first_id])
+
+            self.assertEqual(result["images"], [])
+            self.assertEqual(result["removedImageIds"], [first_id, second_id])
+            self.assertEqual(state.list_images(), [])
+            self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+
     def test_remove_image_from_catalog_rejects_active_work(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
@@ -1475,6 +1494,31 @@ class MosaicStudioTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_catalog_remove_api_uses_one_batch_without_deleting_sources(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        expected = {"images": [{"id": "other"}], "removedImageIds": ["first", "second"]}
+        try:
+            with patch.object(server_module.STATE, "remove_images_from_catalog", return_value=expected) as remove_images:
+                connection.request("POST", "/api/catalog/remove", json.dumps({"imageIds": ["first", "second"]}).encode("utf-8"), {
+                    "Content-Type": "application/json",
+                    "X-Lets-Censoring-Token": server_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, expected)
+            remove_images.assert_called_once_with(["first", "second"])
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_mutation_api_rejects_invalid_request_context(self):
         from http.server import ThreadingHTTPServer
 
@@ -2170,7 +2214,10 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('confirm.clearCurrent.message', dictionary)
         self.assertIn("通常の参照元画像は削除しません", dictionary["confirm.clearCatalog.message"])
         self.assertIn("焼き込み済みのモザイク画素は復元しません", dictionary["confirm.clearAllMasks.message"])
-        self.assertNotIn("画像一覧を閉じる", page)
+        self.assertIn('id="collapseGalleryButton" class="pane-rail"', page)
+        self.assertIn('id="collapseInspectorButton" class="pane-rail"', page)
+        self.assertIn('id="applySuffixRow"', page)
+        self.assertIn('id="applyOverwriteNote"', page)
         self.assertEqual(dictionary["folder.browse"], "画像を追加")
         self.assertEqual(dictionary["folder.load"], "読み込む")
         self.assertNotIn('$("#loadFolder")', app)
@@ -2191,6 +2238,8 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('state.sourceAccess', app)
         self.assertIn('await api("/api/images")', app)
         self.assertIn("apply.handleSource", dictionary)
+        self.assertIn("apply.removeAfterSave", dictionary)
+        self.assertIn("apply.overwriteNote", dictionary)
         self.assertIn('lets-censoring.navigation-shortcuts.v1', app)
         self.assertIn('function renderOverview(', app)
         self.assertIn('function markImagesUnreviewed(', app)
@@ -2205,9 +2254,11 @@ class MosaicStudioTests(unittest.TestCase):
         self.assertIn('id="galleryDropOverlay"', page)
         self.assertIn('id="catalogContextMenu"', page)
         self.assertIn('id="removeCurrentImageButton"', page)
-        self.assertIn('id="floatingSaveButton"', page)
-        self.assertIn('aria-controls="galleryPane"', page)
-        self.assertIn('aria-controls="candidatePane"', page)
+        self.assertIn('id="removeAfterSave"', page)
+        self.assertIn('id="galleryPaneContent"', page)
+        self.assertIn('id="candidatePaneContent"', page)
+        self.assertIn('aria-controls="galleryPaneContent"', page)
+        self.assertIn('aria-controls="candidatePaneContent"', page)
         self.assertNotIn('id="overviewDetectAllButton"', page)
         self.assertIn('gallery-empty-state', styles)
         self.assertIn('.appbar {', styles)

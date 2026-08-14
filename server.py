@@ -224,6 +224,7 @@ class Job:
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
     active_count: int = 0
+    remove_after_save: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -238,6 +239,7 @@ class Job:
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
             "activeCount": self.active_count,
+            "removeAfterSave": self.remove_after_save,
         }
 
 
@@ -840,22 +842,34 @@ class StudioState:
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
         """Remove one image's working state without deleting its source file."""
+        return self.remove_images_from_catalog([image_id])["images"]
+
+    def remove_images_from_catalog(self, image_ids: list[str]) -> dict[str, Any]:
+        """Remove saved images from the working catalog without deleting source files."""
+        if not isinstance(image_ids, list):
+            raise ClientError("画像IDの一覧が正しくありません。")
+        requested_ids = list(dict.fromkeys(str(image_id) for image_id in image_ids if str(image_id)))
+        if not requested_ids:
+            raise ClientError("削除する画像がありません。")
         with self.import_lock:
             with self.lock:
                 self._assert_catalog_mutable()
-                record = self.images.get(image_id)
-                if record is None:
-                    raise ClientError("画像が見つかりません。一覧を再読み込みしてください。")
-
-                self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
-                self.images.pop(image_id, None)
-                self.order = [current_id for current_id in self.order if current_id != image_id]
-                self.candidates.pop(image_id, None)
-                self.candidate_revisions.pop(image_id, None)
+                records = [self.images[image_id] for image_id in requested_ids if image_id in self.images]
+                removed_ids = [record.image_id for record in records]
+                for record in records:
+                    self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
+                    self.images.pop(record.image_id, None)
+                    self.candidates.pop(record.image_id, None)
+                    self.candidate_revisions.pop(record.image_id, None)
+                if removed_ids:
+                    removed_set = set(removed_ids)
+                    self.order = [current_id for current_id in self.order if current_id not in removed_set]
                 self._clear_browser_save_tokens_unchecked()
-                self.catalog_generation += 1
-        self.invalidate_sam_image(image_id)
-        return self.list_images()
+                if removed_ids:
+                    self.catalog_generation += 1
+        for image_id in removed_ids:
+            self.invalidate_sam_image(image_id)
+        return {"images": self.list_images(), "removedImageIds": removed_ids}
 
     def shutdown(self) -> None:
         """Stop background work before releasing the session import directory."""
@@ -1301,7 +1315,13 @@ class StudioState:
             expected_catalog_generation=catalog_generation,
         )
 
-    def start_apply(self, image_ids: list[str], divisor: int, drafts: dict[str, dict[str, Any]]) -> bool:
+    def start_apply(
+        self,
+        image_ids: list[str],
+        divisor: int,
+        drafts: dict[str, dict[str, Any]],
+        remove_after_save: bool = False,
+    ) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if any(record.source_kind != "filesystem" for record in records):
             raise ClientError("一時画像はコピー保存を選んでください。")
@@ -1318,7 +1338,8 @@ class StudioState:
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
         self._start_job(
-            "apply", records, self._apply_worker, divisor, drafts, expected_catalog_generation=catalog_generation,
+            "apply", records, self._apply_worker, divisor, drafts,
+            expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
         )
         return True
 
@@ -1559,6 +1580,7 @@ class StudioState:
         worker: Any,
         *args: Any,
         expected_catalog_generation: int | None = None,
+        remove_after_save: bool = False,
     ) -> None:
         if not self.import_lock.acquire(blocking=False):
             raise ClientError("画像の追加中です。完了後にもう一度実行してください。")
@@ -1569,6 +1591,7 @@ class StudioState:
                 worker,
                 *args,
                 expected_catalog_generation=expected_catalog_generation,
+                remove_after_save=remove_after_save,
             )
         finally:
             self.import_lock.release()
@@ -1580,6 +1603,7 @@ class StudioState:
         worker: Any,
         *args: Any,
         expected_catalog_generation: int | None = None,
+        remove_after_save: bool = False,
     ) -> None:
         with self.lock:
             if self.job.state in {"running", "paused"} or self._has_active_worker():
@@ -1596,6 +1620,7 @@ class StudioState:
                 total=len(records),
                 started_at=time.time(),
                 image_ids=tuple(record.image_id for record in records),
+                remove_after_save=remove_after_save,
             )
             self.job_control = control
         LOGGER.info("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
@@ -2678,6 +2703,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
+            elif path == "/api/catalog/remove":
+                self._json(STATE.remove_images_from_catalog(payload.get("imageIds", [])))
             elif path == "/api/import":
                 images, imported = STATE.import_images_for_api(payload.get("files", []))
                 self._json({"images": images, "imported": imported})
@@ -2729,6 +2756,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 divisor = _read_mosaic_divisor(payload.get("divisor"))
                 started = STATE.start_apply(
                     payload.get("imageIds", []), divisor, payload.get("drafts", {}),
+                    _read_bool(payload.get("removeAfterSave", False), "完了後、一覧から削除"),
                 )
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":

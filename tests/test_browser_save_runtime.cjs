@@ -100,7 +100,7 @@ function binaryResponse(bytes, saveToken = "runtime-render-token") {
   };
 }
 
-function createRuntime({ commit, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null }) {
+function createRuntime({ commit, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   const elements = new Map();
   const getElement = (selector) => {
@@ -176,6 +176,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
       }
       if (requestPath === "/api/save/render") return binaryResponse([4, 5, 6], renderToken);
       if (requestPath === "/api/save/commit") return commit({ options, requests });
+      if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
       throw new Error(`Unexpected request: ${requestPath}`);
     },
   };
@@ -229,6 +230,75 @@ async function runStaleCommitCase() {
   assert.equal(directory.directories.get("nested").files.get("source_censored.png").closed, true);
 }
 
+async function runRemoveAfterSaveCase() {
+  const directory = new FakeDirectoryHandle();
+  const image = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const runtime = createRuntime({
+    directory,
+    initialImages: [image],
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+    removeCatalog: ({ options }) => {
+      assert.deepEqual(JSON.parse(options.body), { imageIds: [image.id] });
+      return jsonResponse({ images: [], removedImageIds: [image.id] });
+    },
+  });
+  await runtime.runBrowserSave(directory, [image.id], "_censored", false, "copy", true);
+  assert.equal(runtime.requests.at(-1).path, "/api/catalog/remove");
+  assert.deepEqual(runtime.state.images, []);
+}
+
+async function runRemoveAfterSaveAlreadyAbsentCase() {
+  const image = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const runtime = createRuntime({
+    directory: new FakeDirectoryHandle(),
+    initialImages: [image],
+    commit: () => jsonResponse({ cleared: true, stale: false, deleted: true, images: [] }),
+    removeCatalog: () => jsonResponse({ images: [], removedImageIds: [] }),
+  });
+  runtime.state.currentId = image.id;
+  runtime.state.drafts.set(image.id, { add: "draft", exclusion: "" });
+
+  await runtime.runBrowserSave(runtime.directory, [image.id], "_censored", true, "copy", true);
+
+  assert.equal(runtime.state.drafts.has(image.id), false, "already-removed source entries still clear browser drafts");
+  assert.equal(runtime.state.currentId, null, "already-removed current entries leave no stale selection");
+}
+
+async function runRemoveAfterSavePartialAndStaleCase() {
+  const first = { id: "image-1", relativePath: "nested/first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", relativePath: "nested/second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  let commits = 0;
+  const runtime = createRuntime({
+    directory: new FakeDirectoryHandle(),
+    initialImages: [first, second],
+    entries: [
+      { imageId: first.id, relativePath: first.relativePath, candidateRevision: 1, deleteOriginal: false },
+      { imageId: second.id, relativePath: second.relativePath, candidateRevision: 1, deleteOriginal: false },
+    ],
+    commit: () => {
+      commits += 1;
+      return commits === 1
+        ? jsonResponse({ cleared: true, stale: false, images: [second] })
+        : jsonResponse({ error: "second commit failed" }, 500);
+    },
+    removeCatalog: ({ options }) => {
+      assert.deepEqual(JSON.parse(options.body), { imageIds: [first.id] });
+      return jsonResponse({ images: [second], removedImageIds: [first.id] });
+    },
+  });
+  await assert.rejects(runtime.runBrowserSave(runtime.directory, [first.id, second.id], "_censored", false, "copy", true), /second commit failed/);
+  assert.equal(runtime.requests.at(-1).path, "/api/catalog/remove");
+  assert.deepEqual(runtime.state.images, [second]);
+
+  const stale = createRuntime({
+    directory: new FakeDirectoryHandle(),
+    initialImages: [first],
+    commit: () => jsonResponse({ cleared: false, stale: true, images: [first] }),
+  });
+  await stale.runBrowserSave(stale.directory, [first.id], "_censored", false, "copy", true);
+  assert.equal(stale.requests.some((request) => request.path === "/api/catalog/remove"), false, "stale saves must remain in the catalog");
+}
+
 async function runCreateWritableFailureCase() {
   const directory = new FakeDirectoryHandle({
     createWritable() { throw new Error("write failed"); },
@@ -260,13 +330,20 @@ async function runCancelCase() {
   const directory = new FakeDirectoryHandle({
     closed() { runtime.state.browserSave.cancelled = true; },
   });
-  runtime = createRuntime({ directory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-  await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
+  runtime = createRuntime({
+    directory,
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+    removeCatalog: ({ options }) => {
+      assert.deepEqual(JSON.parse(options.body), { imageIds: ["image-1"] });
+      return jsonResponse({ images: [], removedImageIds: ["image-1"] });
+    },
+  });
+  await runtime.runBrowserSave(directory, ["image-1"], "_censored", false, "copy", true);
 
   const nested = directory.directories.get("nested");
   assert.deepEqual(nested.removed, []);
   assert.equal(nested.files.get("source_censored.png").closed, true, "cancel keeps the completed browser output");
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit", "/api/catalog/remove"]);
   assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 1");
 }
 
@@ -430,9 +507,43 @@ async function runOutputDirectoryReuseCase() {
   assert.equal(runtime.state.outputDirectory, secondDirectory);
 }
 
+async function runRemoveAfterSaveCases() {
+  const saved = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const retained = { id: "image-2", relativePath: "nested/retained.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
+  let removalPayload = null;
+  const enabled = createRuntime({
+    directory: new FakeDirectoryHandle(), initialImages: [saved, retained],
+    commit: () => jsonResponse({ cleared: true, stale: false, deleted: false, images: [saved, retained] }),
+    removeCatalog: ({ options }) => {
+      removalPayload = JSON.parse(options.body);
+      return jsonResponse({ images: [retained], removedImageIds: [saved.id] });
+    },
+  });
+  await enabled.runBrowserSave(enabled.directory, [saved.id], "_censored", false, "copy", true);
+  assert.deepEqual(removalPayload, { imageIds: [saved.id] }, "only completed and committed images are removed after save");
+  assert.deepEqual(enabled.state.images.map((image) => image.id), [retained.id]);
+
+  const disabled = createRuntime({
+    directory: new FakeDirectoryHandle(), initialImages: [saved],
+    commit: () => jsonResponse({ cleared: true, stale: false, deleted: false, images: [saved] }),
+  });
+  await disabled.runBrowserSave(disabled.directory, [saved.id], "_censored", false, "copy", false);
+  assert.equal(disabled.requests.some((request) => request.path === "/api/catalog/remove"), false, "unchecked removal leaves the catalog unchanged");
+
+  const stale = createRuntime({
+    directory: new FakeDirectoryHandle(), initialImages: [saved],
+    commit: () => jsonResponse({ cleared: false, stale: true, deleted: false, images: [saved] }),
+  });
+  await stale.runBrowserSave(stale.directory, [saved.id], "_censored", false, "copy", true);
+  assert.equal(stale.requests.some((request) => request.path === "/api/catalog/remove"), false, "stale saves remain in the catalog");
+}
+
 (async () => {
   await runSuccessCase();
   await runStaleCommitCase();
+  await runRemoveAfterSaveCase();
+  await runRemoveAfterSaveAlreadyAbsentCase();
+  await runRemoveAfterSavePartialAndStaleCase();
   await runCreateWritableFailureCase();
   await runCommitFailureCase();
   await runCancelCase();
@@ -443,5 +554,6 @@ async function runOutputDirectoryReuseCase() {
   await runForeignCollisionCase();
   await runPartialCommitFailureReconcileCase();
   await runOutputDirectoryReuseCase();
+  await runRemoveAfterSaveCases();
   console.log("test_browser_save_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -20,6 +20,7 @@ const state = {
   sourceAccess: new Map(),
   // This handle is scoped to this browser tab and reused for copy saves.
   outputDirectory: null, outputDirectoryName: "",
+  galleryCollapsed: false, inspectorCollapsed: false,
 };
 
 const canvas = $("#editorCanvas");
@@ -251,7 +252,6 @@ function updateActionButtons() {
   $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
   const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
   $("#saveButton").disabled = currentSaveDisabled;
-  $("#floatingSaveButton").disabled = currentSaveDisabled;
   $("#applyStartButton").disabled = running || mutatingCandidates || Boolean(applyRestrictionMessage());
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || imageIndex() <= 0;
@@ -1269,14 +1269,14 @@ function syncApplyMode() {
   const canDelete = applyTargetsSupport("delete");
   const copying = selectedSaveMode() === "copy";
   $("#applySuffix").disabled = !copying || state.applyRunning;
-  $("#deleteOriginalRow").hidden = !copying;
-  $("#applyOutputDirectoryRow").hidden = !copying;
   $("#chooseOutputDirectoryButton").disabled = !copying || state.applyRunning || state.saveStarting;
   $("#applyOutputDirectoryStatus").textContent = state.outputDirectoryName
     ? t("apply.outputDirectorySelected", { name: state.outputDirectoryName })
     : t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !copying || !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
+  $("#removeAfterSave").disabled = state.applyRunning;
+  $("#applyOverwriteNote").hidden = copying;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -1523,12 +1523,60 @@ async function removeSourceHandle(access) {
   throw new Error(t("error.sourceDeleteUnavailable"));
 }
 
-async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy") {
+async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsById) {
+  if (!imageIds.length) return;
+  const currentId = state.currentId;
+  const currentIndex = initialOrder.indexOf(currentId);
+  const data = await api("/api/catalog/remove", { method: "POST", body: JSON.stringify({ imageIds }) });
+  state.images = data.images;
+  const remainingIds = new Set(state.images.map((image) => image.id));
+  const removedIds = new Set([
+    ...(data.removedImageIds || []),
+    ...imageIds.filter((imageId) => !remainingIds.has(imageId)),
+  ]);
+  if (!removedIds.size) return;
+
+  for (const imageId of removedIds) {
+    state.sourceAccess.delete(imageId);
+    state.drafts.delete(imageId);
+    state.maskStatus.delete(imageId);
+    state.candidateUpdateChains.delete(imageId);
+    state.candidateUpdateVersions.delete(imageId);
+    state.candidateDeleting.delete(imageId);
+    const image = recordsById.get(imageId);
+    if (image) clearReviewForRemovedImage(image);
+  }
+
+  if (currentId && removedIds.has(currentId)) {
+    state.currentId = null;
+    state.currentImage = null;
+    state.pendingImageId = null;
+    state.candidates = [];
+    state.candidateImages.clear();
+    clearEditor();
+  }
+  pruneSourceAccess();
+  renderCatalogViews();
+
+  if (currentId && removedIds.has(currentId)) {
+    const survivors = new Set(state.images.map((image) => image.id));
+    const nextId = [...initialOrder.slice(currentIndex + 1), ...initialOrder.slice(0, currentIndex).reverse()]
+      .find((imageId) => survivors.has(imageId));
+    if (nextId) await selectImage(nextId, true, { saveCurrentDraft: false });
+    else updateNavigationControls();
+  }
+  updateActionButtons();
+}
+
+async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
   const result = await api("/api/save/prepare", {
     method: "POST",
     body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
-  const save = { directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false };
+  const save = {
+    directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, removeAfterSave,
+    removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
+  };
   state.browserSave = save;
   state.saving = true;
   state.applyRunning = true;
@@ -1592,6 +1640,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
             resetCurrentDraft();
           }
         }
+        if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
         if (committed.stale) save.stale += 1;
         state.images = committed.images;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
@@ -1612,6 +1661,11 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
     $("#applyPauseButton").hidden = true;
     $("#applyCancelButton").hidden = true;
     $("#applyCloseButton").hidden = false;
+    try {
+      await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+    } catch (error) {
+      setApplyResult(error.message, true);
+    }
     reconcileBrowserSaveState();
     if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
       await selectImage(state.currentId, true, { saveCurrentDraft: false });
@@ -1671,7 +1725,7 @@ async function startApplyFromDialog(event) {
   if (state.importing) return finishSaveStart();
   try {
     state.saveStarting = false;
-    await runBrowserSave(outputDirectory, imageIds, suffix, copy && $("#deleteOriginal").checked, mode);
+    await runBrowserSave(outputDirectory, imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
   } catch (error) {
     setApplyResult(error.message, true);
     state.saving = false;
@@ -1722,6 +1776,7 @@ async function finishApplyJob(job) {
   const generation = ++state.imageGeneration;
   try {
     const keepCurrent = state.currentId;
+    const previousOrder = state.images.map((image) => image.id);
     const previousImagesById = new Map(state.images.map((image) => [image.id, image]));
     const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
     const completedImageIds = Array.isArray(job.completedImageIds)
@@ -1741,12 +1796,20 @@ async function finishApplyJob(job) {
     state.maskStatus.clear();
     for (const imageId of completedImageIds) state.drafts.delete(imageId);
     state.applyTargetIds = requestedImageIds;
-    if (reloadCurrent) {
+    if (job.removeAfterSave && completedImageIds.length) {
+      await removeCompletedImagesFromCatalog(completedImageIds, previousOrder, previousImagesById);
+    }
+    const removedAfterSave = Boolean(job.removeAfterSave && completedImageIds.length);
+    if (removedAfterSave) {
+      // removeCompletedImagesFromCatalog already selects the next surviving image.
+    } else if (reloadCurrent) {
       state.candidates = [];
       state.candidateImages.clear();
     }
     const reloadedCurrent = reloadCurrent && state.images.some((image) => image.id === keepCurrent);
-    if (reloadedCurrent) {
+    if (removedAfterSave) {
+      // The batch cleanup above has restored either a neighboring image or an empty editor.
+    } else if (reloadedCurrent) {
       await selectImage(keepCurrent, true, { saveCurrentDraft: false });
     } else if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
       refreshMaskStatus();
@@ -2259,7 +2322,6 @@ function bindEvents() {
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
-  $("#floatingSaveButton").addEventListener("click", saveCurrent);
   $("#removeCurrentImageButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -2307,42 +2369,28 @@ function bindEvents() {
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
-  const syncWorkspaceControls = () => {
-    const focusMode = grid.classList.contains("focus-mode");
-    const galleryCollapsed = focusMode || grid.classList.contains("gallery-collapsed");
-    const inspectorCollapsed = focusMode || grid.classList.contains("inspector-collapsed");
-    const galleryPane = $("#galleryPane");
-    const candidatePane = $("#candidatePane");
-    galleryPane.inert = galleryCollapsed;
-    candidatePane.inert = inspectorCollapsed;
-    galleryPane.setAttribute("aria-hidden", String(galleryCollapsed));
-    candidatePane.setAttribute("aria-hidden", String(inspectorCollapsed));
-    $("#collapseGalleryButton").setAttribute("aria-expanded", String(!galleryCollapsed));
-    $("#collapseInspectorButton").setAttribute("aria-expanded", String(!inspectorCollapsed));
-    $("#focusModeButton").setAttribute("aria-pressed", String(focusMode));
-    $("#showGalleryButton").hidden = !galleryCollapsed;
-    $("#showInspectorButton").hidden = !inspectorCollapsed;
-  };
-  const workspaceMode = () => {
-    if (grid.classList.contains("focus-mode")) return "focus";
-    if (grid.classList.contains("gallery-collapsed")) return "inspector";
-    if (grid.classList.contains("inspector-collapsed")) return "gallery";
-    return "both";
-  };
-  const setWorkspaceMode = (mode) => {
-    grid.classList.remove("focus-mode", "gallery-collapsed", "inspector-collapsed");
-    if (mode === "focus") grid.classList.add("focus-mode");
-    if (mode === "gallery") grid.classList.add("inspector-collapsed");
-    if (mode === "inspector") grid.classList.add("gallery-collapsed");
-    syncWorkspaceControls();
+  const setPaneCollapsed = (side, collapsed) => {
+    const isGallery = side === "gallery";
+    const content = $(isGallery ? "#galleryPaneContent" : "#candidatePaneContent");
+    const button = $(isGallery ? "#collapseGalleryButton" : "#collapseInspectorButton");
+    const className = isGallery ? "gallery-collapsed" : "inspector-collapsed";
+    state[isGallery ? "galleryCollapsed" : "inspectorCollapsed"] = collapsed;
+    grid.classList.toggle(className, collapsed);
+    content.inert = collapsed;
+    content.setAttribute("aria-hidden", String(collapsed));
+    button.setAttribute("aria-expanded", String(!collapsed));
+    button.textContent = isGallery ? (collapsed ? "›" : "‹") : (collapsed ? "‹" : "›");
+    const labelKey = isGallery
+      ? (collapsed ? "workspace.expandGallery" : "workspace.collapseGallery")
+      : (collapsed ? "workspace.expandInspector" : "workspace.collapseInspector");
+    button.setAttribute("aria-label", t(labelKey));
+    button.title = t(labelKey);
     requestAnimationFrame(() => { resizeRenderCanvas(); fitImage(); });
   };
-  $("#collapseGalleryButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "gallery" ? "focus" : "inspector"));
-  $("#collapseInspectorButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "inspector" ? "focus" : "gallery"));
-  $("#showGalleryButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "gallery" : "both"));
-  $("#showInspectorButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "inspector" : "both"));
-  $("#focusModeButton").addEventListener("click", () => setWorkspaceMode(workspaceMode() === "focus" ? "both" : "focus"));
-  syncWorkspaceControls();
+  $("#collapseGalleryButton").addEventListener("click", () => setPaneCollapsed("gallery", !state.galleryCollapsed));
+  $("#collapseInspectorButton").addEventListener("click", () => setPaneCollapsed("inspector", !state.inspectorCollapsed));
+  setPaneCollapsed("gallery", false);
+  setPaneCollapsed("inspector", false);
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));

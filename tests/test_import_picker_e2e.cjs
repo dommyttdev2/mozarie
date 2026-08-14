@@ -20,7 +20,7 @@ function startFixtureServer() {
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        images: [{ id: "sample", relativePath: "sample.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }],
+        images: [{ id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }],
         root: "G:/fixture",
       }));
       return;
@@ -167,34 +167,44 @@ async function main() {
     await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
     assert.equal(await page.locator("#collapseGalleryButton").getAttribute("aria-expanded"), "false");
-    assert.equal(await page.locator("#galleryPane").getAttribute("aria-hidden"), "true");
-    assert.equal(await page.locator("#galleryPane").evaluate((pane) => pane.inert), true);
-    assert.equal(await page.locator("#showGalleryButton").isVisible(), true);
+    assert.equal(await page.locator("#galleryPaneContent").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#galleryPaneContent").evaluate((pane) => pane.inert), true);
+    assert.equal(await page.locator("#galleryPane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 40);
     assert.ok(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width) > stageWidth, "collapsing the gallery must enlarge the canvas");
-    await page.locator("#showGalleryButton").click();
+    await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
     assert.equal(await page.locator("#collapseGalleryButton").getAttribute("aria-expanded"), "true");
-    assert.equal(await page.locator("#galleryPane").getAttribute("aria-hidden"), "false");
-    assert.equal(await page.locator("#galleryPane").evaluate((pane) => pane.inert), false);
-    await page.locator("#focusModeButton").click();
-    await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("focus-mode"));
-    assert.equal(await page.locator("#focusModeButton").getAttribute("aria-pressed"), "true");
-    assert.equal(await page.locator("#candidatePane").evaluate((pane) => pane.inert), true);
-    assert.equal(await page.locator("#floatingSaveButton").isVisible(), true, "save must remain reachable in focus mode");
-    await page.locator("#showGalleryButton").click();
+    assert.equal(await page.locator("#galleryPaneContent").getAttribute("aria-hidden"), "false");
+    assert.equal(await page.locator("#galleryPaneContent").evaluate((pane) => pane.inert), false);
+    await page.locator("#collapseInspectorButton").click();
     await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("inspector-collapsed"));
-    assert.equal(await page.locator("#galleryPane").evaluate((pane) => pane.inert), false, "showing the gallery from focus mode must activate it");
-    assert.equal(await page.locator("#candidatePane").evaluate((pane) => pane.inert), true, "showing the gallery from focus mode must keep the inspector closed");
-    await page.locator("#showInspectorButton").click();
+    assert.equal(await page.locator("#candidatePaneContent").getAttribute("aria-hidden"), "true");
+    assert.equal(await page.locator("#candidatePaneContent").evaluate((pane) => pane.inert), true);
+    assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 40);
+    await page.locator("#collapseGalleryButton").click();
+    assert.equal(await page.locator("#candidatePaneContent").evaluate((pane) => pane.inert), true, "left panel state must not reopen the right panel");
+    await page.locator("#collapseInspectorButton").click();
     await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("inspector-collapsed"));
-    assert.equal(await page.locator("#candidatePane").evaluate((pane) => pane.inert), false, "showing the inspector must restore the two-panel workspace");
-    await page.locator("#focusModeButton").click();
-    await page.locator("#focusModeButton").click();
-    await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("focus-mode"));
-    assert.equal(await page.locator("#focusModeButton").getAttribute("aria-pressed"), "false");
-    assert.equal(await page.locator("#galleryPane").evaluate((pane) => pane.inert), false);
-    assert.equal(await page.locator("#candidatePane").evaluate((pane) => pane.inert), false);
+    assert.equal(await page.locator("#candidatePaneContent").evaluate((pane) => pane.inert), false);
+    await page.locator("#collapseGalleryButton").click();
+    await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
+    assert.equal(await page.locator("#canvasStage > .canvas-tool-rail").count(), 1, "only editor tools stay in the canvas overlay");
     assert.equal(await page.locator("#overviewDetectAllButton").count(), 0, "overview must not duplicate global actions");
+    await page.locator("#applyDialog").evaluate((dialog) => dialog.showModal());
+    await page.locator("#applyCopyMode").check();
+    await page.locator("#applySuffix").fill("_kept");
+    await page.locator("#applyOverwriteMode").check();
+    assert.equal(await page.locator("#applySuffix").isDisabled(), true);
+    assert.equal(await page.locator("#deleteOriginal").isDisabled(), true);
+    assert.equal(await page.locator("#chooseOutputDirectoryButton").isDisabled(), true);
+    assert.equal(await page.locator("#deleteOriginalRow").isVisible(), true);
+    assert.equal(await page.locator("#applyOutputDirectoryRow").isVisible(), true);
+    assert.equal(await page.locator("#applyOverwriteNote").isVisible(), true);
+    await page.locator("#applyCopyMode").check();
+    assert.equal(await page.locator("#applySuffix").inputValue(), "_kept");
+    assert.equal(await page.locator("#applySuffix").isDisabled(), false);
+    assert.equal(await page.locator("#removeAfterSave").isVisible(), true);
+    await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);

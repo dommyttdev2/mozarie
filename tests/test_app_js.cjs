@@ -50,10 +50,10 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "floatingSaveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog",
-  "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "showGalleryButton", "showInspectorButton", "focusModeButton",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton",
+  "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave",
 ]) {
   const value = element();
   value.id = id;
@@ -141,11 +141,12 @@ function canvasElement() {
   return target;
 }
 
+const studioGrid = element();
 const document = {
   addEventListener() {},
   querySelector: (selector) => selector === 'input[name="saveMode"]:checked'
     ? { value: elements.get("#applyOverwriteMode").checked ? "overwrite" : "copy" }
-    : (elements.get(selector) || element()),
+    : (selector === ".studio-grid" ? studioGrid : (elements.get(selector) || element())),
   querySelectorAll: (selector) => {
     if (selector === "button, input, select, textarea") return [...elements.values()].filter((item) => item.id);
     if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog"), elements.get("#detectDialog")];
@@ -183,12 +184,56 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, setGalleryDropOverlay };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
-bindEvents();
+  const { state, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
+  bindEvents();
+  const workspaceGrid = document.querySelector(".studio-grid");
+  elements.get("#collapseGalleryButton").click();
+  assert.equal(workspaceGrid.classList.contains("gallery-collapsed"), true);
+  assert.equal(elements.get("#galleryPaneContent").inert, true);
+  assert.equal(elements.get("#galleryPaneContent").attributes["aria-hidden"], "true");
+  assert.equal(elements.get("#collapseGalleryButton").attributes["aria-expanded"], "false");
+  assert.equal(elements.get("#collapseGalleryButton").textContent, "›");
+  elements.get("#collapseInspectorButton").click();
+  assert.equal(workspaceGrid.classList.contains("inspector-collapsed"), true);
+  assert.equal(elements.get("#candidatePaneContent").inert, true);
+  assert.equal(elements.get("#candidatePaneContent").attributes["aria-hidden"], "true");
+  assert.equal(elements.get("#collapseInspectorButton").attributes["aria-expanded"], "false");
+  assert.equal(elements.get("#collapseInspectorButton").textContent, "‹");
+  elements.get("#collapseGalleryButton").click();
+  assert.equal(workspaceGrid.classList.contains("gallery-collapsed"), false);
+  assert.equal(elements.get("#galleryPaneContent").inert, false);
+  elements.get("#collapseInspectorButton").click();
+  assert.equal(workspaceGrid.classList.contains("inspector-collapsed"), false);
+  assert.equal(elements.get("#candidatePaneContent").inert, false);
 
-function keyEvent(key, options = {}) {
+  const applyImage = { id: "apply-image", sourceKind: "filesystem", relativePath: "apply.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [applyImage];
+  state.applyTargetIds = [applyImage.id];
+  state.outputDirectoryName = "保存先";
+  elements.get("#applySuffix").value = "_keep";
+  elements.get("#deleteOriginal").checked = true;
+  elements.get("#applyOverwriteMode").checked = true;
+  elements.get("#applyCopyMode").checked = false;
+  syncApplyMode();
+  assert.equal(elements.get("#applySuffix").disabled, true);
+  assert.equal(elements.get("#deleteOriginal").disabled, true);
+  assert.equal(elements.get("#chooseOutputDirectoryButton").disabled, true);
+  assert.equal(elements.get("#deleteOriginalRow").hidden, false);
+  assert.equal(elements.get("#applyOutputDirectoryRow").hidden, false);
+  assert.equal(elements.get("#applyOverwriteNote").hidden, false);
+  elements.get("#applyOverwriteMode").checked = false;
+  elements.get("#applyCopyMode").checked = true;
+  syncApplyMode();
+  assert.equal(elements.get("#applySuffix").disabled, false);
+  assert.equal(elements.get("#deleteOriginal").disabled, false);
+  assert.equal(elements.get("#chooseOutputDirectoryButton").disabled, false);
+  assert.equal(elements.get("#applySuffix").value, "_keep");
+  assert.equal(elements.get("#deleteOriginal").checked, true);
+  assert.equal(elements.get("#applyOverwriteNote").hidden, true);
+
+  function keyEvent(key, options = {}) {
   return { key, code: options.code || key, shiftKey: Boolean(options.shiftKey), ctrlKey: Boolean(options.ctrlKey), metaKey: Boolean(options.metaKey), altKey: Boolean(options.altKey), prevented: false, preventDefault() { this.prevented = true; } };
 }
 
@@ -268,6 +313,30 @@ function keyEvent(key, options = {}) {
   await removeRequest;
   assert.deepEqual(JSON.parse(JSON.stringify(state.images.map((image) => image.id))), ["keep"]);
   assert.equal(state.sourceAccess.has("remove"), false);
+  const batchA = { id: "batch-a", relativePath: "batch-a.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  const batchB = { id: "batch-b", relativePath: "batch-b.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 };
+  const batchC = { id: "batch-c", relativePath: "batch-c.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
+  state.images = [batchA, batchB, batchC];
+  state.currentId = "batch-b";
+  state.currentImage = { width: 100, height: 80 };
+  state.sourceAccess.set("batch-b", { fileHandle: { name: "batch-b.png" } });
+  state.drafts.set("batch-b", { add: "draft", exclusion: "" });
+  state.maskStatus.set("batch-b", true);
+  state.reviewRoot = "g:\\images\\batch";
+  setReviewed(batchB, true);
+  const batchRemoval = removeCompletedImagesFromCatalog(["batch-b"], ["batch-a", "batch-b", "batch-c"], new Map([["batch-a", batchA], ["batch-b", batchB], ["batch-c", batchC]]));
+  assert.equal(requests.at(-1).path, "/api/catalog/remove");
+  resolveFetch({ ok: true, json: async () => ({ images: [batchA, batchC], removedImageIds: ["batch-b"] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/candidates/batch-c", "the next image is selected after the current image is removed");
+  resolveFetch({ ok: true, json: async () => ({ candidates: [] }) });
+  await batchRemoval;
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images.map((image) => image.id))), ["batch-a", "batch-c"]);
+  assert.equal(state.currentId, "batch-c");
+  assert.equal(state.sourceAccess.has("batch-b"), false);
+  assert.equal(state.drafts.has("batch-b"), false);
+  assert.equal(state.maskStatus.has("batch-b"), false);
+  assert.equal(storage.has("lets-censoring.reviewed.v1:g:\\images\\batch:batch-b.png"), false);
   setGalleryDropOverlay(true);
   assert.equal(elements.get("#galleryDropOverlay").hidden, false);
   setGalleryDropOverlay(false);
@@ -461,6 +530,21 @@ function keyEvent(key, options = {}) {
   elements.get("#applyOverwriteMode").checked = false;
   syncApplyMode();
   assert.equal(elements.get("#deleteOriginal").disabled, false);
+  elements.get("#applyOverwriteMode").checked = true;
+  elements.get("#applyCopyMode").checked = false;
+  syncApplyMode();
+  assert.equal(elements.get("#applySuffix").disabled, true, "overwrite disables the suffix without hiding it");
+  assert.equal(elements.get("#deleteOriginal").disabled, true, "overwrite disables original deletion");
+  assert.equal(elements.get("#chooseOutputDirectoryButton").disabled, true, "overwrite disables the output picker");
+  assert.equal(elements.get("#deleteOriginalRow").hidden, false, "overwrite keeps the original-delete row visible");
+  assert.equal(elements.get("#applyOutputDirectoryRow").hidden, false, "overwrite keeps the destination row visible");
+  assert.equal(elements.get("#applyOverwriteNote").hidden, false, "overwrite explains the disabled controls");
+  elements.get("#applyCopyMode").checked = true;
+  elements.get("#applyOverwriteMode").checked = false;
+  syncApplyMode();
+  assert.equal(elements.get("#applySuffix").disabled, false, "copy restores suffix editing");
+  assert.equal(elements.get("#applyOverwriteNote").hidden, true, "copy hides the overwrite explanation");
+  assert.equal(elements.get("#deleteOriginal").checked, true, "copy preserves the original-delete choice");
   await ensureSaveSources(["session"], "overwrite", false);
   sourceFile.lastModified = 35;
   await assert.rejects(ensureSaveSources(["session"], "overwrite", false), /error\.sourceChanged/);
