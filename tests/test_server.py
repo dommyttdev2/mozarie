@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -256,6 +257,26 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         shutdown.assert_called_once_with()
         self.assertIn("サーバーを起動できません", "\n".join(logs.output))
+
+    def test_server_imports_from_an_isolated_unrelated_working_directory(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            command = (
+                "import os, runpy; "
+                f"os.chdir({directory!r}); "
+                f"runpy.run_path({str(root / 'server.py')!r}, run_name='mozarie_startup_probe')"
+            )
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", command],
+                cwd=directory,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_png_ancillary_metadata_is_byte_identical_after_save(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2401,6 +2422,9 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('where python', launcher)
         self.assertIn('sys.version_info >= (3, 11)', launcher)
         self.assertIn('Python 3.11 or newer was not found', launcher)
+        self.assertIn('if "%EXIT_CODE%"=="0" exit /b 0\necho Mozarie stopped with exit code %EXIT_CODE%.\npause', launcher)
+        self.assertIn(':missing_python\necho [Mozarie] Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv.\npause', launcher)
+        self.assertEqual(launcher.count("pause"), 2)
         self.assertLess(launcher.index('MOZARIE_PYTHON'), launcher.index('.venv\\Scripts\\python.exe'))
         self.assertLess(launcher.index('.venv\\Scripts\\python.exe'), launcher.index('ComfyUI_windows_portable\\python_embeded\\python.exe'))
         self.assertLess(launcher.index('python_embeded\\python.exe'), launcher.index('py -0p'))

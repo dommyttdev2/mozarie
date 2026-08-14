@@ -50,7 +50,8 @@ if not defined PYTHON goto :missing_python
 
 "%PYTHON%" %PYTHON_ARGS% "%APP_DIR%server.py"
 set "EXIT_CODE=%ERRORLEVEL%"
-if not "%EXIT_CODE%"=="0" echo Mozarie stopped with exit code %EXIT_CODE%.
+if "%EXIT_CODE%"=="0" exit /b 0
+echo Mozarie stopped with exit code %EXIT_CODE%.
 pause
 exit /b %EXIT_CODE%
 

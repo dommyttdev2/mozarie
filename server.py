@@ -6,6 +6,13 @@ under a user-selected root, then addressed through opaque catalogue ids.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
 import base64
 import binascii
 import argparse
@@ -31,7 +38,6 @@ import zlib
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -48,7 +54,6 @@ from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
 
-APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 CACHE_BASE_DIR = APP_DIR / ".mozarie-cache"
 SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
