@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="lets-censoring-token" content="{{SESSION_TOKEN}}">
-  <title data-i18n="app.title">Lets Censoring</title>
+  <title data-i18n="app.title">Mozarie</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="appbar">
-    <div class="brand" data-i18n="app.brand">Lets Censoring</div>
+    <div class="brand" data-i18n="app.brand">Mozarie</div>
     <nav class="appbar-commands" aria-label="全画像の操作">
       <button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を追加</button>
       <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
@@ -74,6 +74,7 @@
           <button id="brushTool" class="tool icon-button active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush">筆</button>
           <button id="eraserTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser">消</button>
           <button id="boundaryTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary">囲</button>
+          <button id="polygonTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="4点境界" title="4点境界">◇</button>
           <span class="tool-separator" aria-hidden="true"></span>
           <button id="fitButton" class="tool icon-button" type="button" aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
           <button id="undoButton" class="tool icon-button" type="button" aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
@@ -81,7 +82,7 @@
           <button id="mosaicPreviewButton" class="tool icon-button active" type="button" aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
         </div>
         <div class="canvas-settings-bar" aria-label="編集設定">
-          <label class="numeric-control" for="brushSize"><span>ブラシ径</span><input id="brushSize" type="range" min="2" max="500" value="48"><output id="brushSizeValue">48 px</output></label>
+          <label class="numeric-control" for="brushSize"><span>ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48"><output id="brushSizeValue">48 px</output></label>
           <label class="numeric-control block-control" for="divisor"><span>モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
         </div>
         <div class="canvas-navigation-bar" aria-label="画像移動">
@@ -91,6 +92,10 @@
           <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked><span>ショートカット</span></label>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
+        <div id="polygonActions" class="polygon-actions" hidden>
+          <button id="polygonDetectButton" class="primary" type="button" disabled>検出</button>
+          <button id="polygonCancelButton" class="danger" type="button">取消</button>
+        </div>
         <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
     </section>
@@ -99,7 +104,7 @@
       <button id="collapseInspectorButton" class="pane-rail" type="button" aria-controls="candidatePaneContent" aria-expanded="true" aria-label="検出候補を閉じる" title="検出候補を閉じる" data-i18n-aria-label="workspace.collapseInspector" data-i18n-title="workspace.collapseInspector">›</button>
       <div id="candidatePaneContent" class="pane-content">
       <div class="pane-heading inspector-heading">
-        <h2 data-i18n="editor.currentImage">現在画像</h2>
+        <h2 data-i18n="editor.currentImage">モザイク処理</h2>
       </div>
       <div class="inspector-current-actions" aria-label="現在の画像" data-i18n-aria-label="editor.currentActions">
         <button id="detectCurrentButton" type="button" data-i18n="editor.detectCurrent">自動検出</button>
@@ -116,13 +121,15 @@
         <input id="confidence" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
       </section>
-      <div class="pane-heading candidates-heading">
-        <div>
-          <h2 data-i18n="candidates.title">検出候補</h2>
-          <span id="candidateStatus" class="muted" data-i18n="candidates.unselected">画像を選択してください</span>
-        </div>
-      </div>
-      <div id="candidateList" class="candidate-list"></div>
+      <output id="candidateStatus" class="muted" hidden data-i18n="candidates.unselected">画像を選択してください</output>
+      <section class="candidate-section">
+        <h3>モザイク範囲</h3>
+        <div id="candidateList" class="candidate-list"></div>
+      </section>
+      <section class="candidate-section">
+        <h3>除外範囲</h3>
+        <div id="exclusionList" class="candidate-list"></div>
+      </section>
       </div>
     </aside>
 

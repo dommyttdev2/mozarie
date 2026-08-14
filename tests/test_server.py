@@ -1384,7 +1384,7 @@ class MosaicStudioTests(unittest.TestCase):
 
             self.assertEqual(created["source"], "boundary")
             self.assertEqual(created["className"], "境界")
-            self.assertEqual(state.list_candidates(record.image_id), [created])
+            self.assertEqual(state.list_candidates(record.image_id), [created | {"role": "apply"}])
             combined = state.combined_candidate_mask(record.image_id)
             self.assertTrue(np.any(combined[3:9, 3:9]))
             self.assertFalse(np.any(combined[:3]))

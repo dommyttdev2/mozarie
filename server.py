@@ -39,13 +39,15 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 import torch
-from ultralytics import YOLO
+from ultralytics import YOLO  # Removed after the ONNX Runtime adapter passes parity tests.
+from mozarie.domain import Candidate, CandidateRole
+from mozarie.masks import compose_masks
 
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
-CACHE_BASE_DIR = APP_DIR / ".mosaicstudio-cache"
-SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "LetsCensoring"
+CACHE_BASE_DIR = APP_DIR / ".mozarie-cache"
+SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,9 @@ SOURCE_LABELS = {
     "primary": "補助検出モデル",
     "secondary": "補助検出モデル2",
     "boundary": "境界選択",
+    "hand_exclusion": "手を除外",
+    "fluid_exclusion": "白い体液を除外",
+    "hand_fluid_exclusion": "手と白い体液を除外",
 }
 REFINEMENT_LABELS = {
     "hand": "手の重なりを除外",
@@ -174,18 +179,6 @@ class ImageRecord:
     size_bytes: int = 0
     source_kind: str = "filesystem"
     content_version: int = 0
-
-
-@dataclass
-class Candidate:
-    candidate_id: str
-    class_name: str
-    confidence: float
-    mask_path: Path
-    enabled: bool = True
-    color: str = "#5bb6d5"
-    source: str = "auto"
-    refinement: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1212,7 +1205,10 @@ class StudioState:
                         "mtimeNs": record.mtime_ns,
                         "contentVersion": record.content_version,
                         "candidateCount": len(self.candidates.get(image_id, [])),
-                        "enabledCandidateCount": sum(candidate.enabled for candidate in self.candidates.get(image_id, [])),
+                        "enabledCandidateCount": sum(
+                            candidate.enabled and candidate.role == CandidateRole.APPLY
+                            for candidate in self.candidates.get(image_id, [])
+                        ),
                         "candidateRevision": self._candidate_revision(image_id),
                     }
                 )
@@ -1227,17 +1223,10 @@ class StudioState:
                 self._touch_candidates(image_id)
             self.candidates[image_id] = candidates
         return [
-            {
-                "id": candidate.candidate_id,
-                "className": candidate.class_name,
-                "confidence": candidate.confidence,
-                "enabled": candidate.enabled,
-                "color": candidate.color,
-                "source": candidate.source,
-                "sourceLabel": SOURCE_LABELS.get(candidate.source, candidate.source),
-                "refinement": candidate.refinement,
-                "refinementLabel": REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-            }
+            candidate.as_api_dict(
+                SOURCE_LABELS.get(candidate.source, candidate.source),
+                REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+            )
             for candidate in candidates
         ]
 
@@ -1396,9 +1385,11 @@ class StudioState:
             catalog_generation = self.catalog_generation
             enabled_candidates = [candidate for candidate in candidates if candidate.enabled]
             add_mask, exclusion_mask = draft_masks
-            if not enabled_candidates and add_mask is None:
+            enabled_apply_candidates = [candidate for candidate in enabled_candidates if candidate.role == CandidateRole.APPLY]
+            if not enabled_apply_candidates and add_mask is None:
                 raise ClientError("保存するモザイク範囲がありません。")
-            mask = np.zeros((record.height, record.width), dtype=np.uint8)
+            apply_masks: list[np.ndarray] = []
+            exclude_masks: list[np.ndarray] = []
             for candidate in enabled_candidates:
                 try:
                     with Image.open(candidate.mask_path) as mask_image:
@@ -1407,13 +1398,10 @@ class StudioState:
                     self._remove_candidate_unchecked(image_id, candidate.candidate_id)
                     self._touch_candidates(image_id)
                     raise ClientError("検出候補のマスクが見つかりません。保存をやり直してください。")
-                if candidate_mask.shape != mask.shape:
+                if candidate_mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                mask = np.maximum(mask, candidate_mask)
-            if add_mask is not None:
-                mask = np.maximum(mask, add_mask)
-            if exclusion_mask is not None:
-                mask[exclusion_mask > 0] = 0
+                (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(candidate_mask)
+            mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
         if mask is None or not np.any(mask):
             raise ClientError("保存するモザイク範囲がありません。")
         divisor = _read_mosaic_divisor(divisor)
@@ -1920,11 +1908,18 @@ class StudioState:
             *self._detect_precise_segments(models, rgb, confidence),
             *self._detect_legacy_segments(models, rgb, confidence),
         ])
+        original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
         segments = self._refine_detected_segments(models, record, rgb, segments)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
         for segment in segments:
+            refined_mask = np.asarray(segment["mask"]).copy()
+            original_mask = np.asarray(original_masks.get(id(segment), refined_mask)).copy()
+            # Keep the detector/SAM mask intact.  Hands and fluid are separate
+            # exclusion candidates, so their checkbox can genuinely restore the
+            # underlying target mask when turned off.
+            segment["mask"] = original_mask
             candidate_id = uuid.uuid4().hex
             mask_path = destination / f"{candidate_id}.png"
             Image.fromarray(segment["mask"], mode="L").save(mask_path, format="PNG")
@@ -1937,6 +1932,32 @@ class StudioState:
                     color=DEFAULT_COLORS.get(segment["class_name"], "#5bb6d5"),
                     source=segment["source"],
                     refinement=segment.get("refinement"),
+                )
+            )
+            removed = np.asarray(original_mask > 0, dtype=np.uint8)
+            removed &= np.asarray(refined_mask == 0, dtype=np.uint8)
+            if not np.any(removed):
+                continue
+            refinement = str(segment.get("refinement") or "")
+            exclusion_source = {
+                "hand": "hand_exclusion",
+                "fluid": "fluid_exclusion",
+                "hand_fluid": "hand_fluid_exclusion",
+            }.get(refinement)
+            if exclusion_source is None:
+                continue
+            exclusion_id = uuid.uuid4().hex
+            exclusion_path = destination / f"{exclusion_id}.png"
+            Image.fromarray(removed * 255, mode="L").save(exclusion_path, format="PNG")
+            candidates.append(
+                Candidate(
+                    candidate_id=exclusion_id,
+                    class_name=SOURCE_LABELS[exclusion_source],
+                    confidence=None,
+                    mask_path=exclusion_path,
+                    color="#4ac3df",
+                    source=exclusion_source,
+                    role=CandidateRole.EXCLUDE,
                 )
             )
         return candidates
@@ -1977,17 +1998,7 @@ class StudioState:
             Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
             self.candidates.setdefault(image_id, []).append(candidate)
             self._touch_candidates(image_id)
-        return {
-            "id": candidate.candidate_id,
-            "className": candidate.class_name,
-            "confidence": candidate.confidence,
-            "enabled": candidate.enabled,
-            "color": candidate.color,
-            "source": candidate.source,
-            "sourceLabel": SOURCE_LABELS.get(candidate.source, candidate.source),
-            "refinement": candidate.refinement,
-            "refinementLabel": REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-        }
+        return candidate.as_api_dict(SOURCE_LABELS.get(candidate.source, candidate.source))
 
     def _apply_worker(
         self,
@@ -2070,23 +2081,21 @@ class StudioState:
         add_mask, exclusion_mask = draft or (None, None)
         with self.lock:
             candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.enabled]
-            if not candidates and add_mask is None:
+            apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
+            if not apply_candidates and add_mask is None:
                 return None
-            combined = np.zeros((record.height, record.width), dtype=np.uint8)
+            apply_masks: list[np.ndarray] = []
+            exclude_masks: list[np.ndarray] = []
             for candidate in candidates:
                 try:
                     with Image.open(candidate.mask_path) as mask_image:
                         mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
                 except FileNotFoundError as exc:
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。") from exc
-                if mask.shape != combined.shape:
+                if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                combined = np.maximum(combined, mask)
-        if add_mask is not None:
-            combined = np.maximum(combined, add_mask)
-        if exclusion_mask is not None:
-            combined[exclusion_mask > 0] = 0
-        return combined
+                (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
+        return compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
 
     def _set_job_current(
         self,
