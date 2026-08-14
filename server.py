@@ -42,6 +42,7 @@ import torch
 from ultralytics import YOLO  # Removed after the ONNX Runtime adapter passes parity tests.
 from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks
+from mozarie.boundary import polygon_roi_and_point
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -552,6 +553,19 @@ def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> t
     if not (left <= point[0] < right and top <= point[1] < bottom):
         raise ClientError("クリック位置は選択範囲の内側にしてください。")
     return (left, top, right, bottom), point
+
+
+def read_polygon_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[float, float], np.ndarray]:
+    """Validate a four-point boundary and return one SAM box/point prompt."""
+
+    raw_points = payload.get("points")
+    if not isinstance(raw_points, list):
+        raise ClientError("4点境界の座標が正しくありません。")
+    try:
+        points = tuple((float(point["x"]), float(point["y"])) for point in raw_points)
+        return polygon_roi_and_point(points, width, height)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ClientError("4点境界は画像内の4点で指定してください。") from exc
 
 
 def clip_mask_to_roi(mask: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
@@ -1964,7 +1978,11 @@ class StudioState:
 
     def add_boundary_candidate(self, image_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self.image_for_id(image_id)
-        roi, point = read_boundary_request(payload, record.width, record.height)
+        polygon_mask: np.ndarray | None = None
+        if "points" in payload:
+            roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
+        else:
+            roi, point = read_boundary_request(payload, record.width, record.height)
         with self.inference_lock:
             with self.lock:
                 if self.job.state == "running" or self._has_active_worker():
@@ -1979,13 +1997,15 @@ class StudioState:
                 )
         mask, confidence = select_best_sam_mask(masks, scores)
         clipped = clip_mask_to_roi(mask, roi)
+        if polygon_mask is not None:
+            clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
         if not np.any(clipped):
             raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
 
         candidate_id = uuid.uuid4().hex
         candidate = Candidate(
             candidate_id=candidate_id,
-            class_name="境界",
+            class_name="4点境界" if polygon_mask is not None else "境界",
             confidence=confidence,
             mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
             color="#ffffff",

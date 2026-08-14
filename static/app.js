@@ -862,6 +862,53 @@ function drawBoundaryRoi() {
   ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(x, y, width, height); ctx.restore();
 }
 
+function polygonArea(points) {
+  return Math.abs(points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - point.y * next.x;
+  }, 0) / 2);
+}
+
+function polygonSegmentsIntersect(a, b, c, d) {
+  const orient = (first, second, third) => (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x);
+  const abC = orient(a, b, c); const abD = orient(a, b, d); const cdA = orient(c, d, a); const cdB = orient(c, d, b);
+  return (abC > 0) !== (abD > 0) && (cdA > 0) !== (cdB > 0);
+}
+
+function polygonIsValid() {
+  const points = state.polygonPoints;
+  return points.length === 4
+    && polygonArea(points) >= 16
+    && !polygonSegmentsIntersect(points[0], points[1], points[2], points[3])
+    && !polygonSegmentsIntersect(points[1], points[2], points[3], points[0]);
+}
+
+function updatePolygonActions() {
+  const actions = $("#polygonActions");
+  const active = state.tool === "polygon" && state.polygonPoints.length > 0;
+  actions.hidden = !active;
+  $("#polygonDetectButton").disabled = !polygonIsValid() || isBusy() || state.importing;
+}
+
+function drawPolygonBoundary() {
+  const points = state.polygonPoints;
+  if (!points.length) return;
+  ctx.save();
+  ctx.strokeStyle = polygonIsValid() ? "#50d589" : "#f0ba62"; ctx.fillStyle = "rgba(80, 213, 137, 0.16)"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+    if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  });
+  if (points.length === 4) { ctx.closePath(); ctx.fill(); }
+  ctx.stroke();
+  for (const point of points) {
+    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
+  }
+  ctx.restore(); updatePolygonActions();
+}
+
 function drawCandidateBlinkOverlay() {
   if (!state.blinkCandidateIds.size || !state.currentImage || performance.now() % 320 > 160) return;
   blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height;
@@ -889,6 +936,7 @@ function render() {
   if (state.mosaicPreviewEnabled) paintMosaicPreview();
   drawCandidateBlinkOverlay();
   drawBoundaryRoi();
+  drawPolygonBoundary();
   drawBrushCursor();
 }
 
@@ -1089,18 +1137,18 @@ function deleteManualExclusion() {
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
-async function addBoundaryCandidate(point) {
-  if (!state.currentId || !state.boundaryRoi || isBusy()) return;
+async function addBoundaryCandidate(point = null, polygonPoints = null) {
+  if (!state.currentId || (!polygonPoints && !state.boundaryRoi) || isBusy()) return;
   const imageId = state.currentId;
   const viewGeneration = state.imageGeneration;
-  const roi = { ...state.boundaryRoi };
-  const targetPoint = { ...point };
+  const roi = state.boundaryRoi ? { ...state.boundaryRoi } : null;
+  const targetPoint = point ? { ...point } : null;
   let catalogChanged = false;
   state.boundaryPending = true; updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
   try {
     const data = await api("/api/boundary", {
       method: "POST",
-      body: JSON.stringify({ imageId, roi, point: targetPoint }),
+      body: JSON.stringify(polygonPoints ? { imageId, points: polygonPoints } : { imageId, roi, point: targetPoint }),
     });
     const candidate = data.candidate;
     const record = state.images.find((image) => image.id === imageId);
@@ -1118,7 +1166,7 @@ async function addBoundaryCandidate(point) {
     if (state.candidates.some((item) => item.id === candidate.id)) return;
     state.candidates.push(candidate);
     state.candidateImages.set(candidate.id, maskImage);
-    state.boundaryRoi = null;
+    state.boundaryRoi = null; state.polygonPoints = []; state.polygonDragIndex = -1;
     $("#candidateStatus").textContent = t("candidates.count", { count: state.candidates.length });
     refreshMaskStatus(false);
     renderCandidates(); render(); setStatus(t("status.boundaryDone"));
@@ -1144,6 +1192,13 @@ function boundaryDragStarted(event) {
     event.clientX - state.boundaryStartClient.x,
     event.clientY - state.boundaryStartClient.y,
   ) >= 3;
+}
+function polygonVertexAt(point) {
+  const radius = Math.max(8, 12 / Math.max(state.view.scale, 0.1));
+  return state.polygonPoints.findIndex((vertex) => Math.hypot(vertex.x - point.x, vertex.y - point.y) <= radius);
+}
+function cancelPolygonBoundary() {
+  state.polygonPoints = []; state.polygonDragIndex = -1; updatePolygonActions(); render();
 }
 function copyCanvas(source, target) {
   target.width = source.width; target.height = source.height;
@@ -1967,13 +2022,14 @@ async function pollJob() {
 function setTool(tool) {
   if (isBusy() || state.importing) return;
   if (tool !== "boundary") clearBoundaryInteraction();
+  if (tool !== "polygon") { state.polygonPoints = []; state.polygonDragIndex = -1; }
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#boundaryTool", "boundary"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#boundaryTool", "boundary"], ["#polygonTool", "polygon"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
   if (tool === "boundary" && state.boundaryRoi) setStatus(t("status.boundaryReady"));
-  render();
+  updatePolygonActions(); render();
 }
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
@@ -2420,7 +2476,11 @@ function bindEvents() {
     overviewQueryTimer = setTimeout(() => renderOverview(), 120);
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
-  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary"));
+  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary")); $("#polygonTool").addEventListener("click", () => setTool("polygon"));
+  $("#polygonDetectButton").addEventListener("click", () => {
+    if (polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+  });
+  $("#polygonCancelButton").addEventListener("click", cancelPolygonBoundary);
   $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
   $("#divisor").addEventListener("input", () => {
@@ -2501,6 +2561,12 @@ function bindEvents() {
     const point = clampPoint(pointFromEvent(event));
     state.drawing = true; state.pointer = point; state.hover = point;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    if (state.tool === "polygon") {
+      const vertex = polygonVertexAt(point);
+      if (vertex >= 0) { state.polygonDragIndex = vertex; state.drawing = true; }
+      else if (state.polygonPoints.length < 4) state.polygonPoints.push(point);
+      state.drawing = false; updatePolygonActions(); render(); return;
+    }
     beginManualStroke(point); render();
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -2514,6 +2580,8 @@ function bindEvents() {
       if (state.tool === "boundary") {
         state.boundaryPoint = point;
         state.boundaryDragging ||= boundaryDragStarted(event);
+      } else if (state.tool === "polygon" && state.polygonDragIndex >= 0) {
+        state.polygonPoints[state.polygonDragIndex] = point;
       } else { appendManualStrokePoint(point); state.pointer = point; }
     }
     render();
@@ -2524,6 +2592,7 @@ function bindEvents() {
     const boundaryStarted = Boolean(state.boundaryStart);
     try { if (event && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId); } catch { /* Pointer capture may already be released. */ }
     state.drawing = false; state.panning = false;
+    if (state.tool === "polygon") { state.polygonDragIndex = -1; updatePolygonActions(); render(); return; }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
@@ -2550,6 +2619,10 @@ function bindEvents() {
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
+    if (state.tool === "polygon" && state.polygonPoints.length) {
+      if (event.key === "Escape") { event.preventDefault(); cancelPolygonBoundary(); return; }
+      if (event.key === "Enter" && polygonIsValid()) { event.preventDefault(); void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point }))); return; }
+    }
     const menu = $("#catalogContextMenu");
     if (menu.matches?.(":popover-open")) {
       const items = [...menu.querySelectorAll("button:not([disabled])")];

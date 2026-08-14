@@ -33,3 +33,8 @@ class MozarieDomainTests(unittest.TestCase):
     def test_polygon_rejects_crossing_edges(self) -> None:
         with self.assertRaises(ValueError):
             validate_polygon(((1, 1), (8, 8), (1, 8), (8, 1)), 10, 10)
+
+    def test_polygon_mask_clips_the_sam_result_shape(self) -> None:
+        _roi, _point, mask = polygon_roi_and_point(((2, 2), (12, 2), (11, 9), (3, 9)), 16, 16)
+        self.assertEqual(int(mask[0, 0]), 0)
+        self.assertEqual(int(mask[5, 6]), 255)
