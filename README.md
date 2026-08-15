@@ -74,7 +74,13 @@ Model files are not included in this repository. Mozarie never downloads or bund
 
 Saving preserves image metadata supported by PNG, JPEG, and WebP files. Review saved files before publishing.
 
+## Update
+
+Close Mozarie, then double-click `update.bat`. It checks the latest public GitHub Release, shows the version change, and asks before replacing application files. Local settings, models, caches, and working images are preserved. The updater never starts Mozarie automatically.
+
 ## Development
+
+Before publishing a release, update `VERSION` to the same semantic version as the GitHub Release tag.
 
 ```powershell
 python -m unittest discover -s tests -v

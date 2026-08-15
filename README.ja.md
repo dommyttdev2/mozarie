@@ -74,7 +74,13 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 
 PNG、JPEG、WebPでは対応する元画像メタ情報を保持して保存します。公開前に保存画像を確認してください。
 
+## アップデート
+
+Mozarieを終了してから`update.bat`をダブルクリックしてください。公開されているGitHub Releaseを確認し、更新前にバージョンの変更と確認を表示します。ローカル設定、モデル、キャッシュ、作業画像は保持されます。アップデート後にMozarieを自動起動することはありません。
+
 ## 開発
+
+リリースを公開する前に、`VERSION`をGitHub Releaseタグと同じセマンティックバージョンへ更新してください。
 
 ```powershell
 python -m unittest discover -s tests -v
