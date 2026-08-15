@@ -71,21 +71,21 @@
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div id="canvasStage" class="canvas-stage">
-        <div class="canvas-tool-rail" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
-          <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
-          <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+        <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="vertical" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
+          <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+          <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
           <div class="boundary-tool-menu">
-            <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
+            <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" data-toolbar-item aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
             <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>
-          <button id="fitButton" class="tool icon-button" type="button" aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
-          <button id="undoButton" class="tool icon-button" type="button" aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
-          <button id="redoButton" class="tool icon-button" type="button" aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
-          <button id="mosaicPreviewButton" class="tool icon-button active" type="button" aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
+          <button id="fitButton" class="tool icon-button" type="button" data-toolbar-item aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
+          <button id="undoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
+          <button id="redoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
+          <button id="mosaicPreviewButton" class="tool icon-button active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
         </div>
         <div class="canvas-settings-bar" data-i18n-aria-label="editor.settings" aria-label="編集設定">
           <label class="numeric-control" for="brushSize"><span data-i18n="editor.brushSize">ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48" data-i18n-aria-label="editor.brushSize" aria-label="ブラシ径"><output id="brushSizeValue">48 px</output></label>
@@ -248,6 +248,7 @@
         <output id="settingsModelStatus" class="fixed-note"></output>
       </section>
       <section id="settingsPanelDisplay" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabDisplay" data-settings-panel="display" hidden>
+        <label class="form-row"><span data-i18n="settings.toolPosition">ツールバーの位置</span><select id="settingsToolPosition"><option value="left" data-i18n="settings.toolPositionLeft">左</option><option value="top" data-i18n="settings.toolPositionTop">上</option><option value="right" data-i18n="settings.toolPositionRight">右</option><option value="bottom" data-i18n="settings.toolPositionBottom">下</option></select></label>
         <label class="form-row"><span data-i18n="settings.applyColor">適用範囲の色</span><input id="settingsApplyColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.excludeColor">除外範囲の色</span><input id="settingsExcludeColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>

@@ -93,6 +93,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
     mode = detection.get("mode")
     if mode not in {"standard", "high_precision"}:
         raise SettingsError("detection.mode must be standard or high_precision")
+    tool_position = display.get("tool_position")
+    if tool_position not in {"left", "top", "right", "bottom"}:
+        raise SettingsError("display.tool_position must be left, top, right, or bottom")
     paths = {}
     for key in ("target_segmentation", "hand_detection", "sam_checkpoint"):
         path = models.get(key)
@@ -112,6 +115,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "exclude_color": _expect_color(display.get("exclude_color"), "display.exclude_color"),
             "overlay_opacity": _expect_number(display.get("overlay_opacity"), "display.overlay_opacity", 0, 1),
             "mosaic_preview": _expect_bool(display.get("mosaic_preview"), "display.mosaic_preview"),
+            "tool_position": tool_position,
         },
         "detection": {
             "mode": mode,

@@ -16,7 +16,8 @@
     "apply_color": "#ff3d4d",
     "exclude_color": "#28d3ff",
     "overlay_opacity": 0.78,
-    "mosaic_preview": true
+    "mosaic_preview": true,
+    "tool_position": "left"
   },
   "detection": {
     "mode": "standard",

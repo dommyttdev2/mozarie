@@ -168,10 +168,18 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .gallery-name { padding-top: 4px; }
 .canvas-stage { position: absolute; inset: 0; }
 .canvas-tool-rail, .canvas-settings-bar, .canvas-navigation-bar { position: absolute; z-index: 4; display: flex; align-items: center; gap: 5px; border: 1px solid #48515a; border-radius: 5px; background: #20252aed; box-shadow: 0 8px 20px #0007; backdrop-filter: blur(4px); }
-.canvas-tool-rail { top: 50%; left: 12px; flex-direction: column; padding: 5px; transform: translateY(-50%); }
+.canvas-tool-rail { padding: 5px; }
+.canvas-stage:not([data-tool-position]) .canvas-tool-rail, .canvas-stage[data-tool-position="left"] .canvas-tool-rail { top: 50%; left: 12px; flex-direction: column; transform: translateY(-50%); }
+.canvas-stage[data-tool-position="right"] .canvas-tool-rail { top: 50%; right: 12px; flex-direction: column; transform: translateY(-50%); }
+.canvas-stage[data-tool-position="top"] .canvas-tool-rail { top: 10px; left: 50%; flex-direction: row; transform: translateX(-50%); }
+.canvas-stage[data-tool-position="bottom"] .canvas-tool-rail { bottom: 10px; left: 50%; flex-direction: row; transform: translateX(-50%); }
 .canvas-tool-rail .icon-button { width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; font-size: 16px; }
 .boundary-tool-menu { position: relative; }
-.boundary-mode-menu { position: absolute; z-index: 7; top: 0; left: calc(100% + 6px); display: flex; gap: 4px; padding: 4px; border: 1px solid #48515a; border-radius: 5px; background: #20252a; box-shadow: 0 8px 20px #0007; }
+.boundary-mode-menu { position: absolute; z-index: 7; display: flex; gap: 4px; padding: 4px; border: 1px solid #48515a; border-radius: 5px; background: #20252a; box-shadow: 0 8px 20px #0007; }
+.canvas-stage:not([data-tool-position]) .boundary-mode-menu, .canvas-stage[data-tool-position="left"] .boundary-mode-menu { top: 0; left: calc(100% + 6px); flex-direction: row; }
+.canvas-stage[data-tool-position="right"] .boundary-mode-menu { top: 0; right: calc(100% + 6px); flex-direction: row; }
+.canvas-stage[data-tool-position="top"] .boundary-mode-menu { top: calc(100% + 6px); left: 0; flex-direction: column; }
+.canvas-stage[data-tool-position="bottom"] .boundary-mode-menu { bottom: calc(100% + 6px); left: 0; flex-direction: column; }
 .boundary-mode-menu[hidden] { display: none; }
 .boundary-mode-button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; }
 .boundary-mode-button[aria-pressed="true"] { border-color: #57a993; background: #335d55; }
@@ -187,11 +195,18 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .tool-icon-boundary > span::after { top: 2px; left: 5px; width: 2px; height: 7px; }
 .boundary-mode-diamond > span { width: 12px; height: 12px; border: 2px solid currentColor; transform: rotate(45deg); }
 .tool-separator { width: 18px; height: 1px; margin: 2px 0; background: #4b535c; }
+.canvas-stage[data-tool-position="top"] .tool-separator, .canvas-stage[data-tool-position="bottom"] .tool-separator { width: 1px; height: 18px; margin: 0 2px; }
 .canvas-settings-bar { top: 10px; left: 56px; padding: 5px 8px; }
 .canvas-settings-bar .numeric-control { gap: 5px; }
 .canvas-settings-bar input[type="range"] { width: 92px; }
 .canvas-settings-bar input[type="number"] { width: 60px; min-width: 60px; }
 .canvas-navigation-bar { right: 12px; bottom: 12px; left: 56px; min-width: 0; padding: 5px; }
+.canvas-stage[data-tool-position="right"] .canvas-settings-bar { left: 12px; }
+.canvas-stage[data-tool-position="right"] .canvas-navigation-bar { right: 56px; left: 12px; }
+.canvas-stage[data-tool-position="top"] .canvas-settings-bar { top: 136px; left: 12px; }
+.canvas-stage[data-tool-position="top"] .canvas-navigation-bar { left: 12px; }
+.canvas-stage[data-tool-position="bottom"] .canvas-settings-bar { left: 12px; }
+.canvas-stage[data-tool-position="bottom"] .canvas-navigation-bar { bottom: 136px; left: 12px; }
 .canvas-navigation-bar > * { flex: 0 0 auto; }
 .canvas-navigation-bar .truncate { flex: 1 1 auto; min-width: 48px; color: #c5cdd5; }
 .canvas-navigation-bar .shortcut-toggle { margin-left: 0; }

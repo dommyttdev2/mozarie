@@ -28,6 +28,7 @@ const state = {
 
 const canvas = $("#editorCanvas");
 const stage = $("#canvasStage");
+const toolRail = $("#canvasToolRail");
 const ctx = canvas.getContext("2d");
 const addCanvas = document.createElement("canvas");
 const exclusionCanvas = document.createElement("canvas");
@@ -2713,6 +2714,43 @@ function renderModelStatus() {
     : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
 }
 
+const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
+
+function normaliseToolPosition(position) { return TOOL_POSITIONS.has(position) ? position : "left"; }
+function toolRailItems() { return ["#brushTool", "#eraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
+
+function setToolRailTabStop(activeItem = null) {
+  const items = toolRailItems().filter((item) => !item.disabled);
+  if (!items.length) return;
+  const selected = items.includes(activeItem) ? activeItem : items.find((item) => item.tabIndex === 0) || items[0];
+  items.forEach((item) => { item.tabIndex = item === selected ? 0 : -1; });
+}
+
+function applyToolPosition(position) {
+  const nextPosition = normaliseToolPosition(position);
+  closeBoundaryModeMenu();
+  stage.dataset.toolPosition = nextPosition;
+  toolRail.setAttribute("aria-orientation", ["left", "right"].includes(nextPosition) ? "vertical" : "horizontal");
+  setToolRailTabStop(document.activeElement);
+}
+
+function handleToolRailKeydown(event) {
+  if ($("#boundaryModeMenu").contains?.(event.target)) return;
+  const items = toolRailItems().filter((item) => !item.disabled);
+  const current = items.indexOf(event.target);
+  if (current < 0) return;
+  const vertical = toolRail.getAttribute("aria-orientation") === "vertical";
+  let next = current;
+  if (event.key === (vertical ? "ArrowDown" : "ArrowRight")) next = (current + 1) % items.length;
+  else if (event.key === (vertical ? "ArrowUp" : "ArrowLeft")) next = (current - 1 + items.length) % items.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = items.length - 1;
+  else return;
+  event.preventDefault();
+  setToolRailTabStop(items[next]);
+  focusElement(items[next]);
+}
+
 function setSettingsForm(settings, status = null) {
   state.settings = settings; state.settingsStatus = status;
   $("#settingsLanguage").value = settings.general.language;
@@ -2728,6 +2766,8 @@ function setSettingsForm(settings, status = null) {
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
   $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
+  $("#settingsToolPosition").value = normaliseToolPosition(settings.display.tool_position);
+  applyToolPosition(settings.display.tool_position);
   state.mosaicPreviewEnabled = settings.display.mosaic_preview;
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
@@ -2749,6 +2789,7 @@ function settingsPayload() {
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
+      tool_position: $("#settingsToolPosition").value,
     },
     detection: { threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value), parallelism: detectionParallelism(), mode: selectedDetectionMode() },
   };
@@ -2823,6 +2864,9 @@ function bindEvents() {
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
+  toolRail.addEventListener("keydown", handleToolRailKeydown);
+  toolRailItems().forEach((item) => item.addEventListener("focus", () => setToolRailTabStop(item)));
+  setToolRailTabStop();
   document.querySelectorAll(".settings-tab").forEach((button) => {
     button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab));
     button.addEventListener("keydown", moveSettingsTab);

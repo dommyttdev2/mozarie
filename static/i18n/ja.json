@@ -242,5 +242,10 @@
   "boundary.modeLabel": "境界の形状",
   "boundary.rectangle": "矩形",
   "boundary.polygon": "4点",
-  "editor.settings": "編集設定"
+  "editor.settings": "編集設定",
+  "settings.toolPosition": "ツールバーの位置",
+  "settings.toolPositionLeft": "左",
+  "settings.toolPositionTop": "上",
+  "settings.toolPositionRight": "右",
+  "settings.toolPositionBottom": "下"
 }
