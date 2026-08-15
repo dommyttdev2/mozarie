@@ -92,7 +92,7 @@
           <label class="numeric-control block-control" for="divisor"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
         </div>
         <div class="canvas-navigation-bar" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
-          <span id="imageInfo" hidden data-i18n="editor.none">画像未選択</span><output id="reviewStatus" class="review-status" data-i18n="review.unreviewed">未確認</output>
+          <span id="imageInfo" hidden data-i18n-dynamic>画像未選択</span><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
           <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ" data-i18n-aria-label="navigation.previous" data-i18n-title="navigation.previous">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ" data-i18n-aria-label="navigation.next" data-i18n-title="navigation.next">›</button>
           <button id="nextUnreviewedButton" type="button" data-i18n="navigation.nextUnreviewed">次の未確認</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
           <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked data-i18n-aria-label="navigation.shortcuts" aria-label="ショートカット"><span data-i18n="navigation.shortcuts">ショートカット</span></label>
@@ -127,7 +127,7 @@
         <input id="confidence" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高くすると誤検出を減らします。</p>
       </section>
-      <output id="candidateStatus" class="muted" hidden data-i18n="candidates.unselected">画像を選択してください</output>
+      <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
         <h3>モザイク範囲</h3>
         <div id="candidateList" class="candidate-list"></div>
@@ -226,19 +226,19 @@
     <form id="settingsForm" class="dialog-body">
       <div class="settings-heading"><h2 id="settingsDialogTitle" data-i18n="settings.title">設定</h2><button id="settingsCloseButton" type="button" data-i18n="dialog.close">閉じる</button></div>
       <div class="settings-tabs" role="tablist" aria-label="設定" data-i18n-aria-label="settings.tablist">
-        <button type="button" class="settings-tab active" role="tab" data-settings-tab="general" data-i18n="settings.general">一般</button>
-        <button type="button" class="settings-tab" role="tab" data-settings-tab="models" data-i18n="settings.models">モデル</button>
-        <button type="button" class="settings-tab" role="tab" data-settings-tab="display" data-i18n="settings.display">表示・操作</button>
-        <button type="button" class="settings-tab" role="tab" data-settings-tab="help" data-i18n="settings.help">ヘルプ</button>
-        <button type="button" class="settings-tab" role="tab" data-settings-tab="info" data-i18n="settings.info">情報</button>
+        <button id="settingsTabGeneral" type="button" class="settings-tab active" role="tab" aria-controls="settingsPanelGeneral" aria-selected="true" tabindex="0" data-settings-tab="general" data-i18n="settings.general">一般</button>
+        <button id="settingsTabModels" type="button" class="settings-tab" role="tab" aria-controls="settingsPanelModels" aria-selected="false" tabindex="-1" data-settings-tab="models" data-i18n="settings.models">モデル</button>
+        <button id="settingsTabDisplay" type="button" class="settings-tab" role="tab" aria-controls="settingsPanelDisplay" aria-selected="false" tabindex="-1" data-settings-tab="display" data-i18n="settings.display">表示・操作</button>
+        <button id="settingsTabHelp" type="button" class="settings-tab" role="tab" aria-controls="settingsPanelHelp" aria-selected="false" tabindex="-1" data-settings-tab="help" data-i18n="settings.help">ヘルプ</button>
+        <button id="settingsTabInfo" type="button" class="settings-tab" role="tab" aria-controls="settingsPanelInfo" aria-selected="false" tabindex="-1" data-settings-tab="info" data-i18n="settings.info">情報</button>
       </div>
-      <section class="settings-panel" data-settings-panel="general">
+      <section id="settingsPanelGeneral" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabGeneral" data-settings-panel="general">
         <label class="form-row"><span data-i18n="settings.language">言語</span><select id="settingsLanguage"><option value="ja">日本語</option><option value="en">English</option></select></label>
         <label class="form-row"><span data-i18n="settings.port">次回起動時のポート</span><input id="settingsPort" type="number" min="1024" max="65535" step="1"></label>
         <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
         <label class="choice-row"><input id="settingsShortcuts" type="checkbox"><span data-i18n="settings.shortcuts">キーボードショートカット</span></label>
       </section>
-      <section class="settings-panel" data-settings-panel="models" hidden>
+      <section id="settingsPanelModels" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabModels" data-settings-panel="models" hidden>
         <p class="fixed-note" data-i18n="settings.modelProfileHelp">Mozarie対応プロファイルのローカルファイルだけを指定してください。任意のONNXには対応しません。</p>
         <label class="form-row"><span data-i18n="settings.targetModel">対象セグメンテーション ONNX</span><input id="settingsTargetModel" type="text" spellcheck="false" data-i18n-aria-label="settings.targetModel"></label>
         <label class="form-row"><span data-i18n="settings.handModel">手検出 ONNX</span><input id="settingsHandModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handModel"></label>
@@ -247,14 +247,14 @@
         <label class="form-row"><span data-i18n="settings.provider">推論プロバイダー</span><select id="settingsProvider"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
         <output id="settingsModelStatus" class="fixed-note"></output>
       </section>
-      <section class="settings-panel" data-settings-panel="display" hidden>
+      <section id="settingsPanelDisplay" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabDisplay" data-settings-panel="display" hidden>
         <label class="form-row"><span data-i18n="settings.applyColor">適用範囲の色</span><input id="settingsApplyColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.excludeColor">除外範囲の色</span><input id="settingsExcludeColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
         <label class="choice-row"><input id="settingsMosaicPreview" type="checkbox"><span data-i18n="settings.mosaicPreview">モザイク表示</span></label>
         <p class="fixed-note" data-i18n="settings.mosaicPreviewHelp">編集画面にモザイクを表示します。保存内容には影響しません。</p>
       </section>
-      <section class="settings-panel" data-settings-panel="help" hidden>
+      <section id="settingsPanelHelp" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabHelp" data-settings-panel="help" hidden>
         <table class="shortcut-help-table"><tbody>
           <tr><th>Ctrl / Cmd + Z</th><td data-i18n="settings.helpUndo">元に戻す</td></tr>
           <tr><th>Ctrl / Cmd + Shift + Z</th><td data-i18n="settings.helpRedo">やり直す</td></tr>
@@ -267,7 +267,7 @@
           <tr><th>Shift + Wheel</th><td data-i18n="settings.helpBrush">ブラシ径を変更</td></tr>
         </tbody></table>
       </section>
-      <section class="settings-panel" data-settings-panel="info" hidden>
+      <section id="settingsPanelInfo" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabInfo" data-settings-panel="info" hidden>
         <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd>0.1.0</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl>
       </section>
       <output id="settingsResult" class="dialog-result" aria-live="polite"></output>
@@ -285,7 +285,7 @@
         <label id="applySuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required aria-describedby="applyOverwriteNote"></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox" aria-describedby="applyOverwriteNote"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
         <div id="applyOutputDirectoryRow" class="output-directory-row">
-          <span id="applyOutputDirectoryStatus" class="fixed-note" data-i18n="apply.outputDirectoryUnset">保存先: 未選択</span>
+          <span id="applyOutputDirectoryStatus" class="fixed-note" data-i18n-dynamic>保存先: 未選択</span>
           <button id="chooseOutputDirectoryButton" type="button" aria-describedby="applyOverwriteNote" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
         </div>
         <p id="applyOverwriteNote" class="fixed-note" hidden data-i18n="apply.overwriteNote">元画像を上書きするため、ファイル名・保存先・元画像削除は変更できません。</p>
