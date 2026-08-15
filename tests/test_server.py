@@ -1606,7 +1606,8 @@ class MozarieTests(unittest.TestCase):
                     response = connection.getresponse()
                     payload = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(response.status, 200)
-                    self.assertEqual(payload, {"deleted": expected})
+                self.assertEqual(payload["deleted"], expected)
+                self.assertIsInstance(payload["candidateRevision"], int)
             self.assertEqual(delete_candidate.call_count, 2)
             delete_candidate.assert_called_with("image", "candidate")
         finally:
@@ -1696,34 +1697,21 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
-    def test_start_detection_propagates_ui_confidence(self):
+    def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
         record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
         self.assertEqual(start.call_args.args[0], "detect")
-        self.assertEqual(start.call_args.args[-3:], (0.65, 2, "standard"))
+        self.assertEqual(start.call_args.args[-2:], (0.65, 2))
         self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 7)
-        with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 8)), patch.object(state, "_start_job") as start:
-            state.start_detection(["test"])
-        self.assertEqual(start.call_args.args[-3:], (DEFAULT_DETECTION_CONFIDENCE, 2, "standard"))
-        self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 8)
-
-    def test_rejected_detection_request_cannot_change_a_running_job_mode(self):
-        state = self.new_state()
-        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
-        state.job = server_module.Job(kind="detect", state="running", total=1)
-        with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 1)):
-            with self.assertRaises(ClientError):
-                state.start_detection(["test"], mode="high_precision")
-        self.assertFalse(hasattr(state, "_active_detection_mode"))
-
-        seen_modes: list[str] = []
-        state.job = server_module.Job()
-        with patch.object(state, "_ensure_models", return_value=object()), \
-             patch.object(state, "_detect_image", side_effect=lambda _models, _record, _confidence, mode: seen_modes.append(mode) or []):
-            state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1, "standard")
-        self.assertEqual(seen_modes, ["standard"])
+        for mode in ("standard", "high_precision"):
+            state.settings["detection"]["mode"] = mode
+            seen_modes: list[str] = []
+            with patch.object(state, "_ensure_models", return_value=object()), \
+                 patch.object(state, "_detect_image", side_effect=lambda _models, _record, _confidence, detected_mode: seen_modes.append(detected_mode) or []):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
+            self.assertEqual(seen_modes, [mode])
 
     def test_detection_start_rejects_a_catalog_switch_after_records_are_captured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2312,8 +2300,11 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('id="detectConfidenceRange"', page)
         self.assertIn('id="detectConfidenceNumber"', page)
         self.assertIn('id="detectStartButton"', page)
+        self.assertNotIn('detectDialog.mode', page)
+        self.assertNotIn('detectDialog.standard', dictionary)
+        self.assertNotIn('detectDialog.highPrecision', dictionary)
         self.assertIn('id="saveButton"', page)
-        self.assertIn('id="galleryMaskedTab"', page)
+        self.assertIn('id="galleryFilter"', page)
         self.assertIn('id="saveAllButton"', page)
 
         self.assertIn('class="appbar"', page)
@@ -2380,7 +2371,7 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('id="collapseGalleryButton" class="pane-rail"', page)
         self.assertIn('id="collapseInspectorButton" class="pane-rail"', page)
         self.assertIn('id="applySuffixRow"', page)
-        self.assertIn('id="applyOverwriteNote"', page)
+        self.assertNotIn('id="applyOverwriteNote"', page)
         self.assertEqual(dictionary["folder.browse"], "画像を追加")
         self.assertEqual(dictionary["folder.load"], "読み込む")
         self.assertNotIn('$("#loadFolder")', app)
@@ -2635,7 +2626,7 @@ class MozarieTests(unittest.TestCase):
         try:
             with patch.object(server_module.STATE, "start_detection") as start:
                 connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                body = json.dumps({"imageIds": ["image-a"], "confidence": 0.65, "parallelism": 3}).encode("utf-8")
+                body = json.dumps({"imageIds": ["image-a"], "confidence": 0.65, "parallelism": 3, "mode": "high_precision"}).encode("utf-8")
                 connection.request("POST", "/api/detect", body, {
                     "Content-Type": "application/json",
                     "X-Mozarie-Token": server_module.STATE.session_token,

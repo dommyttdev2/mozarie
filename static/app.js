@@ -21,7 +21,7 @@ const state = {
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
   // This handle is scoped to this browser tab and reused for copy saves.
-  outputDirectory: null, outputDirectoryName: "",
+  outputDirectoryPath: "", imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null,
   imageCache: new Map(), candidateBundleCache: new Map(),
@@ -89,7 +89,6 @@ async function loadTranslations(languageOverride = null) {
   const sectionHeadings = document.querySelectorAll(".candidate-section h3");
   if (sectionHeadings[0]) sectionHeadings[0].textContent = t("candidates.applyRanges");
   if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
-  ensureDetectionModeControl();
   renderModelStatus();
   renderLocalizedDynamicState();
   updateBoundaryActions();
@@ -317,8 +316,7 @@ function updateActionButtons() {
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
   $("#removeCurrentImageButton").disabled = running || !hasImage;
   for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
-  $("#galleryAllTab").disabled = running;
-  $("#galleryMaskedTab").disabled = running;
+  $("#galleryFilter").disabled = running;
   $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
   const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
   $("#saveButton").disabled = currentSaveDisabled;
@@ -438,13 +436,10 @@ function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
   const gallery = $("#gallery");
   const scrollTop = gallery.scrollTop;
-  const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
+  const visibleImages = state.images.filter(imageMatchesGalleryFilter);
   const imageCount = t("gallery.count", { count: visibleImages.length });
   for (const element of document.querySelectorAll(".gallery-local-count")) element.textContent = imageCount;
-  $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
-  $("#galleryAllTab").setAttribute("aria-pressed", String(state.galleryFilter === "all"));
-  $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
-  $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
+  $("#galleryFilter").value = state.galleryFilter;
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
   const template = $("#galleryItemTemplate");
@@ -470,6 +465,7 @@ function renderGallery(force = false) {
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.onclick = () => selectImage(image.id);
+    item.onmouseenter = () => { void cachedImage(image).catch(() => {}); void loadCandidateBundle(image.id, state.imageGeneration).catch(() => {}); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
@@ -482,6 +478,13 @@ function renderGallery(force = false) {
   }
   gallery.scrollTop = scrollTop;
   updateActionButtons();
+}
+
+function imageMatchesGalleryFilter(image) {
+  if (state.galleryFilter === "masked") return imageHasMask(image);
+  if (state.galleryFilter === "reviewed") return isReviewed(image);
+  if (state.galleryFilter === "unreviewed") return !isReviewed(image);
+  return true;
 }
 
 function updateGallerySelection() {
@@ -655,12 +658,20 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     updateActionButtons();
     return;
   }
-  setStatusKey("status.loadingImages", {}, "running");
+  const imageCached = state.imageCache.has(imageCacheKey(record));
+  const candidatesCached = state.candidateBundleCache.has(candidateCacheKey(imageId, Number(record.candidateRevision || 0)));
+  if (!imageCached || !candidatesCached) {
+    clearTimeout(state.loadingDelay);
+    state.loadingDelay = setTimeout(() => {
+      if (state.pendingImageId === imageId && isCurrentGeneration(generation)) setStatusKey("status.loadingImages", {}, "running");
+    }, 150);
+  }
   try {
     const [image, candidateBundle] = await Promise.all([
       cachedImage(record),
       loadCandidateBundle(imageId, generation),
     ]);
+    clearTimeout(state.loadingDelay); state.loadingDelay = null;
     syncCandidateRecord(imageId, candidateBundle.candidates);
     if (!isCurrentGeneration(generation)) return;
     state.currentId = imageId;
@@ -677,6 +688,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
+      clearTimeout(state.loadingDelay); state.loadingDelay = null;
       state.pendingImageId = null;
       setStatus(error.message, "error");
     }
@@ -719,15 +731,21 @@ async function cachedImage(record) {
   const key = imageCacheKey(record);
   const cached = state.imageCache.get(key);
   if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
-  const image = await loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`);
-  return lruRemember(state.imageCache, key, image, 6, releaseImageResource);
+  const pending = state.imageInflight.get(key);
+  if (pending) return pending;
+  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`)
+    .then((image) => lruRemember(state.imageCache, key, image, 6, releaseImageResource))
+    .finally(() => state.imageInflight.delete(key));
+  state.imageInflight.set(key, request);
+  return request;
 }
 
 function prefetchNeighbors(record) {
   const index = state.images.findIndex((item) => item.id === record.id);
   for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
-    if (!neighbor || state.imageCache.has(imageCacheKey(neighbor))) continue;
+    if (!neighbor) continue;
     void cachedImage(neighbor).catch(() => {});
+    void loadCandidateBundle(neighbor.id, state.imageGeneration).catch(() => {});
   }
 }
 
@@ -743,6 +761,8 @@ function releaseImageCaches(imageId = null) {
     releaseCandidateBundle(bundle);
     state.candidateBundleCache.delete(key);
   }
+  for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
+  for (const key of state.candidateInflight.keys()) if (matches(key)) state.candidateInflight.delete(key);
 }
 
 function invalidateCandidateBundles(imageId) {
@@ -751,6 +771,25 @@ function invalidateCandidateBundles(imageId) {
     if (bundle.candidateImages !== state.candidateImages) releaseCandidateBundle(bundle);
     state.candidateBundleCache.delete(key);
   }
+}
+
+function retainCurrentCandidateBundle(imageId, revision) {
+  const record = state.images.find((image) => image.id === imageId);
+  if (!record) return;
+  const currentImages = state.currentId === imageId ? state.candidateImages : null;
+  let reusable = null;
+  for (const [key, bundle] of state.candidateBundleCache) {
+    if (!key.startsWith(`${imageId}:`) || (currentImages && bundle.candidateImages !== currentImages)) continue;
+    reusable = bundle;
+    state.candidateBundleCache.delete(key);
+    break;
+  }
+  record.candidateRevision = Number(revision || 0);
+  if (!reusable || !currentImages) return;
+  reusable.candidates = state.candidates;
+  reusable.candidateImages = currentImages;
+  reusable.candidateRevision = record.candidateRevision;
+  lruRemember(state.candidateBundleCache, candidateCacheKey(imageId, record.candidateRevision), reusable, 12, releaseCandidateBundle);
 }
 
 async function loadCandidateMask(source) {
@@ -768,10 +807,18 @@ async function loadCandidateMask(source) {
 }
 
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
-  const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
-  const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
-  const cached = state.candidateBundleCache.get(cacheKey);
-  if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
+  const record = state.images.find((image) => image.id === imageId);
+  const knownRevision = Number(record?.candidateRevision || 0);
+  const knownKey = candidateCacheKey(imageId, knownRevision);
+  const known = state.candidateBundleCache.get(knownKey);
+  if (known) return lruRemember(state.candidateBundleCache, knownKey, known, 12, releaseCandidateBundle);
+  const pending = state.candidateInflight.get(knownKey);
+  if (pending) return pending;
+  const request = (async () => {
+    const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
+    const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
+    const cached = state.candidateBundleCache.get(cacheKey);
+    if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
   try {
     const candidateImages = new Map();
     await Promise.all(candidateData.candidates.map(async (candidate) => {
@@ -780,10 +827,14 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages, candidateRevision: Number(candidateData.candidateRevision || 0) }, 12, releaseCandidateBundle);
   } catch (error) {
     if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
+      state.candidateInflight.delete(knownKey);
       return loadCandidateBundle(imageId, generation, true);
     }
     throw error;
   }
+  })().finally(() => state.candidateInflight.delete(knownKey));
+  state.candidateInflight.set(knownKey, request);
+  return request;
 }
 
 async function reconcileCurrentCandidates(imageId, generation) {
@@ -1402,14 +1453,14 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
   const desired = candidate.enabled;
   const send = async () => {
     try {
-      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
+      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
       });
-      invalidateCandidateBundles(imageId);
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
         if (currentCandidate) currentCandidate.enabled = desired;
+        retainCurrentCandidateBundle(imageId, result.candidateRevision);
         syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
       } else {
         try { await refreshCandidateRecord(imageId, true); } catch { /* Keep the optimistic aggregate until a later refresh. */ }
@@ -1455,14 +1506,14 @@ async function deleteCandidate(candidate) {
   state.candidateDeleting.add(mutationKey); renderCandidates();
   const send = async () => {
     try {
-      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
-      invalidateCandidateBundles(imageId);
+      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       syncCandidateRecord(imageId, remainingCandidates);
       state.maskStatus.set(imageId, remainingMaskStatus);
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         state.candidates = remainingCandidates;
         state.candidateImages.delete(candidate.id);
+        retainCurrentCandidateBundle(imageId, result.candidateRevision);
         updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
       } else {
         try { await refreshCandidateRecord(imageId, true); } catch { /* The known deletion is already reflected locally. */ }
@@ -1694,12 +1745,12 @@ function openDetectionDialog(imageIds) {
   $("#detectDialog").showModal();
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, mode = selectedDetectionMode()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.detectionStarting = true;
   updateActionButtons();
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), mode }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))) }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
@@ -1714,16 +1765,15 @@ async function startDetectionFromDialog(event) {
   if (!imageIds.length) return;
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
-  const mode = selectedDetectionMode();
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, mode };
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism };
     try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }
-  await runDetection(imageIds, confidence, parallelism, mode);
+  await runDetection(imageIds, confidence, parallelism);
 }
 
 async function cancelDetection() {
@@ -1788,15 +1838,18 @@ function syncApplyMode() {
   const canOverwrite = applyTargetsSupport("overwrite");
   const canDelete = applyTargetsSupport("delete");
   const copying = selectedSaveMode() === "copy";
-  $("#applySuffix").disabled = !copying || state.applyRunning;
-  $("#chooseOutputDirectoryButton").disabled = !copying || state.applyRunning || state.saveStarting;
-  $("#applyOutputDirectoryStatus").textContent = state.outputDirectoryName
-    ? t("apply.outputDirectorySelected", { name: state.outputDirectoryName })
+  $("#applySuffixRow").hidden = !copying;
+  $("#deleteOriginalRow").hidden = !copying;
+  $("#applyOutputDirectoryRow").hidden = !copying;
+  $("#applySuffix").disabled = state.applyRunning;
+  $("#chooseOutputDirectoryButton").disabled = state.applyRunning || state.saveStarting;
+  const outputDirectory = state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "";
+  $("#applyOutputDirectoryStatus").textContent = outputDirectory
+    ? t("apply.outputDirectorySelected", { name: outputDirectory })
     : t("apply.outputDirectoryUnset");
-  $("#deleteOriginal").disabled = !copying || !canDelete || state.applyRunning;
+  $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
-  $("#applyOverwriteNote").hidden = copying;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -1814,6 +1867,7 @@ async function openApplyDialog(imageIds) {
   saveDraft();
   state.applyTargetIds = imageIds;
   state.applyRunning = false;
+  state.outputDirectoryPath = state.settings?.saving?.default_output_directory || "";
   $("#applyTargetCount").textContent = t("apply.target", { count: imageIds.length });
   $("#applyDivisor").value = $("#divisor").value;
   updateBlockSizeDisplay();
@@ -1840,100 +1894,34 @@ function draftPayload(imageIds) {
 }
 
 async function pickOutputDirectory() {
-  if (typeof window.showDirectoryPicker !== "function") {
-    throw new Error(t("error.directoryPickerUnsupported"));
-  }
-  try {
-    return await window.showDirectoryPicker({ id: "mozarie-output", mode: "readwrite" });
-  } catch (error) {
-    if (error?.name === "AbortError") throw new Error(t("error.directoryPickerCancelled"));
-    throw error;
-  }
+  const data = await api("/api/dialog/output-directory", {
+    method: "POST",
+    body: JSON.stringify({ initialDirectory: state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "" }),
+  });
+  return String(data.directory || "");
 }
 
 function rememberOutputDirectory(directory) {
-  state.outputDirectory = directory;
-  state.outputDirectoryName = String(directory?.name || "");
+  state.outputDirectoryPath = String(directory || "").trim();
   syncApplyMode();
-  return directory;
+  return state.outputDirectoryPath;
 }
 
 async function outputDirectoryForSave() {
-  const directory = state.outputDirectory;
-  if (directory) {
-    try {
-      const options = { mode: "readwrite" };
-      const permission = await directory.queryPermission?.(options);
-      if (!permission || permission === "granted") return directory;
-      const requested = await directory.requestPermission?.(options);
-      if (!requested || requested === "granted") return directory;
-    } catch {
-      // A stale handle is replaced by the normal picker below.
-    }
-    state.outputDirectory = null;
-    state.outputDirectoryName = "";
-  }
+  const configured = state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "";
+  if (configured) return configured;
   return rememberOutputDirectory(await pickOutputDirectory());
 }
 
 async function chooseOutputDirectory() {
   if (state.applyRunning || state.saveStarting) return;
   try {
-    rememberOutputDirectory(await pickOutputDirectory());
+    const directory = await pickOutputDirectory();
+    if (directory) rememberOutputDirectory(directory);
     setApplyResult("");
   } catch (error) {
     setApplyResult(error.message, true);
   }
-}
-
-async function outputDirectoryFor(root, relativePath) {
-  let directory = root;
-  const parts = String(relativePath).replaceAll("\\", "/").split("/").slice(0, -1).filter(Boolean);
-  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
-  return directory;
-}
-
-async function uniqueOutputFile(directory, sourceName, suffix) {
-  const dot = sourceName.lastIndexOf(".");
-  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
-  const extension = dot > 0 ? sourceName.slice(dot) : "";
-  for (let number = 1; number < 10000; number += 1) {
-    const name = `${stem}${suffix}${number === 1 ? "" : `_${number}`}${extension}`;
-    try {
-      await directory.getFileHandle(name);
-    } catch (error) {
-      if (error?.name !== "NotFoundError") throw error;
-      const reservedAt = Date.now();
-      const handle = await directory.getFileHandle(name, { create: true });
-      const file = await handle.getFile();
-      if (file.size !== 0 || file.lastModified + 2000 < reservedAt) continue;
-      return { name, handle };
-    }
-  }
-  throw new Error(t("error.outputNameExhausted"));
-}
-
-async function writeBrowserSaveOutput(destination, entry, suffix, bytes) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const output = await uniqueOutputFile(destination, entry.relativePath.split("/").pop(), suffix);
-    let stream = null;
-    let closed = false;
-    try {
-      stream = await output.handle.createWritable({ mode: "exclusive", keepExistingData: false });
-      await stream.write(bytes);
-      await stream.close();
-      closed = true;
-      return output;
-    } catch (error) {
-      try { await stream?.abort?.(); } catch { /* The source image remains unchanged. */ }
-      if (!closed) {
-        try { await destination.removeEntry(output.name); } catch { /* The reservation may already have changed ownership. */ }
-      }
-      if (error?.name === "InvalidStateError" || error?.name === "NoModificationAllowedError") continue;
-      throw error;
-    }
-  }
-  throw new Error(t("error.outputNameExhausted"));
 }
 
 async function waitForBrowserSave(save) {
@@ -2128,13 +2116,21 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
           throw new Error(body.error || t("error.requestFailed"));
         }
         const saveToken = response.headers?.get("X-Mozarie-Save-Token") || "";
-        const bytes = await response.arrayBuffer();
+        const bytes = mode === "overwrite" ? await response.arrayBuffer() : null;
         const sourceImage = state.images.find((image) => image.id === entry.imageId);
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
         if (mode === "copy") {
-          const destination = await outputDirectoryFor(directory, entry.relativePath);
-          await writeBrowserSaveOutput(destination, entry, suffix, bytes);
+          await api("/api/save/copy", {
+            method: "POST",
+            body: JSON.stringify({
+              imageId: entry.imageId,
+              candidateRevision: entry.candidateRevision,
+              saveToken,
+              outputDirectory: directory,
+              suffix,
+            }),
+          });
           if (deleteOriginal) {
             if (access?.fileHandle) await removeSourceHandle(access);
             sourceAction = "deleted";
@@ -2236,6 +2232,7 @@ async function startApplyFromDialog(event) {
       // An existing tab-scoped handle is reused. The picker only opens on the
       // first copy save or after the user explicitly changes the destination.
       outputDirectory = await outputDirectoryForSave();
+      if (!outputDirectory) return finishSaveStart();
     } catch (error) {
       setApplyResult(error.message, true);
       return finishSaveStart();
@@ -2846,38 +2843,6 @@ function closeBatchMoreMenus() {
   }
 }
 
-function selectedDetectionMode() {
-  return document.querySelector('input[name="detectMode"]:checked')?.value || state.settings?.detection?.mode || "standard";
-}
-
-function ensureDetectionModeControl() {
-  const existing = document.querySelector('input[name="detectMode"]');
-  if (existing) {
-    const mode = $("#detectMode");
-    if (mode) mode.setAttribute("aria-label", t("detectDialog.mode"));
-    const standard = $("#detectModeStandard"); const highPrecision = $("#detectModeHighPrecision");
-    if (standard) standard.textContent = t("detectDialog.standard");
-    if (highPrecision) highPrecision.textContent = t("detectDialog.highPrecision");
-    document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
-      if (radio.dataset.precisionSync) return;
-      radio.dataset.precisionSync = "true";
-      radio.addEventListener("change", syncPrecisionFromDetectionMode);
-    });
-    return;
-  }
-  const form = $("#detectForm");
-  if (!form?.insertAdjacentHTML) return;
-  form.insertAdjacentHTML("beforeend", `
-    <fieldset class="mode-choice" id="detectMode" aria-label="${t("detectDialog.mode")}">
-      <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span id="detectModeStandard">${t("detectDialog.standard")}</span></label>
-      <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span id="detectModeHighPrecision">${t("detectDialog.highPrecision")}</span></label>
-    </fieldset>`);
-  document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
-    radio.dataset.precisionSync = "true";
-    radio.addEventListener("change", syncPrecisionFromDetectionMode);
-  });
-}
-
 function renderModelStatus() {
   const modelStatus = Object.entries(state.settingsStatus?.models || {});
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
@@ -2904,8 +2869,6 @@ function setPrecisionDetectionEnabled(enabled) {
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
-  const radio = document.querySelector(`input[name="detectMode"][value="${enabled ? "high_precision" : "standard"}"]`);
-  if (radio) radio.checked = true;
 }
 
 function setFluidExclusionEnabled(enabled) {
@@ -2914,10 +2877,6 @@ function setFluidExclusionEnabled(enabled) {
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
-}
-
-function syncPrecisionFromDetectionMode() {
-  setPrecisionDetectionEnabled(selectedDetectionMode() === "high_precision");
 }
 
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
@@ -2962,6 +2921,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
+  $("#settingsDefaultOutputDirectory").value = settings.saving?.default_output_directory || "";
   setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
@@ -3003,6 +2963,7 @@ function settingsPayload() {
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
       tool_position: $("#settingsToolPosition").value,
     },
+    saving: { default_output_directory: $("#settingsDefaultOutputDirectory").value.trim() },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
       parallelism: detectionParallelism(),
@@ -3070,6 +3031,25 @@ async function resetSettings() {
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
+async function chooseSettingsOutputDirectory() {
+  try {
+    const data = await api("/api/dialog/output-directory", {
+      method: "POST",
+      body: JSON.stringify({ initialDirectory: $("#settingsDefaultOutputDirectory").value.trim() }),
+    });
+    if (data.directory) $("#settingsDefaultOutputDirectory").value = data.directory;
+  } catch (error) {
+    $("#settingsResult").textContent = error.message;
+    $("#settingsResult").classList.add("error");
+  }
+}
+
+function openModelHelp(key) {
+  $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
+  $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpDialog").showModal();
+}
+
 function bindEvents() {
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
@@ -3085,6 +3065,10 @@ function bindEvents() {
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
+  $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
+  document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
+  $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
+  $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
   toolRail.addEventListener("keydown", handleToolRailKeydown);
   toolRailItems().forEach((item) => item.addEventListener("focus", () => setToolRailTabStop(item)));
   setToolRailTabStop();
@@ -3127,8 +3111,7 @@ function bindEvents() {
   for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"]]) {
     $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
   }
-  $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
-  $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
+  $("#galleryFilter").addEventListener("change", (event) => { if (isBusy() || state.importing) return; state.galleryFilter = event.currentTarget.value; renderGallery(); });
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
   $("#closeOverviewButton").addEventListener("click", () => setViewMode("edit"));
   $("#previousImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(-1)));
@@ -3379,7 +3362,6 @@ function bindEvents() {
 }
 
 async function initialise() {
-  ensureDetectionModeControl();
   try {
     const settings = await api("/api/settings");
     setSettingsForm(settings.settings, settings.status);

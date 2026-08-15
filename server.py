@@ -561,6 +561,7 @@ class StudioState:
         self.candidate_revisions: dict[str, int] = {}
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
+        self.browser_copy_outputs: dict[str, Path] = {}
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
@@ -941,6 +942,7 @@ class StudioState:
 
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
+        self.browser_copy_outputs.pop(token, None)
         if details is not None:
             details.rendered_path.unlink(missing_ok=True)
         return details
@@ -1291,7 +1293,7 @@ class StudioState:
                 self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
 
-    def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> None:
+    def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)
         with self.lock:
             if self._has_active_worker():
@@ -1312,6 +1314,7 @@ class StudioState:
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
             self._touch_candidates(image_id)
+            return self._candidate_revision(image_id)
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
@@ -1332,15 +1335,10 @@ class StudioState:
         image_ids: list[str],
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
-        mode: str | None = None,
     ) -> None:
-        mode = mode or str(self.settings.get("detection", {}).get("mode", "standard"))
-        if mode not in {"standard", "high_precision"}:
-            raise ClientError("検出モードが正しくありません。", "invalid_detection_mode")
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         self._start_job(
             "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
-            mode,
             expected_catalog_generation=catalog_generation,
         )
 
@@ -1453,6 +1451,37 @@ class StudioState:
                 record, current_revision, source_fingerprint, catalog_generation, output,
             )
         return output, record, current_revision, save_token
+
+    def save_browser_copy(self, image_id: str, revision: int, save_token: str, output_directory: str, suffix: str) -> str:
+        """Atomically save one rendered token under a user-selected local directory."""
+        if not isinstance(save_token, str) or not save_token:
+            raise ClientError("保存確認トークンがありません。保存をやり直してください。")
+        if not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix:
+            raise ClientError("ファイル名末尾が正しくありません。")
+        destination_root = Path(output_directory).expanduser()
+        if not output_directory.strip() or not destination_root.is_dir():
+            raise ClientError("保存先フォルダーが見つかりません。")
+        with self.lock:
+            self._discard_expired_browser_save_tokens_unchecked()
+            saved = self.browser_copy_outputs.get(save_token)
+            if saved is not None and saved.is_file():
+                return str(saved)
+            token_details = self.browser_save_tokens.get(save_token)
+            if token_details is None:
+                raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+            if token_details.image_id != image_id or token_details.candidate_revision != revision:
+                raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+            record = self.images.get(image_id)
+            if record is None or self._source_fingerprint(record) != token_details.source_fingerprint:
+                raise ClientError("元画像が変更されました。保存をやり直してください。")
+            relative_parent = Path(record.relative_path.replace("\\", "/")).parent
+            destination_directory = destination_root / relative_parent
+            destination_directory.mkdir(parents=True, exist_ok=True)
+            source_name = Path(record.relative_path).name
+            destination = _unique_output_destination(destination_directory, source_name, suffix)
+            _copy_rendered_output_atomic(token_details.rendered_path, destination)
+            self.browser_copy_outputs[save_token] = destination
+            return str(destination)
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:
@@ -1730,13 +1759,13 @@ class StudioState:
         records: list[ImageRecord],
         confidence: float,
         parallelism: int = 2,
-        mode: str | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
+            mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
             model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
             groups = [records[index::worker_count] for index in range(worker_count)]
@@ -2688,6 +2717,62 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             temporary_path.unlink(missing_ok=True)
 
 
+def _unique_output_destination(directory: Path, source_name: str, suffix: str) -> Path:
+    stem = Path(source_name).stem
+    extension = Path(source_name).suffix
+    for number in range(1, 10000):
+        name = f"{stem}{suffix}{'' if number == 1 else f'_{number}'}{extension}"
+        destination = directory / name
+        try:
+            with destination.open("xb"):
+                pass
+        except FileExistsError:
+            continue
+        return destination
+    raise ClientError("同名ファイルが多すぎるため保存できません。")
+
+
+def _copy_rendered_output_atomic(rendered_path: Path, destination: Path) -> None:
+    """Replace the empty reservation only after a durable, decodable temporary file exists."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            with rendered_path.open("rb") as rendered:
+                shutil.copyfileobj(rendered, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_decodable_image(temporary_path.read_bytes())
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        if destination.is_file() and destination.stat().st_size == 0:
+            destination.unlink(missing_ok=True)
+
+
+def choose_output_directory(initial_directory: str = "") -> str | None:
+    """Open the Windows shell folder picker on the request thread."""
+    if sys.platform != "win32":
+        raise ClientError("保存先フォルダーの参照はWindowsでのみ利用できます。")
+    try:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        try:
+            shell = win32com.client.Dispatch("Shell.Application")
+            # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+            selected = shell.BrowseForFolder(0, "保存先フォルダーを選択", 0x0041, initial_directory or 0)
+            return str(selected.Self.Path) if selected is not None else None
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as exc:
+        LOGGER.warning("Could not open output-directory picker: %s", exc)
+        raise ClientError("保存先フォルダーを選択できませんでした。") from exc
+
+
 STATE = StudioState()
 atexit.register(STATE.shutdown)
 
@@ -2811,10 +2896,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
-                if "mode" in payload:
-                    STATE.start_detection(*detect_args, str(payload["mode"]))
-                else:
-                    STATE.start_detection(*detect_args)
+                STATE.start_detection(*detect_args)
                 self._json({"ok": True})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
@@ -2822,6 +2904,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 self._json({"settings": settings, "status": STATE.settings_status()})
+            elif path == "/api/dialog/output-directory":
+                selected = choose_output_directory(str(payload.get("initialDirectory", "")))
+                self._json({"directory": selected})
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
                 self._json(STATE.add_boundary_candidate(image_id, payload))
@@ -2850,6 +2935,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         "X-Mozarie-Source-Kind": record.source_kind,
                     },
                 )
+            elif path == "/api/save/copy":
+                output = STATE.save_browser_copy(
+                    str(payload.get("imageId", "")),
+                    _read_candidate_revision(payload.get("candidateRevision")),
+                    str(payload.get("saveToken", "")),
+                    str(payload.get("outputDirectory", "")),
+                    str(payload.get("suffix", "_censored")),
+                )
+                self._json({"output": output})
             elif path == "/api/save/commit":
                 self._json(STATE.commit_browser_save(
                     str(payload.get("imageId", "")),
@@ -2872,8 +2966,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json(STATE.request_cancel().as_dict())
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
-                STATE.set_candidate_state(image_id, candidate_id, payload)
-                self._json({"ok": True})
+                revision = STATE.set_candidate_state(image_id, candidate_id, payload)
+                self._json({"ok": True, "candidateRevision": revision})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
@@ -2893,7 +2987,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"images": STATE.remove_image_from_catalog(image_id)})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
-                self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
+                deleted = STATE.delete_candidate(image_id, candidate_id)
+                self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:

@@ -6,3 +6,4 @@ onnx>=1.16
 torch>=2.2
 torchvision>=0.17
 segment-anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf
+pywin32>=306; platform_system == "Windows"

@@ -17,15 +17,17 @@ class SettingsTests(unittest.TestCase):
                 "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
                 "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
                 "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+                "saving": {"default_output_directory": ""},
                 "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
             }
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root)
-            saved = store.save({"general": {"language": "en"}, "display": {"tool_position": "bottom"}, "detection": {"mode": "high_precision", "parallelism": 4}})
+            saved = store.save({"general": {"language": "en"}, "display": {"tool_position": "bottom"}, "saving": {"default_output_directory": "G:/Output"}, "detection": {"mode": "high_precision", "parallelism": 4}})
             self.assertEqual(saved["general"]["language"], "en")
             self.assertEqual(saved["display"]["tool_position"], "bottom")
             self.assertEqual(saved["detection"]["mode"], "high_precision")
             self.assertTrue(saved["detection"]["fluid_exclusion_enabled"])
+            self.assertEqual(saved["saving"]["default_output_directory"], "G:/Output")
             self.assertTrue((root / "config" / "local.json").is_file())
             self.assertEqual(json.loads((root / "config" / "defaults.json").read_text(encoding="utf-8")), defaults)
 
@@ -36,6 +38,7 @@ class SettingsTests(unittest.TestCase):
                 "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
                 "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
                 "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+                "saving": {"default_output_directory": ""},
                 "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
             }
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
@@ -49,6 +52,7 @@ class SettingsTests(unittest.TestCase):
             "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
             "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
             "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+            "saving": {"default_output_directory": ""},
             "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
         }
         invalid_provider = json.loads(json.dumps(valid)); invalid_provider["models"]["provider"] = "metal"

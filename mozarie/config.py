@@ -79,6 +79,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
     general = _expect_dict(settings.get("general"), "general")
     models = _expect_dict(settings.get("models"), "models")
     display = _expect_dict(settings.get("display"), "display")
+    saving = _expect_dict(settings.get("saving"), "saving")
     detection = _expect_dict(settings.get("detection"), "detection")
     language = general.get("language")
     if language not in {"ja", "en"}:
@@ -99,6 +100,12 @@ def validate_settings(value: Any) -> dict[str, Any]:
     tool_position = display.get("tool_position")
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
+    output_directory = saving.get("default_output_directory")
+    if not isinstance(output_directory, str):
+        raise SettingsError("saving.default_output_directory must be a string")
+    output_directory = output_directory.strip()
+    if output_directory and not Path(output_directory).is_absolute():
+        raise SettingsError("saving.default_output_directory must be an absolute path")
     paths = {}
     for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "sam_checkpoint"):
         path = models.get(key)
@@ -124,6 +131,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "mosaic_preview": _expect_bool(display.get("mosaic_preview"), "display.mosaic_preview"),
             "tool_position": tool_position,
         },
+        "saving": {"default_output_directory": output_directory},
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,

@@ -24,6 +24,9 @@
     "mosaic_preview": true,
     "tool_position": "left"
   },
+  "saving": {
+    "default_output_directory": ""
+  },
   "detection": {
     "mode": "standard",
     "fluid_exclusion_enabled": true,
