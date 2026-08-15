@@ -2871,10 +2871,21 @@ function ensureDetectionModeControl() {
 
 function renderModelStatus() {
   const modelStatus = Object.entries(state.settingsStatus?.models || {});
-  $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every(([, model]) => model.valid)
+  const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
+  $("#settingsModelStatus").textContent = activeModels.length && activeModels.every(([, model]) => model.valid)
     ? ""
-    : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
+    : activeModels.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
 }
+
+const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle" };
+
+function setModelCardEnabled(key, enabled) {
+  const toggle = $(MODEL_TOGGLE_IDS[key]);
+  toggle.closest?.(".model-card")?.classList.toggle("active", enabled);
+  toggle.setAttribute("aria-pressed", String(enabled));
+}
+
+function modelCardEnabled(key) { return $(MODEL_TOGGLE_IDS[key]).getAttribute("aria-pressed") === "true"; }
 
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
 
@@ -2920,7 +2931,12 @@ function setSettingsForm(settings, status = null) {
   $("#settingsPort").value = String(settings.general.port);
   setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
+  $("#settingsNtd11Model").value = settings.models.ntd11;
+  setModelCardEnabled("ntd11", settings.models.ntd11_enabled);
+  $("#settingsSensitiveModel").value = settings.models.sensitive;
+  setModelCardEnabled("sensitive", settings.models.sensitive_enabled);
   $("#settingsHandModel").value = settings.models.hand_detection;
+  setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
@@ -2945,7 +2961,9 @@ function settingsPayload() {
   return {
     general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcuts").checked },
     models: {
-      target_segmentation: $("#settingsTargetModel").value.trim(), hand_detection: $("#settingsHandModel").value.trim(),
+      target_segmentation: $("#settingsTargetModel").value.trim(), ntd11: $("#settingsNtd11Model").value.trim(), ntd11_enabled: modelCardEnabled("ntd11"),
+      sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
+      hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
       sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value,
     },
     display: {
@@ -3032,6 +3050,11 @@ function bindEvents() {
   document.querySelectorAll(".settings-tab").forEach((button) => {
     button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab));
     button.addEventListener("keydown", moveSettingsTab);
+  });
+  document.querySelectorAll("[data-model-toggle]").forEach((toggle) => {
+    toggle.addEventListener("click", () => {
+      setModelCardEnabled(toggle.dataset.modelToggle, toggle.getAttribute("aria-pressed") !== "true");
+    });
   });
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });

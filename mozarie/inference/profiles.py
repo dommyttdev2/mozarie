@@ -106,6 +106,53 @@ def _normalise_class_name(value: object) -> str:
     return " ".join(str(value).strip().lower().replace("_", " ").replace("-", " ").split())
 
 
+def yolo_class_names(metadata: dict[str, str]) -> tuple[str, ...]:
+    """Read the ordered class names embedded by a standard Ultralytics ONNX export."""
+    try:
+        raw_names = ast.literal_eval(metadata["names"])
+    except (KeyError, SyntaxError, ValueError, TypeError) as exc:
+        raise ModelProfileError("Segmentation model requires parseable names metadata") from exc
+    if isinstance(raw_names, dict):
+        items = sorted(raw_names.items())
+        if [index for index, _name in items] != list(range(len(items))):
+            raise ModelProfileError("Segmentation names metadata must use consecutive integer class ids")
+        names = [name for _index, name in items]
+    elif isinstance(raw_names, (list, tuple)):
+        names = list(raw_names)
+    else:
+        raise ModelProfileError("Segmentation names metadata must be a class-name list or map")
+    if not names or any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ModelProfileError("Segmentation names metadata must contain non-empty class names")
+    return tuple(_normalise_class_name(name) for name in names)
+
+
+def validate_generic_yolo_segment_profile(path: Path) -> ModelProfile:
+    """Validate the raw two-output Ultralytics segmentation export used by optional models."""
+    image_input, outputs, metadata = _load(path, expected_size=1024)
+    names = yolo_class_names(metadata)
+    row_channels = 4 + len(names) + 32
+    if len(outputs) != 2:
+        raise ModelProfileError("Segmentation needs prediction and 32-channel prototype outputs")
+    prediction = next(
+        (
+            item for item in outputs
+            if len(item.dimensions) == 3
+            and _is_float32_single_batch(item)
+            and (item.dimensions[1] == row_channels or item.dimensions[2] == row_channels)
+        ),
+        None,
+    )
+    prototype = next(
+        (item for item in outputs if len(item.dimensions) == 4 and _is_float32_single_batch(item) and item.dimensions[1] == 32),
+        None,
+    )
+    if prediction is None:
+        raise ModelProfileError(f"Segmentation prediction must be rank 3 with a {row_channels}-channel axis")
+    if prototype is None:
+        raise ModelProfileError("Segmentation prototype must be [batch, 32, height, width]")
+    return ModelProfile("generic_yolo_segmentation", image_input, outputs)
+
+
 def _validate_dynamic_hand_metadata(output_name: str, metadata: dict[str, str]) -> None:
     if output_name != "output0":
         raise ModelProfileError("Dynamic hand output must be named output0")

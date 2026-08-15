@@ -15,7 +15,7 @@ class SettingsTests(unittest.TestCase):
             (root / "config").mkdir()
             defaults = {
                 "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-                "models": {"target_segmentation": "", "hand_detection": "", "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
                 "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
                 "detection": {"mode": "standard", "threshold": 0.5, "parallelism": 2},
             }
@@ -33,7 +33,7 @@ class SettingsTests(unittest.TestCase):
             root = Path(directory); (root / "config").mkdir()
             defaults = {
                 "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-                "models": {"target_segmentation": "", "hand_detection": "", "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
                 "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
                 "detection": {"mode": "standard", "threshold": 0.5, "parallelism": 2},
             }
@@ -46,7 +46,7 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_provider_and_threshold_are_rejected(self):
         valid = {
             "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-            "models": {"target_segmentation": "", "hand_detection": "", "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
             "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
             "detection": {"mode": "standard", "threshold": 0.5, "parallelism": 2},
         }

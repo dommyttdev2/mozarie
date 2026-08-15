@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .onnx import BaseOnnxModel, Letterbox, letterbox_bgr, nms_indices, restore_box, sigmoid
+from .onnx import BaseOnnxModel, Letterbox, class_aware_nms_indices, letterbox_bgr, restore_box, sigmoid
 
 
 CLASS_NAMES = ("anus", "nipple", "penis", "vagina", "female face", "male face", "pubic hair")
@@ -77,7 +77,7 @@ class TargetSegmenter(BaseOnnxModel):
                 "class_name": "penis" if class_ids[index] == 2 else "pussy",
                 "confidence": scores[index],
                 "mask": self._mask_from_coefficients(coefficients[index], prototype, boxes[index], transform),
-                "source": "precise",
+                "source": "target",
             }
-            for index in nms_indices(boxes, scores, 0.85)
+            for index in class_aware_nms_indices(boxes, scores, class_ids, 0.85)
         ]

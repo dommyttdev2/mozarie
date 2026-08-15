@@ -49,7 +49,14 @@ from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
-from mozarie.inference.profiles import ModelProfileError, profile_summary, validate_hand_profile, validate_target_profile
+from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter
+from mozarie.inference.profiles import (
+    ModelProfileError,
+    profile_summary,
+    validate_generic_yolo_segment_profile,
+    validate_hand_profile,
+    validate_target_profile,
+)
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -61,9 +68,9 @@ SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis"}
-SOURCE_PRIORITY = {"precise": 3, "primary": 2, "secondary": 1}
-PRECISE_OVERLAP_IOU = 0.20
-PRECISE_CONTAINMENT = 0.60
+SOURCE_PRIORITY = {"target": 3, "ntd11": 2, "sensitive": 1}
+TARGET_OVERLAP_IOU = 0.20
+TARGET_CONTAINMENT = 0.60
 HAND_CONFIDENCE = 0.395
 HAND_SAM_MIN_SCORE = 0.88
 HAND_MAX_REMOVAL_RATIO = 0.70
@@ -76,9 +83,9 @@ FLUID_MAX_COMPONENTS = 8
 FLUID_MAX_COMPONENT_RATIO = 0.15
 FLUID_MAX_TOTAL_RATIO = 0.20
 SOURCE_LABELS = {
-    "precise": "精密性器モデル",
-    "primary": "補助検出モデル",
-    "secondary": "補助検出モデル2",
+    "target": "対象セグメンテーションモデル",
+    "ntd11": "NTD11補助モデル",
+    "sensitive": "Sensitive補助モデル",
     "boundary": "境界選択",
     "hand_exclusion": "手を除外",
     "fluid_exclusion": "白い体液を除外",
@@ -259,16 +266,6 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.count_nonzero(left_bool & right_bool) / smallest)
 
 
-def normalize_precise_class(class_name: str) -> str | None:
-    """Map target-model labels onto Mozarie's stable class names."""
-    normalized = class_name.strip().lower()
-    if normalized == "vagina":
-        return "pussy"
-    if normalized == "penis":
-        return "penis"
-    return None
-
-
 def model_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -292,21 +289,6 @@ def assert_onnx_cuda_available() -> None:
         raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
 
 
-def assert_onnx_cuda_active(model: Any, name: str) -> None:
-    """Confirm a direct ONNX Runtime adapter did not silently use the CPU."""
-    providers = list(getattr(model, "providers", ()) or ())
-    if not providers:
-        backend = getattr(getattr(model, "predictor", None), "model", None)
-        session = getattr(getattr(backend, "backend", backend), "session", None)
-        providers = list(session.get_providers()) if session is not None else []
-    if not providers or providers[0] != "CUDAExecutionProvider":
-        detail = ", ".join(providers) if providers else "取得できません"
-        raise ClientError(
-            f"{name}モデルがCUDAで実行されていません（現在: {detail}）。"
-            "ONNX RuntimeのCUDA設定を確認してください。"
-        )
-
-
 def segment_overlaps(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:
     return (
         left["class_name"] == right["class_name"]
@@ -326,7 +308,7 @@ def merge_segment(
     class_name: str,
     confidence: float,
     mask: np.ndarray,
-    source: str = "primary",
+    source: str = "target",
     iou_threshold: float = 0.75,
     containment_threshold: float = 0.95,
 ) -> None:
@@ -362,8 +344,8 @@ def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, 
         for winner in accepted:
             if winner["source"] == segment["source"]:
                 continue
-            if winner["source"] == "precise" or segment["source"] == "precise":
-                iou_threshold, containment_threshold = PRECISE_OVERLAP_IOU, PRECISE_CONTAINMENT
+            if winner["source"] == "target" or segment["source"] == "target":
+                iou_threshold, containment_threshold = TARGET_OVERLAP_IOU, TARGET_CONTAINMENT
             else:
                 iou_threshold, containment_threshold = 0.75, 0.95
             if segment_overlaps(winner, segment, iou_threshold, containment_threshold):
@@ -539,27 +521,18 @@ def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndar
 
 
 def confidence_for_source(source: str, confidence: float) -> float:
-    return max(0.10, confidence - 0.15) if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
-
-
-def precise_confidence(confidence: float) -> float:
+    if source == "ntd11":
+        return max(0.10, confidence - 0.15)
+    if source == "sensitive":
+        return max(confidence, SECONDARY_MIN_CONFIDENCE)
     return confidence
-
-
-def confidence_for_class(source: str, class_name: str, confidence: float) -> float:
-    return confidence if source == "primary" else max(confidence, SECONDARY_MIN_CONFIDENCE)
 
 
 @dataclass
 class DetectionModels:
-    precise: TargetSegmenter
-    # These are retained as inert attributes only so old in-memory sessions can
-    # be shut down safely. New detection never reads legacy fallback models.
-    primary: Any | None = None
-    secondary: Any | None = None
+    target: TargetSegmenter
+    auxiliaries: list[tuple[str, GenericYoloSegmenter]] = field(default_factory=list)
     hand: HandDetector | None = None
-    precise_provider_checked: bool = False
-    hand_provider_checked: bool = False
 
 
 class StudioState:
@@ -614,8 +587,14 @@ class StudioState:
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = settings
-            if settings["models"] != previous_models:
+            detection_keys = {
+                "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
+                "hand_detection", "hand_detection_enabled", "provider",
+            }
+            sam_keys = {"sam_checkpoint", "sam_model_type", "provider"}
+            if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
                 self.models = None
+            if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
                 self.sam_predictor = None
                 self.sam_image_id = None
             return self.settings
@@ -636,10 +615,24 @@ class StudioState:
         result: dict[str, dict[str, Any]] = {}
         validators = {
             "target_segmentation": validate_target_profile,
+            "ntd11": validate_generic_yolo_segment_profile,
+            "sensitive": validate_generic_yolo_segment_profile,
             "hand_detection": validate_hand_profile,
         }
-        for key, required_suffix in (("target_segmentation", ".onnx"), ("hand_detection", ".onnx"), ("sam_checkpoint", None)):
+
+        def add_status(key: str, *, required: bool, enabled: bool, required_suffix: str | None = None) -> None:
             raw = str(models.get(key, "")).strip()
+            if not required and not enabled:
+                result[key] = {
+                    "required": False,
+                    "enabled": False,
+                    "configured": bool(raw),
+                    "exists": False,
+                    "valid": False,
+                    "detail": "",
+                    "profile": None,
+                }
+                return
             path = Path(raw).expanduser() if raw else None
             exists = bool(path and path.is_file())
             valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
@@ -654,7 +647,21 @@ class StudioState:
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
                 detail = "SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください"
-            result[key] = {"configured": bool(raw), "exists": exists, "valid": valid, "detail": detail, "profile": profile}
+            result[key] = {
+                "required": required,
+                "enabled": enabled,
+                "configured": bool(raw),
+                "exists": exists,
+                "valid": valid,
+                "detail": detail,
+                "profile": profile,
+            }
+
+        add_status("target_segmentation", required=True, enabled=True, required_suffix=".onnx")
+        add_status("ntd11", required=False, enabled=bool(models["ntd11_enabled"]), required_suffix=".onnx")
+        add_status("sensitive", required=False, enabled=bool(models["sensitive_enabled"]), required_suffix=".onnx")
+        add_status("hand_detection", required=False, enabled=bool(models["hand_detection_enabled"]), required_suffix=".onnx")
+        add_status("sam_checkpoint", required=True, enabled=True)
         return {"models": result, "provider": models["provider"], "samModelType": models["sam_model_type"]}
 
     @staticmethod
@@ -1660,7 +1667,13 @@ class StudioState:
         provider = str(self.settings["models"].get("provider", "gpu"))
         if provider == "gpu":
             assert_onnx_cuda_available()
-        return DetectionModels(precise=TargetSegmenter(model_path, device=provider))
+        target = TargetSegmenter(model_path, device=provider)
+        auxiliaries: list[tuple[str, GenericYoloSegmenter]] = []
+        for key, label in (("ntd11", "NTD11補助モデル"), ("sensitive", "Sensitive補助モデル")):
+            if not self.settings["models"][f"{key}_enabled"]:
+                continue
+            auxiliaries.append((key, GenericYoloSegmenter(self._configured_model_path(key, label), device=provider)))
+        return DetectionModels(target=target, auxiliaries=auxiliaries)
 
     def _configured_model_path(self, key: str, label: str) -> Path:
         raw_path = str(self.settings.get("models", {}).get(key, "")).strip()
@@ -1672,7 +1685,12 @@ class StudioState:
         if path.suffix.lower() != ".onnx":
             raise ClientError(f"{label}モデルにはONNXファイルを指定してください。")
         try:
-            (validate_target_profile if key == "target_segmentation" else validate_hand_profile)(path)
+            {
+                "target_segmentation": validate_target_profile,
+                "ntd11": validate_generic_yolo_segment_profile,
+                "sensitive": validate_generic_yolo_segment_profile,
+                "hand_detection": validate_hand_profile,
+            }[key](path)
         except ModelProfileError as exc:
             raise ClientError(f"{label}モデルの互換プロファイルが一致しません: {exc}", "model_profile_invalid") from exc
         return path
@@ -1776,76 +1794,35 @@ class StudioState:
         for candidate in candidates:
             candidate.mask_path.unlink(missing_ok=True)
 
-    def _segments_from_results(
-        self,
-        results: Any,
-        *,
-        source: str,
-        width: int,
-        height: int,
-        x_offset: int = 0,
-        y_offset: int = 0,
-        full_width: int | None = None,
-        full_height: int | None = None,
-        precise_only: bool = False,
-        confidence: float,
-    ) -> list[dict[str, Any]]:
-        segments: list[dict[str, Any]] = []
-        for result in results:
-            if result.boxes is None or result.masks is None:
-                continue
-            masks = result.masks.data.cpu().numpy()
-            boxes = result.boxes.cpu()
-            names = result.names
-            for mask, box in zip(masks, boxes):
-                raw_class = str(names[int(box.cls[0].item())])
-                class_name = normalize_precise_class(raw_class) if precise_only else raw_class
-                if class_name is None or class_name not in TARGET_CLASSES:
-                    continue
-                score = float(box.conf[0].item())
-                if not precise_only and score < confidence_for_class(source, class_name, confidence):
-                    continue
-                if mask.shape[:2] != (height, width):
-                    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
-                local_mask = (np.asarray(mask) > 0.5).astype(np.uint8) * 255
-                if not local_mask.any():
-                    continue
-                full_mask = restore_tile_mask(
-                    local_mask,
-                    full_width if full_width is not None else width,
-                    full_height if full_height is not None else height,
-                    x_offset,
-                    y_offset,
-                )
-                merge_segment(segments, class_name, score, full_mask, source)
-        return segments
-
-    def _detect_precise_segments(
+    def _detect_arbitrated_segments(
         self, models: DetectionModels, rgb: Image.Image, confidence: float
     ) -> list[dict[str, Any]]:
         width, height = rgb.size
-        segments = models.precise.detect(np.asarray(rgb), precise_confidence(confidence))
-        if not models.precise_provider_checked:
-            if str(self.settings["models"].get("provider", "gpu")) == "gpu":
-                assert_onnx_cuda_active(models.precise, "対象セグメンテーション")
-            models.precise_provider_checked = True
-        return [segment for segment in segments if segment["mask"].shape == (height, width)]
-
-    def _detect_legacy_segments(
-        self, models: DetectionModels, rgb: Image.Image, confidence: float
-    ) -> list[dict[str, Any]]:
-        # Legacy fallback inference was deliberately removed. Keeping this
-        # method preserves the stable detection pipeline shape for callers.
-        return []
+        segments = models.target.detect(np.asarray(rgb), confidence)
+        collected = [segment for segment in segments if segment["mask"].shape == (height, width)]
+        for source, model in models.auxiliaries:
+            tiled_segments: list[dict[str, Any]] = []
+            for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
+                tile = np.asarray(rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height)))
+                for segment in model.detect(tile, confidence_for_source(source, confidence), source):
+                    local_mask = np.asarray(segment["mask"], dtype=np.uint8)
+                    if local_mask.shape != (tile_height, tile_width):
+                        continue
+                    merge_segment(
+                        tiled_segments,
+                        str(segment["class_name"]),
+                        float(segment["confidence"]),
+                        restore_tile_mask(local_mask, width, height, x_offset, y_offset),
+                        source,
+                    )
+            collected.extend(tiled_segments)
+        return arbitrate_segment_sources(collected)
 
     def _hand_boxes(self, models: DetectionModels, rgb: Image.Image) -> list[tuple[int, int, int, int]]:
+        if not self.settings["models"]["hand_detection_enabled"]:
+            return []
         hand_model = self._ensure_hand_model(models)
-        boxes = hand_model.detect_boxes(np.asarray(rgb), HAND_CONFIDENCE)
-        if not models.hand_provider_checked:
-            if str(self.settings["models"].get("provider", "gpu")) == "gpu":
-                assert_onnx_cuda_active(hand_model, "手の検出")
-            models.hand_provider_checked = True
-        return boxes
+        return hand_model.detect_boxes(np.asarray(rgb), HAND_CONFIDENCE)
 
     @staticmethod
     def _box_intersects_mask(box: tuple[int, int, int, int], mask: np.ndarray) -> bool:
@@ -1955,10 +1932,7 @@ class StudioState:
         self._assert_record_fresh(record)
         with Image.open(record.path) as image:
             rgb = ImageOps.exif_transpose(image).convert("RGB")
-        segments = arbitrate_segment_sources([
-            *self._detect_precise_segments(models, rgb, confidence),
-            *self._detect_legacy_segments(models, rgb, confidence),
-        ])
+        segments = self._detect_arbitrated_segments(models, rgb, confidence)
         if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
@@ -2757,9 +2731,18 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
+                configured = all(str(models.get(key, "")).strip() for key in ("target_segmentation", "sam_checkpoint"))
+                configured = configured and all(
+                    not bool(models.get(enabled_key)) or bool(str(models.get(path_key, "")).strip())
+                    for enabled_key, path_key in (
+                        ("ntd11_enabled", "ntd11"),
+                        ("sensitive_enabled", "sensitive"),
+                        ("hand_detection_enabled", "hand_detection"),
+                    )
+                )
                 self._json({
                     "ok": True,
-                    "modelsConfigured": all(str(models.get(key, "")).strip() for key in ("target_segmentation", "hand_detection", "sam_checkpoint")),
+                    "modelsConfigured": configured,
                     "device": inference_device_name(),
                 })
             elif path == "/api/settings":

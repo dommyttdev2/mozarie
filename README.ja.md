@@ -36,7 +36,21 @@
 | 手の検出 | `hand_detect_v1.0_s/model.onnx` | [ダウンロード](https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx) | [配布ページ](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 | 境界指定 | `sam_vit_b_01ec64.pth` | [ダウンロード](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
 
-モデルファイルはこのリポジトリに含まれません。使用前に各配布ページの利用規約とライセンスを確認してください。
+主モデルの検出漏れを補うため、次の2モデルを任意で追加できます。
+
+| モデル | 配布元 |
+| --- | --- |
+| `ntd11_anime_nsfw_segm_v5-variant1` | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556/anime-nsfw-detection-adetailer-all-in-one) |
+| `sensitive_detect_v07` | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect/tree/main) |
+
+任意モデルには1024pxのraw ONNX出力を使用します。ダウンロードした`.pt`をUltralyticsで`end2end=False`として変換し、**設定 > モデル** で生成された`.onnx`を指定してください。
+
+```powershell
+python -m pip install ultralytics
+yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
+```
+
+モデルファイルはこのリポジトリに含まれず、Mozarieが自動でダウンロードすることもありません。使用前に各配布ページの利用規約とライセンスを確認してください。
 
 ## 使い方
 
@@ -44,6 +58,8 @@
 2. 自動検出を実行します。
 3. ブラシまたは境界ツールで結果を調整します。
 4. 保存後の画像を確認します。
+
+保存時は元画像のメタ情報を保持します。
 
 ## 開発
 

@@ -23,6 +23,10 @@ class Letterbox:
 
 
 def available_providers(device: str) -> list[str]:
+    if device.lower() != "cpu":
+        preload_dlls = getattr(ort, "preload_dlls", None)
+        if preload_dlls is not None:
+            preload_dlls()
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
         return ["CPUExecutionProvider"]
@@ -36,7 +40,10 @@ def create_session(path: Path, device: str = "gpu") -> ort.InferenceSession:
         raise FileNotFoundError(path)
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    return ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device))
+    session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device))
+    if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
+        raise RuntimeError("CUDAExecutionProvider could not create the ONNX inference session.")
+    return session
 
 
 def letterbox_bgr(rgb: np.ndarray, size: int) -> tuple[np.ndarray, Letterbox]:
@@ -85,6 +92,21 @@ def nms_indices(boxes: list[tuple[int, int, int, int]], scores: list[float], iou
                 survivors.append(other)
         indexed = survivors
     return selected
+
+
+def class_aware_nms_indices(
+    boxes: list[tuple[int, int, int, int]],
+    scores: list[float],
+    classes: list[object],
+    iou_threshold: float = 0.7,
+) -> list[int]:
+    selected: list[int] = []
+    for class_name in dict.fromkeys(classes):
+        class_indices = [index for index, value in enumerate(classes) if value == class_name]
+        class_boxes = [boxes[index] for index in class_indices]
+        class_scores = [scores[index] for index in class_indices]
+        selected.extend(class_indices[index] for index in nms_indices(class_boxes, class_scores, iou_threshold))
+    return sorted(selected, key=lambda index: scores[index], reverse=True)
 
 
 def sigmoid(values: np.ndarray) -> np.ndarray:

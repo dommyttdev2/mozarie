@@ -36,7 +36,21 @@ A local Windows app for reviewing images and applying mosaic edits.
 | Hand detection | `hand_detect_v1.0_s/model.onnx` | [Download](https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx) | [Model page](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 | Boundary selection | `sam_vit_b_01ec64.pth` | [Download](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
 
-Model files are not included in this repository. Check the terms and license on each distribution page before use.
+Two optional segmentation models can supplement detections missed by the primary model:
+
+| Model | Source |
+| --- | --- |
+| `ntd11_anime_nsfw_segm_v5-variant1` | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556/anime-nsfw-detection-adetailer-all-in-one) |
+| `sensitive_detect_v07` | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect/tree/main) |
+
+Mozarie uses raw 1024px ONNX exports for these optional models. Export a downloaded `.pt` file with Ultralytics and `end2end=False`, then select the resulting `.onnx` file under **Settings > Models**.
+
+```powershell
+python -m pip install ultralytics
+yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
+```
+
+Model files are not included in this repository. Mozarie never downloads or bundles models. Check the terms and license on each distribution page before use.
 
 ## Usage
 
@@ -44,6 +58,8 @@ Model files are not included in this repository. Check the terms and license on 
 2. Run automatic detection.
 3. Refine the result with the brush or boundary tool.
 4. Save the image, then review the saved result.
+
+Saving preserves image metadata.
 
 ## Development
 

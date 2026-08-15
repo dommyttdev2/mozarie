@@ -1,5 +1,6 @@
 import http.client
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -37,12 +38,9 @@ from server import (  # noqa: E402
     accepted_hand_sam_mask,
     arbitrate_segment_sources,
     assert_onnx_cuda_available,
-    assert_onnx_cuda_active,
     calculate_block_size,
     clip_mask_to_roi,
-    confidence_for_class,
     confidence_for_source,
-    precise_confidence,
     detection_tiles,
     jpeg_metadata_manifest,
     mask_iou,
@@ -51,7 +49,6 @@ from server import (  # noqa: E402
     restore_tile_mask,
     read_boundary_request,
     read_detection_confidence,
-    normalize_precise_class,
     padded_hand_box,
     refine_mask_with_hand,
     _read_mosaic_divisor,
@@ -939,49 +936,38 @@ class MozarieTests(unittest.TestCase):
         separate[9:11, 9:11] = 255
         self.assertGreater(mask_iou(first, duplicate), 0.5)
         segments = []
-        merge_segment(segments, "penis", 0.4, first, "primary")
-        merge_segment(segments, "penis", 0.9, duplicate, "primary")
+        merge_segment(segments, "penis", 0.4, first, "ntd11")
+        merge_segment(segments, "penis", 0.9, duplicate, "ntd11")
         merge_segment(segments, "penis", 0.7, separate)
         self.assertEqual(len(segments), 2)
         self.assertEqual(segments[0]["confidence"], 0.9)
         self.assertTrue(np.array_equal(segments[0]["mask"], duplicate))
 
-    def test_primary_segment_wins_over_secondary_duplicate(self):
+    def test_ntd11_segment_wins_over_sensitive_duplicate(self):
         first = np.zeros((12, 12), dtype=np.uint8)
         first[2:8, 2:8] = 255
         secondary = np.zeros((12, 12), dtype=np.uint8)
         secondary[2:8, 2:8] = 255
         segments = []
-        merge_segment(segments, "penis", 0.62, first, "primary")
-        merge_segment(segments, "penis", 0.91, secondary, "secondary")
+        merge_segment(segments, "penis", 0.62, first, "ntd11")
+        merge_segment(segments, "penis", 0.91, secondary, "sensitive")
         self.assertEqual(len(segments), 1)
-        self.assertEqual(segments[0]["source"], "primary")
+        self.assertEqual(segments[0]["source"], "ntd11")
         self.assertTrue(np.array_equal(segments[0]["mask"], first))
 
-    def test_detection_confidence_validation_and_secondary_floor(self):
+    def test_detection_confidence_validation_and_auxiliary_floor(self):
         self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.50)
-        self.assertAlmostEqual(precise_confidence(DEFAULT_DETECTION_CONFIDENCE), 0.50)
-        self.assertAlmostEqual(precise_confidence(0.10), 0.10)
         self.assertEqual(read_detection_confidence("0.10"), 0.10)
         self.assertEqual(read_detection_confidence("1.00"), 1.00)
-        self.assertAlmostEqual(confidence_for_source("primary", 0.60), 0.45)
-        self.assertEqual(confidence_for_source("secondary", 0.10), 0.50)
-        self.assertEqual(confidence_for_source("secondary", 0.85), 0.85)
-        self.assertEqual(confidence_for_class("primary", "penis", 0.60), 0.60)
-        self.assertEqual(confidence_for_class("secondary", "penis", 0.10), 0.50)
+        self.assertAlmostEqual(confidence_for_source("ntd11", 0.60), 0.45)
+        self.assertEqual(confidence_for_source("sensitive", 0.10), 0.50)
+        self.assertEqual(confidence_for_source("sensitive", 0.85), 0.85)
         with self.assertRaises(ClientError):
             read_detection_confidence(0.09)
         with self.assertRaisesRegex(ClientError, "0.10から1.00"):
             read_detection_confidence(1.01)
 
-    def test_precise_class_normalization_keeps_only_stable_genital_classes(self):
-        self.assertEqual(TARGET_CLASSES, {"penis", "pussy"})
-        self.assertEqual(normalize_precise_class("penis"), "penis")
-        self.assertEqual(normalize_precise_class("Vagina"), "pussy")
-        self.assertIsNone(normalize_precise_class("anus"))
-        self.assertIsNone(normalize_precise_class("testicles"))
-
-    def test_precise_source_replaces_only_overlapping_legacy_segments(self):
+    def test_target_source_replaces_only_overlapping_auxiliary_segments(self):
         precise = np.zeros((40, 40), dtype=np.uint8)
         precise[5:15, 5:15] = 255
         overlapping_legacy = np.zeros((40, 40), dtype=np.uint8)
@@ -989,12 +975,12 @@ class MozarieTests(unittest.TestCase):
         unmatched_legacy = np.zeros((40, 40), dtype=np.uint8)
         unmatched_legacy[24:34, 24:34] = 255
         result = arbitrate_segment_sources([
-            {"class_name": "penis", "confidence": 0.55, "mask": unmatched_legacy, "source": "primary"},
-            {"class_name": "penis", "confidence": 0.80, "mask": overlapping_legacy, "source": "primary"},
-            {"class_name": "penis", "confidence": 0.20, "mask": precise, "source": "precise"},
+            {"class_name": "penis", "confidence": 0.55, "mask": unmatched_legacy, "source": "ntd11"},
+            {"class_name": "penis", "confidence": 0.80, "mask": overlapping_legacy, "source": "ntd11"},
+            {"class_name": "penis", "confidence": 0.20, "mask": precise, "source": "target"},
         ])
         self.assertEqual(len(result), 2)
-        self.assertEqual([segment["source"] for segment in result], ["precise", "primary"])
+        self.assertEqual([segment["source"] for segment in result], ["target", "ntd11"])
         self.assertTrue(any(np.array_equal(segment["mask"], unmatched_legacy) for segment in result))
 
     def test_precise_arbitration_does_not_merge_nearby_organs(self):
@@ -1003,8 +989,8 @@ class MozarieTests(unittest.TestCase):
         right = np.zeros((40, 40), dtype=np.uint8)
         right[15:23, 15:23] = 255
         result = arbitrate_segment_sources([
-            {"class_name": "pussy", "confidence": 0.5, "mask": left, "source": "precise"},
-            {"class_name": "pussy", "confidence": 0.5, "mask": right, "source": "precise"},
+            {"class_name": "pussy", "confidence": 0.5, "mask": left, "source": "target"},
+            {"class_name": "pussy", "confidence": 0.5, "mask": right, "source": "target"},
         ])
         self.assertEqual(len(result), 2)
 
@@ -1132,19 +1118,6 @@ class MozarieTests(unittest.TestCase):
                 "name": "broken.png", "data": base64.b64encode(valid.getvalue()[:20]).decode("ascii"),
             }])
 
-    def test_onnx_provider_check_requires_cuda_without_loading_a_gpu(self):
-        class FakeSession:
-            def __init__(self, providers): self.providers = providers
-            def get_providers(self): return self.providers
-        class FakeModel:
-            def __init__(self, providers):
-                onnx_backend = type("OnnxBackend", (), {"session": FakeSession(providers)})()
-                auto_backend = type("AutoBackend", (), {"backend": onnx_backend})()
-                self.predictor = type("Predictor", (), {"model": auto_backend})()
-        assert_onnx_cuda_active(FakeModel(["CUDAExecutionProvider", "CPUExecutionProvider"]), "対象セグメンテーション")
-        with self.assertRaisesRegex(ClientError, "CUDA"):
-            assert_onnx_cuda_active(FakeModel(["CPUExecutionProvider"]), "対象セグメンテーション")
-
     def test_onnx_provider_preflight_rejects_cpu_only_runtime(self):
         with patch("onnxruntime.get_available_providers", return_value=["CPUExecutionProvider"]):
             with self.assertRaisesRegex(ClientError, "CUDAExecutionProvider"):
@@ -1169,6 +1142,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
+        state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         precise = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
@@ -1178,19 +1152,90 @@ class MozarieTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(segmenter.call_count, 1)
 
-    def test_precise_model_loads_without_optional_legacy_models(self):
+    def test_auxiliary_setting_change_keeps_sam_cache(self):
         state = self.new_state()
+        next_settings = copy.deepcopy(state.settings)
+        next_settings["models"]["ntd11_enabled"] = not next_settings["models"]["ntd11_enabled"]
+        state.models = object()
+        predictor = object()
+        state.sam_predictor = predictor
+        state.sam_image_id = "image"
+        with patch.object(state.settings_store, "save", return_value=next_settings):
+            state.update_settings(next_settings)
+        self.assertIsNone(state.models)
+        self.assertIs(state.sam_predictor, predictor)
+        self.assertEqual(state.sam_image_id, "image")
+
+    def test_sam_setting_change_keeps_detection_model_cache(self):
+        state = self.new_state()
+        next_settings = copy.deepcopy(state.settings)
+        next_settings["models"]["sam_model_type"] = "vit_l"
+        models = object()
+        state.models = models
+        state.sam_predictor = object()
+        state.sam_image_id = "image"
+        with patch.object(state.settings_store, "save", return_value=next_settings):
+            state.update_settings(next_settings)
+        self.assertIs(state.models, models)
+        self.assertIsNone(state.sam_predictor)
+        self.assertIsNone(state.sam_image_id)
+
+    def test_disabled_auxiliary_models_are_not_loaded(self):
+        state = self.new_state()
+        state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
         ), patch.object(server_module, "TargetSegmenter", return_value=Mock()) as segmenter:
             models = state._ensure_models()
-        self.assertIsNone(models.primary)
-        self.assertIsNone(models.secondary)
+        self.assertEqual(models.auxiliaries, [])
         self.assertEqual(segmenter.call_count, 1)
+
+    def test_enabled_auxiliaries_load_in_priority_order(self):
+        state = self.new_state()
+        state.settings["models"].update({"ntd11_enabled": True, "sensitive_enabled": True})
+        paths = iter((Path("target.onnx"), Path("ntd11.onnx"), Path("sensitive.onnx")))
+        with patch.object(state, "_configured_model_path", side_effect=lambda *_args: next(paths)), patch.object(
+            server_module, "assert_onnx_cuda_available"
+        ), patch.object(server_module, "TargetSegmenter", return_value=Mock()), patch.object(
+            server_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
+        ):
+            models = state._load_detection_models()
+        self.assertEqual([source for source, _model in models.auxiliaries], ["ntd11", "sensitive"])
+
+    def test_disabled_optional_models_skip_status_validation(self):
+        state = self.new_state()
+        state.settings["models"].update({
+            "ntd11": "missing-ntd11.onnx", "ntd11_enabled": False,
+            "sensitive": "missing-sensitive.onnx", "sensitive_enabled": False,
+            "hand_detection": "missing-hand.onnx", "hand_detection_enabled": False,
+        })
+        with patch.object(server_module, "validate_generic_yolo_segment_profile") as generic_validator, patch.object(
+            server_module, "validate_hand_profile"
+        ) as hand_validator:
+            status = state.settings_status()["models"]
+        generic_validator.assert_not_called()
+        hand_validator.assert_not_called()
+        self.assertFalse(status["ntd11"]["enabled"])
+        self.assertFalse(status["sensitive"]["enabled"])
+        self.assertFalse(status["hand_detection"]["enabled"])
+
+    def test_target_and_auxiliary_segments_are_arbitrated_once(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "cpu"
+        mask = np.zeros((10, 10), dtype=np.uint8); mask[2:8, 2:8] = 255
+        target = Mock(); target.detect.return_value = [{"class_name": "penis", "confidence": 0.6, "mask": mask, "source": "target"}]
+        auxiliary = Mock()
+        auxiliary.detect.side_effect = lambda tile, _confidence, source: [{
+            "class_name": "penis", "confidence": 0.9, "mask": np.full(tile.shape[:2], 255, dtype=np.uint8), "source": source,
+        }]
+        models = DetectionModels(target=target, auxiliaries=[("ntd11", auxiliary)])
+        segments = state._detect_arbitrated_segments(models, Image.new("RGB", (10, 10), "white"), 0.5)
+        self.assertEqual([segment["source"] for segment in segments], ["target"])
+        self.assertEqual(auxiliary.detect.call_count, len(detection_tiles(10, 10)))
 
     def test_hand_model_verification_occurs_once_after_first_load(self):
         state = self.new_state()
-        models = DetectionModels(Mock(), Mock())
+        models = DetectionModels(Mock())
         hand = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(
             server_module, "assert_onnx_cuda_available"
@@ -1214,7 +1259,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
-                [{"class_name": "penis", "confidence": 0.8, "mask": precise_mask, "source": "precise"}],
+                [{"class_name": "penis", "confidence": 0.8, "mask": precise_mask, "source": "target"}],
             )
         self.assertEqual(result[0]["refinement"], "hand")
         self.assertEqual(np.count_nonzero(result[0]["mask"]), 48)
@@ -1238,7 +1283,7 @@ class MozarieTests(unittest.TestCase):
         predictor.predict.side_effect = predict
         segments = [
             {"class_name": "penis", "confidence": 0.8, "mask": base_mask.copy(), "source": source}
-            for source in ("precise", "primary", "secondary")
+            for source in ("target", "ntd11", "sensitive")
         ]
         with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8), (8, 8, 12, 12), (0, 0, 2, 2)]) as hand_boxes, patch.object(
             state, "_sam_predictor_for", return_value=predictor
@@ -1257,7 +1302,7 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
-                [{"class_name": "pussy", "confidence": 0.8, "mask": pussy, "source": "precise"}],
+                [{"class_name": "pussy", "confidence": 0.8, "mask": pussy, "source": "target"}],
             )
         fluid_mask.assert_not_called()
         self.assertNotIn("refinement", result[0])
@@ -1278,7 +1323,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(
                 Mock(), record, Image.fromarray(rgb, mode="RGB"),
-                [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "precise"}],
+                [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "target"}],
             )
         self.assertEqual(result[0]["refinement"], "hand_fluid")
         self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりと白い体液を除外")
@@ -1404,7 +1449,7 @@ class MozarieTests(unittest.TestCase):
             state.order = [record.image_id]
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
                  patch.object(state, "_refine_detected_segments", side_effect=lambda _models, _record, _rgb, segments: segments), \
-                 patch.object(state, "_ensure_models", return_value=DetectionModels(precise=object())):
+                 patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())):
                 created = state.add_boundary_candidate(
                     record.image_id,
                     {"roi": {"left": 3, "top": 3, "right": 9, "bottom": 9}, "point": {"x": 5, "y": 5}},
@@ -1442,7 +1487,7 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
                  patch.object(state, "_refine_detected_segments", side_effect=refine), \
-                 patch.object(state, "_ensure_models", return_value=DetectionModels(precise=object())):
+                 patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())):
                 state.add_boundary_candidate(record.image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
 
             candidates = state.list_candidates(record.image_id)
@@ -1463,9 +1508,9 @@ class MozarieTests(unittest.TestCase):
             record = self._record(image_path, 12, 12)
             state = self.new_state()
             mask = np.zeros((12, 12), dtype=np.uint8); mask[3:9, 3:9] = 255
-            segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "precise"}
+            segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "target"}
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
-                refined = state._high_precision_segments(DetectionModels(precise=object()), record, [segment])[0]
+                refined = state._high_precision_segments(DetectionModels(target=object()), record, [segment])[0]
             self.assertTrue(np.array_equal(refined["mask"], mask))
             self.assertEqual(refined["refinement"], "sam_fallback")
 

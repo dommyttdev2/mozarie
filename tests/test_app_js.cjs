@@ -57,7 +57,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
   "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsTargetModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle",
 ]) {
   const value = element();
   value.id = id;
@@ -125,6 +125,11 @@ const settingsPanels = [
 ].map(([id, name]) => {
   const panel = element("section"); panel.id = id; panel.dataset.settingsPanel = name; elements.set(`#${id}`, panel); return panel;
 });
+const modelCards = [
+  ["settingsNtd11Toggle", "ntd11"], ["settingsSensitiveToggle", "sensitive"], ["settingsHandToggle", "hand_detection"],
+].map(([id, modelToggle]) => {
+  const toggle = elements.get(`#${id}`); toggle.dataset.modelToggle = modelToggle; return toggle;
+});
 elements.get("#boundaryModeMenu").children = [elements.get("#rectangleTool"), elements.get("#polygonTool"), elements.get("#boundaryBrushTool")];
 
 const createdCanvases = [];
@@ -177,6 +182,7 @@ const document = {
     if (selector === "dialog") return [elements.get("#confirmDialog"), elements.get("#applyDialog"), elements.get("#detectDialog")];
     if (selector === ".settings-tab") return settingsTabs;
     if (selector === "[data-settings-panel]") return settingsPanels;
+    if (selector === "[data-model-toggle]") return modelCards;
     return [];
   },
   createElement: (tag) => tag === "canvas" ? canvasElement() : element(tag),
@@ -363,7 +369,7 @@ const completionWatchdog = setTimeout(() => {
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [initialImage]);
   state.settings = {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true, tool_position: "left" },
     detection: { threshold: 0.5, parallelism: 2, mode: "high_precision" },
   };
@@ -2014,7 +2020,7 @@ const completionWatchdog = setTimeout(() => {
   // Loading either language refreshes dynamic detection labels and model status,
   // and parameterized strings never leak unresolved placeholders to the UI.
   state.settings = { general: { language: "en" } };
-  state.settingsStatus = { models: { target: { configured: true, valid: true, detail: "ready" } } };
+  state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   state.images = [{ id: "dynamic", relativePath: "dynamic-name.png", width: 20, height: 10, candidateCount: 1, enabledCandidateCount: 1 }];
   state.currentId = "dynamic";
   state.currentImage = { width: 20, height: 10 };
@@ -2031,6 +2037,15 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#detectModeStandard").textContent, "Standard");
   assert.equal(elements.get("#detectModeHighPrecision").textContent, "High precision");
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  state.settingsStatus = { models: {
+    target: { required: true, enabled: true, configured: true, valid: true, detail: "" },
+    ntd11: { required: false, enabled: true, configured: true, valid: false, detail: "invalid auxiliary" },
+    sensitive: { required: false, enabled: false, configured: false, valid: false, detail: "" },
+  } };
+  renderModelStatus();
+  assert.match(elements.get("#settingsModelStatus").textContent, /ntd11: invalid auxiliary/);
+  state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
+  renderModelStatus();
   assert.equal(elements.get("#imageInfo").textContent, "dynamic-name.png / 20 x 10");
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
@@ -2098,12 +2113,19 @@ const completionWatchdog = setTimeout(() => {
   // success message is rendered, so the result cannot be left in the old UI language.
   const japaneseSettings = {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "target.onnx", hand_detection: "hand.onnx", sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
+    models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true },
     detection: { threshold: 0.5, parallelism: 2, mode: "standard" },
   };
   const englishSettings = { ...japaneseSettings, general: { ...japaneseSettings.general, language: "en" }, display: { ...japaneseSettings.display, tool_position: "right" } };
-  setSettingsForm(japaneseSettings, { models: { target: { configured: true, valid: true, detail: "ready" } } });
+  setSettingsForm(japaneseSettings, { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } });
+  assert.equal(elements.get("#settingsNtd11Toggle").getAttribute("aria-pressed"), "true");
+  assert.equal(elements.get("#settingsSensitiveToggle").getAttribute("aria-pressed"), "false");
+  selectSettingsTab("models");
+  selectSettingsTab("general");
+  selectSettingsTab("models");
+  elements.get("#settingsSensitiveToggle").click();
+  assert.equal(settingsPayload().models.sensitive_enabled, true);
   assert.equal(elements.get("#canvasStage").dataset.toolPosition, "left");
   elements.get("#settingsToolPosition").value = "bottom";
   assert.equal(settingsPayload().display.tool_position, "bottom");
@@ -2112,7 +2134,7 @@ const completionWatchdog = setTimeout(() => {
   let preventedSettingsSubmit = false;
   const languageSwitchSave = saveSettings({ preventDefault() { preventedSettingsSubmit = true; } });
   assert.equal(preventedSettingsSubmit, true);
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: { target: { configured: true, valid: true, detail: "ready" } } } }) });
+  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } } }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get("#settingsResult").textContent, "", "settings success text waits for the replacement language dictionary");
   resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });

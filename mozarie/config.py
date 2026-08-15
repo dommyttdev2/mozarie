@@ -97,11 +97,15 @@ def validate_settings(value: Any) -> dict[str, Any]:
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
     paths = {}
-    for key in ("target_segmentation", "hand_detection", "sam_checkpoint"):
+    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "sam_checkpoint"):
         path = models.get(key)
         if not isinstance(path, str):
             raise SettingsError(f"models.{key} must be a string")
         paths[key] = path.strip()
+    enabled = {
+        key: _expect_bool(models.get(key), f"models.{key}")
+        for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled")
+    }
     return {
         "general": {
             "language": language,
@@ -109,7 +113,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "port": int(port),
             "shortcuts_enabled": _expect_bool(general.get("shortcuts_enabled"), "general.shortcuts_enabled"),
         },
-        "models": {**paths, "sam_model_type": sam_model_type, "provider": provider},
+        "models": {**paths, **enabled, "sam_model_type": sam_model_type, "provider": provider},
         "display": {
             "apply_color": _expect_color(display.get("apply_color"), "display.apply_color"),
             "exclude_color": _expect_color(display.get("exclude_color"), "display.exclude_color"),

@@ -4,17 +4,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mozarie.inference.onnx import Letterbox, nms_indices, restore_box
+from mozarie.inference.onnx import Letterbox, class_aware_nms_indices, create_session, nms_indices, restore_box
 from mozarie.inference.yolo_detect import HandDetector
+from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter
 from mozarie.inference.yolo_segment import TargetSegmenter
-from mozarie.inference.profiles import ModelProfileError, validate_hand_profile, validate_target_profile
+from mozarie.inference.profiles import ModelProfileError, validate_generic_yolo_segment_profile, validate_hand_profile, validate_target_profile
 
 
 class OnnxAdapterTests(unittest.TestCase):
@@ -36,6 +37,24 @@ class OnnxAdapterTests(unittest.TestCase):
     def test_nms_removes_overlapping_lower_confidence_box(self) -> None:
         self.assertEqual(nms_indices([(0, 0, 10, 10), (1, 1, 9, 9), (20, 20, 30, 30)], [0.9, 0.8, 0.7], 0.5), [0, 2])
 
+    def test_class_aware_nms_keeps_overlapping_different_classes(self) -> None:
+        boxes = [(0, 0, 10, 10), (1, 1, 9, 9), (1, 1, 9, 9)]
+        self.assertEqual(class_aware_nms_indices(boxes, [0.9, 0.8, 0.7], ["penis", "pussy", "penis"], 0.5), [0, 1])
+
+    def test_gpu_session_preloads_dlls_and_rejects_cpu_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"model")
+            session = Mock()
+            session.get_providers.return_value = ["CPUExecutionProvider"]
+            with patch("mozarie.inference.onnx.ort.preload_dlls") as preload, patch(
+                "mozarie.inference.onnx.ort.get_available_providers",
+                return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            ), patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session):
+                with self.assertRaisesRegex(RuntimeError, "CUDAExecutionProvider"):
+                    create_session(path, "gpu")
+            preload.assert_called_once_with()
+
     def test_segment_rows_accept_channel_first_export(self) -> None:
         rows = TargetSegmenter._prediction_rows(np.zeros((1, 43, 10), dtype=np.float32))
         self.assertEqual(rows.shape, (10, 43))
@@ -46,6 +65,35 @@ class OnnxAdapterTests(unittest.TestCase):
         resolved_prediction, resolved_prototype = TargetSegmenter._outputs([prototype, prediction])
         self.assertEqual(resolved_prediction.shape, prediction.shape)
         self.assertEqual(resolved_prototype.shape, prototype.shape)
+
+    def test_generic_segment_decoder_accepts_both_prediction_orientations(self) -> None:
+        detector = GenericYoloSegmenter.__new__(GenericYoloSegmenter)
+        detector.class_names = ("vagina", "penis", "arm")
+        channels = 4 + len(detector.class_names) + 32
+        self.assertEqual(detector._prediction_rows(np.zeros((1, channels, 5), dtype=np.float32)).shape, (5, channels))
+        self.assertEqual(detector._prediction_rows(np.zeros((1, 5, channels), dtype=np.float32)).shape, (5, channels))
+        prediction = np.zeros((1, channels, 5), dtype=np.float32)
+        prototype = np.zeros((1, 32, 20, 20), dtype=np.float32)
+        resolved_prediction, resolved_prototype = detector._outputs([prototype, prediction])
+        self.assertEqual(resolved_prediction.shape, prediction.shape)
+        self.assertEqual(resolved_prototype.shape, prototype.shape)
+
+    def test_generic_segment_decoder_returns_only_pussy_and_penis(self) -> None:
+        detector = GenericYoloSegmenter.__new__(GenericYoloSegmenter)
+        detector.class_names = ("vagina", "penis", "arm")
+        detector.input_size = 1024
+        channels = 4 + len(detector.class_names) + 32
+        prediction = np.zeros((1, channels, 3), dtype=np.float32)
+        for index, class_id in enumerate((0, 1, 2)):
+            prediction[0, :4, index] = (2 + index * 4, 5, 3, 6)
+            prediction[0, 4 + class_id, index] = 0.9
+            prediction[0, 4 + len(detector.class_names):, index] = 1.0
+        detector.run = lambda _tensor: [prediction, np.ones((1, 32, 4, 4), dtype=np.float32)]
+        tensor = np.zeros((1, 3, 1024, 1024), dtype=np.float32)
+        with patch("mozarie.inference.generic_yolo_segment.letterbox_bgr", return_value=(tensor, Letterbox(1, 0, 0, 10, 10, 10, 10))):
+            segments = detector.detect(np.zeros((10, 10, 3), dtype=np.uint8), 0.5, "ntd11")
+        self.assertEqual([segment["class_name"] for segment in segments], ["pussy", "penis"])
+        self.assertTrue(all(segment["source"] == "ntd11" for segment in segments))
 
     def test_hand_decoder_accepts_both_supported_orientations(self) -> None:
         detector = HandDetector.__new__(HandDetector)
@@ -131,6 +179,23 @@ class OnnxAdapterTests(unittest.TestCase):
                 validate_target_profile(self._write_model(root, "target-wrong-rank-output.onnx", [image], [wrong_rank_prediction, prototype]))
             dynamic = helper.make_tensor_value_info("images", TensorProto.FLOAT, [None, 3, None, None])
             self.assertEqual(validate_target_profile(self._write_model(root, "target-dynamic.onnx", [dynamic], [prediction, prototype])).kind, "target_segmentation")
+
+    def test_generic_segment_profile_requires_1024_raw_yolo_outputs_and_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 1024, 1024])
+            prediction = helper.make_tensor_value_info("output0", TensorProto.FLOAT, [1, 39, None])
+            prototype = helper.make_tensor_value_info("output1", TensorProto.FLOAT, [1, 32, None, None])
+            metadata = {"names": "{0: 'vagina', 1: 'penis', 2: 'arm'}"}
+            path = self._write_model(root, "generic.onnx", [image], [prediction, prototype], metadata=metadata)
+            self.assertEqual(validate_generic_yolo_segment_profile(path).kind, "generic_yolo_segmentation")
+            reversed_path = self._write_model(root, "generic-reversed.onnx", [image], [prototype, helper.make_tensor_value_info("output0", TensorProto.FLOAT, [1, None, 39])], metadata=metadata)
+            self.assertEqual(validate_generic_yolo_segment_profile(reversed_path).kind, "generic_yolo_segmentation")
+            with self.assertRaises(ModelProfileError):
+                validate_generic_yolo_segment_profile(self._write_model(root, "generic-no-names.onnx", [image], [prediction, prototype]))
+            wrong_size = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 1280, 1280])
+            with self.assertRaises(ModelProfileError):
+                validate_generic_yolo_segment_profile(self._write_model(root, "generic-size.onnx", [wrong_size], [prediction, prototype], metadata=metadata))
 
     def test_hand_profile_requires_single_xywh_score_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
