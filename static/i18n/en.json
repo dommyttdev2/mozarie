@@ -25,6 +25,7 @@
   "boundary.modeLabel": "Boundary shape",
   "boundary.rectangle": "Rectangle",
   "boundary.polygon": "Four-point",
+  "boundary.brush": "Boundary brush",
   "editor.settings": "Editor settings",
   "settings.toolPosition": "Tool position",
   "settings.toolPositionLeft": "Left",

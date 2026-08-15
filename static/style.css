@@ -73,7 +73,6 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 #editorCanvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; } .empty-state { position: absolute; inset: 0; display: grid; place-items: center; color: #8f98a2; pointer-events: none; } .empty-state[hidden] { display: none; }
 .review-status { min-width: 52px; color: #c6ccd3; white-space: nowrap; } .review-status.reviewed { color: #72cdb3; }
 .icon-button { min-width: 30px; min-height: 28px; padding: 1px 7px; font-size: 20px; line-height: 1; } .image-position { min-width: 54px; text-align: center; color: #c0c8d0; }
-.shortcut-toggle { display: inline-flex; min-height: 28px; gap: 5px; align-items: center; margin-left: 4px; color: #c0c8d0; cursor: pointer; } .shortcut-toggle input { margin: 0; accent-color: #4bb99d; }
 
 .detection-settings { padding: 11px; border-bottom: 1px solid #3b424a; } .threshold-control { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; color: #c0c8d0; }
 .threshold-control output { min-width: 50px; padding: 2px 6px; border: 1px solid #4e5660; border-radius: 3px; color: #e7eaed; text-align: center; } #confidence { width: 100%; margin: 8px 0 3px; } .detection-settings p { margin: 0; }
@@ -172,7 +171,7 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .canvas-stage:not([data-tool-position]) .canvas-tool-rail, .canvas-stage[data-tool-position="left"] .canvas-tool-rail { top: 50%; left: 12px; flex-direction: column; transform: translateY(-50%); }
 .canvas-stage[data-tool-position="right"] .canvas-tool-rail { top: 50%; right: 12px; flex-direction: column; transform: translateY(-50%); }
 .canvas-stage[data-tool-position="top"] .canvas-tool-rail { top: 10px; left: 50%; flex-direction: row; transform: translateX(-50%); }
-.canvas-stage[data-tool-position="bottom"] .canvas-tool-rail { bottom: 10px; left: 50%; flex-direction: row; transform: translateX(-50%); }
+.canvas-stage[data-tool-position="bottom"] .canvas-tool-rail { bottom: 10px; left: 12px; flex-direction: row; transform: none; }
 .canvas-tool-rail .icon-button { width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; font-size: 16px; }
 .boundary-tool-menu { position: relative; }
 .boundary-mode-menu { position: absolute; z-index: 7; display: flex; gap: 4px; padding: 4px; border: 1px solid #48515a; border-radius: 5px; background: #20252a; box-shadow: 0 8px 20px #0007; }
@@ -194,6 +193,8 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .tool-icon-boundary > span::before { top: 5px; left: 2px; width: 7px; height: 2px; }
 .tool-icon-boundary > span::after { top: 2px; left: 5px; width: 2px; height: 7px; }
 .boundary-mode-diamond > span { width: 12px; height: 12px; border: 2px solid currentColor; transform: rotate(45deg); }
+.boundary-mode-brush > span::before { position: absolute; top: 1px; left: 6px; width: 4px; height: 13px; border-radius: 3px 3px 1px 1px; background: currentColor; content: ""; transform: rotate(42deg); }
+.boundary-mode-brush > span::after { position: absolute; right: 0; bottom: 1px; width: 8px; height: 3px; border-radius: 4px; background: currentColor; content: ""; transform: rotate(-18deg); }
 .tool-separator { width: 18px; height: 1px; margin: 2px 0; background: #4b535c; }
 .canvas-stage[data-tool-position="top"] .tool-separator, .canvas-stage[data-tool-position="bottom"] .tool-separator { width: 1px; height: 18px; margin: 0 2px; }
 .canvas-settings-bar { top: 10px; left: 56px; padding: 5px 8px; }
@@ -206,10 +207,9 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .canvas-stage[data-tool-position="top"] .canvas-settings-bar { top: 136px; left: 12px; }
 .canvas-stage[data-tool-position="top"] .canvas-navigation-bar { left: 12px; }
 .canvas-stage[data-tool-position="bottom"] .canvas-settings-bar { left: 12px; }
-.canvas-stage[data-tool-position="bottom"] .canvas-navigation-bar { bottom: 136px; left: 12px; }
+.canvas-stage[data-tool-position="bottom"] .canvas-navigation-bar { right: 12px; bottom: 10px; left: 286px; }
 .canvas-navigation-bar > * { flex: 0 0 auto; }
 .canvas-navigation-bar .truncate { flex: 1 1 auto; min-width: 48px; color: #c5cdd5; }
-.canvas-navigation-bar .shortcut-toggle { margin-left: 0; }
 .review-status { min-width: 45px; }
 .inspector-heading { min-height: 46px; }
 .inspector-current-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; padding: 8px; border-bottom: 1px solid #3b424a; }

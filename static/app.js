@@ -7,7 +7,8 @@ const state = {
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
-  polygonPoints: [], polygonDragIndex: -1, blinkCandidateIds: new Set(),
+  boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
+  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(),
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
@@ -38,6 +39,7 @@ const mosaicSourceCanvas = document.createElement("canvas");
 const historyAddCanvas = document.createElement("canvas");
 const historyExclusionCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
+const boundaryOverlayCanvas = document.createElement("canvas");
 const blinkCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
 const exclusionCtx = exclusionCanvas.getContext("2d");
@@ -45,6 +47,7 @@ const combinedCtx = combinedCanvas.getContext("2d");
 const mosaicCtx = mosaicCanvas.getContext("2d");
 const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
 const layerCtx = layerCanvas.getContext("2d");
+const boundaryOverlayCtx = boundaryOverlayCanvas.getContext("2d");
 const blinkCtx = blinkCanvas.getContext("2d");
 let renderedWidth = 0;
 let renderedHeight = 0;
@@ -260,9 +263,7 @@ function focusCanvas() { focusElement(canvas); }
 function setNavigationShortcutsEnabled(enabled) {
   state.navigationShortcutsEnabled = Boolean(enabled);
   if (state.settings?.general) state.settings.general.shortcuts_enabled = state.navigationShortcutsEnabled;
-  const topControl = $("#navigationShortcutsEnabled");
   const settingsControl = $("#settingsShortcuts");
-  if (topControl) topControl.checked = state.navigationShortcutsEnabled;
   if (settingsControl) settingsControl.checked = state.navigationShortcutsEnabled;
   updateNavigationControls();
   focusCanvas();
@@ -327,7 +328,6 @@ function updateActionButtons() {
   $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
   $("#nextUnreviewedButton").disabled = running || !nextUnreviewedImage();
   $("#reviewAndNextButton").disabled = running || !hasImage;
-  $("#navigationShortcutsEnabled").disabled = running;
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
@@ -347,9 +347,26 @@ function clearBoundaryInteraction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
+  state.boundaryDrafts = [];
+  state.boundaryActiveId = null;
+  state.boundaryBrushStroke = null;
   state.polygonPoints = [];
   state.polygonDragIndex = -1;
+  state.polygonDraftDrag = null;
   updateBoundaryActions();
+}
+
+function clearBoundaryConstruction() {
+  state.boundaryRoi = null;
+  state.boundaryStart = null;
+  state.boundaryStartClient = null;
+  state.boundaryPoint = null;
+  state.boundaryPromptPoint = null;
+  state.boundaryDragging = false;
+  state.boundaryBrushStroke = null;
+  state.polygonPoints = [];
+  state.polygonDragIndex = -1;
+  state.polygonDraftDrag = null;
 }
 
 function setMosaicPreviewEnabled(enabled) {
@@ -596,7 +613,6 @@ function updateNavigationControls() {
   const index = imageIndex();
   const position = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
   $("#imagePosition").textContent = position;
-  $("#navigationShortcutsEnabled").checked = state.navigationShortcutsEnabled;
   const status = $("#reviewStatus");
   const record = currentRecord();
   const reviewed = isReviewed(record);
@@ -880,7 +896,9 @@ function resizeRenderCanvas() {
   if (renderedWidth === width && renderedHeight === height && canvas.width === Math.round(width * dpr)) return;
   renderedWidth = width; renderedHeight = height;
   canvas.width = Math.max(1, Math.round(width * dpr)); canvas.height = Math.max(1, Math.round(height * dpr));
-  layerCanvas.width = canvas.width; layerCanvas.height = canvas.height; render();
+  layerCanvas.width = canvas.width; layerCanvas.height = canvas.height;
+  boundaryOverlayCanvas.width = canvas.width; boundaryOverlayCanvas.height = canvas.height;
+  render();
 }
 
 function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; context.setTransform(dpr, 0, 0, dpr, 0, 0); }
@@ -977,13 +995,13 @@ function paintMosaicPreview() {
 }
 
 function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "eraser"].includes(state.tool)) return;
+  if (!state.hover || !state.currentImage || !["brush", "eraser", "boundary_brush"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
   ctx.save();
   if (state.tool === "eraser") ctx.setLineDash([6, 4]);
-  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = state.tool === "boundary_brush" ? "#50d589" : "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
   ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#111316"; ctx.lineWidth = 1; ctx.stroke();
   ctx.restore();
 }
@@ -1000,23 +1018,163 @@ function boundaryDraftRoi() {
     : state.boundaryRoi;
 }
 
-function pointInBoundaryRoi(point) {
-  const roi = state.boundaryRoi;
-  return Boolean(roi && point.x >= roi.left && point.x < roi.right && point.y >= roi.top && point.y < roi.bottom);
+function boundaryDraftId() { state.boundaryDraftSequence += 1; return `boundary-${state.boundaryDraftSequence}`; }
+function pointForRoi(roi) { return { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) }; }
+
+function polygonRoi(points) {
+  if (!points.length) return null;
+  return {
+    left: Math.floor(Math.min(...points.map((point) => point.x))), right: Math.ceil(Math.max(...points.map((point) => point.x))),
+    top: Math.floor(Math.min(...points.map((point) => point.y))), bottom: Math.ceil(Math.max(...points.map((point) => point.y))),
+  };
+}
+
+function boundaryDraftBounds(draft) { return draft?.roi || polygonRoi(draft?.points || []); }
+
+function addBoundaryDraft(draft) {
+  const item = { id: boundaryDraftId(), ...draft };
+  state.boundaryDrafts.push(item);
+  state.boundaryActiveId = item.id;
+  return item;
+}
+
+function activeBoundaryShape() {
+  const rectangle = boundaryDraftRoi();
+  if (rectangle) return { type: "rectangle", roi: rectangle, point: state.boundaryPromptPoint || pointForRoi(rectangle), transient: true };
+  if (state.polygonPoints.length) return { type: "polygon", points: state.polygonPoints, transient: true };
+  if (state.boundaryBrushStroke) return { ...state.boundaryBrushStroke, transient: true };
+  return null;
+}
+
+function boundaryShapes() { return [...state.boundaryDrafts, ...[activeBoundaryShape()].filter(Boolean)]; }
+
+function strokeRoi(points, radius) {
+  if (!points.length) return null;
+  const padding = Math.max(1, radius / 2);
+  const image = state.currentImage;
+  const clampX = (value) => Math.max(0, Math.min(image.width, value));
+  const clampY = (value) => Math.max(0, Math.min(image.height, value));
+  const roi = {
+    left: Math.floor(clampX(Math.min(...points.map((point) => point.x)) - padding)),
+    top: Math.floor(clampY(Math.min(...points.map((point) => point.y)) - padding)),
+    right: Math.ceil(clampX(Math.max(...points.map((point) => point.x)) + padding)),
+    bottom: Math.ceil(clampY(Math.max(...points.map((point) => point.y)) + padding)),
+  };
+  return roiFromPoints({ x: roi.left, y: roi.top }, { x: roi.right, y: roi.bottom });
+}
+
+function appendBoundaryBrushPoint(point) {
+  const stroke = state.boundaryBrushStroke;
+  if (!stroke) return;
+  const previous = stroke.points.at(-1);
+  if (!previous || Math.hypot(previous.x - point.x, previous.y - point.y) >= 0.5) stroke.points.push(point);
+  stroke.roi = strokeRoi(stroke.points, stroke.radius);
+}
+
+function beginBoundaryBrushStroke(point) {
+  state.boundaryBrushStroke = { type: "brush", points: [point], radius: Math.max(1, Number($("#brushSize").value)), roi: null };
+  state.boundaryBrushStroke.roi = strokeRoi(state.boundaryBrushStroke.points, state.boundaryBrushStroke.radius);
+}
+
+function completeBoundaryBrushStroke() {
+  const stroke = state.boundaryBrushStroke;
+  state.boundaryBrushStroke = null;
+  if (!stroke?.roi) return;
+  addBoundaryDraft({ type: "brush", points: stroke.points.map((point) => ({ ...point })), radius: stroke.radius, roi: stroke.roi, point: pointForRoi(stroke.roi) });
+  setStatusKey("status.boundaryReady");
+}
+
+function rectsTouch(first, second) {
+  return first.left <= second.right + 1 && first.right + 1 >= second.left
+    && first.top <= second.bottom + 1 && first.bottom + 1 >= second.top;
+}
+
+function joinRois(rois) {
+  return {
+    left: Math.min(...rois.map((roi) => roi.left)), right: Math.max(...rois.map((roi) => roi.right)),
+    top: Math.min(...rois.map((roi) => roi.top)), bottom: Math.max(...rois.map((roi) => roi.bottom)),
+  };
+}
+
+function boundaryRequests() {
+  const requests = [];
+  const brushGroups = [];
+  state.boundaryDrafts.forEach((draft, index) => {
+    if (draft.type !== "brush") {
+      requests.push({ firstIndex: index, draftIds: [draft.id], draft });
+      return;
+    }
+    if (!draft.roi) return;
+    let group = brushGroups.find((item) => rectsTouch(item.roi, draft.roi));
+    if (!group) { brushGroups.push({ drafts: [draft], roi: { ...draft.roi }, firstIndex: index }); return; }
+    group.drafts.push(draft); group.roi = joinRois(group.drafts.map((item) => item.roi));
+    group.firstIndex = Math.min(group.firstIndex, index);
+    for (let index = brushGroups.length - 1; index >= 0; index -= 1) {
+      const other = brushGroups[index];
+      if (other === group || !rectsTouch(group.roi, other.roi)) continue;
+      group.drafts.push(...other.drafts); group.roi = joinRois(group.drafts.map((item) => item.roi)); group.firstIndex = Math.min(group.firstIndex, other.firstIndex); brushGroups.splice(index, 1);
+    }
+  });
+  for (const group of brushGroups) requests.push({ firstIndex: group.firstIndex, draftIds: group.drafts.map((draft) => draft.id), draft: { type: "brush", roi: group.roi, point: pointForRoi(group.roi) } });
+  return requests.sort((first, second) => first.firstIndex - second.firstIndex).map(({ draftIds, draft }) => ({ draftIds, draft }));
+}
+
+function boundaryPath(shape, context = ctx) {
+  const roi = boundaryDraftBounds(shape);
+  if (shape.type === "polygon" && shape.points?.length) {
+    shape.points.forEach((point, index) => {
+      const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+      if (index) context.lineTo(x, y); else context.moveTo(x, y);
+    });
+    if (shape.points.length === 4) context.closePath();
+    return;
+  }
+  if (shape.type === "brush" && shape.points?.length) {
+    const points = shape.points;
+    const first = points[0];
+    context.moveTo(state.view.x + first.x * state.view.scale, state.view.y + first.y * state.view.scale);
+    for (const point of points.slice(1)) context.lineTo(state.view.x + point.x * state.view.scale, state.view.y + point.y * state.view.scale);
+    if (points.length === 1) context.lineTo(state.view.x + first.x * state.view.scale + 0.01, state.view.y + first.y * state.view.scale + 0.01);
+    return;
+  }
+  if (roi) context.rect(state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
+}
+
+function drawBoundaryScrim(shapes) {
+  if (!shapes.length || !state.currentImage) return;
+  setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  boundaryOverlayCtx.save();
+  boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
+  boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
+  boundaryOverlayCtx.globalCompositeOperation = "destination-out";
+  for (const shape of shapes) {
+    boundaryOverlayCtx.beginPath();
+    boundaryPath(shape, boundaryOverlayCtx);
+    if (shape.type === "brush") {
+      boundaryOverlayCtx.lineWidth = Math.max(1, shape.radius * state.view.scale); boundaryOverlayCtx.lineCap = "round"; boundaryOverlayCtx.lineJoin = "round"; boundaryOverlayCtx.stroke();
+    } else boundaryOverlayCtx.fill();
+  }
+  boundaryOverlayCtx.restore(); setCssTransform(ctx); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
+}
+
+function drawBoundaryShape(shape) {
+  const ready = shape.type !== "polygon" || shape.points.length === 4;
+  ctx.save(); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
+  ctx.beginPath(); boundaryPath(shape);
+  if (shape.type === "brush") { ctx.lineWidth = Math.max(2, shape.radius * state.view.scale); ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke(); }
+  else ctx.stroke();
+  if (shape.type === "polygon") for (const point of shape.points) {
+    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawBoundaryRoi() {
-  const roi = boundaryDraftRoi();
-  if (!roi) return;
-  const x = state.view.x + roi.left * state.view.scale; const y = state.view.y + roi.top * state.view.scale;
-  const width = (roi.right - roi.left) * state.view.scale; const height = (roi.bottom - roi.top) * state.view.scale;
-  ctx.save(); ctx.fillStyle = "rgba(255, 255, 255, 0.24)"; ctx.fillRect(x, y, width, height);
-  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(x, y, width, height); ctx.restore();
-  if (state.boundaryPromptPoint && !state.boundaryDragging) {
-    const pointX = state.view.x + state.boundaryPromptPoint.x * state.view.scale;
-    const pointY = state.view.y + state.boundaryPromptPoint.y * state.view.scale;
-    ctx.save(); ctx.fillStyle = "#50d589"; ctx.beginPath(); ctx.arc(pointX, pointY, 4, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  }
+  const shapes = boundaryShapes();
+  if (!shapes.length) return;
+  drawBoundaryScrim(shapes);
+  shapes.forEach(drawBoundaryShape);
 }
 
 function polygonArea(points) {
@@ -1041,40 +1199,29 @@ function polygonIsValid() {
 }
 
 function canDetectBoundary() {
-  const rectangleReady = state.tool === "boundary" && Boolean(state.boundaryRoi);
-  const polygonReady = state.tool === "polygon" && polygonIsValid();
-  return Boolean(state.currentId && state.currentImage && (rectangleReady || polygonReady))
-    && !state.boundaryDragging && !state.pendingImageId && !state.boundaryPending && !isBusy() && !state.importing;
+  const constructing = state.boundaryDragging || state.polygonPoints.length > 0 || Boolean(state.boundaryBrushStroke);
+  return Boolean(state.currentId && state.currentImage && boundaryRequests().length)
+    && !constructing && !state.pendingImageId && !state.boundaryPending && !isBusy() && !state.importing;
 }
 
 function hasBoundaryDraft() {
-  return (state.tool === "boundary" && Boolean(state.boundaryRoi || state.boundaryStart))
-    || (state.tool === "polygon" && state.polygonPoints.length > 0);
+  return Boolean(state.boundaryDrafts.length || activeBoundaryShape());
 }
 
 function boundaryActionAnchor() {
-  const rectangle = boundaryDraftRoi();
-  const points = state.polygonPoints;
-  if (rectangle) return {
-    left: state.view.x + rectangle.left * state.view.scale,
-    right: state.view.x + rectangle.right * state.view.scale,
-    top: state.view.y + rectangle.top * state.view.scale,
-    bottom: state.view.y + rectangle.bottom * state.view.scale,
-  };
-  if (!points.length) return null;
-  const projected = points.map((point) => ({ x: state.view.x + point.x * state.view.scale, y: state.view.y + point.y * state.view.scale }));
+  const active = activeBoundaryShape() || state.boundaryDrafts.find((draft) => draft.id === state.boundaryActiveId) || state.boundaryDrafts.at(-1);
+  const roi = boundaryDraftBounds(active);
+  if (!roi) return null;
   return {
-    left: Math.min(...projected.map((point) => point.x)), right: Math.max(...projected.map((point) => point.x)),
-    top: Math.min(...projected.map((point) => point.y)), bottom: Math.max(...projected.map((point) => point.y)),
+    left: state.view.x + roi.left * state.view.scale, right: state.view.x + roi.right * state.view.scale,
+    top: state.view.y + roi.top * state.view.scale, bottom: state.view.y + roi.bottom * state.view.scale,
   };
 }
 
 function updateBoundaryActions() {
   const actions = $("#boundaryActions");
   if (!actions) return;
-  const isRectangleDraft = state.tool === "boundary" && Boolean(boundaryDraftRoi());
-  const isPolygonDraft = state.tool === "polygon" && state.polygonPoints.length > 0;
-  const active = !state.boundaryPending && !state.pendingImageId && (isRectangleDraft || isPolygonDraft);
+  const active = !state.boundaryPending && !state.pendingImageId && hasBoundaryDraft();
   const focusedAction = document.activeElement === $("#boundaryDetectButton") || document.activeElement === $("#boundaryCancelButton");
   actions.hidden = !active;
   $("#boundaryDetectButton").disabled = !canDetectBoundary();
@@ -1096,22 +1243,7 @@ function updateBoundaryActions() {
 }
 
 function drawPolygonBoundary() {
-  const points = state.polygonPoints;
-  if (!points.length) return;
-  ctx.save();
-  ctx.strokeStyle = polygonIsValid() ? "#50d589" : "#f0ba62"; ctx.fillStyle = "rgba(80, 213, 137, 0.16)"; ctx.lineWidth = 2;
-  ctx.beginPath();
-  points.forEach((point, index) => {
-    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
-    if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-  });
-  if (points.length === 4) { ctx.closePath(); ctx.fill(); }
-  ctx.stroke();
-  for (const point of points) {
-    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
-    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
-  }
-  ctx.restore(); updateBoundaryActions();
+  // Polygon drawing is handled together with every selected boundary shape.
 }
 
 function drawCandidateBlinkOverlay() {
@@ -1367,38 +1499,51 @@ function deleteManualExclusion() {
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
-async function addBoundaryCandidate(point = null, polygonPoints = null) {
+async function addBoundaryCandidate() {
   if (!canDetectBoundary()) return;
   const imageId = state.currentId;
   const viewGeneration = state.imageGeneration;
-  const roi = state.boundaryRoi ? { ...state.boundaryRoi } : null;
-  const targetPoint = point ? { ...point } : (roi ? { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) } : null);
+  const requests = boundaryRequests();
   let catalogChanged = false;
   state.boundaryPending = true; updateBoundaryActions(); updateActionButtons(); setStatusKey("status.boundaryDetecting", {}, "running");
   try {
-    const data = await api("/api/boundary", {
-      method: "POST",
-      body: JSON.stringify(polygonPoints ? { imageId, points: polygonPoints } : { imageId, roi, point: targetPoint }),
-    });
-    const created = Array.isArray(data.candidates) ? data.candidates : [];
-    if (!created.length || !Number.isInteger(data.candidateRevision)) throw new Error(t("error.boundaryResponse"));
-    const record = state.images.find((item) => item.id === imageId);
-    if (record) {
-      record.candidateCount = (record.candidateCount || 0) + created.length;
-      record.enabledCandidateCount = (record.enabledCandidateCount || 0) + created.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
-      record.candidateRevision = data.candidateRevision;
-      state.maskStatus.set(imageId, true);
+    for (const request of requests) {
+      const body = request.draft.type === "polygon"
+        ? { imageId, points: request.draft.points.map((point) => ({ ...point })) }
+        : { imageId, roi: request.draft.roi, point: request.draft.point || pointForRoi(request.draft.roi) };
+      let data;
+      try {
+        data = await api("/api/boundary", { method: "POST", body: JSON.stringify(body) });
+      } catch (error) {
+        if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error");
+        break;
+      }
+      const created = Array.isArray(data.candidates) ? data.candidates : [];
+      if (!created.length || !Number.isInteger(data.candidateRevision)) {
+        if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(t("error.boundaryResponse"), "error");
+        break;
+      }
+      const record = state.images.find((item) => item.id === imageId);
+      if (record) {
+        record.candidateCount = (record.candidateCount || 0) + created.length;
+        record.enabledCandidateCount = (record.enabledCandidateCount || 0) + created.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+        record.candidateRevision = data.candidateRevision;
+        state.maskStatus.set(imageId, true);
+      }
+      state.boundaryDrafts = state.boundaryDrafts.filter((draft) => !request.draftIds.includes(draft.id));
+      state.boundaryActiveId = state.boundaryDrafts.at(-1)?.id || null;
+      invalidateCandidateBundles(imageId); catalogChanged = true;
     }
-    invalidateCandidateBundles(imageId);
-    catalogChanged = true;
-    markImagesUnreviewed([imageId], false);
-    if (state.currentId !== imageId || state.imageGeneration !== viewGeneration) return;
-
-    await reconcileCurrentCandidates(imageId, viewGeneration);
-    clearBoundaryInteraction();
-    setStatusKey("status.boundaryDone");
-  } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
-  finally {
+    if (catalogChanged) {
+      markImagesUnreviewed([imageId], false);
+      if (state.currentId === imageId && state.imageGeneration === viewGeneration) {
+        await reconcileCurrentCandidates(imageId, viewGeneration);
+        if (!state.boundaryDrafts.length) setStatusKey("status.boundaryDone");
+      }
+    }
+  } catch (error) {
+    if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error");
+  } finally {
     state.boundaryPending = false;
     if (catalogChanged) renderCatalogViews();
     updateBoundaryActions(); updateActionButtons();
@@ -1423,6 +1568,15 @@ function boundaryDragStarted(event) {
 function polygonVertexAt(point) {
   const radius = Math.max(8, 12 / Math.max(state.view.scale, 0.1));
   return state.polygonPoints.findIndex((vertex) => Math.hypot(vertex.x - point.x, vertex.y - point.y) <= radius);
+}
+function completedPolygonVertexAt(point) {
+  const radius = Math.max(8, 12 / Math.max(state.view.scale, 0.1));
+  for (const draft of [...state.boundaryDrafts].reverse()) {
+    if (draft.type !== "polygon") continue;
+    const index = draft.points.findIndex((vertex) => Math.hypot(vertex.x - point.x, vertex.y - point.y) <= radius);
+    if (index >= 0) return { draft, index };
+  }
+  return null;
 }
 function cancelBoundary() {
   clearBoundaryInteraction(); render();
@@ -2262,16 +2416,17 @@ async function pollJob() {
 function setTool(tool) {
   if (isBusy() || state.importing) return;
   const focusedInBoundaryMenu = closeBoundaryModeMenu();
-  if (tool !== "boundary") clearBoundaryInteraction();
-  if (tool !== "polygon") { state.polygonPoints = []; state.polygonDragIndex = -1; }
+  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush"]);
+  if (!boundaryTools.has(tool)) clearBoundaryInteraction();
+  else if (state.tool !== tool) clearBoundaryConstruction();
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
-  $("#boundaryTool").classList.toggle("active", ["boundary", "polygon"].includes(tool));
-  $("#boundaryTool").setAttribute("aria-pressed", String(["boundary", "polygon"].includes(tool)));
+  $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
+  $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
-  if (tool === "boundary" && state.boundaryRoi) setStatusKey("status.boundaryReady");
+  if (boundaryTools.has(tool) && state.boundaryDrafts.length) setStatusKey("status.boundaryReady");
   updateBoundaryActions(); render();
   if (focusedInBoundaryMenu) focusCanvas();
 }
@@ -2909,7 +3064,6 @@ function bindEvents() {
   $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
   $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
   $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
-  $("#navigationShortcutsEnabled").addEventListener("change", (event) => { void persistNavigationShortcuts(event.target.checked); });
   $("#settingsShortcuts").addEventListener("change", () => {});
   $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
@@ -2929,11 +3083,10 @@ function bindEvents() {
   });
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
+  $("#boundaryBrushTool").addEventListener("click", () => setTool("boundary_brush"));
   $("#boundaryDetectButton").addEventListener("click", () => {
     if (!canDetectBoundary()) return;
-    if (state.tool === "polygon") {
-      void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
-    } else void addBoundaryCandidate(state.boundaryPromptPoint);
+    void addBoundaryCandidate();
   });
   $("#boundaryCancelButton").addEventListener("click", cancelBoundary);
   $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
@@ -3022,11 +3175,22 @@ function bindEvents() {
         state.polygonDragIndex = vertex;
         state.drawing = true;
       } else {
-        if (state.polygonPoints.length < 4) state.polygonPoints.push(point);
+        const completedVertex = completedPolygonVertexAt(point);
+        if (completedVertex) {
+          state.polygonDraftDrag = { id: completedVertex.draft.id, index: completedVertex.index };
+        } else if (state.polygonPoints.length < 4) {
+          state.polygonPoints.push(point);
+          if (state.polygonPoints.length === 4 && polygonIsValid()) {
+            addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
+            state.polygonPoints = [];
+            setStatusKey("status.boundaryReady");
+          }
+        }
         state.drawing = false;
       }
       updateBoundaryActions(); render(); return;
     }
+    if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
     beginManualStroke(point); render();
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -3042,6 +3206,15 @@ function bindEvents() {
         state.boundaryDragging ||= boundaryDragStarted(event);
       } else if (state.tool === "polygon" && state.polygonDragIndex >= 0) {
         state.polygonPoints[state.polygonDragIndex] = point;
+      } else if (state.tool === "polygon" && state.polygonDraftDrag) {
+        const draft = state.boundaryDrafts.find((item) => item.id === state.polygonDraftDrag.id);
+        if (draft) {
+          draft.points[state.polygonDraftDrag.index] = point;
+          draft.roi = polygonRoi(draft.points);
+          state.boundaryActiveId = draft.id;
+        }
+      } else if (state.tool === "boundary_brush") {
+        appendBoundaryBrushPoint(point);
       } else { appendManualStrokePoint(point); state.pointer = point; }
     }
     render();
@@ -3052,21 +3225,20 @@ function bindEvents() {
     const boundaryStarted = Boolean(state.boundaryStart);
     try { if (event && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId); } catch { /* Pointer capture may already be released. */ }
     state.drawing = false; state.panning = false;
-    if (state.tool === "polygon") { state.polygonDragIndex = -1; updateBoundaryActions(); render(); return; }
+    if (state.tool === "polygon") { state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); render(); return; }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
     canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair";
     if (wasDrawing && manualStrokeStarted) completeManualStroke();
+    if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
+    if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;
     if (!cancelled && wasDrawing && boundaryStarted && !isBusy() && !state.importing && event?.button === 0) {
       const point = clampPoint(pointFromEvent(event));
       const roi = roiFromPoints(boundaryStart, point);
       if (boundaryDragging && roi) {
-        state.boundaryRoi = roi;
-        state.boundaryPromptPoint = { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) };
-        setStatusKey("status.boundaryReady");
-      } else if (pointInBoundaryRoi(point)) {
-        state.boundaryPromptPoint = point;
+        addBoundaryDraft({ type: "rectangle", roi, point: pointForRoi(roi) });
+        state.boundaryRoi = null;
         setStatusKey("status.boundaryReady");
       }
     }
@@ -3092,10 +3264,7 @@ function bindEvents() {
       if (event.key === "Escape") { event.preventDefault(); cancelBoundary(); return; }
       if (event.key === "Enter") {
         event.preventDefault();
-        if (canDetectBoundary()) {
-          if (state.tool === "polygon") void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
-          else void addBoundaryCandidate(state.boundaryPromptPoint);
-        }
+        if (canDetectBoundary()) void addBoundaryCandidate();
         return;
       }
     }

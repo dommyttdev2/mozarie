@@ -54,8 +54,8 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
-  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
+  "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
+  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
   "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsTargetModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult",
 ]) {
@@ -99,7 +99,7 @@ Object.defineProperty(overviewGrid, "textContent", {
   get() { return this._textContent || ""; },
   set(value) { this._textContent = value; this.children = []; },
 });
-elements.get("#editorCanvas").getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, arc() {}, fill() {}, stroke() {}, setLineDash() {} });
+elements.get("#editorCanvas").getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, rect() {}, closePath() {}, arc() {}, fill() {}, stroke() {}, clip() {}, setLineDash() {} });
 elements.get("#editorCanvas").getBoundingClientRect = () => ({ left: 0, top: 0 });
 elements.get("#editorCanvas").setPointerCapture = () => {};
 elements.get("#editorCanvas").hasPointerCapture = () => true;
@@ -125,7 +125,7 @@ const settingsPanels = [
 ].map(([id, name]) => {
   const panel = element("section"); panel.id = id; panel.dataset.settingsPanel = name; elements.set(`#${id}`, panel); return panel;
 });
-elements.get("#boundaryModeMenu").children = [elements.get("#rectangleTool"), elements.get("#polygonTool")];
+elements.get("#boundaryModeMenu").children = [elements.get("#rectangleTool"), elements.get("#polygonTool"), elements.get("#boundaryBrushTool")];
 
 const createdCanvases = [];
 function canvasElement() {
@@ -148,7 +148,7 @@ function canvasElement() {
         }
       }
     },
-    setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() { this.strokeCalls += 1; },
+    setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, rect() {}, closePath() {}, fill() {}, clip() {}, stroke() { this.strokeCalls += 1; },
     getImageData() {
       if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) };
       return { data: new Uint8ClampedArray([...target._alpha].flatMap((alpha) => [0, 0, 0, alpha ? 255 : 0])) };
@@ -262,10 +262,10 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, settingsPayload, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, settingsPayload, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, settingsPayload, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
-  const { render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab } = context.__mosaicTest;
+  const { render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim } = context.__mosaicTest;
   bindEvents();
   for (const [position, orientation] of [["left", "vertical"], ["right", "vertical"], ["top", "horizontal"], ["bottom", "horizontal"]]) {
     elements.get("#boundaryModeMenu").hidden = false;
@@ -370,7 +370,6 @@ const completionWatchdog = setTimeout(() => {
   const persistShortcuts = persistNavigationShortcuts(false);
   resolveFetch({ ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
   await persistShortcuts;
-  assert.equal(elements.get("#navigationShortcutsEnabled").checked, false);
   assert.equal(elements.get("#settingsShortcuts").checked, false);
   assert.equal(state.settings.general.shortcuts_enabled, false);
   assert.equal(requests.at(-1).path, "/api/settings");
@@ -554,15 +553,16 @@ const completionWatchdog = setTimeout(() => {
   state.currentId = "boundary-draft";
   state.tool = "boundary";
   state.view = { x: 0, y: 0, scale: 1 };
-  state.boundaryRoi = { left: 20, top: 340, right: 100, bottom: 390 };
-  state.boundaryPromptPoint = { x: 60, y: 365 };
+  state.boundaryRoi = null;
+  state.boundaryDrafts = [{ id: "draft-1", type: "rectangle", roi: { left: 20, top: 340, right: 100, bottom: 390 }, point: { x: 60, y: 365 } }];
+  state.boundaryActiveId = "draft-1";
   updateBoundaryActions();
   assert.equal(elements.get("#boundaryActions").hidden, false);
   assert.equal(elements.get("#boundaryDetectButton").disabled, false);
   assert.equal(elements.get("#boundaryActions").style.top, "294px");
   assert.equal(elements.get("#boundaryActions").style.left, "8px");
   state.tool = "polygon";
-  state.boundaryRoi = null;
+  state.boundaryDrafts = [];
   state.polygonPoints = [{ x: 10, y: 10 }];
   updateBoundaryActions();
   assert.equal(elements.get("#boundaryActions").hidden, false);
@@ -659,12 +659,14 @@ const completionWatchdog = setTimeout(() => {
   state.imageGeneration = 1;
   state.reviewedPaths = new Set(["first.png"]);
   state.tool = "boundary";
+  state.polygonPoints = [];
   const staleBoundaryAppends = galleryAppendCount;
-  state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
-  state.boundaryPromptPoint = { x: 8.5, y: 7.5 };
+  state.boundaryRoi = null;
+  state.boundaryDrafts = [{ id: "stale-boundary", type: "rectangle", roi: { left: 1, top: 1, right: 20, bottom: 20 }, point: { x: 8.5, y: 7.5 } }];
+  state.boundaryActiveId = "stale-boundary";
   state.candidates = [];
   state.candidateImages = new Map();
-  const pending = addBoundaryCandidate({ x: 8.5, y: 7.5 });
+  const pending = addBoundaryCandidate();
   state.currentId = "second";
   state.imageGeneration += 1;
   state.currentId = "first";
@@ -757,8 +759,10 @@ const completionWatchdog = setTimeout(() => {
   combinedMaskPresent = true;
   const candidateCountBeforeBoundary = state.images[0].candidateCount;
   const galleryAppendsBeforeBoundary = galleryAppendCount;
-  state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
-  const boundarySuccess = addBoundaryCandidate({ x: 8, y: 7 });
+  state.boundaryRoi = null;
+  state.boundaryDrafts = [{ id: "success-boundary", type: "rectangle", roi: { left: 1, top: 1, right: 20, bottom: 20 }, point: { x: 8, y: 7 } }];
+  state.boundaryActiveId = "success-boundary";
+  const boundarySuccess = addBoundaryCandidate();
   const existingBoundary = { id: "boundary-existing", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
   const boundarySuccessCandidate = { id: "boundary-success", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
   resolveFetch({ ok: true, json: async () => ({ candidates: [boundarySuccessCandidate], candidateRevision: 2 }) });
@@ -768,7 +772,7 @@ const completionWatchdog = setTimeout(() => {
   resolvePendingFetch("/api/mask/first/boundary-existing", { ok: true, blob: async () => ({}) });
   resolvePendingFetch("/api/mask/first/boundary-success", { ok: true, blob: async () => ({}) });
   await boundarySuccess;
-  assert.equal(state.boundaryRoi, null);
+  assert.equal(state.boundaryDrafts.length, 0);
   assert.equal(state.images[0].candidateCount, candidateCountBeforeBoundary + 1);
   assert.equal(isReviewed(state.images[0]), false);
   assert.equal(galleryAppendCount - galleryAppendsBeforeBoundary, state.images.length);
@@ -779,8 +783,10 @@ const completionWatchdog = setTimeout(() => {
   state.maskStatus = new Map([["first", false]]);
   const candidateCountBeforeMaskFailure = state.images[0].candidateCount;
   const maskFailureAppends = galleryAppendCount;
-  state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
-  const boundaryMaskFailure = addBoundaryCandidate({ x: 8, y: 7 });
+  state.boundaryRoi = null;
+  state.boundaryDrafts = [{ id: "mask-failure-boundary", type: "rectangle", roi: { left: 1, top: 1, right: 20, bottom: 20 }, point: { x: 8, y: 7 } }];
+  state.boundaryActiveId = "mask-failure-boundary";
+  const boundaryMaskFailure = addBoundaryCandidate();
   const boundaryMaskFailureCandidate = { id: "boundary-mask-failure", enabled: true, confidence: 0.9, color: "#fff", role: "apply" };
   resolveFetch({ ok: true, json: async () => ({ candidates: [boundaryMaskFailureCandidate], candidateRevision: 3 }) });
   await new Promise((resolve) => setImmediate(resolve));
@@ -799,11 +805,49 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(gallery.children.some((item) => item.dataset.id === "first"), true);
   state.galleryFilter = "all";
 
-  state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
-  const boundaryFailure = addBoundaryCandidate({ x: 8, y: 7 });
+  state.boundaryRoi = null;
+  state.boundaryDrafts = [{ id: "failed-boundary", type: "rectangle", roi: { left: 1, top: 1, right: 20, bottom: 20 }, point: { x: 8, y: 7 } }];
+  state.boundaryActiveId = "failed-boundary";
+  const boundaryFailure = addBoundaryCandidate();
   resolveFetch({ ok: false, json: async () => ({ error: "boundary failed" }) });
   await boundaryFailure;
-  assert.deepEqual(JSON.parse(JSON.stringify(state.boundaryRoi)), { left: 1, top: 1, right: 20, bottom: 20 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.boundaryDrafts[0].roi)), { left: 1, top: 1, right: 20, bottom: 20 });
+
+  // Boundary drafts keep creation order. Brush strokes merge by touching bounds,
+  // while disconnected strokes remain independent SAM requests.
+  state.boundaryDrafts = [];
+  elements.get("#brushSize").value = "6";
+  const rectangleDraft = addBoundaryDraft({ type: "rectangle", roi: { left: 2, top: 2, right: 20, bottom: 20 }, point: { x: 11, y: 11 } });
+  beginBoundaryBrushStroke({ x: 30, y: 20 }); appendBoundaryBrushPoint({ x: 36, y: 20 }); completeBoundaryBrushStroke();
+  beginBoundaryBrushStroke({ x: 36, y: 20 }); appendBoundaryBrushPoint({ x: 40, y: 20 }); completeBoundaryBrushStroke();
+  beginBoundaryBrushStroke({ x: 80, y: 50 }); appendBoundaryBrushPoint({ x: 85, y: 50 }); completeBoundaryBrushStroke();
+  const boundaryBatch = boundaryRequests();
+  assert.equal(boundaryBatch.length, 3, "rectangle plus touching and disconnected brush selections create three requests");
+  assert.equal(boundaryBatch[0].draftIds.join(","), rectangleDraft.id);
+  assert.equal(boundaryBatch[1].draft.type, "brush");
+  assert.equal(boundaryBatch[1].draftIds.length, 2, "touching brush strokes share one request");
+  assert.equal(boundaryBatch[2].draftIds.length, 1, "disconnected brush strokes stay separate");
+  assert.match(source, /globalCompositeOperation = "destination-out"/, "the boundary scrim cuts selected interiors out of the dark overlay");
+  assert.match(source, /boundaryOverlayCtx\.clip\(\)/, "the boundary scrim is clipped to the displayed image");
+  cancelBoundary();
+  assert.equal(state.boundaryDrafts.length, 0, "boundary cancel clears every pending selection");
+
+  // A failed item must remain after earlier items completed successfully.
+  state.currentId = "first"; state.currentImage = { width: 100, height: 80 }; state.imageGeneration = 90;
+  state.boundaryDrafts = [
+    { id: "ordered-1", type: "rectangle", roi: { left: 1, top: 1, right: 12, bottom: 12 }, point: { x: 6, y: 6 } },
+    { id: "ordered-2", type: "rectangle", roi: { left: 30, top: 10, right: 45, bottom: 30 }, point: { x: 37, y: 20 } },
+  ];
+  const orderedBoundary = addBoundaryCandidate();
+  state.imageGeneration += 1;
+  resolveFetch({ ok: true, json: async () => ({ candidates: [{ id: "ordered-candidate", enabled: true, role: "apply" }], candidateRevision: 5 }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, json: async () => ({ error: "second boundary failed" }) });
+  await orderedBoundary;
+  assert.equal(state.boundaryDrafts.length, 1, "only failed and unprocessed selections remain");
+  assert.equal(state.boundaryDrafts[0].id, "ordered-2");
+  const orderedRequests = requests.filter((request) => request.path === "/api/boundary").slice(-2).map((request) => JSON.parse(request.options.body).roi.left);
+  assert.equal(orderedRequests.join(","), "1,30", "boundary requests are sent sequentially in draft order");
 
   // Files loaded from a real filesystem path keep both destructive save choices available.
   state.images = [{ id: "filesystem", sourceKind: "filesystem", relativePath: "source.png", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1 }];
@@ -1755,14 +1799,6 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(state.viewMode, "overview");
   assert.equal(document.activeElement, elements.get("#overviewPane"));
   setViewMode("edit");
-  assert.equal(document.activeElement, elements.get("#editorCanvas"));
-  const shortcutCheckbox = elements.get("#navigationShortcutsEnabled");
-  shortcutCheckbox.focus();
-  shortcutCheckbox.checked = true;
-  shortcutCheckbox.dispatch("change");
-  await new Promise((resolve) => setImmediate(resolve));
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
-  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   runNavigationAction(() => {});
   assert.equal(document.activeElement, elements.get("#editorCanvas"));

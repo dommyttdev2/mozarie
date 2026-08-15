@@ -142,6 +142,10 @@ async function assertToolRailLayout(page, position) {
   });
   assert.equal(overlaps(boxes.rail, boxes.settings), false, `${position} rail must not overlap editor settings`);
   assert.equal(overlaps(boxes.rail, boxes.navigation), false, `${position} rail must not overlap image navigation`);
+  if (position === "bottom") {
+    assert.ok(Math.abs(boxes.rail.y - boxes.navigation.y) <= 2, "bottom tools and image navigation share one compact row");
+    assert.ok(boxes.rail.x + boxes.rail.width <= boxes.navigation.x, "bottom navigation uses the horizontal space beside the tools");
+  }
   await page.locator("#boundaryTool").click();
   const menu = await page.locator("#boundaryModeMenu").evaluate((element) => {
     const box = element.getBoundingClientRect();
@@ -193,7 +197,7 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
     assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 700), true, "the canvas stage must keep at least 700px at 1024x768");
-    for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#navigationShortcutsEnabled", "#saveButton"]) {
+    for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
     for (const position of ["left", "top", "right", "bottom"]) await assertToolRailLayout(page, position);

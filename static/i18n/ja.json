@@ -247,5 +247,6 @@
   "settings.toolPositionLeft": "左",
   "settings.toolPositionTop": "上",
   "settings.toolPositionRight": "右",
-  "settings.toolPositionBottom": "下"
+  "settings.toolPositionBottom": "下",
+  "boundary.brush": "境界ブラシ"
 }

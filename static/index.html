@@ -79,6 +79,7 @@
             <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
+              <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>
@@ -95,7 +96,6 @@
           <span id="imageInfo" hidden data-i18n-dynamic>画像未選択</span><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
           <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ" data-i18n-aria-label="navigation.previous" data-i18n-title="navigation.previous">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ" data-i18n-aria-label="navigation.next" data-i18n-title="navigation.next">›</button>
           <button id="nextUnreviewedButton" type="button" data-i18n="navigation.nextUnreviewed">次の未確認</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済みにして次へ</button>
-          <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked data-i18n-aria-label="navigation.shortcuts" aria-label="ショートカット"><span data-i18n="navigation.shortcuts">ショートカット</span></label>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
         <div id="boundaryActions" class="boundary-actions" role="group" aria-label="境界操作" data-i18n-aria-label="boundary.actions" hidden>
