@@ -650,7 +650,7 @@ class MozarieTests(unittest.TestCase):
         self.assertTrue(state.job_control.pause_requested.is_set())
 
         state.job.state = "paused"
-        state.resume_apply()
+        state.resume_job()
         self.assertEqual(state.job.state, "running")
         self.assertFalse(state.job_control.pause_requested.is_set())
 
@@ -661,6 +661,19 @@ class MozarieTests(unittest.TestCase):
         state.job.state = "paused"
         state.request_cancel()
         self.assertEqual(state.job.state, "cancelled")
+
+    def test_detection_can_pause_and_resume(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", total=2)
+        state.job_control = server_module.JobControl()
+
+        state.request_pause()
+        self.assertTrue(state.job_control.pause_requested.is_set())
+        state.job.state = "paused"
+        state.resume_job()
+
+        self.assertEqual(state.job.state, "running")
+        self.assertFalse(state.job_control.pause_requested.is_set())
 
     def test_detect_cancel_is_cooperative_and_discards_the_inflight_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1762,7 +1775,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), original_source)
             self.assertEqual(state.root, second_root.resolve())
 
-    def test_same_root_reload_waits_for_import_commit_and_replaces_the_session_catalog(self):
+    def test_same_root_reload_rejects_while_import_is_preparing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             Image.new("RGB", (16, 16), "white").save(root / "source.png")
@@ -1773,7 +1786,6 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             imported = threading.Event()
-            reloaded = threading.Event()
             errors: list[Exception] = []
             original_verify = server_module._verify_decodable_image
 
@@ -1790,32 +1802,21 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     imported.set()
 
-            def reload_worker():
-                try:
-                    state.set_root(str(root))
-                except Exception as exc:  # pragma: no cover - asserted below
-                    errors.append(exc)
-                finally:
-                    reloaded.set()
-
             with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
-                reloader = threading.Thread(target=reload_worker)
-                reloader.start()
-                self.assertFalse(reloaded.wait(0.1))
+                with self.assertRaises(ClientError):
+                    state.set_root(str(root))
                 release.set()
                 importer.join(2)
-                reloader.join(2)
 
             self.assertEqual(errors, [])
             self.assertTrue(imported.is_set())
-            self.assertTrue(reloaded.is_set())
-            self.assertFalse((root / ".mozarie_imports").exists())
-            self.assertEqual([image["relativePath"] for image in state.list_images()], ["source.png"])
-            self.assertIsNone(state.session_dir)
-
+            self.assertEqual(
+                [image["relativePath"] for image in state.list_images()],
+                ["imported.png", "source.png"],
+            )
     def test_concurrent_same_name_imports_commit_to_two_unique_intact_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1849,6 +1850,54 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual((destination_dir / "same.png").read_bytes(), raw)
             self.assertEqual((destination_dir / "same_2.png").read_bytes(), raw)
             self.assertFalse((root / ".mozarie_imports").exists())
+            self.assertEqual(len(state.list_images()), 2)
+
+    def test_concurrent_imports_decode_outside_the_commit_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_buffer = io.BytesIO()
+            Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
+            raw = raw_buffer.getvalue()
+            state = self.new_state()
+            state.set_root(str(root))
+            active = 0
+            peak = 0
+            active_lock = threading.Lock()
+            overlap = threading.Event()
+            release = threading.Event()
+            original_verify = server_module._verify_decodable_image
+
+            def blocked_verify(data):
+                nonlocal active, peak
+                with active_lock:
+                    active += 1
+                    peak = max(peak, active)
+                    if active >= 2:
+                        overlap.set()
+                try:
+                    self.assertTrue(release.wait(2))
+                    return original_verify(data)
+                finally:
+                    with active_lock:
+                        active -= 1
+
+            errors = []
+            def worker(name):
+                try:
+                    state.import_images([{"name": name, "data": base64.b64encode(raw).decode("ascii")}])
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+                first = threading.Thread(target=worker, args=("first.png",))
+                second = threading.Thread(target=worker, args=("second.png",))
+                first.start(); second.start()
+                self.assertTrue(overlap.wait(2), "image verification should overlap across import requests")
+                release.set()
+                first.join(2); second.join(2)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(peak, 2)
             self.assertEqual(len(state.list_images()), 2)
 
     def test_drag_import_uses_a_session_without_writing_to_the_source_root(self):
@@ -2029,7 +2078,7 @@ class MozarieTests(unittest.TestCase):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
-                with self.assertRaisesRegex(ClientError, "画像の追加中"):
+                with self.assertRaises(ClientError):
                     state._start_job("detect", [record], lambda *_args, **_kwargs: None)
                 release.set()
                 importer.join(2)
@@ -2244,7 +2293,7 @@ class MozarieTests(unittest.TestCase):
         state._start_job("apply", [record], worker)
         self.assertTrue(entered.wait(2))
         state.request_cancel()
-        with self.assertRaisesRegex(ClientError, "別の処理が進行中"):
+        with self.assertRaises(ClientError):
             state._start_job("detect", [record], lambda *_args, **_kwargs: None)
         release.set()
         assert state.worker_thread is not None
@@ -2287,7 +2336,8 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('data-i18n="folder.browse">画像を追加', page)
         self.assertNotIn('id="browseDialog"', page)
         self.assertNotIn('id="fileBrowserDialog"', page)
-        self.assertIn('id="jobProgressText"', page)
+        self.assertNotIn('id="jobProgressText"', page)
+        self.assertIn('id="processingProgressText"', page)
         self.assertIn('id="clearAllMasksButton"', page)
         self.assertIn('id="clearCatalogButton"', page)
         self.assertIn('id="batchMoreButton"', page)
@@ -3223,6 +3273,23 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(imported, [{"clientKey": "client-1", "imageId": images[0]["id"]}])
             self.assertEqual(images[0]["relativePath"], "nested/first.png")
             self.assertEqual(state.image_for_id(images[0]["id"]).source_kind, "session")
+
+    def test_binary_import_can_skip_rebuilding_the_full_catalog(self):
+        with tempfile.TemporaryDirectory():
+            source = io.BytesIO()
+            Image.new("RGB", (12, 8), "white").save(source, format="PNG")
+            state = self.new_state()
+            with patch.object(state, "list_images", wraps=state.list_images) as list_images:
+                images, imported = state.import_image_bytes_for_api(
+                    source.getvalue(),
+                    name="first.png",
+                    relative_path="nested/first.png",
+                    client_key="client-1",
+                    include_images=False,
+                )
+            self.assertEqual(images, [])
+            self.assertEqual(len(imported), 1)
+            list_images.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

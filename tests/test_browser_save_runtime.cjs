@@ -42,7 +42,7 @@ class FakeFileHandle {
         this.closed = true;
         this.lastModified = Date.now();
         this.directory.files.set(this.name, this);
-        this.options.closed?.(this);
+        await this.options.closed?.(this);
       },
       abort: async () => { this.options.aborted?.(this); },
     };
@@ -51,6 +51,7 @@ class FakeFileHandle {
 
 class FakeDirectoryHandle {
   constructor(options = {}) {
+    this.name = options.name || "output";
     this.options = options;
     this.files = new Map();
     this.directories = new Map();
@@ -84,6 +85,9 @@ class FakeDirectoryHandle {
     this.removed.push(name);
     this.files.delete(name);
   }
+
+  async queryPermission() { return "granted"; }
+  async requestPermission() { return "granted"; }
 }
 
 function jsonResponse(body, status = 200) {
@@ -100,7 +104,13 @@ function binaryResponse(bytes, saveToken = "runtime-render-token") {
   };
 }
 
-function createRuntime({ commit, copy = null, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null, pickedDirectories = [] }) {
+function createRuntime({ commit, copy = null, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
+  const outputDirectory = directory instanceof FakeDirectoryHandle ? directory : new FakeDirectoryHandle({
+    closed: async () => {
+      const response = copy?.();
+      if (response && !response.ok) throw new Error("write failed");
+    },
+  });
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   const elements = new Map();
   const getElement = (selector) => {
@@ -178,7 +188,6 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
       if (requestPath === "/api/save/copy") return (copy || (() => jsonResponse({ output: "G:/output/source_censored.png" })))({ options, requests });
       if (requestPath === "/api/save/commit") return commit({ options, requests });
       if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
-      if (requestPath === "/api/dialog/output-directory") return jsonResponse({ directory: pickedDirectories.shift() || null });
       throw new Error(`Unexpected request: ${requestPath}`);
     },
   };
@@ -195,7 +204,7 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { directory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
+  return { directory: outputDirectory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave: (target, ...args) => runBrowserSave(target instanceof FakeDirectoryHandle ? target : outputDirectory, ...args), saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
@@ -211,11 +220,10 @@ async function runSuccessCase() {
   });
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
 
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/copy", "/api/save/commit"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
   assert.deepEqual(JSON.parse(JSON.stringify(runtime.lockRequests)), [{ name: "mozarie-output", options: { mode: "exclusive" } }]);
-  const copyPayload = JSON.parse(runtime.requests[2].options.body);
-  assert.equal(copyPayload.outputDirectory, directory);
-  assert.equal(copyPayload.suffix, "_censored");
+  const nested = runtime.directory.directories.get("nested");
+  assert.deepEqual([...nested.files.get("source_censored.png").written], [4, 5, 6]);
   const commitPayload = JSON.parse(runtime.requests.at(-1).options.body);
   assert.equal(commitPayload.saveToken, "runtime-render-token");
   assert.equal(commitPayload.deleteOriginal, false);
@@ -303,7 +311,15 @@ async function runCopyFailureCase() {
   const directory = "G:/output";
   const runtime = createRuntime({ directory, copy: () => jsonResponse({ error: "write failed" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   await assert.rejects(runtime.runBrowserSave(directory, ["image-1"], "_censored", false), /write failed/);
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/copy"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
+  assert.deepEqual(runtime.directory.directories.get("nested").removed, ["source_censored.png"]);
+}
+
+async function runOutputDirectoryReuseCase() {
+  const runtime = createRuntime({ directory: new FakeDirectoryHandle({ name: "remembered" }), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.outputDirectoryHandle = runtime.directory;
+  assert.equal(await runtime.outputDirectoryForSave(), runtime.directory);
+  assert.equal(runtime.requests.length, 0, "a remembered browser handle is reused without a server picker request");
 }
 
 async function runCommitFailureCase() {
@@ -313,7 +329,7 @@ async function runCommitFailureCase() {
 
   assert.equal(runtime.state.images.length, 1);
   const paths = runtime.requests.map((request) => request.path);
-  assert.deepEqual(paths.slice(0, 3), ["/api/save/prepare", "/api/save/render", "/api/save/copy"]);
+  assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
   assert.equal(paths.filter((path) => path === "/api/save/commit").length, 12);
 }
 
@@ -331,7 +347,7 @@ async function runCancelCase() {
   });
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false, "copy", true);
 
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/copy", "/api/save/commit", "/api/catalog/remove"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit", "/api/catalog/remove"]);
   assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 1");
 }
 
@@ -410,7 +426,8 @@ async function runForeignCollisionCase() {
   const directory = "G:/output";
   const runtime = createRuntime({ directory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
-  assert.equal(JSON.parse(runtime.requests.find((request) => request.path === "/api/save/copy").options.body).suffix, "_censored");
+  const nested = runtime.directory.directories.get("nested");
+  assert.ok(nested.files.has("source_censored.png"));
 }
 
 async function runPartialCommitFailureReconcileCase() {
@@ -460,22 +477,6 @@ async function runPartialCommitFailureReconcileCase() {
   assert.equal(runtime.state.galleryNodes.has(first.id), false);
   assert.equal(runtime.state.galleryNodes.has(second.id), true, "the masked gallery renders the remaining add-only draft");
   assert.equal(runtime.state.galleryNodes.has(exclusionOnly.id), false, "the masked gallery excludes an exclusion-only draft");
-}
-
-async function runOutputDirectoryReuseCase() {
-  const firstDirectory = "G:/first";
-  const secondDirectory = "G:/second";
-  const runtime = createRuntime({ directory: firstDirectory, pickedDirectories: [firstDirectory, secondDirectory], commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-
-  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/dialog/output-directory").length, 1, "the first copy save selects a destination");
-  assert.equal(runtime.state.outputDirectoryPath, firstDirectory);
-  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/dialog/output-directory").length, 1, "the selected destination is reused within the tab");
-
-  await runtime.chooseOutputDirectory();
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/dialog/output-directory").length, 2, "the destination can be explicitly replaced");
-  assert.equal(runtime.state.outputDirectoryPath, secondDirectory);
 }
 
 async function runRemoveAfterSaveCases() {

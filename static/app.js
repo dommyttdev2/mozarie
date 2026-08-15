@@ -20,8 +20,8 @@ const state = {
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
-  // This handle is scoped to this browser tab and reused for copy saves.
-  outputDirectoryPath: "", imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
+  // The save folder handle is browser-local and never sent to the server.
+  outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null,
   imageCache: new Map(), candidateBundleCache: new Map(),
@@ -127,6 +127,29 @@ function setStatusKey(key, params = {}, kind = "") {
   renderStatus();
 }
 
+function processingTitle(kind) {
+  return t(kind === "detect" ? "processing.detect" : "processing.import");
+}
+
+function showProcessing(processing) {
+  state.processing = { ...state.processing, ...processing };
+  const current = state.processing;
+  const modal = $("#processingDialog");
+  $("#processingTitle").textContent = processingTitle(current.kind);
+  $("#processingCurrent").textContent = current.current || "";
+  $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
+  $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
+  $("#processingProgressText").textContent = t("status.progressCount", { completed: current.completed || 0, total: current.total || 0 });
+  $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
+  if (!modal.open) modal.showModal();
+}
+
+function closeProcessing() {
+  state.processing = null;
+  const modal = $("#processingDialog");
+  if (modal.open) modal.close();
+}
+
 function renderStatus() {
   const status = state.status;
   if (!status) return;
@@ -158,7 +181,7 @@ function setDetectionConfidence(value) {
   $("#detectConfidenceRange").value = confidence.toFixed(2);
   $("#detectConfidenceNumber").value = confidence.toFixed(2);
 }
-function activeDetection() { return state.job?.kind === "detect" && state.job?.state === "running"; }
+function activeDetection() { return state.job?.kind === "detect" && ["running", "paused"].includes(state.job?.state); }
 function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
@@ -329,6 +352,7 @@ function updateActionButtons() {
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
+    if (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing) continue;
     if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
@@ -401,16 +425,7 @@ function discardCatalogNodes(nodes, container) {
 }
 
 function updateProgress(job) {
-  const progress = $("#jobProgress");
-  const progressText = $("#jobProgressText");
-  const running = ["running", "paused"].includes(job?.state);
-  progress.hidden = !running;
-  progressText.hidden = !running;
-  if (running) {
-    progress.max = Math.max(1, Number(job.total) || 1);
-    progress.value = Math.min(progress.max, Number(job.completed) || 0);
-    progressText.textContent = t("status.progressCount", { completed: progress.value, total: progress.max });
-  }
+  if (job?.kind !== "apply" && ["running", "paused"].includes(job?.state)) showProcessing(job);
   updateActionButtons();
 }
 
@@ -1736,6 +1751,16 @@ function detectionParallelism() {
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
 
+function normaliseImportParallelism(value) {
+  if (String(value ?? "").trim() === "") return 3;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(10, Math.max(1, Math.round(number))) : 3;
+}
+
+function importParallelism() {
+  return normaliseImportParallelism(state.settings?.importing?.parallelism);
+}
+
 function openDetectionDialog(imageIds) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.pendingDetectionTargetIds = [...imageIds];
@@ -1754,6 +1779,7 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
+    showProcessing(state.job);
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
   finally { state.detectionStarting = false; updateActionButtons(); }
@@ -1843,9 +1869,9 @@ function syncApplyMode() {
   $("#applyOutputDirectoryRow").hidden = !copying;
   $("#applySuffix").disabled = state.applyRunning;
   $("#chooseOutputDirectoryButton").disabled = state.applyRunning || state.saveStarting;
-  const outputDirectory = state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "";
+  const outputDirectory = state.outputDirectoryHandle;
   $("#applyOutputDirectoryStatus").textContent = outputDirectory
-    ? t("apply.outputDirectorySelected", { name: outputDirectory })
+    ? t("apply.outputDirectorySelected", { name: outputDirectory.name })
     : t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
@@ -1867,7 +1893,6 @@ async function openApplyDialog(imageIds) {
   saveDraft();
   state.applyTargetIds = imageIds;
   state.applyRunning = false;
-  state.outputDirectoryPath = state.settings?.saving?.default_output_directory || "";
   $("#applyTargetCount").textContent = t("apply.target", { count: imageIds.length });
   $("#applyDivisor").value = $("#divisor").value;
   updateBlockSizeDisplay();
@@ -1893,35 +1918,82 @@ function draftPayload(imageIds) {
   return drafts;
 }
 
-async function pickOutputDirectory() {
-  const data = await api("/api/dialog/output-directory", {
-    method: "POST",
-    body: JSON.stringify({ initialDirectory: state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "" }),
+const OUTPUT_HANDLE_DB = "mozarie-output";
+const OUTPUT_HANDLE_STORE = "handles";
+const OUTPUT_HANDLE_KEY = "default";
+
+function outputHandleDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(OUTPUT_HANDLE_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(OUTPUT_HANDLE_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
-  return String(data.directory || "");
 }
 
-function rememberOutputDirectory(directory) {
-  state.outputDirectoryPath = String(directory || "").trim();
+async function readOutputHandle() {
+  const database = await outputHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(OUTPUT_HANDLE_STORE, "readonly").objectStore(OUTPUT_HANDLE_STORE).get(OUTPUT_HANDLE_KEY);
+    request.onsuccess = () => { database.close(); resolve(request.result || null); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function storeOutputHandle(handle) {
+  const database = await outputHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(OUTPUT_HANDLE_STORE, "readwrite").objectStore(OUTPUT_HANDLE_STORE).put(handle, OUTPUT_HANDLE_KEY);
+    request.onsuccess = () => { database.close(); resolve(); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function ensureOutputHandlePermission(handle) {
+  let permission = await handle.queryPermission({ mode: "readwrite" });
+  if (permission !== "granted") permission = await handle.requestPermission({ mode: "readwrite" });
+  if (permission !== "granted") throw new Error(t("error.directoryPermissionDenied"));
+  return handle;
+}
+
+function renderOutputHandle() {
+  const label = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
+  $("#settingsDefaultOutputDirectory").textContent = label;
   syncApplyMode();
-  return state.outputDirectoryPath;
+}
+
+async function selectOutputDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") throw new Error(t("error.directoryPickerUnsupported"));
+  const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" });
+  await ensureOutputHandlePermission(handle);
+  await storeOutputHandle(handle);
+  state.outputDirectoryHandle = handle;
+  renderOutputHandle();
+  return handle;
 }
 
 async function outputDirectoryForSave() {
-  const configured = state.outputDirectoryPath || state.settings?.saving?.default_output_directory || "";
-  if (configured) return configured;
-  return rememberOutputDirectory(await pickOutputDirectory());
+  if (state.outputDirectoryHandle) return ensureOutputHandlePermission(state.outputDirectoryHandle);
+  return selectOutputDirectory();
+}
+
+async function pickOutputDirectory() {
+  return selectOutputDirectory();
 }
 
 async function chooseOutputDirectory() {
   if (state.applyRunning || state.saveStarting) return;
+  try { await selectOutputDirectory(); setApplyResult(""); }
+  catch (error) { if (error?.name !== "AbortError") setApplyResult(error.message, true); }
+}
+
+async function restoreOutputDirectory() {
   try {
-    const directory = await pickOutputDirectory();
-    if (directory) rememberOutputDirectory(directory);
-    setApplyResult("");
-  } catch (error) {
-    setApplyResult(error.message, true);
-  }
+    const handle = await readOutputHandle();
+    if (!handle || await handle.queryPermission({ mode: "readwrite" }) !== "granted") return;
+    state.outputDirectoryHandle = handle;
+    renderOutputHandle();
+  } catch { /* The save picker remains available even when browser storage is unavailable. */ }
 }
 
 async function waitForBrowserSave(save) {
@@ -2076,6 +2148,38 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   updateActionButtons();
 }
 
+async function uniqueOutputFileHandle(rootHandle, relativePath, suffix) {
+  const parts = String(relativePath).split("/").filter(Boolean);
+  const sourceName = parts.pop();
+  const dot = sourceName.lastIndexOf(".");
+  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
+  const extension = dot > 0 ? sourceName.slice(dot) : "";
+  let directory = rootHandle;
+  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
+  for (let index = 1; index < 10000; index += 1) {
+    const name = `${stem}${suffix}${index === 1 ? "" : `_${index}`}${extension}`;
+    try {
+      await directory.getFileHandle(name);
+    } catch (error) {
+      if (error?.name !== "NotFoundError") throw error;
+      return { directory, name, fileHandle: await directory.getFileHandle(name, { create: true }) };
+    }
+  }
+  throw new Error(t("error.outputNameExhausted"));
+}
+
+async function writeCopyOutput(rootHandle, entry, suffix, bytes) {
+  const output = await uniqueOutputFileHandle(rootHandle, entry.relativePath, suffix);
+  const fileHandle = output.fileHandle;
+  const writable = await fileHandle.createWritable({ keepExistingData: false });
+  try { await writable.write(bytes); await writable.close(); }
+  catch (error) {
+    try { await writable.abort?.(); } catch { /* Continue with best-effort cleanup below. */ }
+    try { await output.directory.removeEntry(output.name); } catch { /* Preserve the original write error. */ }
+    throw error;
+  }
+}
+
 async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
   const result = await api("/api/save/prepare", {
     method: "POST",
@@ -2116,21 +2220,12 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
           throw new Error(body.error || t("error.requestFailed"));
         }
         const saveToken = response.headers?.get("X-Mozarie-Save-Token") || "";
-        const bytes = mode === "overwrite" ? await response.arrayBuffer() : null;
+        const bytes = await response.arrayBuffer();
         const sourceImage = state.images.find((image) => image.id === entry.imageId);
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
         if (mode === "copy") {
-          await api("/api/save/copy", {
-            method: "POST",
-            body: JSON.stringify({
-              imageId: entry.imageId,
-              candidateRevision: entry.candidateRevision,
-              saveToken,
-              outputDirectory: directory,
-              suffix,
-            }),
-          });
+          await writeCopyOutput(directory, entry, suffix, bytes);
           if (deleteOriginal) {
             if (access?.fileHandle) await removeSourceHandle(access);
             sourceAction = "deleted";
@@ -2371,6 +2466,7 @@ async function finishDetectionJob(job) {
   state.handledDetectionStartedAt = job.startedAt;
   state.detectionTargetIds = [];
   state.detectCancelRequested = false;
+  closeProcessing();
   if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
     await selectImage(keepCurrent, true);
   }
@@ -2671,25 +2767,52 @@ async function importFiles(files) {
     .filter(({ file }) => isSupportedImageFile(file));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
-    setStatusKey("gallery.importProgress", { completed: 0, total: supportedFiles.length }, "running");
-    let completed = 0;
-    for (const entry of supportedFiles) {
-      const clientKey = newClientKey();
-      const data = await importSingleFile(entry, clientKey);
-      if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
-      state.images = data.images;
-      for (const imported of data.imported || []) {
-        if (imported.clientKey !== clientKey || !entry.fileHandle || !imported.imageId) continue;
+    session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
+    showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
+    const results = new Array(supportedFiles.length);
+    let nextIndex = 0;
+    const worker = async () => {
+      while (true) {
+        while (session.paused && !session.cancelled) await new Promise((resolve) => setTimeout(resolve, 80));
+        if (session.cancelled) return;
+        const index = nextIndex; nextIndex += 1;
+        if (index >= supportedFiles.length) return;
+        const entry = supportedFiles[index]; const clientKey = newClientKey();
+        showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
+        const data = await importSingleFile(entry, clientKey);
+        results[index] = { entry, clientKey, data };
+        session.completed += 1;
+        showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
+      }
+    };
+    const workerCount = Math.min(supportedFiles.length, importParallelism());
+    const workers = Array.from({ length: workerCount }, worker);
+    try {
+      await Promise.all(workers);
+    } catch (error) {
+      // Do not schedule more files after an upload failure.  Wait for the
+      // in-flight requests so the server can discard their temporary files.
+      session.cancelled = true;
+      await Promise.allSettled(workers);
+      throw error;
+    }
+    if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
+    const latest = await api("/api/images");
+    state.images = latest.images;
+    if (session.cancelled) {
+      pruneSourceAccess(); renderCatalogViews();
+      setStatusKey("status.importCancelled", { completed: session.completed });
+      return;
+    }
+    for (const result of results) {
+      if (!result) continue;
+      for (const imported of result.data.imported || []) {
+        if (imported.clientKey !== result.clientKey || !result.entry.fileHandle || !imported.imageId) continue;
         state.sourceAccess.set(imported.imageId, {
-          fileHandle: entry.fileHandle,
-          parentHandle: entry.parentHandle || null,
-          name: entry.file.name,
-          size: entry.file.size,
-          lastModified: entry.file.lastModified,
+          fileHandle: result.entry.fileHandle, parentHandle: result.entry.parentHandle || null,
+          name: result.entry.file.name, size: result.entry.file.size, lastModified: result.entry.file.lastModified,
         });
       }
-      completed += 1;
-      setStatusKey("gallery.importProgress", { completed, total: supportedFiles.length }, "running");
     }
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
@@ -2726,7 +2849,7 @@ async function importSingleFile(entry, clientKey) {
 
 function beginImportSession() {
   if (isBusy() || state.importing) return null;
-  const session = { id: newClientKey(), epoch: beginCatalogEpoch() };
+  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0 };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
@@ -2735,29 +2858,54 @@ function beginImportSession() {
 function finishImportSession(session) {
   if (state.importSession !== session) return;
   state.importSession = null; state.importing = false;
+  closeProcessing();
   updateActionButtons();
+}
+
+async function waitForImportSession(session) {
+  while (session.paused && !session.cancelled) await new Promise((resolve) => setTimeout(resolve, 80));
+  return !session.cancelled && state.importSession === session;
+}
+
+async function importHandleEntries(entries, session) {
+  if (!entries.length) return finishImportSession(session);
+  showProcessing({ kind: "import", state: "running", total: entries.length, completed: 0, current: "" });
+  const files = new Array(entries.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (await waitForImportSession(session)) {
+      const index = nextIndex; nextIndex += 1;
+      if (index >= entries.length) return;
+      const entry = entries[index];
+      showProcessing({ kind: "import", state: session.paused ? "paused" : "running", total: entries.length, completed: 0, current: entry.relativePath });
+      const file = await entry.handle.getFile();
+      files[index] = droppedFile(file, entry.relativePath, entry.handle, entry.parentHandle || null);
+    }
+  };
+  const parallelism = Math.min(entries.length, importParallelism());
+  await Promise.all(Array.from({ length: parallelism }, worker));
+  if (!await waitForImportSession(session)) return finishImportSession(session);
+  await importFiles(files.filter(Boolean), session);
 }
 
 async function importFileHandles(handles, session = beginImportSession()) {
   if (!session) return;
-  const files = [];
-  for (const handle of handles) {
-    const file = await handle.getFile();
-    files.push(droppedFile(file, file.name, handle));
-  }
-  await importFiles(files, session);
+  await importHandleEntries(handles.map((handle) => ({ handle, relativePath: handle.name, parentHandle: null })), session);
 }
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
-  const files = [];
+  const entries = [];
+  showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
   async function collect(handle, relativePath = "", parentHandle = null) {
+    if (!await waitForImportSession(session)) return;
     const path = relativePath ? `${relativePath}/${handle.name}` : handle.name;
-    if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), path, handle, parentHandle));
+    if (handle.kind === "file") entries.push({ handle, relativePath: path, parentHandle });
     else for await (const child of handle.values()) await collect(child, path, handle);
   }
   for await (const handle of directoryHandle.values()) await collect(handle, "", directoryHandle);
-  await importFiles(files, session);
+  if (!await waitForImportSession(session)) return finishImportSession(session);
+  await importHandleEntries(entries, session);
 }
 
 async function pickImageFiles() {
@@ -2921,7 +3069,8 @@ function setSettingsForm(settings, status = null) {
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
-  $("#settingsDefaultOutputDirectory").value = settings.saving?.default_output_directory || "";
+  $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
+  renderOutputHandle();
   setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
@@ -2963,7 +3112,7 @@ function settingsPayload() {
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
       tool_position: $("#settingsToolPosition").value,
     },
-    saving: { default_output_directory: $("#settingsDefaultOutputDirectory").value.trim() },
+    importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
       parallelism: detectionParallelism(),
@@ -3033,14 +3182,9 @@ async function resetSettings() {
 
 async function chooseSettingsOutputDirectory() {
   try {
-    const data = await api("/api/dialog/output-directory", {
-      method: "POST",
-      body: JSON.stringify({ initialDirectory: $("#settingsDefaultOutputDirectory").value.trim() }),
-    });
-    if (data.directory) $("#settingsDefaultOutputDirectory").value = data.directory;
+    await selectOutputDirectory();
   } catch (error) {
-    $("#settingsResult").textContent = error.message;
-    $("#settingsResult").classList.add("error");
+    if (error?.name !== "AbortError") { $("#settingsResult").textContent = error.message; $("#settingsResult").classList.add("error"); }
   }
 }
 
@@ -3051,9 +3195,13 @@ function openModelHelp(key) {
 }
 
 function bindEvents() {
+  const lightDismiss = (dialog, close) => dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();
+  });
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
+  lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
     const language = state.settings?.general?.language || "ja";
     if (state.settings?.models && state.settings?.display && state.settings?.detection) {
@@ -3069,6 +3217,7 @@ function bindEvents() {
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
   $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
+  lightDismiss($("#modelHelpDialog"), () => $("#modelHelpDialog").close());
   toolRail.addEventListener("keydown", handleToolRailKeydown);
   toolRailItems().forEach((item) => item.addEventListener("focus", () => setToolRailTabStop(item)));
   setToolRailTabStop();
@@ -3158,6 +3307,7 @@ function bindEvents() {
   $("#detectForm").addEventListener("submit", startDetectionFromDialog);
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
+  lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
   const setPaneCollapsed = (side, collapsed) => {
@@ -3192,7 +3342,28 @@ function bindEvents() {
   });
   $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
   $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
+  lightDismiss($("#applyDialog"), () => { if (!state.applyRunning) $("#applyDialog").close(); });
   $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });
+  lightDismiss($("#confirmDialog"), () => $("#confirmDialog").close("cancel"));
+  $("#processingDialog").addEventListener("cancel", (event) => event.preventDefault());
+  $("#processingPauseButton").addEventListener("click", async () => {
+    const processing = state.processing;
+    if (!processing) return;
+    if (processing.kind === "import") {
+      const session = state.importSession; if (!session) return;
+      session.paused = !session.paused;
+      showProcessing({ ...processing, state: session.paused ? "paused" : "running" });
+      return;
+    }
+    try { await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) }); }
+    catch (error) { setStatus(error.message, "error"); }
+  });
+  $("#processingCancelButton").addEventListener("click", async () => {
+    const processing = state.processing;
+    if (!processing) return;
+    if (processing.kind === "import") { if (state.importSession) state.importSession.cancelled = true; return; }
+    await cancelDetection();
+  });
   $("#toggleReviewMenuItem").addEventListener("click", () => {
     const image = state.images.find((item) => item.id === state.contextMenuImageId);
     if (image) setReviewed(image, !isReviewed(image));
@@ -3367,6 +3538,7 @@ async function initialise() {
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
+  await restoreOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);

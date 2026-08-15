@@ -317,12 +317,28 @@ async function main() {
     }
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("role"), "menu");
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("tabindex"), "-1");
-    for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog"]) {
+    for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog", "#processingDialog"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-labelledby"), `${selector} must have an accessible title`);
     }
-    for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#jobProgress", "#applyProgress"]) {
+    for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#processingProgress", "#applyProgress"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-label"), `${selector} must have an accessible name`);
     }
+    for (const selector of ["#confirmDialog", "#detectDialog", "#settingsDialog", "#modelHelpDialog", "#applyDialog"]) {
+      await page.locator(selector).evaluate((dialog) => {
+        if (!dialog.open) dialog.showModal();
+        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await page.waitForFunction((target) => document.querySelector(target).open === false, selector);
+    }
+    await page.locator("#processingDialog").evaluate((dialog) => {
+      dialog.showModal();
+      dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      dialog.dispatchEvent(new Event("cancel", { bubbles: false, cancelable: true }));
+    });
+    assert.equal(await page.locator("#processingDialog").getAttribute("open"), "", "processing dialog must ignore backdrop and Escape dismissal");
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
+    assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
+    assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

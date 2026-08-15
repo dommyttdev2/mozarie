@@ -541,6 +541,7 @@ class StudioState:
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
+        self.importing_count = 0
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -561,7 +562,6 @@ class StudioState:
         self.candidate_revisions: dict[str, int] = {}
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
-        self.browser_copy_outputs: dict[str, Path] = {}
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
@@ -805,7 +805,7 @@ class StudioState:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.job.state in {"running", "paused"} or self._has_active_worker():
+        if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -942,7 +942,6 @@ class StudioState:
 
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
-        self.browser_copy_outputs.pop(token, None)
         if details is not None:
             details.rendered_path.unlink(missing_ok=True)
         return details
@@ -1006,7 +1005,7 @@ class StudioState:
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
         with self.lock:
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("処理中はモザイク候補をクリアできません。")
             self._clear_masks_unchecked(records)
         return len(records)
@@ -1058,90 +1057,106 @@ class StudioState:
             raise ClientError("追加画像のclientKeyが不正です。")
         return self._import_images(files)
 
-    def _import_images(self, files: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    def _import_images(
+        self,
+        files: list[dict[str, Any]],
+        *,
+        include_images: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
-        with self.import_lock:
-            with self.lock:
-                root = self.root
-                catalog_generation = self.catalog_generation
-                if self.job.state in {"running", "paused"} or self._has_active_worker():
-                    raise ClientError("処理中は画像を追加できません。")
-            destination_dir = self._ensure_session()
-            pending: list[tuple[Path, str, int, int, str]] = []
-            try:
-                for file_data in files:
-                    if not isinstance(file_data, dict):
-                        raise ClientError("画像データの形式が正しくありません。")
-                    client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
-                    relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
-                    if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
-                        continue
-                    raw_value = file_data.get("raw")
-                    if isinstance(raw_value, bytes):
-                        raw = raw_value
-                    else:
-                        try:
-                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                        except (binascii.Error, ValueError) as exc:
-                            raise ClientError("追加画像を読み込めません。") from exc
-                    if not raw:
-                        continue
-                    _verify_decodable_image(raw)
-                    with Image.open(io.BytesIO(raw)) as image:
-                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                        width, height = oriented_image_size(image)
-                    temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
-                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
-                    temporary.write_bytes(raw)
 
-                with self.lock:
-                    if (
-                        self.root != root
-                        or self.catalog_generation != catalog_generation
-                        or self.job.state in {"running", "paused"}
-                        or self._has_active_worker()
-                    ):
-                        raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
-                    added: list[ImageRecord] = []
-                    final_paths: list[Path] = []
+        with self.lock:
+            root = self.root
+            catalog_generation = self.catalog_generation
+            if self.job.state in {"running", "paused"} or self._has_active_worker():
+                raise ClientError("処理中は画像を追加できません。")
+            destination_dir = self._ensure_session()
+            self.importing_count += 1
+
+        pending: list[tuple[Path, str, int, int, str]] = []
+        try:
+            # Decoding and staging can overlap across request threads. The short
+            # catalogue commit below remains serialized.
+            for file_data in files:
+                if not isinstance(file_data, dict):
+                    raise ClientError("画像データの形式が正しくありません。")
+                client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
+                relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
+                if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                raw_value = file_data.get("raw")
+                if isinstance(raw_value, bytes):
+                    raw = raw_value
+                else:
                     try:
-                        imported: list[dict[str, str]] = []
-                        for temporary, name, width, height, client_key in pending:
-                            destination = unique_session_import_destination(destination_dir / name)
-                            destination.parent.mkdir(parents=True, exist_ok=True)
-                            os.replace(temporary, destination)
-                            final_paths.append(destination)
-                            stat = destination.stat()
-                            image_id = uuid.uuid4().hex
-                            added.append(
-                                ImageRecord(
-                                    image_id,
-                                    destination,
-                                    destination.relative_to(destination_dir).as_posix(),
-                                    width,
-                                    height,
-                                    stat.st_mtime_ns,
-                                    stat.st_size,
-                                    "session",
-                                )
-                            )
-                            imported.append({"clientKey": client_key, "imageId": image_id})
-                    except Exception:
-                        for destination in final_paths:
-                            destination.unlink(missing_ok=True)
-                        raise
-                    for record in added:
-                        self.images[record.image_id] = record
-                        self.order.append(record.image_id)
-                    self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
-                    return self.list_images(), imported
-            finally:
-                for temporary, _name, _width, _height, _client_key in pending:
-                    temporary.unlink(missing_ok=True)
+                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ClientError("追加画像を読み込めません。") from exc
+                if not raw:
+                    continue
+                _verify_decodable_image(raw)
+                with Image.open(io.BytesIO(raw)) as image:
+                    _assert_image_suffix_matches_format(relative_path.suffix, image.format)
+                    width, height = oriented_image_size(image)
+                temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
+                temporary.write_bytes(raw)
+                pending.append((temporary, relative_path.as_posix(), width, height, client_key))
+
+            with self.import_lock, self.lock:
+                if (
+                    self.root != root
+                    or self.catalog_generation != catalog_generation
+                    or self.job.state in {"running", "paused"}
+                    or self._has_active_worker()
+                ):
+                    raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
+                added: list[ImageRecord] = []
+                final_paths: list[Path] = []
+                try:
+                    imported: list[dict[str, str]] = []
+                    for temporary, name, width, height, client_key in pending:
+                        destination = unique_session_import_destination(destination_dir / name)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(temporary, destination)
+                        final_paths.append(destination)
+                        stat = destination.stat()
+                        image_id = uuid.uuid4().hex
+                        added.append(ImageRecord(
+                            image_id,
+                            destination,
+                            destination.relative_to(destination_dir).as_posix(),
+                            width,
+                            height,
+                            stat.st_mtime_ns,
+                            stat.st_size,
+                            "session",
+                        ))
+                        imported.append({"clientKey": client_key, "imageId": image_id})
+                except Exception:
+                    for destination in final_paths:
+                        destination.unlink(missing_ok=True)
+                    raise
+                for record in added:
+                    self.images[record.image_id] = record
+                    self.order.append(record.image_id)
+                self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
+                images = self.list_images() if include_images else []
+                return images, imported
+        finally:
+            for temporary, _name, _width, _height, _client_key in pending:
+                temporary.unlink(missing_ok=True)
+            with self.lock:
+                self.importing_count -= 1
 
     def import_image_bytes_for_api(
-        self, raw: bytes, *, name: str, relative_path: str, client_key: str,
+        self,
+        raw: bytes,
+        *,
+        name: str,
+        relative_path: str,
+        client_key: str,
+        include_images: bool = True,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(client_key, str) or not client_key:
             raise ClientError("追加画像のclientKeyが不正です。")
@@ -1150,7 +1165,7 @@ class StudioState:
             "name": name,
             "relativePath": relative_path,
             "raw": raw,
-        }])
+        }], include_images=include_images)
 
     def _clear_cache(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1452,37 +1467,6 @@ class StudioState:
             )
         return output, record, current_revision, save_token
 
-    def save_browser_copy(self, image_id: str, revision: int, save_token: str, output_directory: str, suffix: str) -> str:
-        """Atomically save one rendered token under a user-selected local directory."""
-        if not isinstance(save_token, str) or not save_token:
-            raise ClientError("保存確認トークンがありません。保存をやり直してください。")
-        if not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix:
-            raise ClientError("ファイル名末尾が正しくありません。")
-        destination_root = Path(output_directory).expanduser()
-        if not output_directory.strip() or not destination_root.is_dir():
-            raise ClientError("保存先フォルダーが見つかりません。")
-        with self.lock:
-            self._discard_expired_browser_save_tokens_unchecked()
-            saved = self.browser_copy_outputs.get(save_token)
-            if saved is not None and saved.is_file():
-                return str(saved)
-            token_details = self.browser_save_tokens.get(save_token)
-            if token_details is None:
-                raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
-            if token_details.image_id != image_id or token_details.candidate_revision != revision:
-                raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-            record = self.images.get(image_id)
-            if record is None or self._source_fingerprint(record) != token_details.source_fingerprint:
-                raise ClientError("元画像が変更されました。保存をやり直してください。")
-            relative_parent = Path(record.relative_path.replace("\\", "/")).parent
-            destination_directory = destination_root / relative_parent
-            destination_directory.mkdir(parents=True, exist_ok=True)
-            source_name = Path(record.relative_path).name
-            destination = _unique_output_destination(destination_directory, source_name, suffix)
-            _copy_rendered_output_atomic(token_details.rendered_path, destination)
-            self.browser_copy_outputs[save_token] = destination
-            return str(destination)
-
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。")
@@ -1564,20 +1548,21 @@ class StudioState:
 
     def request_pause(self) -> Job:
         with self.lock:
-            if self.job.kind != "apply" or self.job.state != "running":
-                raise ClientError("一時停止できるモザイク適用はありません。")
+            if self.job.kind not in {"apply", "detect"} or self.job.state != "running":
+                raise ClientError("一時停止できる処理はありません。")
             assert self.job_control is not None
             self.job_control.pause_requested.set()
             return self.job
 
-    def resume_apply(self) -> Job:
+    def resume_job(self) -> Job:
         with self.lock:
-            if self.job.kind != "apply" or self.job.state != "paused":
-                raise ClientError("再開できるモザイク適用はありません。")
+            if self.job.kind not in {"apply", "detect"} or self.job.state != "paused":
+                raise ClientError("再開できる処理はありません。")
             assert self.job_control is not None
             self.job_control.pause_requested.clear()
             self.job.state = "running"
             return self.job
+
 
     def request_cancel(self) -> Job:
         with self.lock:
@@ -1663,7 +1648,7 @@ class StudioState:
         remove_after_save: bool = False,
     ) -> None:
         with self.lock:
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("別の処理が進行中です。")
             if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
                 raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
@@ -1777,6 +1762,9 @@ class StudioState:
                 for record in assigned:
                     if not self._job_is_current(job_generation, catalog_generation):
                         return
+                    if control is not None and control.cancel_requested.is_set():
+                        return
+                    self._wait_while_paused(control, job_generation, catalog_generation)
                     if control is not None and control.cancel_requested.is_set():
                         return
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
@@ -2717,62 +2705,6 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             temporary_path.unlink(missing_ok=True)
 
 
-def _unique_output_destination(directory: Path, source_name: str, suffix: str) -> Path:
-    stem = Path(source_name).stem
-    extension = Path(source_name).suffix
-    for number in range(1, 10000):
-        name = f"{stem}{suffix}{'' if number == 1 else f'_{number}'}{extension}"
-        destination = directory / name
-        try:
-            with destination.open("xb"):
-                pass
-        except FileExistsError:
-            continue
-        return destination
-    raise ClientError("同名ファイルが多すぎるため保存できません。")
-
-
-def _copy_rendered_output_atomic(rendered_path: Path, destination: Path) -> None:
-    """Replace the empty reservation only after a durable, decodable temporary file exists."""
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
-            temporary_path = Path(handle.name)
-            with rendered_path.open("rb") as rendered:
-                shutil.copyfileobj(rendered, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _verify_decodable_image(temporary_path.read_bytes())
-        os.replace(temporary_path, destination)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        if destination.is_file() and destination.stat().st_size == 0:
-            destination.unlink(missing_ok=True)
-
-
-def choose_output_directory(initial_directory: str = "") -> str | None:
-    """Open the Windows shell folder picker on the request thread."""
-    if sys.platform != "win32":
-        raise ClientError("保存先フォルダーの参照はWindowsでのみ利用できます。")
-    try:
-        import pythoncom
-        import win32com.client
-
-        pythoncom.CoInitialize()
-        try:
-            shell = win32com.client.Dispatch("Shell.Application")
-            # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
-            selected = shell.BrowseForFolder(0, "保存先フォルダーを選択", 0x0041, initial_directory or 0)
-            return str(selected.Self.Path) if selected is not None else None
-        finally:
-            pythoncom.CoUninitialize()
-    except Exception as exc:
-        LOGGER.warning("Could not open output-directory picker: %s", exc)
-        raise ClientError("保存先フォルダーを選択できませんでした。") from exc
-
-
 STATE = StudioState()
 atexit.register(STATE.shutdown)
 
@@ -2870,10 +2802,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
-                images, imported = STATE.import_image_bytes_for_api(
-                    raw, name=name, relative_path=relative_path, client_key=client_key,
+                _images, imported = STATE.import_image_bytes_for_api(
+                    raw,
+                    name=name,
+                    relative_path=relative_path,
+                    client_key=client_key,
+                    include_images=False,
                 )
-                self._json({"images": images, "imported": imported})
+                self._json({"imported": imported})
                 return
             self._require_json_request()
             payload = self._read_json_body()
@@ -2904,9 +2840,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 self._json({"settings": settings, "status": STATE.settings_status()})
-            elif path == "/api/dialog/output-directory":
-                selected = choose_output_directory(str(payload.get("initialDirectory", "")))
-                self._json({"directory": selected})
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
                 self._json(STATE.add_boundary_candidate(image_id, payload))
@@ -2935,15 +2868,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         "X-Mozarie-Source-Kind": record.source_kind,
                     },
                 )
-            elif path == "/api/save/copy":
-                output = STATE.save_browser_copy(
-                    str(payload.get("imageId", "")),
-                    _read_candidate_revision(payload.get("candidateRevision")),
-                    str(payload.get("saveToken", "")),
-                    str(payload.get("outputDirectory", "")),
-                    str(payload.get("suffix", "_censored")),
-                )
-                self._json({"output": output})
             elif path == "/api/save/commit":
                 self._json(STATE.commit_browser_save(
                     str(payload.get("imageId", "")),
@@ -2961,7 +2885,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/job/pause":
                 self._json(STATE.request_pause().as_dict())
             elif path == "/api/job/resume":
-                self._json(STATE.resume_apply().as_dict())
+                self._json(STATE.resume_job().as_dict())
             elif path == "/api/job/cancel":
                 self._json(STATE.request_cancel().as_dict())
             elif path.startswith("/api/candidate/"):

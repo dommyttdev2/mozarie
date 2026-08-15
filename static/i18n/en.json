@@ -96,6 +96,7 @@
   "error.connectionLost": "Connection to Mozarie was lost. Confirm the app is still running.",
   "error.directoryPickerCancelled": "Folder selection was cancelled.",
   "error.directoryPickerUnsupported": "This browser cannot select a save folder. Use Chrome or Edge.",
+  "error.directoryPermissionDenied": "Permission to save in this folder was denied.",
   "error.imageLoad": "Could not load the image.",
   "error.outputNameExhausted": "Could not find an available output filename.",
   "error.requestFailed": "Request failed.",
@@ -165,6 +166,7 @@
   "status.editReady": "Ready.",
   "status.enterFolder": "Enter an image folder.",
   "status.imagesLoaded": "Loaded {count} image(s).",
+  "status.importCancelled": "Image loading stopped after {completed} image(s).",
   "status.loadingImages": "Loading image...",
   "status.progress": "Progress",
   "status.progressCount": "{completed}/{total}",
@@ -253,6 +255,8 @@
   "gallery.tabReviewed": "Reviewed",
   "gallery.tabUnreviewed": "Unreviewed",
   "settings.defaultOutputDirectory": "Default output folder",
+  "settings.importParallelism": "Image import workers",
+  "settings.helpInfo": "About this option",
   "settings.browseOutputDirectory": "Browse",
   "settings.samModel": "Outline extraction model",
   "modelHelp.ntd11.title": "NTD11",
@@ -264,5 +268,7 @@
   "modelHelp.fluid.title": "Exclude semen",
   "modelHelp.fluid.text": "Excludes small white regions inside a genital range using image analysis. No additional model is required.",
   "modelHelp.precision.title": "Refine automatic detection outlines",
-  "modelHelp.precision.text": "This does not detect genitals by itself. It refines already detected ranges with the outline extraction model, which is also used by the boundary tool."
+  "modelHelp.precision.text": "This does not detect genitals by itself. It refines already detected ranges with the outline extraction model, which is also used by the boundary tool.",
+  "processing.detect": "Automatic detection",
+  "processing.import": "Adding images"
 }

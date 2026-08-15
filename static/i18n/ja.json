@@ -13,6 +13,7 @@
   "status.enterFolder": "Windowsフォルダを入力してください。",
   "status.loadingImages": "画像を読み込んでいます...",
   "status.imagesLoaded": "{count}件を読み込みました",
+  "status.importCancelled": "画像の読み込みを停止しました。{completed}件は読み込み済みです。",
   "status.editReady": "編集できます",
   "status.saving": "ファイルを保存しています...",
   "status.saved": "ファイルを保存しました。メタデータも検証済みです。",
@@ -266,5 +267,10 @@
   "modelHelp.fluid.title": "精液を除外",
   "modelHelp.fluid.text": "性器候補の中にある小さな白色領域を画像解析で除外します。追加モデルは不要です。",
   "modelHelp.precision.title": "自動検出の輪郭を補正",
-  "modelHelp.precision.text": "性器を新規に検出する機能ではありません。自動検出済みの候補を輪郭抽出モデルで補正します。境界ツールにも同じモデルを使用します。"
+  "modelHelp.precision.text": "性器を新規に検出する機能ではありません。自動検出済みの候補を輪郭抽出モデルで補正します。境界ツールにも同じモデルを使用します。",
+  "settings.importParallelism": "画像読み込み同時処理数",
+  "settings.helpInfo": "この設定の説明",
+  "error.directoryPermissionDenied": "このフォルダーへの保存権限が許可されませんでした。",
+  "processing.detect": "自動検出",
+  "processing.import": "画像を追加中"
 }

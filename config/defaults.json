@@ -24,8 +24,8 @@
     "mosaic_preview": true,
     "tool_position": "left"
   },
-  "saving": {
-    "default_output_directory": ""
+  "importing": {
+    "parallelism": 3
   },
   "detection": {
     "mode": "standard",

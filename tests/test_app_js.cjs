@@ -56,8 +56,8 @@ const elements = new Map();
 for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
-  "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton",
+  "status", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton",
 ]) {
   const value = element();
   value.id = id;
@@ -332,7 +332,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const applyImage = { id: "apply-image", sourceKind: "filesystem", relativePath: "apply.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   state.images = [applyImage];
   state.applyTargetIds = [applyImage.id];
-  state.outputDirectoryPath = "G:/保存先";
+  state.outputDirectoryHandle = { name: "保存先" };
   elements.get("#applySuffix").value = "_keep";
   elements.get("#deleteOriginal").checked = true;
   elements.get("#applyOverwriteMode").checked = true;
@@ -380,6 +380,7 @@ const completionWatchdog = setTimeout(() => {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true, tool_position: "left" },
+    importing: { parallelism: 3 },
     detection: { threshold: 0.5, parallelism: 2, mode: "high_precision", fluid_exclusion_enabled: true },
   };
   const persistShortcuts = persistNavigationShortcuts(false);
@@ -934,15 +935,15 @@ const completionWatchdog = setTimeout(() => {
 
   state.job = { state: "paused" };
   assert.equal(isBusy(), true);
-  updateProgress({ state: "paused", total: 3, completed: 1 });
-  assert.equal(elements.get("#jobProgress").hidden, false);
+  updateProgress({ kind: "detect", state: "paused", total: 3, completed: 1 });
+  assert.equal(elements.get("#processingDialog").open, true);
   updateActionButtons();
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
 
   state.applyRunning = false;
   state.job = { kind: "detect", state: "running", total: 80, completed: 0 };
   updateProgress(state.job);
-  assert.equal(elements.get("#jobProgressText").textContent, "0 / 80");
+  assert.equal(elements.get("#processingProgressText").textContent, "0 / 80");
   assert.equal(elements.get("#pickFolder").disabled, true);
   assert.equal(elements.get("#folderPath").disabled, true);
   assert.equal(elements.get("#galleryFilter").disabled, true);
@@ -955,12 +956,10 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(state.maskStatus.get("first"), maskBeforeToggle);
   state.job = { kind: "detect", state: "complete", total: 80, completed: 80 };
   updateProgress(state.job);
-  assert.equal(elements.get("#jobProgress").hidden, true);
-  assert.equal(elements.get("#jobProgressText").hidden, true);
+  assert.equal(elements.get("#processingDialog").open, true);
   for (const terminalState of ["cancelled", "error", "idle"]) {
     updateProgress({ kind: "detect", state: terminalState, total: 80, completed: 80 });
-    assert.equal(elements.get("#jobProgress").hidden, true, `${terminalState} must not show stale progress`);
-    assert.equal(elements.get("#jobProgressText").hidden, true, `${terminalState} must not show stale progress`);
+    assert.equal(elements.get("#processingDialog").open, true, `${terminalState} must not reset the active modal`);
   }
   assert.equal(elements.get("#pickFolder").disabled, false);
   setMosaicPreviewEnabled(false);
@@ -1863,11 +1862,14 @@ const completionWatchdog = setTimeout(() => {
     { name: "ignored.txt" },
     { name: "second.webp" },
   ];
+  state.settings = { ...(state.settings || {}), importing: { parallelism: 1 } };
   const importing = importFiles(importedFiles);
   assert.equal(state.importing, true);
   resolveFetch({ ok: true, json: async () => ({ images: state.images, imported: [] }) });
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ images: state.images, imported: [] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
   await importing;
   const importRequests = requests.filter((request) => request.path === "/api/import/file");
   assert.equal(importRequests.length, 2);
@@ -1875,6 +1877,38 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(importRequests[0].options.headers["X-Mozarie-Relative-Path"], "album%2Ffirst.png");
   assert.equal(importRequests[0].options.body, importedFiles[0]);
   assert.equal(importRequests[1].options.body, importedFiles[2]);
+  assert.equal(state.importing, false);
+
+  // Folder and multi-file imports start no more than the configured workers.
+  const parallelFiles = Array.from({ length: 5 }, (_, index) => ({ name: `parallel-${index}.png` }));
+  state.settings = { ...(state.settings || {}), importing: { parallelism: 3 } };
+  const parallelRequestStart = requests.length;
+  const parallelImport = importFiles(parallelFiles);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.slice(parallelRequestStart).filter((request) => request.path === "/api/import/file").length, 3);
+  for (let index = 0; index < parallelFiles.length; index += 1) {
+    resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [] }) });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(requests.slice(parallelRequestStart).filter((request) => request.path === "/api/import/file").length, 5);
+  resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
+  await parallelImport;
+  assert.equal(state.importing, false);
+
+  // Stopping an import still synchronizes files that already reached the server.
+  const cancelledFiles = Array.from({ length: 5 }, (_, index) => ({ name: `cancelled-${index}.png` }));
+  const cancelledImport = importFiles(cancelledFiles);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.slice(-3).every((request) => request.path === "/api/import/file"), true);
+  state.importSession.cancelled = true;
+  for (let index = 0; index < 3; index += 1) {
+    resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [] }) });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const partialCatalog = [{ id: "partial", relativePath: "cancelled-0.png", width: 10, height: 10 }];
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: partialCatalog }) });
+  await cancelledImport;
+  assert.deepEqual(JSON.parse(JSON.stringify(state.images)), partialCatalog);
   assert.equal(state.importing, false);
 
   // Import mappings bind browser-only source handles to the returned image id.
@@ -1887,6 +1921,8 @@ const completionWatchdog = setTimeout(() => {
   const mappedRequest = requests.at(-1);
   const mappedClientKey = decodeURIComponent(mappedRequest.options.headers["X-Mozarie-Client-Key"]);
   resolveFetch({ ok: true, json: async () => ({ images: [{ id: "handled", sourceKind: "session", relativePath: "nested/handled.png", width: 10, height: 10 }], imported: [{ clientKey: mappedClientKey, imageId: "handled" }] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: [{ id: "handled", sourceKind: "session", relativePath: "nested/handled.png", width: 10, height: 10 }] }) });
   await mappedImport;
   assert.equal(state.sourceAccess.get("handled").fileHandle, handledSource);
   assert.equal(state.sourceAccess.get("handled").parentHandle.name, "nested");
@@ -1921,18 +1957,14 @@ const completionWatchdog = setTimeout(() => {
   const folderImport = importFiles([{ name: "nested.png", webkitRelativePath: "source/nested/nested.png" }]);
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: true, json: async () => ({ images: state.images }) });
   await folderImport;
   folderInput.value = "";
   assert.equal(folderInput.value, "");
-  const folderRequest = requests.at(-1);
+  const folderRequest = requests.filter((request) => request.path === "/api/import/file").at(-1);
   assert.equal(folderRequest.options.headers["X-Mozarie-Relative-Path"], "source%2Fnested%2Fnested.png");
 
-  const selectedDirectory = pickOutputDirectory();
-  resolveFetch({ ok: true, json: async () => ({ directory: "G:/output" }) });
-  assert.equal(await selectedDirectory, "G:/output");
-  const cancelledDirectory = pickOutputDirectory();
-  resolveFetch({ ok: true, json: async () => ({ directory: null }) });
-  assert.equal(await cancelledDirectory, "");
 
   // Empty editor canvases never retain a full-resolution Data URL draft.
   state.currentId = "empty-draft";
@@ -2018,8 +2050,8 @@ const completionWatchdog = setTimeout(() => {
   state.currentImage = { width: 20, height: 10 };
   state.candidates = [{ id: "dynamic-candidate", enabled: true }];
   state.reviewedPaths = new Set(["dynamic-name.png"]);
-  state.job = { state: "running", completed: 2, total: 4 };
-  state.outputDirectoryPath = "G:/saved-output";
+  state.job = { kind: "detect", state: "running", completed: 2, total: 4 };
+  state.outputDirectoryHandle = { name: "saved-output" };
   setStatusKey("status.editReady");
   const englishLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2039,9 +2071,9 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#imageInfo").textContent, "dynamic-name.png / 20 x 10");
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
-  assert.equal(elements.get("#jobProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
+  assert.equal(elements.get("#processingProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
   assert.equal(elements.get("#status").textContent, translationFixtures.en["status.editReady"]);
-  assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "G:/saved-output"));
+  assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "saved-output"));
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
     t("apply.completeWithStale", { completed: 3, stale: 1 }),
@@ -2104,7 +2136,7 @@ const completionWatchdog = setTimeout(() => {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true },
-    saving: { default_output_directory: "G:/output" },
+    importing: { parallelism: 3 },
     detection: { threshold: 0.5, parallelism: 2, mode: "standard", fluid_exclusion_enabled: true },
   };
   const englishSettings = { ...japaneseSettings, general: { ...japaneseSettings.general, language: "en" }, display: { ...japaneseSettings.display, tool_position: "right" } };
@@ -2132,6 +2164,12 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsFluidToggle").checked = false;
   elements.get("#settingsFluidToggle").dispatch("change");
   assert.equal(settingsPayload().detection.fluid_exclusion_enabled, false);
+  elements.get("#settingsImportParallelism").value = "0";
+  assert.equal(settingsPayload().importing.parallelism, 1);
+  elements.get("#settingsImportParallelism").value = "11";
+  assert.equal(settingsPayload().importing.parallelism, 10);
+  elements.get("#settingsImportParallelism").value = "3";
+  assert.equal(settingsPayload().importing.parallelism, 3);
   elements.get("#settingsPrecisionToggle").checked = true;
   elements.get("#settingsPrecisionToggle").dispatch("change");
   elements.get("#settingsNtd11Toggle").checked = false;
