@@ -116,9 +116,20 @@ function api(path, options = {}) {
 
 function setStatus(message, kind = "") {
   state.status = { message, kind };
+  renderStatus();
+}
+
+function setStatusKey(key, params = {}, kind = "") {
+  state.status = { key, params, kind };
+  renderStatus();
+}
+
+function renderStatus() {
+  const status = state.status;
+  if (!status) return;
   const element = $("#status");
-  element.textContent = message;
-  element.className = `status ${kind}`;
+  element.textContent = status.key ? t(status.key, status.params) : status.message;
+  element.className = `status ${status.kind}`;
 }
 
 function renderLocalizedDynamicState() {
@@ -130,7 +141,7 @@ function renderLocalizedDynamicState() {
   updateCandidateStatus();
   syncApplyMode();
   updateProgress(state.job);
-  if (state.status) setStatus(state.status.message, state.status.kind);
+  renderStatus();
 }
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
@@ -350,6 +361,7 @@ function setMosaicPreviewEnabled(enabled) {
 }
 
 function resetCatalog(images, root) {
+  closeBoundaryModeMenu({ restoreFocus: true });
   releaseImageCaches();
   state.images = images;
   state.sourceAccess.clear();
@@ -389,17 +401,17 @@ function updateProgress(job) {
 async function loadFolder() {
   if (isBusy() || state.importing) return;
   const path = $("#folderPath").value.trim();
-  if (!path) return setStatus(t("status.enterFolder"), "error");
+  if (!path) return setStatusKey("status.enterFolder", {}, "error");
   const picker = $("#pickerMenu");
   if (picker?.matches?.(":popover-open")) picker.hidePopover();
   const catalogEpoch = beginCatalogEpoch();
   ++state.imageGeneration;
-  setStatus(t("status.loadingImages"), "running");
+  setStatusKey("status.loadingImages", {}, "running");
   try {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     resetCatalog(data.images, path);
-    setStatus(t("status.imagesLoaded", { count: state.images.length }));
+    setStatusKey("status.imagesLoaded", { count: state.images.length });
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
 }
 
@@ -600,6 +612,7 @@ function canvasSizeForImage(image) {
 }
 
 function clearEditor() {
+  closeBoundaryModeMenu({ restoreFocus: true });
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = 1;
@@ -625,7 +638,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     updateActionButtons();
     return;
   }
-  setStatus(t("status.loadingImages"), "running");
+  setStatusKey("status.loadingImages", {}, "running");
   try {
     const [image, candidateBundle] = await Promise.all([
       cachedImage(record),
@@ -643,7 +656,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     updateCandidateStatus();
-    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatus(t("status.editReady"));
+    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatusKey("status.editReady");
     prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
@@ -980,13 +993,19 @@ function roiFromPoints(start, end) {
   return right - left >= 2 && bottom - top >= 2 ? { left, top, right, bottom } : null;
 }
 
+function boundaryDraftRoi() {
+  return state.boundaryDragging && state.boundaryStart && state.boundaryPoint
+    ? roiFromPoints(state.boundaryStart, state.boundaryPoint)
+    : state.boundaryRoi;
+}
+
 function pointInBoundaryRoi(point) {
   const roi = state.boundaryRoi;
   return Boolean(roi && point.x >= roi.left && point.x < roi.right && point.y >= roi.top && point.y < roi.bottom);
 }
 
 function drawBoundaryRoi() {
-  const roi = state.boundaryDragging ? roiFromPoints(state.boundaryStart, state.boundaryPoint) : state.boundaryRoi;
+  const roi = boundaryDraftRoi();
   if (!roi) return;
   const x = state.view.x + roi.left * state.view.scale; const y = state.view.y + roi.top * state.view.scale;
   const width = (roi.right - roi.left) * state.view.scale; const height = (roi.bottom - roi.top) * state.view.scale;
@@ -1020,8 +1039,15 @@ function polygonIsValid() {
     && !polygonSegmentsIntersect(points[1], points[2], points[3], points[0]);
 }
 
+function canDetectBoundary() {
+  const rectangleReady = state.tool === "boundary" && Boolean(state.boundaryRoi);
+  const polygonReady = state.tool === "polygon" && polygonIsValid();
+  return Boolean(state.currentId && state.currentImage && (rectangleReady || polygonReady))
+    && !state.boundaryDragging && !state.pendingImageId && !state.boundaryPending && !isBusy() && !state.importing;
+}
+
 function boundaryActionAnchor() {
-  const rectangle = state.boundaryDragging ? roiFromPoints(state.boundaryStart, state.boundaryPoint) : state.boundaryRoi;
+  const rectangle = boundaryDraftRoi();
   const points = state.polygonPoints;
   if (rectangle) return {
     left: state.view.x + rectangle.left * state.view.scale,
@@ -1040,12 +1066,12 @@ function boundaryActionAnchor() {
 function updateBoundaryActions() {
   const actions = $("#boundaryActions");
   if (!actions) return;
-  const isRectangleDraft = state.tool === "boundary" && Boolean(state.boundaryDragging ? roiFromPoints(state.boundaryStart, state.boundaryPoint) : state.boundaryRoi);
+  const isRectangleDraft = state.tool === "boundary" && Boolean(boundaryDraftRoi());
   const isPolygonDraft = state.tool === "polygon" && state.polygonPoints.length > 0;
   const active = !state.boundaryPending && !state.pendingImageId && (isRectangleDraft || isPolygonDraft);
   const focusedAction = document.activeElement === $("#boundaryDetectButton") || document.activeElement === $("#boundaryCancelButton");
   actions.hidden = !active;
-  $("#boundaryDetectButton").disabled = !active || state.boundaryDragging || (isPolygonDraft && !polygonIsValid()) || isBusy() || state.importing;
+  $("#boundaryDetectButton").disabled = !canDetectBoundary();
   if (!active) {
     if (focusedAction) focusCanvas();
     return;
@@ -1336,13 +1362,13 @@ function deleteManualExclusion() {
 }
 
 async function addBoundaryCandidate(point = null, polygonPoints = null) {
-  if (!state.currentId || (!polygonPoints && !state.boundaryRoi) || isBusy()) return;
+  if (!canDetectBoundary()) return;
   const imageId = state.currentId;
   const viewGeneration = state.imageGeneration;
   const roi = state.boundaryRoi ? { ...state.boundaryRoi } : null;
   const targetPoint = point ? { ...point } : (roi ? { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) } : null);
   let catalogChanged = false;
-  state.boundaryPending = true; updateBoundaryActions(); updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
+  state.boundaryPending = true; updateBoundaryActions(); updateActionButtons(); setStatusKey("status.boundaryDetecting", {}, "running");
   try {
     const data = await api("/api/boundary", {
       method: "POST",
@@ -1364,7 +1390,7 @@ async function addBoundaryCandidate(point = null, polygonPoints = null) {
 
     await reconcileCurrentCandidates(imageId, viewGeneration);
     clearBoundaryInteraction();
-    setStatus(t("status.boundaryDone"));
+    setStatusKey("status.boundaryDone");
   } catch (error) { if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error"); }
   finally {
     state.boundaryPending = false;
@@ -1510,7 +1536,7 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
-    updateProgress(state.job); setStatus(t("status.detectStarted"), "running");
+    updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
   finally { state.detectionStarting = false; updateActionButtons(); }
 }
@@ -1537,7 +1563,7 @@ async function cancelDetection() {
   if (!activeDetection() || state.detectCancelRequested) return;
   state.detectCancelRequested = true;
   updateActionButtons();
-  setStatus(t("status.detectCancelling"), "running");
+  setStatusKey("status.detectCancelling", {}, "running");
   try { await api("/api/job/cancel", { method: "POST", body: JSON.stringify({}) }); }
   catch (error) { state.detectCancelRequested = false; updateActionButtons(); setStatus(error.message, "error"); }
 }
@@ -2196,7 +2222,10 @@ async function pollJob() {
     const terminalApply = isTerminalApply(job);
     if (terminalApply) {
       await finishApplyJob(job);
-      setStatus(job.state === "complete" ? t("status.applyDone") : (job.state === "cancelled" ? t("status.applyCancelled") : (job.error || t("error.background"))), job.state === "error" ? "error" : "");
+      if (job.state === "complete") setStatusKey("status.applyDone");
+      else if (job.state === "cancelled") setStatusKey("status.applyCancelled");
+      else if (job.error) setStatus(job.error, "error");
+      else setStatusKey("error.background", {}, "error");
     } else if (job.kind === "apply" && ["running", "paused"].includes(job.state)) {
       if (!state.applyRunning) showRunningApply(job);
       $("#applyProgress").max = Math.max(1, Number(job.total) || 1);
@@ -2204,18 +2233,20 @@ async function pollJob() {
       $("#applyCurrentName").textContent = job.current || "";
       $("#applyProgressText").textContent = t("apply.progress", { completed: job.completed, total: job.total });
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
-      if (job.state === "running") setStatus(t("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }), "running");
+      if (job.state === "running") setStatusKey("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }, "running");
     } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
       state.detectCancelRequested = false;
       await finishDetectionJob(job);
-      setStatus(job.error || t("error.background"), "error");
+      if (job.error) setStatus(job.error, "error");
+      else setStatusKey("error.background", {}, "error");
   } else if (isTerminalDetection(job, previous)) {
     await finishDetectionJob(job);
-      setStatus(job.state === "cancelled" ? t("status.detectCancelled", { completed: job.completed }) : t("status.detectDone"));
+      if (job.state === "cancelled") setStatusKey("status.detectCancelled", { completed: job.completed });
+      else setStatusKey("status.detectDone");
     }
   } catch (error) {
     state.pollFailures += 1;
-    if (state.pollFailures >= 3) setStatus(t("error.connectionLost"), "error");
+    if (state.pollFailures >= 3) setStatusKey("error.connectionLost", {}, "error");
   }
   })();
   try { return await state.pollInFlight; }
@@ -2224,7 +2255,7 @@ async function pollJob() {
 
 function setTool(tool) {
   if (isBusy() || state.importing) return;
-  closeBoundaryModeMenu();
+  const focusedInBoundaryMenu = closeBoundaryModeMenu();
   if (tool !== "boundary") clearBoundaryInteraction();
   if (tool !== "polygon") { state.polygonPoints = []; state.polygonDragIndex = -1; }
   state.tool = tool;
@@ -2234,8 +2265,9 @@ function setTool(tool) {
   $("#boundaryTool").classList.toggle("active", ["boundary", "polygon"].includes(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(["boundary", "polygon"].includes(tool)));
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
-  if (tool === "boundary" && state.boundaryRoi) setStatus(t("status.boundaryReady"));
+  if (tool === "boundary" && state.boundaryRoi) setStatusKey("status.boundaryReady");
   updateBoundaryActions(); render();
+  if (focusedInBoundaryMenu) focusCanvas();
 }
 
 function setBoundaryModeMenuOpen(open) {
@@ -2244,8 +2276,12 @@ function setBoundaryModeMenuOpen(open) {
   $("#boundaryTool").setAttribute("aria-expanded", String(open));
 }
 
-function closeBoundaryModeMenu() {
+function closeBoundaryModeMenu({ restoreFocus = false } = {}) {
+  const menu = $("#boundaryModeMenu");
+  const focusedInMenu = menu.contains?.(document.activeElement);
   setBoundaryModeMenuOpen(false);
+  if (focusedInMenu && restoreFocus) focusElement($("#boundaryTool"));
+  return Boolean(focusedInMenu);
 }
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
@@ -2301,7 +2337,7 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     });
     imageIds.forEach((imageId) => state.maskStatus.delete(imageId));
     markImagesUnreviewed(imageIds, false);
-    renderCatalogViews(); updateNavigationControls(); setStatus(t("status.editReady"));
+    renderCatalogViews(); updateNavigationControls(); setStatusKey("status.editReady");
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.masksClearing = false; updateActionButtons(); }
 }
@@ -2319,7 +2355,7 @@ async function clearCatalog() {
     releaseImageCaches();
     state.images = []; state.sourceAccess.clear(); state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
     state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.overviewFolder = ""; clearEditor(); renderCatalogViews();
-    setStatus(t("status.chooseFolder"));
+    setStatusKey("status.chooseFolder");
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }
 }
@@ -2398,7 +2434,8 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
       await selectImage(nextImageId, true, { saveCurrentDraft: false });
     } else {
       updateNavigationControls(); updateActionButtons();
-      setStatus(state.images.length ? t("status.editReady") : t("status.chooseFolder"));
+      if (state.images.length) setStatusKey("status.editReady");
+      else setStatusKey("status.chooseFolder");
     }
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }
@@ -2469,7 +2506,7 @@ async function importFiles(files) {
     .filter(({ file }) => isSupportedImageFile(file));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
-    setStatus(t("gallery.importProgress", { completed: 0, total: supportedFiles.length }), "running");
+    setStatusKey("gallery.importProgress", { completed: 0, total: supportedFiles.length }, "running");
     let completed = 0;
     for (const entry of supportedFiles) {
       const clientKey = newClientKey();
@@ -2487,9 +2524,9 @@ async function importFiles(files) {
         });
       }
       completed += 1;
-      setStatus(t("gallery.importProgress", { completed, total: supportedFiles.length }), "running");
+      setStatusKey("gallery.importProgress", { completed, total: supportedFiles.length }, "running");
     }
-    pruneSourceAccess(); renderCatalogViews(); setStatus(t("gallery.imported", { count: supportedFiles.length }));
+    pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
     try {
       const latest = await api("/api/images");
@@ -2844,9 +2881,10 @@ function bindEvents() {
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
   $("#boundaryDetectButton").addEventListener("click", () => {
+    if (!canDetectBoundary()) return;
     if (state.tool === "polygon") {
-      if (polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
-    } else if (state.boundaryRoi) void addBoundaryCandidate(state.boundaryPromptPoint);
+      void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+    } else void addBoundaryCandidate(state.boundaryPromptPoint);
   });
   $("#boundaryCancelButton").addEventListener("click", cancelBoundary);
   $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
@@ -2977,10 +3015,10 @@ function bindEvents() {
       if (boundaryDragging && roi) {
         state.boundaryRoi = roi;
         state.boundaryPromptPoint = { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) };
-        setStatus(t("status.boundaryReady"));
+        setStatusKey("status.boundaryReady");
       } else if (pointInBoundaryRoi(point)) {
         state.boundaryPromptPoint = point;
-        setStatus(t("status.boundaryReady"));
+        setStatusKey("status.boundaryReady");
       }
     }
     render();
@@ -3003,10 +3041,10 @@ function bindEvents() {
     }
     if ((state.tool === "boundary" && state.boundaryRoi) || (state.tool === "polygon" && state.polygonPoints.length)) {
       if (event.key === "Escape") { event.preventDefault(); cancelBoundary(); return; }
-      if (event.key === "Enter" && !isBusy()) {
+      if (event.key === "Enter" && canDetectBoundary()) {
         event.preventDefault();
-        if (state.tool === "polygon" && polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
-        else if (state.tool === "boundary") void addBoundaryCandidate(state.boundaryPromptPoint);
+        if (state.tool === "polygon") void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+        else void addBoundaryCandidate(state.boundaryPromptPoint);
         return;
       }
     }
@@ -3051,7 +3089,7 @@ async function initialise() {
     if (data.images.length) {
       $("#folderPath").value = data.root || "";
       resetCatalog(data.images, data.root);
-      setStatus(t("status.imagesLoaded", { count: state.images.length }));
+      setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
   } catch (error) { setStatus(error.message, "error"); }
 }

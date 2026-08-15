@@ -238,6 +238,8 @@ const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"
 const styles = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");
 assert.match(markup, /id="boundaryActions"[^>]*hidden/);
 assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
+assert.match(markup, /<nav class="appbar-commands" data-i18n-aria-label="appbar\.actions"/);
+assert.equal(translationFixtures.en["appbar.actions"], "Image actions");
 assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="polygonCancelButton"/);
 assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
 assert.match(styles, /\.settings-dialog\s*\{\s*width:\s*min\(620px/);
@@ -260,10 +262,10 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, render, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
-  const { render, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab } = context.__mosaicTest;
+  const { render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab } = context.__mosaicTest;
   bindEvents();
   const lru = new Map();
   const firstImage = { src: "blob:first" };
@@ -534,6 +536,7 @@ const completionWatchdog = setTimeout(() => {
 
   // Boundary actions only appear for a draft, track the image coordinate
   // anchor, and flip above the boundary when there is no room below.
+  state.currentId = "boundary-draft";
   state.tool = "boundary";
   state.view = { x: 0, y: 0, scale: 1 };
   state.boundaryRoi = { left: 20, top: 340, right: 100, bottom: 390 };
@@ -587,14 +590,18 @@ const completionWatchdog = setTimeout(() => {
   clearBoundaryInteraction();
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
 
-  // The mode flyout has one close path for tool changes, outside clicks and Escape.
+  // The mode flyout has one close path for tool selection, outside clicks and Escape.
   setBoundaryModeMenuOpen(true);
   assert.equal(elements.get("#boundaryTool").attributes["aria-expanded"], "true");
-  elements.get("#brushTool").click();
+  elements.get("#rectangleTool").click();
   assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(state.tool, "boundary");
+  assert.equal(document.activeElement, elements.get("#editorCanvas"));
+  assert.equal(elements.get("#boundaryTool").attributes["aria-expanded"], "false");
   setBoundaryModeMenuOpen(true);
   documentListeners.get("pointerdown")({ target: element() });
   assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(elements.get("#boundaryTool").attributes["aria-expanded"], "false");
   setBoundaryModeMenuOpen(true);
   windowListeners.get("keydown")({ key: "Escape", preventDefault() {} });
   assert.equal(elements.get("#boundaryModeMenu").hidden, true);
@@ -636,8 +643,10 @@ const completionWatchdog = setTimeout(() => {
   state.currentId = "first";
   state.imageGeneration = 1;
   state.reviewedPaths = new Set(["first.png"]);
+  state.tool = "boundary";
   const staleBoundaryAppends = galleryAppendCount;
   state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
+  state.boundaryPromptPoint = { x: 8.5, y: 7.5 };
   state.candidates = [];
   state.candidateImages = new Map();
   const pending = addBoundaryCandidate({ x: 8.5, y: 7.5 });
@@ -669,6 +678,25 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(fetchCalls, 1);
 
   state.saving = false;
+  state.boundaryRoi = { left: 1, top: 1, right: 20, bottom: 20 };
+  state.boundaryPromptPoint = { x: 8, y: 7 };
+  state.boundaryDragging = true;
+  updateBoundaryActions();
+  const blockedBoundaryRequests = fetchCalls;
+  assert.equal(canDetectBoundary(), false);
+  windowListeners.get("keydown")({ key: "Enter", preventDefault() {} });
+  elements.get("#boundaryDetectButton").click();
+  await addBoundaryCandidate({ x: 8, y: 7 });
+  assert.equal(fetchCalls, blockedBoundaryRequests);
+  state.boundaryDragging = false;
+  state.pendingImageId = "loading";
+  updateBoundaryActions();
+  assert.equal(canDetectBoundary(), false);
+  windowListeners.get("keydown")({ key: "Enter", preventDefault() {} });
+  elements.get("#boundaryDetectButton").click();
+  await addBoundaryCandidate({ x: 8, y: 7 });
+  assert.equal(fetchCalls, blockedBoundaryRequests);
+  state.pendingImageId = null;
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
   state.imageGeneration = 20;
@@ -1874,9 +1902,18 @@ const completionWatchdog = setTimeout(() => {
 
   state.candidateUpdateVersions.set("old:row", 1);
   state.candidateDeleting.add("old:row");
+  setBoundaryModeMenuOpen(true);
+  elements.get("#rectangleTool").focus();
   resetCatalog([], "");
   assert.equal(state.candidateUpdateVersions.size, 0);
   assert.equal(state.candidateDeleting.size, 0);
+  assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(document.activeElement, elements.get("#boundaryTool"));
+  setBoundaryModeMenuOpen(true);
+  elements.get("#polygonTool").focus();
+  clearEditor();
+  assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(document.activeElement, elements.get("#boundaryTool"));
 
   // Loading either language refreshes dynamic detection labels and model status,
   // and parameterized strings never leak unresolved placeholders to the UI.
@@ -1889,8 +1926,7 @@ const completionWatchdog = setTimeout(() => {
   state.reviewedPaths = new Set(["dynamic-name.png"]);
   state.job = { state: "running", completed: 2, total: 4 };
   state.outputDirectoryName = "saved-output";
-  elements.get("#status").textContent = "dynamic status";
-  state.status = { message: "dynamic status", kind: "running" };
+  setStatusKey("status.editReady");
   const englishLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
   resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
@@ -1903,7 +1939,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
   assert.equal(elements.get("#jobProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
-  assert.equal(elements.get("#status").textContent, "dynamic status");
+  assert.equal(elements.get("#status").textContent, translationFixtures.en["status.editReady"]);
   assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "saved-output"));
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
@@ -1929,6 +1965,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(document.documentElement.lang, "en");
 
   state.settings.general.language = "ja";
+  setStatusKey("status.imagesLoaded", { count: 3 });
   const japaneseLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
   resolvePendingFetch("/i18n/ja.json", { ok: true, json: async () => translationFixtures.ja });
@@ -1936,6 +1973,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(document.documentElement.lang, "ja");
   assert.equal(elements.get("#detectModeStandard").textContent, translationFixtures.ja["detectDialog.standard"]);
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  assert.equal(elements.get("#status").textContent, translationFixtures.ja["status.imagesLoaded"].replace("{count}", "3"));
 
   // Selecting a language updates immediately, while closing without Save
   // restores the persisted language. The settings shortcut control itself
@@ -1944,17 +1982,21 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsShortcuts").checked = false;
   elements.get("#settingsShortcuts").dispatch("change");
   assert.equal(state.navigationShortcutsEnabled, true);
+  setStatusKey("status.applyProgress", { completed: 2, total: 4, current: "dynamic-name.png" }, "running");
   elements.get("#settingsLanguage").value = "en";
   elements.get("#settingsLanguage").dispatch("change");
   await new Promise((resolve) => setImmediate(resolve));
   resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(document.documentElement.lang, "en");
+  assert.equal(elements.get("#status").textContent, translationFixtures.en["status.applyProgress"].replace("{completed}", "2").replace("{total}", "4").replace("{current}", "dynamic-name.png"));
+  setStatus("raw server error", "error");
   elements.get("#settingsDialog").close();
   await new Promise((resolve) => setImmediate(resolve));
   resolvePendingFetch("/i18n/ja.json", { ok: true, json: async () => translationFixtures.ja });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(document.documentElement.lang, "ja");
+  assert.equal(elements.get("#status").textContent, "raw server error");
 
   // Saving settings into another language loads that dictionary before the
   // success message is rendered, so the result cannot be left in the old UI language.

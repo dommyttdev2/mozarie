@@ -1,6 +1,7 @@
 {
   "app.title": "Mozarie",
   "app.brand": "Mozarie",
+  "appbar.actions": "全画像の操作",
   "folder.label": "画像フォルダ",
   "folder.browse": "画像を追加",
   "folder.load": "読み込む",
