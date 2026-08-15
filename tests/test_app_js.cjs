@@ -228,6 +228,18 @@ assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="po
 assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
 assert.match(styles, /\.settings-dialog\s*\{\s*width:\s*min\(620px/);
 assert.doesNotMatch(markup, /必要なモデルを確認しました|モデルは含まれていません|依存関係|ログの場所/);
+assert.match(markup, /<span data-i18n="editor\.blockSize">モザイク粗さ<\/span>/);
+assert.match(markup, /class="settings-tabs" role="tablist" aria-label="設定" data-i18n-aria-label="settings\.tablist"/);
+for (const key of [...markup.matchAll(/data-i18n="([^"]+)"/g)].map((match) => match[1])) {
+  assert.ok(translationFixtures.en[key], `English translation missing visible key: ${key}`);
+}
+for (const key of [...markup.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)].map((match) => match[1])) {
+  assert.ok(translationFixtures.en[key], `English translation missing accessible key: ${key}`);
+}
+for (const tag of markup.match(/<[^>]+>/g) || []) {
+  assert.ok(!/aria-label="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-aria-label=/.test(tag), `Japanese ARIA label lacks a translation key: ${tag}`);
+  assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
+}
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });

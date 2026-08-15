@@ -176,6 +176,7 @@
   "error.connectionLost": "Mozarie との通信が途切れました。アプリが起動しているか確認してください。"
   ,"settings.open": "設定",
   "settings.title": "設定",
+  "settings.tablist": "設定",
   "settings.general": "一般",
   "settings.models": "モデル",
   "settings.display": "表示・操作",
