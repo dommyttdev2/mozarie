@@ -2,64 +2,77 @@
 
 # Mozarie
 
-画像を確認し、モザイク編集を行うWindows向けローカルアプリです。
+複数画像のモザイク範囲をローカルで確認・編集するWindowsアプリです。自動検出で候補を出し、候補の確認や手動修正をしてから保存できます。対応形式では保存時に元画像のメタ情報を保持します。
 
-- モザイク範囲の自動検出
-- ブラシと境界指定による手動編集
-- PNG、JPEG、WebPの一括処理
-- メタ情報を保持した画像保存
-- Windows上でローカル動作
-
-## クイックスタート
+## 最短手順
 
 1. Python 3.11以降をインストールします。
-2. 依存関係をインストールします。
+2. 依存関係を入れます。
 
    ```powershell
    python -m pip install -r requirements.txt
    ```
 
-3. 下記の必須2モデルをダウンロードします。
+3. 下の「必須」モデルを2つダウンロードします。
 4. Mozarieを起動します。
 
    ```powershell
    .\run.bat
    ```
 
-5. **設定 > 検出** を開き、ダウンロードした2ファイルを選択します。
+5. **設定 > 検出**で2つのモデルファイルを指定し、画像またはフォルダを読み込みます。
+6. 自動検出、候補確認、必要な手動修正を行い、保存します。
 
-## 使用モデル
+## モデルの準備
 
-| 用途 | ファイル名 | ダウンロード | 配布元 |
+### 必須
+
+| 用途 | ファイル | ダウンロード | 配布元 |
 | --- | --- | --- | --- |
-| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [配布ページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
-| 対象を正確に検出する | `sam_vit_b_01ec64.pth` | [ダウンロード](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
+| 性器を自動検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [モデルページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
+| 輪郭を整える・境界ツールに使う | `sam_vit_b_01ec64.pth` | [ダウンロード](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
 
-任意で追加できるモデルです。
+輪郭モデルは、高精度での自動検出、境界ツール、手の除外で物体の輪郭を取るためにも使います。
+
+### 任意: 検出漏れを補う
+
+NTD11とSensitiveは、基本モデルで検出漏れが多いときだけ追加する性器検出モデルです。
 
 | モデル | 配布元 |
 | --- | --- |
 | `ntd11_anime_nsfw_segm_v5-variant1` | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556/anime-nsfw-detection-adetailer-all-in-one) |
 | `sensitive_detect_v07` | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect/tree/main) |
-| 手を除外 | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 
-NTD11とSensitiveは1024pxのraw ONNX出力を使います。ダウンロードした`.pt`をUltralyticsで`end2end=False`として変換し、**設定 > 検出** で生成された`.onnx`を指定してください。手の除外は任意です。精液の除外に追加モデルは不要です。
+この2つには1024pxのraw segmentation ONNXが必要です。配布元に互換ONNXがない場合だけ、ダウンロードした`.pt`をUltralyticsで`end2end=False`として変換し、**設定 > 検出**で生成された`.onnx`を指定してください。
 
 ```powershell
 python -m pip install ultralytics
 yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 ```
 
-モデルファイルはこのリポジトリに含まれず、Mozarieが自動でダウンロードすることもありません。使用前に各配布ページの利用規約とライセンスを確認してください。
+### 任意: 重なった手を除外
+
+性器に重なった手をモザイクから外したい場合だけ有効にします。手の検出ONNXが必要で、上記の輪郭モデルと組み合わせて重なった部分だけを除外します。
+
+| モデル | 配布元 |
+| --- | --- |
+| 手の検出 | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
+
+### 任意: 白い体液と思われる部分を除外
+
+追加モデルは使いません。検出されたペニス範囲の中で、白色かつ小さい領域を色と面積で判定して除外する実験的な処理です。白いハイライトや明るい小物も誤って除外することがあるため、必ず結果を確認してください。
+
+モデルファイルはこのリポジトリに含まれず、自動ダウンロードもしません。利用前に各配布元の利用条件とライセンスを確認してください。
 
 ## 使い方
 
-1. 画像ファイルまたはフォルダを読み込みます。
-2. 自動検出を実行します。
-3. ブラシまたは境界ツールで結果を調整します。
-4. 保存後の画像を確認します。
+1. 画像またはフォルダを読み込みます。
+2. 現在の画像、または全画像に自動検出を実行します。
+3. モザイク範囲の候補を確認し、不要な候補を外します。
+4. ブラシで追加・削除するか、境界ツールで物体の輪郭を選びます。
+5. 1枚ずつ、またはまとめて保存します。
 
-保存時は元画像のメタ情報を保持します。
+PNG、JPEG、WebPでは対応する元画像メタ情報を保持して保存します。公開前に保存画像を確認してください。
 
 ## 開発
 
@@ -73,6 +86,4 @@ node tests/test_import_picker_e2e.cjs
 
 ## ライセンス
 
-Mozarieは[MIT License](LICENSE)で公開しています。
-
-サードパーティー製コンポーネントは[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)を参照してください。
+Mozarieは[MIT License](LICENSE)で公開しています。第三者コンポーネントとモデル配布元については[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)を確認してください。
