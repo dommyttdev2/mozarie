@@ -684,7 +684,9 @@ const completionWatchdog = setTimeout(() => {
   updateBoundaryActions();
   const blockedBoundaryRequests = fetchCalls;
   assert.equal(canDetectBoundary(), false);
-  windowListeners.get("keydown")({ key: "Enter", preventDefault() {} });
+  let draggingEnterPrevented = false;
+  windowListeners.get("keydown")({ key: "Enter", preventDefault() { draggingEnterPrevented = true; } });
+  assert.equal(draggingEnterPrevented, true);
   elements.get("#boundaryDetectButton").click();
   await addBoundaryCandidate({ x: 8, y: 7 });
   assert.equal(fetchCalls, blockedBoundaryRequests);
@@ -692,11 +694,45 @@ const completionWatchdog = setTimeout(() => {
   state.pendingImageId = "loading";
   updateBoundaryActions();
   assert.equal(canDetectBoundary(), false);
-  windowListeners.get("keydown")({ key: "Enter", preventDefault() {} });
+  let loadingEnterPrevented = false;
+  windowListeners.get("keydown")({ key: "Enter", preventDefault() { loadingEnterPrevented = true; } });
+  assert.equal(loadingEnterPrevented, true);
   elements.get("#boundaryDetectButton").click();
   await addBoundaryCandidate({ x: 8, y: 7 });
   assert.equal(fetchCalls, blockedBoundaryRequests);
   state.pendingImageId = null;
+
+  // Enter is always consumed by a boundary draft, even when the polygon is
+  // incomplete or invalid, so it cannot mark the image reviewed or navigate.
+  state.tool = "polygon";
+  state.boundaryRoi = null;
+  state.boundaryStart = null;
+  state.boundaryPoint = null;
+  state.boundaryDragging = false;
+  state.currentId = "first";
+  state.currentImage = { width: 100, height: 80 };
+  state.reviewedPaths = new Set();
+  for (const points of [
+    [{ x: 0, y: 0 }],
+    [{ x: 0, y: 0 }, { x: 12, y: 0 }],
+    [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 12, y: 12 }],
+    [{ x: 0, y: 0 }, { x: 12, y: 12 }, { x: 0, y: 12 }, { x: 12, y: 0 }],
+    [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }],
+  ]) {
+    state.polygonPoints = points.map((point) => ({ ...point }));
+    const savedDraft = JSON.parse(JSON.stringify(state.polygonPoints));
+    const currentBeforeEnter = state.currentId;
+    const requestsBeforeEnter = fetchCalls;
+    let prevented = false;
+    windowListeners.get("keydown")({ key: "Enter", preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(fetchCalls, requestsBeforeEnter);
+    assert.equal(state.currentId, currentBeforeEnter);
+    assert.equal(isReviewed(state.images[0]), false);
+    assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints)), savedDraft);
+  }
+  state.tool = "boundary";
+  state.polygonPoints = [];
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
   state.imageGeneration = 20;

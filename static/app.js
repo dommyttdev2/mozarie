@@ -1046,6 +1046,11 @@ function canDetectBoundary() {
     && !state.boundaryDragging && !state.pendingImageId && !state.boundaryPending && !isBusy() && !state.importing;
 }
 
+function hasBoundaryDraft() {
+  return (state.tool === "boundary" && Boolean(state.boundaryRoi || state.boundaryStart))
+    || (state.tool === "polygon" && state.polygonPoints.length > 0);
+}
+
 function boundaryActionAnchor() {
   const rectangle = boundaryDraftRoi();
   const points = state.polygonPoints;
@@ -3039,12 +3044,14 @@ function bindEvents() {
     if (event.key === "Escape" && !$("#boundaryModeMenu").hidden) {
       event.preventDefault(); closeBoundaryModeMenu(); focusElement($("#boundaryTool")); return;
     }
-    if ((state.tool === "boundary" && state.boundaryRoi) || (state.tool === "polygon" && state.polygonPoints.length)) {
+    if (hasBoundaryDraft()) {
       if (event.key === "Escape") { event.preventDefault(); cancelBoundary(); return; }
-      if (event.key === "Enter" && canDetectBoundary()) {
+      if (event.key === "Enter") {
         event.preventDefault();
-        if (state.tool === "polygon") void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
-        else void addBoundaryCandidate(state.boundaryPromptPoint);
+        if (canDetectBoundary()) {
+          if (state.tool === "polygon") void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+          else void addBoundaryCandidate(state.boundaryPromptPoint);
+        }
         return;
       }
     }
