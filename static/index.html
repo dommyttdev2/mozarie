@@ -72,10 +72,15 @@
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div id="canvasStage" class="canvas-stage">
         <div class="canvas-tool-rail" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
-          <button id="brushTool" class="tool icon-button active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush">筆</button>
-          <button id="eraserTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser">消</button>
-          <button id="boundaryTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary">囲</button>
-          <button id="polygonTool" class="tool icon-button" type="button" aria-pressed="false" aria-label="4点境界" title="4点境界" data-i18n-aria-label="polygon.tool" data-i18n-title="polygon.tool">◇</button>
+          <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+          <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+          <div class="boundary-tool-menu">
+            <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
+            <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
+              <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
+              <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
+            </div>
+          </div>
           <span class="tool-separator" aria-hidden="true"></span>
           <button id="fitButton" class="tool icon-button" type="button" aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
           <button id="undoButton" class="tool icon-button" type="button" aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
@@ -93,9 +98,9 @@
           <label class="shortcut-toggle"><input id="navigationShortcutsEnabled" type="checkbox" checked data-i18n-aria-label="navigation.shortcuts" aria-label="ショートカット"><span data-i18n="navigation.shortcuts">ショートカット</span></label>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
-        <div id="polygonActions" class="polygon-actions" hidden>
-          <button id="polygonDetectButton" class="primary" type="button" disabled>検出</button>
-          <button id="polygonCancelButton" class="danger" type="button">取消</button>
+        <div id="boundaryActions" class="boundary-actions" role="group" aria-label="境界操作" data-i18n-aria-label="boundary.actions" hidden>
+          <button id="boundaryDetectButton" class="primary" type="button" disabled data-i18n="boundary.detect">検出</button>
+          <button id="boundaryCancelButton" class="danger" type="button" data-i18n="boundary.cancel">取消</button>
         </div>
         <div id="emptyState" class="empty-state" data-i18n="editor.empty">左の画像を選択してください</div>
       </div>
@@ -224,12 +229,13 @@
         <button type="button" class="settings-tab active" role="tab" data-settings-tab="general" data-i18n="settings.general">一般</button>
         <button type="button" class="settings-tab" role="tab" data-settings-tab="models" data-i18n="settings.models">モデル</button>
         <button type="button" class="settings-tab" role="tab" data-settings-tab="display" data-i18n="settings.display">表示・操作</button>
+        <button type="button" class="settings-tab" role="tab" data-settings-tab="help" data-i18n="settings.help">ヘルプ</button>
         <button type="button" class="settings-tab" role="tab" data-settings-tab="info" data-i18n="settings.info">情報</button>
       </div>
       <section class="settings-panel" data-settings-panel="general">
         <label class="form-row"><span data-i18n="settings.language">言語</span><select id="settingsLanguage"><option value="ja">日本語</option><option value="en">English</option></select></label>
-        <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
         <label class="form-row"><span data-i18n="settings.port">次回起動時のポート</span><input id="settingsPort" type="number" min="1024" max="65535" step="1"></label>
+        <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
         <label class="choice-row"><input id="settingsShortcuts" type="checkbox"><span data-i18n="settings.shortcuts">キーボードショートカット</span></label>
       </section>
       <section class="settings-panel" data-settings-panel="models" hidden>
@@ -245,11 +251,24 @@
         <label class="form-row"><span data-i18n="settings.applyColor">適用範囲の色</span><input id="settingsApplyColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.excludeColor">除外範囲の色</span><input id="settingsExcludeColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
-        <label class="choice-row"><input id="settingsMosaicPreview" type="checkbox"><span data-i18n="settings.mosaicPreview">モザイクプレビュー</span></label>
+        <label class="choice-row"><input id="settingsMosaicPreview" type="checkbox"><span data-i18n="settings.mosaicPreview">モザイク表示</span></label>
+        <p class="fixed-note" data-i18n="settings.mosaicPreviewHelp">編集画面にモザイクを表示します。保存内容には影響しません。</p>
+      </section>
+      <section class="settings-panel" data-settings-panel="help" hidden>
+        <table class="shortcut-help-table"><tbody>
+          <tr><th>Ctrl / Cmd + Z</th><td data-i18n="settings.helpUndo">元に戻す</td></tr>
+          <tr><th>Ctrl / Cmd + Shift + Z</th><td data-i18n="settings.helpRedo">やり直す</td></tr>
+          <tr><th>G</th><td data-i18n="settings.helpOverview">画像一覧</td></tr>
+          <tr><th>&larr; / &rarr;</th><td data-i18n="settings.helpNavigate">前後の画像</td></tr>
+          <tr><th>Shift + &rarr;</th><td data-i18n="settings.helpNextUnreviewed">次の未確認</td></tr>
+          <tr><th>Home / End</th><td data-i18n="settings.helpEdge">最初 / 最後</td></tr>
+          <tr><th>Enter</th><td data-i18n="settings.helpReview">確認済みにして次へ</td></tr>
+          <tr><th>Enter / Esc</th><td data-i18n="settings.helpBoundary">境界の検出 / 取消</td></tr>
+          <tr><th>Shift + Wheel</th><td data-i18n="settings.helpBrush">ブラシ径を変更</td></tr>
+        </tbody></table>
       </section>
       <section class="settings-panel" data-settings-panel="info" hidden>
-        <p class="fixed-note" data-i18n="settings.infoText">モデルは含まれていません。利用者が各モデルの配布条件を確認し、ローカルのパスを指定します。</p>
-        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd>0.1.0</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd><dt data-i18n="settings.dependencies">依存関係</dt><dd>Python, NumPy, Pillow, OpenCV, ONNX Runtime, PyTorch, Segment Anything</dd><dt data-i18n="settings.logLocation">ログの場所</dt><dd>標準出力</dd></dl>
+        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd>0.1.0</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl>
       </section>
       <output id="settingsResult" class="dialog-result" aria-live="polite"></output>
       <div class="dialog-actions"><button id="settingsResetButton" type="button" data-i18n="settings.reset">初期値に戻す</button><button id="settingsSaveButton" type="submit" class="primary" data-i18n="settings.save">保存</button></div>

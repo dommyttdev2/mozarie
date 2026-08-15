@@ -6,7 +6,7 @@ const state = {
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
-  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryDragging: false,
+  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
   polygonPoints: [], polygonDragIndex: -1, blinkCandidateIds: new Set(),
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
@@ -47,6 +47,7 @@ const layerCtx = layerCanvas.getContext("2d");
 const blinkCtx = blinkCanvas.getContext("2d");
 let renderedWidth = 0;
 let renderedHeight = 0;
+let translationGeneration = 0;
 
 function t(key, params = {}) {
   let value = state.translations[key] || key;
@@ -54,12 +55,16 @@ function t(key, params = {}) {
   return value;
 }
 
-async function loadTranslations() {
+async function loadTranslations(languageOverride = null) {
+  const generation = ++translationGeneration;
   try {
-    const language = state.settings?.general?.language === "en" ? "en" : "ja";
+    const language = languageOverride === "en" || (!languageOverride && state.settings?.general?.language === "en") ? "en" : "ja";
     document.documentElement.lang = language;
-    state.translations = await fetch(`/i18n/${language}.json`).then((response) => response.ok ? response.json() : {});
+    const translations = await fetch(`/i18n/${language}.json`).then((response) => response.ok ? response.json() : {});
+    if (generation !== translationGeneration) return false;
+    state.translations = translations;
   } catch {
+    if (generation !== translationGeneration) return false;
     state.translations = {};
   }
   document.querySelectorAll("[data-i18n]").forEach((element) => {
@@ -77,11 +82,11 @@ async function loadTranslations() {
   const sectionHeadings = document.querySelectorAll(".candidate-section h3");
   if (sectionHeadings[0]) sectionHeadings[0].textContent = t("candidates.applyRanges");
   if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
-  const polygonDetect = $("#polygonDetectButton"); const polygonCancel = $("#polygonCancelButton");
-  if (polygonDetect) polygonDetect.textContent = t("polygon.detect");
-  if (polygonCancel) polygonCancel.textContent = t("polygon.cancel");
   ensureDetectionModeControl();
   renderModelStatus();
+  updateBoundaryActions();
+  renderCatalogViews(); renderCandidates(); render();
+  return true;
 }
 
 function api(path, options = {}) {
@@ -311,10 +316,11 @@ function clearBoundaryInteraction() {
   state.boundaryStart = null;
   state.boundaryStartClient = null;
   state.boundaryPoint = null;
+  state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
   state.polygonPoints = [];
   state.polygonDragIndex = -1;
-  updatePolygonActions();
+  updateBoundaryActions();
 }
 
 function setMosaicPreviewEnabled(enabled) {
@@ -333,7 +339,7 @@ function resetCatalog(images, root) {
   state.reviewRoot = normaliseReviewRoot(root);
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.boundaryRoi = null;
+  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearBoundaryInteraction();
   state.candidateUpdateVersions.clear(); state.candidateDeleting.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
@@ -963,6 +969,11 @@ function drawBoundaryRoi() {
   const width = (roi.right - roi.left) * state.view.scale; const height = (roi.bottom - roi.top) * state.view.scale;
   ctx.save(); ctx.fillStyle = "rgba(255, 255, 255, 0.24)"; ctx.fillRect(x, y, width, height);
   ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.strokeRect(x, y, width, height); ctx.restore();
+  if (state.boundaryPromptPoint && !state.boundaryDragging) {
+    const pointX = state.view.x + state.boundaryPromptPoint.x * state.view.scale;
+    const pointY = state.view.y + state.boundaryPromptPoint.y * state.view.scale;
+    ctx.save(); ctx.fillStyle = "#50d589"; ctx.beginPath(); ctx.arc(pointX, pointY, 4, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  }
 }
 
 function polygonArea(points) {
@@ -986,11 +997,41 @@ function polygonIsValid() {
     && !polygonSegmentsIntersect(points[1], points[2], points[3], points[0]);
 }
 
-function updatePolygonActions() {
-  const actions = $("#polygonActions");
-  const active = state.tool === "polygon" && state.polygonPoints.length > 0;
+function boundaryActionAnchor() {
+  const rectangle = state.boundaryRoi;
+  const points = state.polygonPoints;
+  if (rectangle) return {
+    left: state.view.x + rectangle.left * state.view.scale,
+    right: state.view.x + rectangle.right * state.view.scale,
+    top: state.view.y + rectangle.top * state.view.scale,
+    bottom: state.view.y + rectangle.bottom * state.view.scale,
+  };
+  if (!points.length) return null;
+  const projected = points.map((point) => ({ x: state.view.x + point.x * state.view.scale, y: state.view.y + point.y * state.view.scale }));
+  return {
+    left: Math.min(...projected.map((point) => point.x)), right: Math.max(...projected.map((point) => point.x)),
+    top: Math.min(...projected.map((point) => point.y)), bottom: Math.max(...projected.map((point) => point.y)),
+  };
+}
+
+function updateBoundaryActions() {
+  const actions = $("#boundaryActions");
+  if (!actions) return;
+  const isRectangleDraft = state.tool === "boundary" && Boolean(state.boundaryRoi);
+  const isPolygonDraft = state.tool === "polygon" && state.polygonPoints.length > 0;
+  const active = !state.boundaryPending && (isRectangleDraft || isPolygonDraft);
   actions.hidden = !active;
-  $("#polygonDetectButton").disabled = !polygonIsValid() || isBusy() || state.importing;
+  $("#boundaryDetectButton").disabled = !active || (isPolygonDraft && !polygonIsValid()) || isBusy() || state.importing;
+  if (!active) return;
+  const anchor = boundaryActionAnchor();
+  if (!anchor) return;
+  const width = actions.offsetWidth || 142;
+  const height = actions.offsetHeight || 38;
+  const horizontal = Math.max(8, Math.min(stage.clientWidth - width - 8, anchor.left + (anchor.right - anchor.left - width) / 2));
+  const below = anchor.bottom + 8;
+  const vertical = below + height <= stage.clientHeight - 8 ? below : Math.max(8, anchor.top - height - 8);
+  actions.style.left = `${Math.round(horizontal)}px`;
+  actions.style.top = `${Math.round(vertical)}px`;
 }
 
 function drawPolygonBoundary() {
@@ -1009,7 +1050,7 @@ function drawPolygonBoundary() {
     const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
     ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
   }
-  ctx.restore(); updatePolygonActions();
+  ctx.restore(); updateBoundaryActions();
 }
 
 function drawCandidateBlinkOverlay() {
@@ -1048,6 +1089,7 @@ function render() {
   drawBoundaryRoi();
   drawPolygonBoundary();
   drawBrushCursor();
+  updateBoundaryActions();
 }
 
 function renderCandidates() {
@@ -1269,9 +1311,9 @@ async function addBoundaryCandidate(point = null, polygonPoints = null) {
   const imageId = state.currentId;
   const viewGeneration = state.imageGeneration;
   const roi = state.boundaryRoi ? { ...state.boundaryRoi } : null;
-  const targetPoint = point ? { ...point } : null;
+  const targetPoint = point ? { ...point } : (roi ? { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) } : null);
   let catalogChanged = false;
-  state.boundaryPending = true; updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
+  state.boundaryPending = true; updateBoundaryActions(); updateActionButtons(); setStatus(t("status.boundaryDetecting"), "running");
   try {
     const data = await api("/api/boundary", {
       method: "POST",
@@ -1298,7 +1340,7 @@ async function addBoundaryCandidate(point = null, polygonPoints = null) {
   finally {
     state.boundaryPending = false;
     if (catalogChanged) renderCatalogViews();
-    updateActionButtons();
+    updateBoundaryActions(); updateActionButtons();
   }
 }
 
@@ -1321,8 +1363,8 @@ function polygonVertexAt(point) {
   const radius = Math.max(8, 12 / Math.max(state.view.scale, 0.1));
   return state.polygonPoints.findIndex((vertex) => Math.hypot(vertex.x - point.x, vertex.y - point.y) <= radius);
 }
-function cancelPolygonBoundary() {
-  state.polygonPoints = []; state.polygonDragIndex = -1; updatePolygonActions(); render();
+function cancelBoundary() {
+  clearBoundaryInteraction(); render();
 }
 function copyCanvas(source, target) {
   target.width = source.width; target.height = source.height;
@@ -2156,12 +2198,14 @@ function setTool(tool) {
   if (tool !== "boundary") clearBoundaryInteraction();
   if (tool !== "polygon") { state.polygonPoints = []; state.polygonDragIndex = -1; }
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#boundaryTool", "boundary"], ["#polygonTool", "polygon"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
+  $("#boundaryTool").classList.toggle("active", ["boundary", "polygon"].includes(tool));
+  $("#boundaryTool").setAttribute("aria-pressed", String(["boundary", "polygon"].includes(tool)));
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
   if (tool === "boundary" && state.boundaryRoi) setStatus(t("status.boundaryReady"));
-  updatePolygonActions(); render();
+  updateBoundaryActions(); render();
 }
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
@@ -2583,7 +2627,7 @@ function ensureDetectionModeControl() {
 function renderModelStatus() {
   const modelStatus = Object.entries(state.settingsStatus?.models || {});
   $("#settingsModelStatus").textContent = modelStatus.length && modelStatus.every(([, model]) => model.valid)
-    ? t("settings.modelsReady")
+    ? ""
     : modelStatus.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
 }
 
@@ -2629,7 +2673,10 @@ function settingsPayload() {
 }
 
 function selectSettingsTab(name) {
-  document.querySelectorAll(".settings-tab").forEach((button) => button.classList.toggle("active", button.dataset.settingsTab === name));
+  document.querySelectorAll(".settings-tab").forEach((button) => {
+    const active = button.dataset.settingsTab === name;
+    button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active));
+  });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
 }
 
@@ -2671,6 +2718,12 @@ async function resetSettings() {
 function bindEvents() {
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
+  $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
+  $("#settingsDialog").addEventListener("close", () => {
+    const language = state.settings?.general?.language || "ja";
+    $("#settingsLanguage").value = language;
+    void loadTranslations(language);
+  });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   document.querySelectorAll(".settings-tab").forEach((button) => button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab)));
@@ -2713,7 +2766,8 @@ function bindEvents() {
   $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
   $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
   $("#navigationShortcutsEnabled").addEventListener("change", (event) => { void persistNavigationShortcuts(event.target.checked); });
-  $("#settingsShortcuts").addEventListener("change", (event) => { void persistNavigationShortcuts(event.target.checked); });
+  $("#settingsShortcuts").addEventListener("change", () => {});
+  $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
     if (isBusy() || state.importing) return;
     state.overviewFilter = button.dataset.overviewFilter; renderOverview();
@@ -2725,11 +2779,21 @@ function bindEvents() {
     overviewQueryTimer = setTimeout(() => renderOverview(), 120);
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
-  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser")); $("#boundaryTool").addEventListener("click", () => setTool("boundary")); $("#polygonTool").addEventListener("click", () => setTool("polygon"));
-  $("#polygonDetectButton").addEventListener("click", () => {
-    if (polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#boundaryTool").addEventListener("click", () => {
+    const menu = $("#boundaryModeMenu");
+    const expanded = menu.hidden;
+    menu.hidden = !expanded;
+    $("#boundaryTool").setAttribute("aria-expanded", String(expanded));
   });
-  $("#polygonCancelButton").addEventListener("click", cancelPolygonBoundary);
+  $("#rectangleTool").addEventListener("click", () => { $("#boundaryModeMenu").hidden = true; $("#boundaryTool").setAttribute("aria-expanded", "false"); setTool("boundary"); });
+  $("#polygonTool").addEventListener("click", () => { $("#boundaryModeMenu").hidden = true; $("#boundaryTool").setAttribute("aria-expanded", "false"); setTool("polygon"); });
+  $("#boundaryDetectButton").addEventListener("click", () => {
+    if (state.tool === "polygon") {
+      if (polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+    } else if (state.boundaryRoi) void addBoundaryCandidate(state.boundaryPromptPoint);
+  });
+  $("#boundaryCancelButton").addEventListener("click", cancelBoundary);
   $("#mosaicPreviewButton").addEventListener("click", () => setMosaicPreviewEnabled(!state.mosaicPreviewEnabled));
   $("#brushSize").addEventListener("input", () => updateBrushSize($("#brushSize").value));
   $("#divisor").addEventListener("input", () => {
@@ -2819,7 +2883,7 @@ function bindEvents() {
         if (state.polygonPoints.length < 4) state.polygonPoints.push(point);
         state.drawing = false;
       }
-      updatePolygonActions(); render(); return;
+      updateBoundaryActions(); render(); return;
     }
     beginManualStroke(point); render();
   });
@@ -2846,7 +2910,7 @@ function bindEvents() {
     const boundaryStarted = Boolean(state.boundaryStart);
     try { if (event && canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId); } catch { /* Pointer capture may already be released. */ }
     state.drawing = false; state.panning = false;
-    if (state.tool === "polygon") { state.polygonDragIndex = -1; updatePolygonActions(); render(); return; }
+    if (state.tool === "polygon") { state.polygonDragIndex = -1; updateBoundaryActions(); render(); return; }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
@@ -2855,8 +2919,14 @@ function bindEvents() {
     if (!cancelled && wasDrawing && boundaryStarted && !isBusy() && !state.importing && event?.button === 0) {
       const point = clampPoint(pointFromEvent(event));
       const roi = roiFromPoints(boundaryStart, point);
-      if (boundaryDragging && roi) { state.boundaryRoi = roi; setStatus(t("status.boundaryReady")); }
-      else if (pointInBoundaryRoi(point)) void addBoundaryCandidate(point);
+      if (boundaryDragging && roi) {
+        state.boundaryRoi = roi;
+        state.boundaryPromptPoint = { x: Math.round((roi.left + roi.right) / 2), y: Math.round((roi.top + roi.bottom) / 2) };
+        setStatus(t("status.boundaryReady"));
+      } else if (pointInBoundaryRoi(point)) {
+        state.boundaryPromptPoint = point;
+        setStatus(t("status.boundaryReady"));
+      }
     }
     render();
   }
@@ -2873,9 +2943,14 @@ function bindEvents() {
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
-    if (state.tool === "polygon" && state.polygonPoints.length) {
-      if (event.key === "Escape") { event.preventDefault(); cancelPolygonBoundary(); return; }
-      if (event.key === "Enter" && polygonIsValid()) { event.preventDefault(); void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point }))); return; }
+    if ((state.tool === "boundary" && state.boundaryRoi) || (state.tool === "polygon" && state.polygonPoints.length)) {
+      if (event.key === "Escape") { event.preventDefault(); cancelBoundary(); return; }
+      if (event.key === "Enter" && !isBusy()) {
+        event.preventDefault();
+        if (state.tool === "polygon" && polygonIsValid()) void addBoundaryCandidate(null, state.polygonPoints.map((point) => ({ ...point })));
+        else if (state.tool === "boundary") void addBoundaryCandidate(state.boundaryPromptPoint);
+        return;
+      }
     }
     const menu = $("#catalogContextMenu");
     if (menu.matches?.(":popover-open")) {

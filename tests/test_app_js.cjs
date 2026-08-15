@@ -54,7 +54,7 @@ function overviewItem() {
 
 const elements = new Map();
 for (const id of [
-  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "polygonTool", "polygonActions", "polygonDetectButton", "polygonCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus",
+  "editorCanvas", "canvasStage", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryAllTab", "galleryMaskedTab", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "detectMode", "detectModeStandard", "detectModeHighPrecision", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "navigationShortcutsEnabled", "imagePosition", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
   "status", "jobProgress", "jobProgressText", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
   "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOverwriteNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsTargetModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsResult",
@@ -106,6 +106,8 @@ elements.get("#editorCanvas").hasPointerCapture = () => true;
 elements.get("#editorCanvas").releasePointerCapture = () => {};
 elements.get("#canvasStage").clientWidth = 600;
 elements.get("#canvasStage").clientHeight = 400;
+elements.get("#boundaryActions").offsetWidth = 142;
+elements.get("#boundaryActions").offsetHeight = 38;
 elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode: galleryItem } } });
 elements.set("#overviewItemTemplate", { content: { firstElementChild: { cloneNode: overviewItem } } });
 const candidateList = elements.get("#candidateList");
@@ -218,10 +220,18 @@ const context = {
 
 let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
+const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
+const styles = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");
+assert.match(markup, /id="boundaryActions"[^>]*hidden/);
+assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
+assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="polygonCancelButton"/);
+assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
+assert.match(styles, /\.settings-dialog\s*\{\s*width:\s*min\(620px/);
+assert.doesNotMatch(markup, /必要なモデルを確認しました|モデルは含まれていません|依存関係|ログの場所/);
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, outputDirectoryFor, uniqueOutputFile, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
   bindEvents();
   const lru = new Map();
   const firstImage = { src: "blob:first" };
@@ -488,6 +498,27 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(state.boundaryDragging, false);
   assert.deepEqual(JSON.parse(JSON.stringify(state.polygonPoints)), []);
   assert.equal(state.polygonDragIndex, -1);
+  assert.equal(elements.get("#boundaryActions").hidden, true);
+
+  // Boundary actions only appear for a draft, track the image coordinate
+  // anchor, and flip above the boundary when there is no room below.
+  state.tool = "boundary";
+  state.view = { x: 0, y: 0, scale: 1 };
+  state.boundaryRoi = { left: 20, top: 340, right: 100, bottom: 390 };
+  state.boundaryPromptPoint = { x: 60, y: 365 };
+  updateBoundaryActions();
+  assert.equal(elements.get("#boundaryActions").hidden, false);
+  assert.equal(elements.get("#boundaryDetectButton").disabled, false);
+  assert.equal(elements.get("#boundaryActions").style.top, "294px");
+  assert.equal(elements.get("#boundaryActions").style.left, "8px");
+  state.tool = "polygon";
+  state.boundaryRoi = null;
+  state.polygonPoints = [{ x: 10, y: 10 }];
+  updateBoundaryActions();
+  assert.equal(elements.get("#boundaryActions").hidden, false);
+  assert.equal(elements.get("#boundaryDetectButton").disabled, true);
+  cancelBoundary();
+  assert.equal(elements.get("#boundaryActions").hidden, true);
 
   // Four-point boundary vertices must remain draggable after pointerdown.
   state.currentImage = { width: 100, height: 80 };
@@ -1737,7 +1768,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#detectModeStandard").textContent, "Standard");
   assert.equal(elements.get("#detectModeHighPrecision").textContent, "High precision");
-  assert.equal(elements.get("#settingsModelStatus").textContent, "Required models are ready.");
+  assert.equal(elements.get("#settingsModelStatus").textContent, "");
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
     t("apply.completeWithStale", { completed: 3, stale: 1 }),
@@ -1752,7 +1783,26 @@ const completionWatchdog = setTimeout(() => {
   await japaneseLoad;
   assert.equal(document.documentElement.lang, "ja");
   assert.equal(elements.get("#detectModeStandard").textContent, translationFixtures.ja["detectDialog.standard"]);
-  assert.equal(elements.get("#settingsModelStatus").textContent, translationFixtures.ja["settings.modelsReady"]);
+  assert.equal(elements.get("#settingsModelStatus").textContent, "");
+
+  // Selecting a language updates immediately, while closing without Save
+  // restores the persisted language. The settings shortcut control itself
+  // does not alter the active global shortcut setting before Save.
+  state.settings.general.shortcuts_enabled = true;
+  elements.get("#settingsShortcuts").checked = false;
+  elements.get("#settingsShortcuts").dispatch("change");
+  assert.equal(state.navigationShortcutsEnabled, true);
+  elements.get("#settingsLanguage").value = "en";
+  elements.get("#settingsLanguage").dispatch("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.documentElement.lang, "en");
+  elements.get("#settingsDialog").close();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/ja.json", { ok: true, json: async () => translationFixtures.ja });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.documentElement.lang, "ja");
 
   // Saving settings into another language loads that dictionary before the
   // success message is rendered, so the result cannot be left in the old UI language.
