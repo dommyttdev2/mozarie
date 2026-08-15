@@ -1,61 +1,51 @@
+[日本語](README.ja.md)
+
 # Mozarie
 
-Mozarie is a local, desktop-oriented image review and mosaic editor. It keeps image work on your machine, proposes mosaic and exclusion ranges, supports hand edits and boundary refinement, and saves PNG/JPEG/WebP through the existing metadata-preserving pipeline.
+A local Windows app for reviewing images and applying mosaic edits.
 
-## 日本語
+- Automatic mosaic-region detection
+- Brush and boundary-based manual editing
+- Batch processing for PNG, JPEG, and WebP
+- Metadata-preserving image saves
+- Runs locally on Windows
 
-動作環境は Windows 10 / 11 と Python 3.11 以降です。
+## Quick Start
 
-### できること
+1. Install Python 3.11 or later.
+2. Install the dependencies:
 
-- フォルダまたはブラウザで追加した画像の確認
-- ONNX Runtimeによるモザイク対象候補と手の除外候補の検出
-- 矩形・4点境界とSAMによる範囲の追加
-- 手描きのモザイク追加・除外、候補ごとの有効化、削除、点滅確認
-- 適用範囲の合成から除外範囲を差し引く保存処理
-- PNG/JPEG/WebPの既存メタデータを保持する保存処理
+   ```powershell
+   python -m pip install -r requirements.txt
+   ```
 
-### セットアップ
+3. Download the three models listed below.
+4. Start Mozarie:
 
-1. Python 3.11以降の仮想環境を用意します。
-2. `pip install -r requirements.txt` を実行します。
-3. `python server.py` で起動します。`--port` を付けると、その起動だけ保存済みポートを上書きできます。
-4. **設定 > モデル** で、対応プロファイルのローカルモデルを選びます。
+   ```powershell
+   .\run.bat
+   ```
 
-必要なローカルファイルは次の3つです。モデルは同梱も自動ダウンロードもしません。
+5. Open **Settings > Models** and select the three downloaded files.
 
-- 7クラス・32マスク係数の対応YOLOセグメンテーションONNX
-- `[batch, anchors, 5]` 出力の対応1クラス手検出ONNX
-- `vit_b`、`vit_l`、`vit_h` のいずれかに対応するSAMチェックポイント
+## Models
 
-設定はGit管理しない `config/local.json` に保存されます。設定画面でCPUを選ぶと、ONNX RuntimeとSAMのどちらもCPUを使います。GPUを選んだ場合はCUDAプロバイダーが必要です。
+| Purpose | File | Download | Source |
+| --- | --- | --- | --- |
+| Mosaic-region detection | `nsfw-anime-xl-x1280.onnx` | [Download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [Model page](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
+| Hand detection | `hand_detect_v1.0_s/model.onnx` | [Download](https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx) | [Model page](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
+| Boundary selection | `sam_vit_b_01ec64.pth` | [Download](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
 
-### 操作
+Model files are not included in this repository. Check the terms and license on each distribution page before use.
 
-1. 画像を読み込み、左の一覧または画像一覧で対象を開きます。
-2. 自動検出を実行し、右の「モザイク範囲」と「除外範囲」を確認します。
-3. 必要に応じてブラシ、除外ブラシ、矩形境界、4点境界で修正します。
-4. 点滅ボタンで範囲を確認し、確認済みにします。
-5. ファイル保存でコピー保存または元画像上書きを選びます。公開前に必ず保存結果を目視確認してください。
+## Usage
 
-キャッシュは `.mozarie-cache/`、ブラウザ追加画像の一時データはOSの一時フォルダに置かれます。どちらもGit管理されません。
+1. Load image files or a folder.
+2. Run automatic detection.
+3. Refine the result with the brush or boundary tool.
+4. Save the image, then review the saved result.
 
-## English
-
-### Setup and operation
-
-1. Use Windows 10 or 11, create a Python 3.11+ environment, and run `pip install -r requirements.txt`.
-2. Start with `python server.py`. `--port` overrides the saved port for that start only.
-3. In **Settings > Models**, select compatible local target-segmentation ONNX, hand-detection ONNX, and SAM checkpoint files.
-4. Load images, review proposed apply and exclusion ranges, refine them with the editor, then save and inspect the result.
-
-Mozarie accepts only its documented ONNX profiles; arbitrary ONNX exports are rejected before inference. It never downloads or bundles models. Select CPU in Settings to force both ONNX Runtime and SAM to CPU. Local settings live in ignored `config/local.json`.
-
-Saving preserves image metadata through the existing PNG, JPEG, and WebP pipeline; inspect every output before publishing.
-
-## Tests
-
-Run the non-inference suite from this directory:
+## Development
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -65,8 +55,8 @@ node tests/test_browser_save_runtime.cjs
 node tests/test_import_picker_e2e.cjs
 ```
 
-The tests use fixtures and mocks. They do not run model inference.
+## License
 
-## Licensing and models
+Mozarie is released under the [MIT License](LICENSE).
 
-Mozarie source code is licensed under [MIT](LICENSE). Runtime dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Model weights are neither bundled nor downloaded by Mozarie; their licenses are independent, and the person selecting each local model is responsible for confirming permitted use.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components.
