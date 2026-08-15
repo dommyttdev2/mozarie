@@ -19,31 +19,31 @@
    python -m pip install -r requirements.txt
    ```
 
-3. 下記の3モデルをダウンロードします。
+3. 下記の必須2モデルをダウンロードします。
 4. Mozarieを起動します。
 
    ```powershell
    .\run.bat
    ```
 
-5. **設定 > モデル** を開き、ダウンロードした3ファイルを選択します。
+5. **設定 > 検出** を開き、ダウンロードした2ファイルを選択します。
 
 ## 使用モデル
 
 | 用途 | ファイル名 | ダウンロード | 配布元 |
 | --- | --- | --- | --- |
-| モザイク範囲の検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [配布ページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
-| 手の検出 | `hand_detect_v1.0_s/model.onnx` | [ダウンロード](https://huggingface.co/deepghs/anime_hand_detection/resolve/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s/model.onnx) | [配布ページ](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
-| 境界指定 | `sam_vit_b_01ec64.pth` | [ダウンロード](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
+| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [配布ページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
+| 対象を正確に検出する | `sam_vit_b_01ec64.pth` | [ダウンロード](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
 
-主モデルの検出漏れを補うため、次の2モデルを任意で追加できます。
+任意で追加できるモデルです。
 
 | モデル | 配布元 |
 | --- | --- |
 | `ntd11_anime_nsfw_segm_v5-variant1` | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556/anime-nsfw-detection-adetailer-all-in-one) |
 | `sensitive_detect_v07` | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect/tree/main) |
+| 手を除外 | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 
-任意モデルには1024pxのraw ONNX出力を使用します。ダウンロードした`.pt`をUltralyticsで`end2end=False`として変換し、**設定 > モデル** で生成された`.onnx`を指定してください。
+NTD11とSensitiveは1024pxのraw ONNX出力を使います。ダウンロードした`.pt`をUltralyticsで`end2end=False`として変換し、**設定 > 検出** で生成された`.onnx`を指定してください。手の除外は任意です。精液の除外に追加モデルは不要です。
 
 ```powershell
 python -m pip install ultralytics

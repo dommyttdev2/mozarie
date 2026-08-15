@@ -23,7 +23,7 @@ function startFixtureServer() {
         general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
         models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", provider: "gpu" },
         display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
-        detection: { mode: "standard", threshold: 0.5, parallelism: 2 },
+        detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2 },
       }, status: { models: {} } }));
       return;
     }

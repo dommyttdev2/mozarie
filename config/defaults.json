@@ -26,6 +26,7 @@
   },
   "detection": {
     "mode": "standard",
+    "fluid_exclusion_enabled": true,
     "threshold": 0.5,
     "parallelism": 2
   }

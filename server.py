@@ -1877,12 +1877,13 @@ class StudioState:
             if segment["class_name"] != "penis":
                 segment["exclusions"] = exclusions
                 continue
-            fluid_mask = white_fluid_mask(rgb, segment["mask"])
-            if np.any(fluid_mask):
-                before_fluid = np.asarray(segment["mask"]).copy()
-                segment["mask"] = np.where(fluid_mask > 0, 0, before_fluid).astype(np.uint8)
-                exclusions["fluid"] = ((before_fluid > 0) & (segment["mask"] == 0)).astype(np.uint8) * 255
-                segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
+            if self.settings["detection"]["fluid_exclusion_enabled"]:
+                fluid_mask = white_fluid_mask(rgb, segment["mask"])
+                if np.any(fluid_mask):
+                    before_fluid = np.asarray(segment["mask"]).copy()
+                    segment["mask"] = np.where(fluid_mask > 0, 0, before_fluid).astype(np.uint8)
+                    exclusions["fluid"] = ((before_fluid > 0) & (segment["mask"] == 0)).astype(np.uint8) * 255
+                    segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
             segment["exclusions"] = exclusions
         return segments
 

@@ -1719,7 +1719,7 @@ async function startDetectionFromDialog(event) {
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { threshold: confidence, parallelism, mode };
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, mode };
     try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }
@@ -2858,6 +2858,11 @@ function ensureDetectionModeControl() {
     const standard = $("#detectModeStandard"); const highPrecision = $("#detectModeHighPrecision");
     if (standard) standard.textContent = t("detectDialog.standard");
     if (highPrecision) highPrecision.textContent = t("detectDialog.highPrecision");
+    document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
+      if (radio.dataset.precisionSync) return;
+      radio.dataset.precisionSync = "true";
+      radio.addEventListener("change", syncPrecisionFromDetectionMode);
+    });
     return;
   }
   const form = $("#detectForm");
@@ -2867,6 +2872,10 @@ function ensureDetectionModeControl() {
       <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span id="detectModeStandard">${t("detectDialog.standard")}</span></label>
       <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span id="detectModeHighPrecision">${t("detectDialog.highPrecision")}</span></label>
     </fieldset>`);
+  document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
+    radio.dataset.precisionSync = "true";
+    radio.addEventListener("change", syncPrecisionFromDetectionMode);
+  });
 }
 
 function renderModelStatus() {
@@ -2874,18 +2883,42 @@ function renderModelStatus() {
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
   $("#settingsModelStatus").textContent = activeModels.length && activeModels.every(([, model]) => model.valid)
     ? ""
-    : activeModels.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n") || t("settings.modelsRequired");
+    : activeModels.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n");
 }
 
 const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle" };
 
 function setModelCardEnabled(key, enabled) {
   const toggle = $(MODEL_TOGGLE_IDS[key]);
-  toggle.closest?.(".model-card")?.classList.toggle("active", enabled);
-  toggle.setAttribute("aria-pressed", String(enabled));
+  toggle.checked = Boolean(enabled);
+  toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
+  const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
+  if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
 }
 
-function modelCardEnabled(key) { return $(MODEL_TOGGLE_IDS[key]).getAttribute("aria-pressed") === "true"; }
+function modelCardEnabled(key) { return Boolean($(MODEL_TOGGLE_IDS[key]).checked); }
+
+function setPrecisionDetectionEnabled(enabled) {
+  const toggle = $("#settingsPrecisionToggle");
+  toggle.checked = Boolean(enabled);
+  toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
+  const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
+  if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
+  const radio = document.querySelector(`input[name="detectMode"][value="${enabled ? "high_precision" : "standard"}"]`);
+  if (radio) radio.checked = true;
+}
+
+function setFluidExclusionEnabled(enabled) {
+  const toggle = $("#settingsFluidToggle");
+  toggle.checked = Boolean(enabled);
+  toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
+  const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
+  if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
+}
+
+function syncPrecisionFromDetectionMode() {
+  setPrecisionDetectionEnabled(selectedDetectionMode() === "high_precision");
+}
 
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
 
@@ -2938,6 +2971,8 @@ function setSettingsForm(settings, status = null) {
   $("#settingsHandModel").value = settings.models.hand_detection;
   setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
+  setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
+  setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
   $("#settingsApplyColor").value = settings.display.apply_color;
@@ -2951,9 +2986,6 @@ function setSettingsForm(settings, status = null) {
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
   $("#detectParallelism").value = String(settings.detection.parallelism);
-  const mode = settings.detection.mode;
-  const radio = document.querySelector(`input[name="detectMode"][value="${mode}"]`);
-  if (radio) radio.checked = true;
   renderModelStatus();
 }
 
@@ -2971,7 +3003,12 @@ function settingsPayload() {
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
       tool_position: $("#settingsToolPosition").value,
     },
-    detection: { threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value), parallelism: detectionParallelism(), mode: selectedDetectionMode() },
+    detection: {
+      threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
+      parallelism: detectionParallelism(),
+      mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
+      fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
+    },
   };
 }
 
@@ -3039,7 +3076,11 @@ function bindEvents() {
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   $("#settingsDialog").addEventListener("close", () => {
     const language = state.settings?.general?.language || "ja";
-    $("#settingsLanguage").value = language;
+    if (state.settings?.models && state.settings?.display && state.settings?.detection) {
+      setSettingsForm(state.settings, state.settingsStatus);
+    } else {
+      $("#settingsLanguage").value = language;
+    }
     void loadTranslations(language);
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
@@ -3052,10 +3093,10 @@ function bindEvents() {
     button.addEventListener("keydown", moveSettingsTab);
   });
   document.querySelectorAll("[data-model-toggle]").forEach((toggle) => {
-    toggle.addEventListener("click", () => {
-      setModelCardEnabled(toggle.dataset.modelToggle, toggle.getAttribute("aria-pressed") !== "true");
-    });
+    toggle.addEventListener("change", () => setModelCardEnabled(toggle.dataset.modelToggle, toggle.checked));
   });
+  $("#settingsPrecisionToggle").addEventListener("change", () => setPrecisionDetectionEnabled($("#settingsPrecisionToggle").checked));
+  $("#settingsFluidToggle").addEventListener("change", () => setFluidExclusionEnabled($("#settingsFluidToggle").checked));
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });
   for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {

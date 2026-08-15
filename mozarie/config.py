@@ -93,6 +93,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
     mode = detection.get("mode")
     if mode not in {"standard", "high_precision"}:
         raise SettingsError("detection.mode must be standard or high_precision")
+    fluid_exclusion_enabled = _expect_bool(
+        detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
+    )
     tool_position = display.get("tool_position")
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
@@ -123,6 +126,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
         },
         "detection": {
             "mode": mode,
+            "fluid_exclusion_enabled": fluid_exclusion_enabled,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
         },

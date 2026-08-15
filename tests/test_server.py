@@ -1329,6 +1329,21 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりと白い体液を除外")
         self.assertEqual(np.count_nonzero(result[0]["mask"]), 368)
 
+    def test_fluid_exclusion_can_be_disabled_without_changing_hand_refinement(self):
+        state = self.new_state()
+        state.settings["detection"]["fluid_exclusion_enabled"] = False
+        penis = np.zeros((16, 16), dtype=np.uint8)
+        penis[2:14, 2:14] = 255
+        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
+            result = state._refine_detected_segments(
+                Mock(), record, Image.new("RGB", (16, 16), "white"),
+                [{"class_name": "penis", "confidence": 0.8, "mask": penis.copy(), "source": "target"}],
+            )
+        fluid_mask.assert_not_called()
+        self.assertTrue(np.array_equal(result[0]["mask"], penis))
+        self.assertEqual(result[0]["exclusions"], {})
+
     def test_boundary_request_requires_a_valid_roi_and_click(self):
         roi, point = read_boundary_request(
             {"roi": {"left": 2.2, "top": 3.1, "right": 12.6, "bottom": 15.8}, "point": {"x": 7, "y": 9}},
