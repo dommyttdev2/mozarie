@@ -24,6 +24,9 @@
     "mosaic_preview": true,
     "tool_position": "left"
   },
+  "importing": {
+    "parallelism": 3
+  },
   "detection": {
     "mode": "standard",
     "fluid_exclusion_enabled": true,

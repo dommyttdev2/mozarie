@@ -541,6 +541,7 @@ class StudioState:
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
+        self.importing_count = 0
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -804,7 +805,7 @@ class StudioState:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.job.state in {"running", "paused"} or self._has_active_worker():
+        if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -1004,7 +1005,7 @@ class StudioState:
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
         with self.lock:
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("処理中はモザイク候補をクリアできません。")
             self._clear_masks_unchecked(records)
         return len(records)
@@ -1056,90 +1057,106 @@ class StudioState:
             raise ClientError("追加画像のclientKeyが不正です。")
         return self._import_images(files)
 
-    def _import_images(self, files: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    def _import_images(
+        self,
+        files: list[dict[str, Any]],
+        *,
+        include_images: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
-        with self.import_lock:
-            with self.lock:
-                root = self.root
-                catalog_generation = self.catalog_generation
-                if self.job.state in {"running", "paused"} or self._has_active_worker():
-                    raise ClientError("処理中は画像を追加できません。")
-            destination_dir = self._ensure_session()
-            pending: list[tuple[Path, str, int, int, str]] = []
-            try:
-                for file_data in files:
-                    if not isinstance(file_data, dict):
-                        raise ClientError("画像データの形式が正しくありません。")
-                    client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
-                    relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
-                    if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
-                        continue
-                    raw_value = file_data.get("raw")
-                    if isinstance(raw_value, bytes):
-                        raw = raw_value
-                    else:
-                        try:
-                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                        except (binascii.Error, ValueError) as exc:
-                            raise ClientError("追加画像を読み込めません。") from exc
-                    if not raw:
-                        continue
-                    _verify_decodable_image(raw)
-                    with Image.open(io.BytesIO(raw)) as image:
-                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                        width, height = oriented_image_size(image)
-                    temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
-                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
-                    temporary.write_bytes(raw)
 
-                with self.lock:
-                    if (
-                        self.root != root
-                        or self.catalog_generation != catalog_generation
-                        or self.job.state in {"running", "paused"}
-                        or self._has_active_worker()
-                    ):
-                        raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
-                    added: list[ImageRecord] = []
-                    final_paths: list[Path] = []
+        with self.lock:
+            root = self.root
+            catalog_generation = self.catalog_generation
+            if self.job.state in {"running", "paused"} or self._has_active_worker():
+                raise ClientError("処理中は画像を追加できません。")
+            destination_dir = self._ensure_session()
+            self.importing_count += 1
+
+        pending: list[tuple[Path, str, int, int, str]] = []
+        try:
+            # Decoding and staging can overlap across request threads. The short
+            # catalogue commit below remains serialized.
+            for file_data in files:
+                if not isinstance(file_data, dict):
+                    raise ClientError("画像データの形式が正しくありません。")
+                client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
+                relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
+                if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
+                    continue
+                raw_value = file_data.get("raw")
+                if isinstance(raw_value, bytes):
+                    raw = raw_value
+                else:
                     try:
-                        imported: list[dict[str, str]] = []
-                        for temporary, name, width, height, client_key in pending:
-                            destination = unique_session_import_destination(destination_dir / name)
-                            destination.parent.mkdir(parents=True, exist_ok=True)
-                            os.replace(temporary, destination)
-                            final_paths.append(destination)
-                            stat = destination.stat()
-                            image_id = uuid.uuid4().hex
-                            added.append(
-                                ImageRecord(
-                                    image_id,
-                                    destination,
-                                    destination.relative_to(destination_dir).as_posix(),
-                                    width,
-                                    height,
-                                    stat.st_mtime_ns,
-                                    stat.st_size,
-                                    "session",
-                                )
-                            )
-                            imported.append({"clientKey": client_key, "imageId": image_id})
-                    except Exception:
-                        for destination in final_paths:
-                            destination.unlink(missing_ok=True)
-                        raise
-                    for record in added:
-                        self.images[record.image_id] = record
-                        self.order.append(record.image_id)
-                    self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
-                    return self.list_images(), imported
-            finally:
-                for temporary, _name, _width, _height, _client_key in pending:
-                    temporary.unlink(missing_ok=True)
+                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ClientError("追加画像を読み込めません。") from exc
+                if not raw:
+                    continue
+                _verify_decodable_image(raw)
+                with Image.open(io.BytesIO(raw)) as image:
+                    _assert_image_suffix_matches_format(relative_path.suffix, image.format)
+                    width, height = oriented_image_size(image)
+                temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
+                temporary.write_bytes(raw)
+                pending.append((temporary, relative_path.as_posix(), width, height, client_key))
+
+            with self.import_lock, self.lock:
+                if (
+                    self.root != root
+                    or self.catalog_generation != catalog_generation
+                    or self.job.state in {"running", "paused"}
+                    or self._has_active_worker()
+                ):
+                    raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
+                added: list[ImageRecord] = []
+                final_paths: list[Path] = []
+                try:
+                    imported: list[dict[str, str]] = []
+                    for temporary, name, width, height, client_key in pending:
+                        destination = unique_session_import_destination(destination_dir / name)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(temporary, destination)
+                        final_paths.append(destination)
+                        stat = destination.stat()
+                        image_id = uuid.uuid4().hex
+                        added.append(ImageRecord(
+                            image_id,
+                            destination,
+                            destination.relative_to(destination_dir).as_posix(),
+                            width,
+                            height,
+                            stat.st_mtime_ns,
+                            stat.st_size,
+                            "session",
+                        ))
+                        imported.append({"clientKey": client_key, "imageId": image_id})
+                except Exception:
+                    for destination in final_paths:
+                        destination.unlink(missing_ok=True)
+                    raise
+                for record in added:
+                    self.images[record.image_id] = record
+                    self.order.append(record.image_id)
+                self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
+                images = self.list_images() if include_images else []
+                return images, imported
+        finally:
+            for temporary, _name, _width, _height, _client_key in pending:
+                temporary.unlink(missing_ok=True)
+            with self.lock:
+                self.importing_count -= 1
 
     def import_image_bytes_for_api(
-        self, raw: bytes, *, name: str, relative_path: str, client_key: str,
+        self,
+        raw: bytes,
+        *,
+        name: str,
+        relative_path: str,
+        client_key: str,
+        include_images: bool = True,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(client_key, str) or not client_key:
             raise ClientError("追加画像のclientKeyが不正です。")
@@ -1148,7 +1165,7 @@ class StudioState:
             "name": name,
             "relativePath": relative_path,
             "raw": raw,
-        }])
+        }], include_images=include_images)
 
     def _clear_cache(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1291,7 +1308,7 @@ class StudioState:
                 self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
 
-    def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> None:
+    def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)
         with self.lock:
             if self._has_active_worker():
@@ -1312,6 +1329,7 @@ class StudioState:
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
             self._touch_candidates(image_id)
+            return self._candidate_revision(image_id)
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
@@ -1332,15 +1350,10 @@ class StudioState:
         image_ids: list[str],
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
-        mode: str | None = None,
     ) -> None:
-        mode = mode or str(self.settings.get("detection", {}).get("mode", "standard"))
-        if mode not in {"standard", "high_precision"}:
-            raise ClientError("検出モードが正しくありません。", "invalid_detection_mode")
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         self._start_job(
             "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
-            mode,
             expected_catalog_generation=catalog_generation,
         )
 
@@ -1535,20 +1548,21 @@ class StudioState:
 
     def request_pause(self) -> Job:
         with self.lock:
-            if self.job.kind != "apply" or self.job.state != "running":
-                raise ClientError("一時停止できるモザイク適用はありません。")
+            if self.job.kind not in {"apply", "detect"} or self.job.state != "running":
+                raise ClientError("一時停止できる処理はありません。")
             assert self.job_control is not None
             self.job_control.pause_requested.set()
             return self.job
 
-    def resume_apply(self) -> Job:
+    def resume_job(self) -> Job:
         with self.lock:
-            if self.job.kind != "apply" or self.job.state != "paused":
-                raise ClientError("再開できるモザイク適用はありません。")
+            if self.job.kind not in {"apply", "detect"} or self.job.state != "paused":
+                raise ClientError("再開できる処理はありません。")
             assert self.job_control is not None
             self.job_control.pause_requested.clear()
             self.job.state = "running"
             return self.job
+
 
     def request_cancel(self) -> Job:
         with self.lock:
@@ -1634,7 +1648,7 @@ class StudioState:
         remove_after_save: bool = False,
     ) -> None:
         with self.lock:
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
                 raise ClientError("別の処理が進行中です。")
             if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
                 raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
@@ -1730,13 +1744,13 @@ class StudioState:
         records: list[ImageRecord],
         confidence: float,
         parallelism: int = 2,
-        mode: str | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
+            mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
             model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
             groups = [records[index::worker_count] for index in range(worker_count)]
@@ -1748,6 +1762,9 @@ class StudioState:
                 for record in assigned:
                     if not self._job_is_current(job_generation, catalog_generation):
                         return
+                    if control is not None and control.cancel_requested.is_set():
+                        return
+                    self._wait_while_paused(control, job_generation, catalog_generation)
                     if control is not None and control.cancel_requested.is_set():
                         return
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
@@ -2785,10 +2802,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
-                images, imported = STATE.import_image_bytes_for_api(
-                    raw, name=name, relative_path=relative_path, client_key=client_key,
+                _images, imported = STATE.import_image_bytes_for_api(
+                    raw,
+                    name=name,
+                    relative_path=relative_path,
+                    client_key=client_key,
+                    include_images=False,
                 )
-                self._json({"images": images, "imported": imported})
+                self._json({"imported": imported})
                 return
             self._require_json_request()
             payload = self._read_json_body()
@@ -2811,10 +2832,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
-                if "mode" in payload:
-                    STATE.start_detection(*detect_args, str(payload["mode"]))
-                else:
-                    STATE.start_detection(*detect_args)
+                STATE.start_detection(*detect_args)
                 self._json({"ok": True})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
@@ -2867,13 +2885,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/job/pause":
                 self._json(STATE.request_pause().as_dict())
             elif path == "/api/job/resume":
-                self._json(STATE.resume_apply().as_dict())
+                self._json(STATE.resume_job().as_dict())
             elif path == "/api/job/cancel":
                 self._json(STATE.request_cancel().as_dict())
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
-                STATE.set_candidate_state(image_id, candidate_id, payload)
-                self._json({"ok": True})
+                revision = STATE.set_candidate_state(image_id, candidate_id, payload)
+                self._json({"ok": True, "candidateRevision": revision})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
@@ -2893,7 +2911,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"images": STATE.remove_image_from_catalog(image_id)})
             elif path.startswith("/api/candidate/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
-                self._json({"deleted": STATE.delete_candidate(image_id, candidate_id)})
+                deleted = STATE.delete_candidate(image_id, candidate_id)
+                self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:

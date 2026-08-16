@@ -233,12 +233,10 @@ async function main() {
     await page.locator("#applyCopyMode").check();
     await page.locator("#applySuffix").fill("_kept");
     await page.locator("#applyOverwriteMode").check();
-    assert.equal(await page.locator("#applySuffix").isDisabled(), true);
-    assert.equal(await page.locator("#deleteOriginal").isDisabled(), true);
-    assert.equal(await page.locator("#chooseOutputDirectoryButton").isDisabled(), true);
-    assert.equal(await page.locator("#deleteOriginalRow").isVisible(), true);
-    assert.equal(await page.locator("#applyOutputDirectoryRow").isVisible(), true);
-    assert.equal(await page.locator("#applyOverwriteNote").isVisible(), true);
+    assert.equal(await page.locator("#applySuffixRow").isVisible(), false);
+    assert.equal(await page.locator("#deleteOriginalRow").isVisible(), false);
+    assert.equal(await page.locator("#applyOutputDirectoryRow").isVisible(), false);
+    assert.equal(await page.locator("#applyOverwriteNote").count(), 0);
     await page.locator("#applyCopyMode").check();
     assert.equal(await page.locator("#applySuffix").inputValue(), "_kept");
     assert.equal(await page.locator("#applySuffix").isDisabled(), false);
@@ -258,6 +256,7 @@ async function main() {
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
     assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
+    assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
 
     await page.reload({ waitUntil: "networkidle" });
     await page.locator("#detectAllButton").click();
@@ -271,6 +270,7 @@ async function main() {
     assert.equal(detectRequests.length, 2, "starting settings should call detection once");
     assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
     assert.equal(detectRequests[1].parallelism, 3, "dialog parallelism should be submitted");
+    assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
     await page.reload({ waitUntil: "networkidle" });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");
@@ -306,8 +306,8 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector("#batchMoreMenu").matches(":popover-open"));
     await page.waitForFunction(() => document.querySelector("#batchMoreButton").getAttribute("aria-expanded") === "false");
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
-    assert.equal(await page.locator("#galleryAllTab").getAttribute("aria-pressed"), "true");
-    assert.equal(await page.locator("#galleryMaskedTab").getAttribute("aria-pressed"), "false");
+    assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
+    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "確認済み", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
     assert.equal(await page.locator("#galleryFilteredEmptyState").count(), 1, "the gallery needs a filtered-empty state");
     assert.equal(await page.locator("#overviewEmptyState").count(), 1, "the overview needs an empty state");
@@ -317,12 +317,28 @@ async function main() {
     }
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("role"), "menu");
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("tabindex"), "-1");
-    for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog"]) {
+    for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog", "#processingDialog"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-labelledby"), `${selector} must have an accessible title`);
     }
-    for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#jobProgress", "#applyProgress"]) {
+    for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#processingProgress", "#applyProgress"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-label"), `${selector} must have an accessible name`);
     }
+    for (const selector of ["#confirmDialog", "#detectDialog", "#settingsDialog", "#modelHelpDialog", "#applyDialog"]) {
+      await page.locator(selector).evaluate((dialog) => {
+        if (!dialog.open) dialog.showModal();
+        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await page.waitForFunction((target) => document.querySelector(target).open === false, selector);
+    }
+    await page.locator("#processingDialog").evaluate((dialog) => {
+      dialog.showModal();
+      dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      dialog.dispatchEvent(new Event("cancel", { bubbles: false, cancelable: true }));
+    });
+    assert.equal(await page.locator("#processingDialog").getAttribute("open"), "", "processing dialog must ignore backdrop and Escape dismissal");
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
+    assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
+    assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

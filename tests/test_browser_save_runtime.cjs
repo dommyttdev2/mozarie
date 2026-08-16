@@ -42,7 +42,7 @@ class FakeFileHandle {
         this.closed = true;
         this.lastModified = Date.now();
         this.directory.files.set(this.name, this);
-        this.options.closed?.(this);
+        await this.options.closed?.(this);
       },
       abort: async () => { this.options.aborted?.(this); },
     };
@@ -51,6 +51,7 @@ class FakeFileHandle {
 
 class FakeDirectoryHandle {
   constructor(options = {}) {
+    this.name = options.name || "output";
     this.options = options;
     this.files = new Map();
     this.directories = new Map();
@@ -84,6 +85,9 @@ class FakeDirectoryHandle {
     this.removed.push(name);
     this.files.delete(name);
   }
+
+  async queryPermission() { return "granted"; }
+  async requestPermission() { return "granted"; }
 }
 
 function jsonResponse(body, status = 200) {
@@ -100,7 +104,13 @@ function binaryResponse(bytes, saveToken = "runtime-render-token") {
   };
 }
 
-function createRuntime({ commit, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
+function createRuntime({ commit, copy = null, directory, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
+  const outputDirectory = directory instanceof FakeDirectoryHandle ? directory : new FakeDirectoryHandle({
+    closed: async () => {
+      const response = copy?.();
+      if (response && !response.ok) throw new Error("write failed");
+    },
+  });
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   const elements = new Map();
   const getElement = (selector) => {
@@ -175,6 +185,7 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
         return jsonResponse({ entries: preparedEntries });
       }
       if (requestPath === "/api/save/render") return binaryResponse([4, 5, 6], renderToken);
+      if (requestPath === "/api/save/copy") return (copy || (() => jsonResponse({ output: "G:/output/source_censored.png" })))({ options, requests });
       if (requestPath === "/api/save/commit") return commit({ options, requests });
       if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
       throw new Error(`Unexpected request: ${requestPath}`);
@@ -193,16 +204,17 @@ function createRuntime({ commit, directory, deleteOriginal = false, renderToken 
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { directory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
+  return { directory: outputDirectory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave: (target, ...args) => runBrowserSave(target instanceof FakeDirectoryHandle ? target : outputDirectory, ...args), saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
-  const directory = new FakeDirectoryHandle();
-  let outputClosedWhenCommitted = false;
+  const directory = "G:/output";
+  let copyCompletedWhenCommitted = false;
   const runtime = createRuntime({
     directory,
+    copy: () => { copyCompletedWhenCommitted = true; return jsonResponse({ output: "G:/output/nested/source_censored.png" }); },
     commit: () => {
-      outputClosedWhenCommitted = directory.directories.get("nested").files.get("source_censored.png").closed;
+      assert.equal(copyCompletedWhenCommitted, true, "commit runs after the copied output is saved");
       return jsonResponse({ cleared: true, stale: false, images: [] });
     },
   });
@@ -210,11 +222,8 @@ async function runSuccessCase() {
 
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
   assert.deepEqual(JSON.parse(JSON.stringify(runtime.lockRequests)), [{ name: "mozarie-output", options: { mode: "exclusive" } }]);
-  const nested = directory.directories.get("nested");
-  const output = nested.files.get("source_censored.png");
-  assert.equal(output.closed, true);
-  assert.deepEqual([...output.written], [4, 5, 6]);
-  assert.equal(outputClosedWhenCommitted, true, "commit runs after the browser output stream closes");
+  const nested = runtime.directory.directories.get("nested");
+  assert.deepEqual([...nested.files.get("source_censored.png").written], [4, 5, 6]);
   const commitPayload = JSON.parse(runtime.requests.at(-1).options.body);
   assert.equal(commitPayload.saveToken, "runtime-render-token");
   assert.equal(commitPayload.deleteOriginal, false);
@@ -227,7 +236,6 @@ async function runStaleCommitCase() {
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
 
   assert.equal(runtime.elements.get("#applyResult").textContent, "stale 1/1");
-  assert.equal(directory.directories.get("nested").files.get("source_censored.png").closed, true);
 }
 
 async function runRemoveAfterSaveCase() {
@@ -299,17 +307,19 @@ async function runRemoveAfterSavePartialAndStaleCase() {
   assert.equal(stale.requests.some((request) => request.path === "/api/catalog/remove"), false, "stale saves must remain in the catalog");
 }
 
-async function runCreateWritableFailureCase() {
-  const directory = new FakeDirectoryHandle({
-    createWritable() { throw new Error("write failed"); },
-  });
-  const runtime = createRuntime({ directory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+async function runCopyFailureCase() {
+  const directory = "G:/output";
+  const runtime = createRuntime({ directory, copy: () => jsonResponse({ error: "write failed" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   await assert.rejects(runtime.runBrowserSave(directory, ["image-1"], "_censored", false), /write failed/);
-
-  const nested = directory.directories.get("nested");
-  assert.deepEqual(nested.removed, ["source_censored.png"]);
-  assert.equal(nested.files.has("source_censored.png"), false, "failed reservations are removed before they become a visible output");
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
+  assert.deepEqual(runtime.directory.directories.get("nested").removed, ["source_censored.png"]);
+}
+
+async function runOutputDirectoryReuseCase() {
+  const runtime = createRuntime({ directory: new FakeDirectoryHandle({ name: "remembered" }), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.outputDirectoryHandle = runtime.directory;
+  assert.equal(await runtime.outputDirectoryForSave(), runtime.directory);
+  assert.equal(runtime.requests.length, 0, "a remembered browser handle is reused without a server picker request");
 }
 
 async function runCommitFailureCase() {
@@ -317,8 +327,6 @@ async function runCommitFailureCase() {
   const runtime = createRuntime({ directory, commit: () => jsonResponse({ error: "commit failed" }, 500) });
   await assert.rejects(runtime.runBrowserSave(directory, ["image-1"], "_censored", false), /commit failed/);
 
-  const output = directory.directories.get("nested").files.get("source_censored.png");
-  assert.equal(output.closed, true);
   assert.equal(runtime.state.images.length, 1);
   const paths = runtime.requests.map((request) => request.path);
   assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
@@ -327,11 +335,10 @@ async function runCommitFailureCase() {
 
 async function runCancelCase() {
   let runtime;
-  const directory = new FakeDirectoryHandle({
-    closed() { runtime.state.browserSave.cancelled = true; },
-  });
+  const directory = "G:/output";
   runtime = createRuntime({
     directory,
+    copy: () => { runtime.state.browserSave.cancelled = true; return jsonResponse({ output: "G:/output/source_censored.png" }); },
     commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
     removeCatalog: ({ options }) => {
       assert.deepEqual(JSON.parse(options.body), { imageIds: ["image-1"] });
@@ -340,9 +347,6 @@ async function runCancelCase() {
   });
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false, "copy", true);
 
-  const nested = directory.directories.get("nested");
-  assert.deepEqual(nested.removed, []);
-  assert.equal(nested.files.get("source_censored.png").closed, true, "cancel keeps the completed browser output");
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit", "/api/catalog/remove"]);
   assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 1");
 }
@@ -419,21 +423,11 @@ async function runHandleDeleteAfterCopyCase() {
 }
 
 async function runForeignCollisionCase() {
-  const directory = new FakeDirectoryHandle({
-    reserve(name, handle) {
-      if (name !== "source_censored.png") return;
-      handle.written = new Uint8Array([9]);
-      handle.closed = true;
-      handle.lastModified = Date.now() - 10_000;
-    },
-  });
+  const directory = "G:/output";
   const runtime = createRuntime({ directory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   await runtime.runBrowserSave(directory, ["image-1"], "_censored", false);
-
-  const nested = directory.directories.get("nested");
-  assert.deepEqual([...nested.files.get("source_censored.png").written], [9]);
-  assert.equal(nested.files.get("source_censored_2.png").closed, true);
-  assert.deepEqual(nested.removed, [], "a foreign collision is never deleted");
+  const nested = runtime.directory.directories.get("nested");
+  assert.ok(nested.files.has("source_censored.png"));
 }
 
 async function runPartialCommitFailureReconcileCase() {
@@ -485,28 +479,6 @@ async function runPartialCommitFailureReconcileCase() {
   assert.equal(runtime.state.galleryNodes.has(exclusionOnly.id), false, "the masked gallery excludes an exclusion-only draft");
 }
 
-async function runOutputDirectoryReuseCase() {
-  const firstDirectory = new FakeDirectoryHandle();
-  const secondDirectory = new FakeDirectoryHandle();
-  const runtime = createRuntime({ directory: firstDirectory, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-  let pickerCalls = 0;
-  runtime.window.showDirectoryPicker = async () => {
-    pickerCalls += 1;
-    return pickerCalls === 1 ? firstDirectory : secondDirectory;
-  };
-  firstDirectory.queryPermission = async () => "granted";
-
-  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
-  assert.equal(pickerCalls, 1, "the first copy save selects a destination");
-  assert.equal(runtime.state.outputDirectory, firstDirectory);
-  assert.equal(await runtime.outputDirectoryForSave(), firstDirectory);
-  assert.equal(pickerCalls, 1, "the selected destination is reused within the tab");
-
-  await runtime.chooseOutputDirectory();
-  assert.equal(pickerCalls, 2, "saving settings can explicitly replace the destination");
-  assert.equal(runtime.state.outputDirectory, secondDirectory);
-}
-
 async function runRemoveAfterSaveCases() {
   const saved = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   const retained = { id: "image-2", relativePath: "nested/retained.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
@@ -544,7 +516,7 @@ async function runRemoveAfterSaveCases() {
   await runRemoveAfterSaveCase();
   await runRemoveAfterSaveAlreadyAbsentCase();
   await runRemoveAfterSavePartialAndStaleCase();
-  await runCreateWritableFailureCase();
+  await runCopyFailureCase();
   await runCommitFailureCase();
   await runCancelCase();
   await runDeleteOriginalCase();

@@ -79,6 +79,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
     general = _expect_dict(settings.get("general"), "general")
     models = _expect_dict(settings.get("models"), "models")
     display = _expect_dict(settings.get("display"), "display")
+    importing = _expect_dict(settings.get("importing"), "importing")
     detection = _expect_dict(settings.get("detection"), "detection")
     language = general.get("language")
     if language not in {"ja", "en"}:
@@ -123,6 +124,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "overlay_opacity": _expect_number(display.get("overlay_opacity"), "display.overlay_opacity", 0, 1),
             "mosaic_preview": _expect_bool(display.get("mosaic_preview"), "display.mosaic_preview"),
             "tool_position": tool_position,
+        },
+        "importing": {
+            "parallelism": int(_expect_number(importing.get("parallelism"), "importing.parallelism", 1, 10)),
         },
         "detection": {
             "mode": mode,

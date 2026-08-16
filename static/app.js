@@ -20,8 +20,8 @@ const state = {
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
-  // This handle is scoped to this browser tab and reused for copy saves.
-  outputDirectory: null, outputDirectoryName: "",
+  // The save folder handle is browser-local and never sent to the server.
+  outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null,
   imageCache: new Map(), candidateBundleCache: new Map(),
@@ -89,7 +89,6 @@ async function loadTranslations(languageOverride = null) {
   const sectionHeadings = document.querySelectorAll(".candidate-section h3");
   if (sectionHeadings[0]) sectionHeadings[0].textContent = t("candidates.applyRanges");
   if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
-  ensureDetectionModeControl();
   renderModelStatus();
   renderLocalizedDynamicState();
   updateBoundaryActions();
@@ -128,6 +127,29 @@ function setStatusKey(key, params = {}, kind = "") {
   renderStatus();
 }
 
+function processingTitle(kind) {
+  return t(kind === "detect" ? "processing.detect" : "processing.import");
+}
+
+function showProcessing(processing) {
+  state.processing = { ...state.processing, ...processing };
+  const current = state.processing;
+  const modal = $("#processingDialog");
+  $("#processingTitle").textContent = processingTitle(current.kind);
+  $("#processingCurrent").textContent = current.current || "";
+  $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
+  $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
+  $("#processingProgressText").textContent = t("status.progressCount", { completed: current.completed || 0, total: current.total || 0 });
+  $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
+  if (!modal.open) modal.showModal();
+}
+
+function closeProcessing() {
+  state.processing = null;
+  const modal = $("#processingDialog");
+  if (modal.open) modal.close();
+}
+
 function renderStatus() {
   const status = state.status;
   if (!status) return;
@@ -159,7 +181,7 @@ function setDetectionConfidence(value) {
   $("#detectConfidenceRange").value = confidence.toFixed(2);
   $("#detectConfidenceNumber").value = confidence.toFixed(2);
 }
-function activeDetection() { return state.job?.kind === "detect" && state.job?.state === "running"; }
+function activeDetection() { return state.job?.kind === "detect" && ["running", "paused"].includes(state.job?.state); }
 function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
@@ -317,8 +339,7 @@ function updateActionButtons() {
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
   $("#removeCurrentImageButton").disabled = running || !hasImage;
   for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
-  $("#galleryAllTab").disabled = running;
-  $("#galleryMaskedTab").disabled = running;
+  $("#galleryFilter").disabled = running;
   $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
   const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
   $("#saveButton").disabled = currentSaveDisabled;
@@ -331,6 +352,7 @@ function updateActionButtons() {
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
+    if (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing) continue;
     if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
@@ -403,16 +425,7 @@ function discardCatalogNodes(nodes, container) {
 }
 
 function updateProgress(job) {
-  const progress = $("#jobProgress");
-  const progressText = $("#jobProgressText");
-  const running = ["running", "paused"].includes(job?.state);
-  progress.hidden = !running;
-  progressText.hidden = !running;
-  if (running) {
-    progress.max = Math.max(1, Number(job.total) || 1);
-    progress.value = Math.min(progress.max, Number(job.completed) || 0);
-    progressText.textContent = t("status.progressCount", { completed: progress.value, total: progress.max });
-  }
+  if (job?.kind !== "apply" && ["running", "paused"].includes(job?.state)) showProcessing(job);
   updateActionButtons();
 }
 
@@ -438,13 +451,10 @@ function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
   const gallery = $("#gallery");
   const scrollTop = gallery.scrollTop;
-  const visibleImages = state.galleryFilter === "masked" ? state.images.filter(imageHasMask) : state.images;
+  const visibleImages = state.images.filter(imageMatchesGalleryFilter);
   const imageCount = t("gallery.count", { count: visibleImages.length });
   for (const element of document.querySelectorAll(".gallery-local-count")) element.textContent = imageCount;
-  $("#galleryAllTab").classList.toggle("active", state.galleryFilter === "all");
-  $("#galleryAllTab").setAttribute("aria-pressed", String(state.galleryFilter === "all"));
-  $("#galleryMaskedTab").classList.toggle("active", state.galleryFilter === "masked");
-  $("#galleryMaskedTab").setAttribute("aria-pressed", String(state.galleryFilter === "masked"));
+  $("#galleryFilter").value = state.galleryFilter;
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
   const template = $("#galleryItemTemplate");
@@ -470,6 +480,7 @@ function renderGallery(force = false) {
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.onclick = () => selectImage(image.id);
+    item.onmouseenter = () => { void cachedImage(image).catch(() => {}); void loadCandidateBundle(image.id, state.imageGeneration).catch(() => {}); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
@@ -482,6 +493,13 @@ function renderGallery(force = false) {
   }
   gallery.scrollTop = scrollTop;
   updateActionButtons();
+}
+
+function imageMatchesGalleryFilter(image) {
+  if (state.galleryFilter === "masked") return imageHasMask(image);
+  if (state.galleryFilter === "reviewed") return isReviewed(image);
+  if (state.galleryFilter === "unreviewed") return !isReviewed(image);
+  return true;
 }
 
 function updateGallerySelection() {
@@ -655,12 +673,20 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     updateActionButtons();
     return;
   }
-  setStatusKey("status.loadingImages", {}, "running");
+  const imageCached = state.imageCache.has(imageCacheKey(record));
+  const candidatesCached = state.candidateBundleCache.has(candidateCacheKey(imageId, Number(record.candidateRevision || 0)));
+  if (!imageCached || !candidatesCached) {
+    clearTimeout(state.loadingDelay);
+    state.loadingDelay = setTimeout(() => {
+      if (state.pendingImageId === imageId && isCurrentGeneration(generation)) setStatusKey("status.loadingImages", {}, "running");
+    }, 150);
+  }
   try {
     const [image, candidateBundle] = await Promise.all([
       cachedImage(record),
       loadCandidateBundle(imageId, generation),
     ]);
+    clearTimeout(state.loadingDelay); state.loadingDelay = null;
     syncCandidateRecord(imageId, candidateBundle.candidates);
     if (!isCurrentGeneration(generation)) return;
     state.currentId = imageId;
@@ -677,6 +703,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
+      clearTimeout(state.loadingDelay); state.loadingDelay = null;
       state.pendingImageId = null;
       setStatus(error.message, "error");
     }
@@ -719,15 +746,21 @@ async function cachedImage(record) {
   const key = imageCacheKey(record);
   const cached = state.imageCache.get(key);
   if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
-  const image = await loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`);
-  return lruRemember(state.imageCache, key, image, 6, releaseImageResource);
+  const pending = state.imageInflight.get(key);
+  if (pending) return pending;
+  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`)
+    .then((image) => lruRemember(state.imageCache, key, image, 6, releaseImageResource))
+    .finally(() => state.imageInflight.delete(key));
+  state.imageInflight.set(key, request);
+  return request;
 }
 
 function prefetchNeighbors(record) {
   const index = state.images.findIndex((item) => item.id === record.id);
   for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
-    if (!neighbor || state.imageCache.has(imageCacheKey(neighbor))) continue;
+    if (!neighbor) continue;
     void cachedImage(neighbor).catch(() => {});
+    void loadCandidateBundle(neighbor.id, state.imageGeneration).catch(() => {});
   }
 }
 
@@ -743,6 +776,8 @@ function releaseImageCaches(imageId = null) {
     releaseCandidateBundle(bundle);
     state.candidateBundleCache.delete(key);
   }
+  for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
+  for (const key of state.candidateInflight.keys()) if (matches(key)) state.candidateInflight.delete(key);
 }
 
 function invalidateCandidateBundles(imageId) {
@@ -751,6 +786,25 @@ function invalidateCandidateBundles(imageId) {
     if (bundle.candidateImages !== state.candidateImages) releaseCandidateBundle(bundle);
     state.candidateBundleCache.delete(key);
   }
+}
+
+function retainCurrentCandidateBundle(imageId, revision) {
+  const record = state.images.find((image) => image.id === imageId);
+  if (!record) return;
+  const currentImages = state.currentId === imageId ? state.candidateImages : null;
+  let reusable = null;
+  for (const [key, bundle] of state.candidateBundleCache) {
+    if (!key.startsWith(`${imageId}:`) || (currentImages && bundle.candidateImages !== currentImages)) continue;
+    reusable = bundle;
+    state.candidateBundleCache.delete(key);
+    break;
+  }
+  record.candidateRevision = Number(revision || 0);
+  if (!reusable || !currentImages) return;
+  reusable.candidates = state.candidates;
+  reusable.candidateImages = currentImages;
+  reusable.candidateRevision = record.candidateRevision;
+  lruRemember(state.candidateBundleCache, candidateCacheKey(imageId, record.candidateRevision), reusable, 12, releaseCandidateBundle);
 }
 
 async function loadCandidateMask(source) {
@@ -768,10 +822,18 @@ async function loadCandidateMask(source) {
 }
 
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
-  const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
-  const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
-  const cached = state.candidateBundleCache.get(cacheKey);
-  if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
+  const record = state.images.find((image) => image.id === imageId);
+  const knownRevision = Number(record?.candidateRevision || 0);
+  const knownKey = candidateCacheKey(imageId, knownRevision);
+  const known = state.candidateBundleCache.get(knownKey);
+  if (known) return lruRemember(state.candidateBundleCache, knownKey, known, 12, releaseCandidateBundle);
+  const pending = state.candidateInflight.get(knownKey);
+  if (pending) return pending;
+  const request = (async () => {
+    const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
+    const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
+    const cached = state.candidateBundleCache.get(cacheKey);
+    if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
   try {
     const candidateImages = new Map();
     await Promise.all(candidateData.candidates.map(async (candidate) => {
@@ -780,10 +842,14 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages, candidateRevision: Number(candidateData.candidateRevision || 0) }, 12, releaseCandidateBundle);
   } catch (error) {
     if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
+      state.candidateInflight.delete(knownKey);
       return loadCandidateBundle(imageId, generation, true);
     }
     throw error;
   }
+  })().finally(() => state.candidateInflight.delete(knownKey));
+  state.candidateInflight.set(knownKey, request);
+  return request;
 }
 
 async function reconcileCurrentCandidates(imageId, generation) {
@@ -1402,14 +1468,14 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
   const desired = candidate.enabled;
   const send = async () => {
     try {
-      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
+      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
       });
-      invalidateCandidateBundles(imageId);
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
         if (currentCandidate) currentCandidate.enabled = desired;
+        retainCurrentCandidateBundle(imageId, result.candidateRevision);
         syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
       } else {
         try { await refreshCandidateRecord(imageId, true); } catch { /* Keep the optimistic aggregate until a later refresh. */ }
@@ -1455,14 +1521,14 @@ async function deleteCandidate(candidate) {
   state.candidateDeleting.add(mutationKey); renderCandidates();
   const send = async () => {
     try {
-      await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
-      invalidateCandidateBundles(imageId);
+      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       syncCandidateRecord(imageId, remainingCandidates);
       state.maskStatus.set(imageId, remainingMaskStatus);
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         state.candidates = remainingCandidates;
         state.candidateImages.delete(candidate.id);
+        retainCurrentCandidateBundle(imageId, result.candidateRevision);
         updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
       } else {
         try { await refreshCandidateRecord(imageId, true); } catch { /* The known deletion is already reflected locally. */ }
@@ -1685,6 +1751,16 @@ function detectionParallelism() {
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
 
+function normaliseImportParallelism(value) {
+  if (String(value ?? "").trim() === "") return 3;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(10, Math.max(1, Math.round(number))) : 3;
+}
+
+function importParallelism() {
+  return normaliseImportParallelism(state.settings?.importing?.parallelism);
+}
+
 function openDetectionDialog(imageIds) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.pendingDetectionTargetIds = [...imageIds];
@@ -1694,15 +1770,16 @@ function openDetectionDialog(imageIds) {
   $("#detectDialog").showModal();
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, mode = selectedDetectionMode()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.detectionStarting = true;
   updateActionButtons();
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), mode }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))) }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
+    showProcessing(state.job);
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
   } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
   finally { state.detectionStarting = false; updateActionButtons(); }
@@ -1714,16 +1791,15 @@ async function startDetectionFromDialog(event) {
   if (!imageIds.length) return;
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
-  const mode = selectedDetectionMode();
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, mode };
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism };
     try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }
-  await runDetection(imageIds, confidence, parallelism, mode);
+  await runDetection(imageIds, confidence, parallelism);
 }
 
 async function cancelDetection() {
@@ -1788,15 +1864,18 @@ function syncApplyMode() {
   const canOverwrite = applyTargetsSupport("overwrite");
   const canDelete = applyTargetsSupport("delete");
   const copying = selectedSaveMode() === "copy";
-  $("#applySuffix").disabled = !copying || state.applyRunning;
-  $("#chooseOutputDirectoryButton").disabled = !copying || state.applyRunning || state.saveStarting;
-  $("#applyOutputDirectoryStatus").textContent = state.outputDirectoryName
-    ? t("apply.outputDirectorySelected", { name: state.outputDirectoryName })
+  $("#applySuffixRow").hidden = !copying;
+  $("#deleteOriginalRow").hidden = !copying;
+  $("#applyOutputDirectoryRow").hidden = !copying;
+  $("#applySuffix").disabled = state.applyRunning;
+  $("#chooseOutputDirectoryButton").disabled = state.applyRunning || state.saveStarting;
+  const outputDirectory = state.outputDirectoryHandle;
+  $("#applyOutputDirectoryStatus").textContent = outputDirectory
+    ? t("apply.outputDirectorySelected", { name: outputDirectory.name })
     : t("apply.outputDirectoryUnset");
-  $("#deleteOriginal").disabled = !copying || !canDelete || state.applyRunning;
+  $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
-  $("#applyOverwriteNote").hidden = copying;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -1839,101 +1918,82 @@ function draftPayload(imageIds) {
   return drafts;
 }
 
-async function pickOutputDirectory() {
-  if (typeof window.showDirectoryPicker !== "function") {
-    throw new Error(t("error.directoryPickerUnsupported"));
-  }
-  try {
-    return await window.showDirectoryPicker({ id: "mozarie-output", mode: "readwrite" });
-  } catch (error) {
-    if (error?.name === "AbortError") throw new Error(t("error.directoryPickerCancelled"));
-    throw error;
-  }
+const OUTPUT_HANDLE_DB = "mozarie-output";
+const OUTPUT_HANDLE_STORE = "handles";
+const OUTPUT_HANDLE_KEY = "default";
+
+function outputHandleDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(OUTPUT_HANDLE_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(OUTPUT_HANDLE_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
 }
 
-function rememberOutputDirectory(directory) {
-  state.outputDirectory = directory;
-  state.outputDirectoryName = String(directory?.name || "");
+async function readOutputHandle() {
+  const database = await outputHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(OUTPUT_HANDLE_STORE, "readonly").objectStore(OUTPUT_HANDLE_STORE).get(OUTPUT_HANDLE_KEY);
+    request.onsuccess = () => { database.close(); resolve(request.result || null); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function storeOutputHandle(handle) {
+  const database = await outputHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(OUTPUT_HANDLE_STORE, "readwrite").objectStore(OUTPUT_HANDLE_STORE).put(handle, OUTPUT_HANDLE_KEY);
+    request.onsuccess = () => { database.close(); resolve(); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function ensureOutputHandlePermission(handle) {
+  let permission = await handle.queryPermission({ mode: "readwrite" });
+  if (permission !== "granted") permission = await handle.requestPermission({ mode: "readwrite" });
+  if (permission !== "granted") throw new Error(t("error.directoryPermissionDenied"));
+  return handle;
+}
+
+function renderOutputHandle() {
+  const label = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
+  $("#settingsDefaultOutputDirectory").textContent = label;
   syncApplyMode();
-  return directory;
+}
+
+async function selectOutputDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") throw new Error(t("error.directoryPickerUnsupported"));
+  const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" });
+  await ensureOutputHandlePermission(handle);
+  await storeOutputHandle(handle);
+  state.outputDirectoryHandle = handle;
+  renderOutputHandle();
+  return handle;
 }
 
 async function outputDirectoryForSave() {
-  const directory = state.outputDirectory;
-  if (directory) {
-    try {
-      const options = { mode: "readwrite" };
-      const permission = await directory.queryPermission?.(options);
-      if (!permission || permission === "granted") return directory;
-      const requested = await directory.requestPermission?.(options);
-      if (!requested || requested === "granted") return directory;
-    } catch {
-      // A stale handle is replaced by the normal picker below.
-    }
-    state.outputDirectory = null;
-    state.outputDirectoryName = "";
-  }
-  return rememberOutputDirectory(await pickOutputDirectory());
+  if (state.outputDirectoryHandle) return ensureOutputHandlePermission(state.outputDirectoryHandle);
+  return selectOutputDirectory();
+}
+
+async function pickOutputDirectory() {
+  return selectOutputDirectory();
 }
 
 async function chooseOutputDirectory() {
   if (state.applyRunning || state.saveStarting) return;
+  try { await selectOutputDirectory(); setApplyResult(""); }
+  catch (error) { if (error?.name !== "AbortError") setApplyResult(error.message, true); }
+}
+
+async function restoreOutputDirectory() {
   try {
-    rememberOutputDirectory(await pickOutputDirectory());
-    setApplyResult("");
-  } catch (error) {
-    setApplyResult(error.message, true);
-  }
-}
-
-async function outputDirectoryFor(root, relativePath) {
-  let directory = root;
-  const parts = String(relativePath).replaceAll("\\", "/").split("/").slice(0, -1).filter(Boolean);
-  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
-  return directory;
-}
-
-async function uniqueOutputFile(directory, sourceName, suffix) {
-  const dot = sourceName.lastIndexOf(".");
-  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
-  const extension = dot > 0 ? sourceName.slice(dot) : "";
-  for (let number = 1; number < 10000; number += 1) {
-    const name = `${stem}${suffix}${number === 1 ? "" : `_${number}`}${extension}`;
-    try {
-      await directory.getFileHandle(name);
-    } catch (error) {
-      if (error?.name !== "NotFoundError") throw error;
-      const reservedAt = Date.now();
-      const handle = await directory.getFileHandle(name, { create: true });
-      const file = await handle.getFile();
-      if (file.size !== 0 || file.lastModified + 2000 < reservedAt) continue;
-      return { name, handle };
-    }
-  }
-  throw new Error(t("error.outputNameExhausted"));
-}
-
-async function writeBrowserSaveOutput(destination, entry, suffix, bytes) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const output = await uniqueOutputFile(destination, entry.relativePath.split("/").pop(), suffix);
-    let stream = null;
-    let closed = false;
-    try {
-      stream = await output.handle.createWritable({ mode: "exclusive", keepExistingData: false });
-      await stream.write(bytes);
-      await stream.close();
-      closed = true;
-      return output;
-    } catch (error) {
-      try { await stream?.abort?.(); } catch { /* The source image remains unchanged. */ }
-      if (!closed) {
-        try { await destination.removeEntry(output.name); } catch { /* The reservation may already have changed ownership. */ }
-      }
-      if (error?.name === "InvalidStateError" || error?.name === "NoModificationAllowedError") continue;
-      throw error;
-    }
-  }
-  throw new Error(t("error.outputNameExhausted"));
+    const handle = await readOutputHandle();
+    if (!handle || await handle.queryPermission({ mode: "readwrite" }) !== "granted") return;
+    state.outputDirectoryHandle = handle;
+    renderOutputHandle();
+  } catch { /* The save picker remains available even when browser storage is unavailable. */ }
 }
 
 async function waitForBrowserSave(save) {
@@ -2088,6 +2148,38 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   updateActionButtons();
 }
 
+async function uniqueOutputFileHandle(rootHandle, relativePath, suffix) {
+  const parts = String(relativePath).split("/").filter(Boolean);
+  const sourceName = parts.pop();
+  const dot = sourceName.lastIndexOf(".");
+  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
+  const extension = dot > 0 ? sourceName.slice(dot) : "";
+  let directory = rootHandle;
+  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
+  for (let index = 1; index < 10000; index += 1) {
+    const name = `${stem}${suffix}${index === 1 ? "" : `_${index}`}${extension}`;
+    try {
+      await directory.getFileHandle(name);
+    } catch (error) {
+      if (error?.name !== "NotFoundError") throw error;
+      return { directory, name, fileHandle: await directory.getFileHandle(name, { create: true }) };
+    }
+  }
+  throw new Error(t("error.outputNameExhausted"));
+}
+
+async function writeCopyOutput(rootHandle, entry, suffix, bytes) {
+  const output = await uniqueOutputFileHandle(rootHandle, entry.relativePath, suffix);
+  const fileHandle = output.fileHandle;
+  const writable = await fileHandle.createWritable({ keepExistingData: false });
+  try { await writable.write(bytes); await writable.close(); }
+  catch (error) {
+    try { await writable.abort?.(); } catch { /* Continue with best-effort cleanup below. */ }
+    try { await output.directory.removeEntry(output.name); } catch { /* Preserve the original write error. */ }
+    throw error;
+  }
+}
+
 async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
   const result = await api("/api/save/prepare", {
     method: "POST",
@@ -2133,8 +2225,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
         if (mode === "copy") {
-          const destination = await outputDirectoryFor(directory, entry.relativePath);
-          await writeBrowserSaveOutput(destination, entry, suffix, bytes);
+          await writeCopyOutput(directory, entry, suffix, bytes);
           if (deleteOriginal) {
             if (access?.fileHandle) await removeSourceHandle(access);
             sourceAction = "deleted";
@@ -2236,6 +2327,7 @@ async function startApplyFromDialog(event) {
       // An existing tab-scoped handle is reused. The picker only opens on the
       // first copy save or after the user explicitly changes the destination.
       outputDirectory = await outputDirectoryForSave();
+      if (!outputDirectory) return finishSaveStart();
     } catch (error) {
       setApplyResult(error.message, true);
       return finishSaveStart();
@@ -2374,6 +2466,7 @@ async function finishDetectionJob(job) {
   state.handledDetectionStartedAt = job.startedAt;
   state.detectionTargetIds = [];
   state.detectCancelRequested = false;
+  closeProcessing();
   if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
     await selectImage(keepCurrent, true);
   }
@@ -2674,25 +2767,52 @@ async function importFiles(files) {
     .filter(({ file }) => isSupportedImageFile(file));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
-    setStatusKey("gallery.importProgress", { completed: 0, total: supportedFiles.length }, "running");
-    let completed = 0;
-    for (const entry of supportedFiles) {
-      const clientKey = newClientKey();
-      const data = await importSingleFile(entry, clientKey);
-      if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
-      state.images = data.images;
-      for (const imported of data.imported || []) {
-        if (imported.clientKey !== clientKey || !entry.fileHandle || !imported.imageId) continue;
+    session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
+    showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
+    const results = new Array(supportedFiles.length);
+    let nextIndex = 0;
+    const worker = async () => {
+      while (true) {
+        while (session.paused && !session.cancelled) await new Promise((resolve) => setTimeout(resolve, 80));
+        if (session.cancelled) return;
+        const index = nextIndex; nextIndex += 1;
+        if (index >= supportedFiles.length) return;
+        const entry = supportedFiles[index]; const clientKey = newClientKey();
+        showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
+        const data = await importSingleFile(entry, clientKey);
+        results[index] = { entry, clientKey, data };
+        session.completed += 1;
+        showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
+      }
+    };
+    const workerCount = Math.min(supportedFiles.length, importParallelism());
+    const workers = Array.from({ length: workerCount }, worker);
+    try {
+      await Promise.all(workers);
+    } catch (error) {
+      // Do not schedule more files after an upload failure.  Wait for the
+      // in-flight requests so the server can discard their temporary files.
+      session.cancelled = true;
+      await Promise.allSettled(workers);
+      throw error;
+    }
+    if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
+    const latest = await api("/api/images");
+    state.images = latest.images;
+    if (session.cancelled) {
+      pruneSourceAccess(); renderCatalogViews();
+      setStatusKey("status.importCancelled", { completed: session.completed });
+      return;
+    }
+    for (const result of results) {
+      if (!result) continue;
+      for (const imported of result.data.imported || []) {
+        if (imported.clientKey !== result.clientKey || !result.entry.fileHandle || !imported.imageId) continue;
         state.sourceAccess.set(imported.imageId, {
-          fileHandle: entry.fileHandle,
-          parentHandle: entry.parentHandle || null,
-          name: entry.file.name,
-          size: entry.file.size,
-          lastModified: entry.file.lastModified,
+          fileHandle: result.entry.fileHandle, parentHandle: result.entry.parentHandle || null,
+          name: result.entry.file.name, size: result.entry.file.size, lastModified: result.entry.file.lastModified,
         });
       }
-      completed += 1;
-      setStatusKey("gallery.importProgress", { completed, total: supportedFiles.length }, "running");
     }
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
@@ -2729,7 +2849,7 @@ async function importSingleFile(entry, clientKey) {
 
 function beginImportSession() {
   if (isBusy() || state.importing) return null;
-  const session = { id: newClientKey(), epoch: beginCatalogEpoch() };
+  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0 };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
@@ -2738,29 +2858,54 @@ function beginImportSession() {
 function finishImportSession(session) {
   if (state.importSession !== session) return;
   state.importSession = null; state.importing = false;
+  closeProcessing();
   updateActionButtons();
+}
+
+async function waitForImportSession(session) {
+  while (session.paused && !session.cancelled) await new Promise((resolve) => setTimeout(resolve, 80));
+  return !session.cancelled && state.importSession === session;
+}
+
+async function importHandleEntries(entries, session) {
+  if (!entries.length) return finishImportSession(session);
+  showProcessing({ kind: "import", state: "running", total: entries.length, completed: 0, current: "" });
+  const files = new Array(entries.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (await waitForImportSession(session)) {
+      const index = nextIndex; nextIndex += 1;
+      if (index >= entries.length) return;
+      const entry = entries[index];
+      showProcessing({ kind: "import", state: session.paused ? "paused" : "running", total: entries.length, completed: 0, current: entry.relativePath });
+      const file = await entry.handle.getFile();
+      files[index] = droppedFile(file, entry.relativePath, entry.handle, entry.parentHandle || null);
+    }
+  };
+  const parallelism = Math.min(entries.length, importParallelism());
+  await Promise.all(Array.from({ length: parallelism }, worker));
+  if (!await waitForImportSession(session)) return finishImportSession(session);
+  await importFiles(files.filter(Boolean), session);
 }
 
 async function importFileHandles(handles, session = beginImportSession()) {
   if (!session) return;
-  const files = [];
-  for (const handle of handles) {
-    const file = await handle.getFile();
-    files.push(droppedFile(file, file.name, handle));
-  }
-  await importFiles(files, session);
+  await importHandleEntries(handles.map((handle) => ({ handle, relativePath: handle.name, parentHandle: null })), session);
 }
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
-  const files = [];
+  const entries = [];
+  showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
   async function collect(handle, relativePath = "", parentHandle = null) {
+    if (!await waitForImportSession(session)) return;
     const path = relativePath ? `${relativePath}/${handle.name}` : handle.name;
-    if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), path, handle, parentHandle));
+    if (handle.kind === "file") entries.push({ handle, relativePath: path, parentHandle });
     else for await (const child of handle.values()) await collect(child, path, handle);
   }
   for await (const handle of directoryHandle.values()) await collect(handle, "", directoryHandle);
-  await importFiles(files, session);
+  if (!await waitForImportSession(session)) return finishImportSession(session);
+  await importHandleEntries(entries, session);
 }
 
 async function pickImageFiles() {
@@ -2846,38 +2991,6 @@ function closeBatchMoreMenus() {
   }
 }
 
-function selectedDetectionMode() {
-  return document.querySelector('input[name="detectMode"]:checked')?.value || state.settings?.detection?.mode || "standard";
-}
-
-function ensureDetectionModeControl() {
-  const existing = document.querySelector('input[name="detectMode"]');
-  if (existing) {
-    const mode = $("#detectMode");
-    if (mode) mode.setAttribute("aria-label", t("detectDialog.mode"));
-    const standard = $("#detectModeStandard"); const highPrecision = $("#detectModeHighPrecision");
-    if (standard) standard.textContent = t("detectDialog.standard");
-    if (highPrecision) highPrecision.textContent = t("detectDialog.highPrecision");
-    document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
-      if (radio.dataset.precisionSync) return;
-      radio.dataset.precisionSync = "true";
-      radio.addEventListener("change", syncPrecisionFromDetectionMode);
-    });
-    return;
-  }
-  const form = $("#detectForm");
-  if (!form?.insertAdjacentHTML) return;
-  form.insertAdjacentHTML("beforeend", `
-    <fieldset class="mode-choice" id="detectMode" aria-label="${t("detectDialog.mode")}">
-      <label class="choice-row"><input type="radio" name="detectMode" value="standard" checked><span id="detectModeStandard">${t("detectDialog.standard")}</span></label>
-      <label class="choice-row"><input type="radio" name="detectMode" value="high_precision"><span id="detectModeHighPrecision">${t("detectDialog.highPrecision")}</span></label>
-    </fieldset>`);
-  document.querySelectorAll('input[name="detectMode"]').forEach((radio) => {
-    radio.dataset.precisionSync = "true";
-    radio.addEventListener("change", syncPrecisionFromDetectionMode);
-  });
-}
-
 function renderModelStatus() {
   const modelStatus = Object.entries(state.settingsStatus?.models || {});
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
@@ -2904,8 +3017,6 @@ function setPrecisionDetectionEnabled(enabled) {
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
-  const radio = document.querySelector(`input[name="detectMode"][value="${enabled ? "high_precision" : "standard"}"]`);
-  if (radio) radio.checked = true;
 }
 
 function setFluidExclusionEnabled(enabled) {
@@ -2914,10 +3025,6 @@ function setFluidExclusionEnabled(enabled) {
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
-}
-
-function syncPrecisionFromDetectionMode() {
-  setPrecisionDetectionEnabled(selectedDetectionMode() === "high_precision");
 }
 
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
@@ -2962,6 +3069,8 @@ function setSettingsForm(settings, status = null) {
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
+  $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
+  renderOutputHandle();
   setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
@@ -3003,6 +3112,7 @@ function settingsPayload() {
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
       tool_position: $("#settingsToolPosition").value,
     },
+    importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
       parallelism: detectionParallelism(),
@@ -3070,10 +3180,28 @@ async function resetSettings() {
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
+async function chooseSettingsOutputDirectory() {
+  try {
+    await selectOutputDirectory();
+  } catch (error) {
+    if (error?.name !== "AbortError") { $("#settingsResult").textContent = error.message; $("#settingsResult").classList.add("error"); }
+  }
+}
+
+function openModelHelp(key) {
+  $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
+  $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpDialog").showModal();
+}
+
 function bindEvents() {
+  const lightDismiss = (dialog, close) => dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();
+  });
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
+  lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
     const language = state.settings?.general?.language || "ja";
     if (state.settings?.models && state.settings?.display && state.settings?.detection) {
@@ -3085,6 +3213,11 @@ function bindEvents() {
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
+  $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
+  document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
+  $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
+  $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
+  lightDismiss($("#modelHelpDialog"), () => $("#modelHelpDialog").close());
   toolRail.addEventListener("keydown", handleToolRailKeydown);
   toolRailItems().forEach((item) => item.addEventListener("focus", () => setToolRailTabStop(item)));
   setToolRailTabStop();
@@ -3127,8 +3260,7 @@ function bindEvents() {
   for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"]]) {
     $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
   }
-  $("#galleryAllTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "all"; renderGallery(); });
-  $("#galleryMaskedTab").addEventListener("click", () => { if (isBusy() || state.importing) return; state.galleryFilter = "masked"; renderGallery(); });
+  $("#galleryFilter").addEventListener("change", (event) => { if (isBusy() || state.importing) return; state.galleryFilter = event.currentTarget.value; renderGallery(); });
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
   $("#closeOverviewButton").addEventListener("click", () => setViewMode("edit"));
   $("#previousImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(-1)));
@@ -3175,6 +3307,7 @@ function bindEvents() {
   $("#detectForm").addEventListener("submit", startDetectionFromDialog);
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
+  lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
   const setPaneCollapsed = (side, collapsed) => {
@@ -3209,7 +3342,28 @@ function bindEvents() {
   });
   $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
   $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
+  lightDismiss($("#applyDialog"), () => { if (!state.applyRunning) $("#applyDialog").close(); });
   $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });
+  lightDismiss($("#confirmDialog"), () => $("#confirmDialog").close("cancel"));
+  $("#processingDialog").addEventListener("cancel", (event) => event.preventDefault());
+  $("#processingPauseButton").addEventListener("click", async () => {
+    const processing = state.processing;
+    if (!processing) return;
+    if (processing.kind === "import") {
+      const session = state.importSession; if (!session) return;
+      session.paused = !session.paused;
+      showProcessing({ ...processing, state: session.paused ? "paused" : "running" });
+      return;
+    }
+    try { await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) }); }
+    catch (error) { setStatus(error.message, "error"); }
+  });
+  $("#processingCancelButton").addEventListener("click", async () => {
+    const processing = state.processing;
+    if (!processing) return;
+    if (processing.kind === "import") { if (state.importSession) state.importSession.cancelled = true; return; }
+    await cancelDetection();
+  });
   $("#toggleReviewMenuItem").addEventListener("click", () => {
     const image = state.images.find((item) => item.id === state.contextMenuImageId);
     if (image) setReviewed(image, !isReviewed(image));
@@ -3379,12 +3533,12 @@ function bindEvents() {
 }
 
 async function initialise() {
-  ensureDetectionModeControl();
   try {
     const settings = await api("/api/settings");
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
+  await restoreOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
