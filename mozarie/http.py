@@ -64,6 +64,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/images":
                 self._json(STATE.catalog_snapshot())
             elif path == "/api/job":
+                STATE.cleanup_expired_browser_save_tokens()
                 with STATE.lock:
                     self._json(STATE.job.as_dict())
             elif path.startswith("/api/image/"):

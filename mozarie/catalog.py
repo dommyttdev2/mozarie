@@ -196,6 +196,21 @@ class CatalogMixin:
             if receipt.completed_at < cutoff:
                 self.browser_save_receipts.pop(token, None)
 
+    def cleanup_expired_browser_save_tokens(self) -> None:
+        """Cheap polling-path expiry: detach under lock, unlink afterwards."""
+        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
+        with self.lock:
+            expired_paths = [
+                self.browser_save_tokens.pop(token).rendered_path
+                for token, details in tuple(self.browser_save_tokens.items())
+                if details.issued_at < cutoff
+            ]
+            for token, receipt in tuple(self.browser_save_receipts.items()):
+                if receipt.completed_at < cutoff:
+                    self.browser_save_receipts.pop(token, None)
+        for path in expired_paths:
+            path.unlink(missing_ok=True)
+
     def _issue_browser_save_token_unchecked(
         self,
         record: ImageRecord,
