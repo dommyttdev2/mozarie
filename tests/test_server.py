@@ -2131,12 +2131,13 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             imported = threading.Event()
             errors: list[Exception] = []
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(raw):
-                original_verify(raw)
+            def blocked_inspect(path, suffix):
+                result = original_inspect(path, suffix)
                 entered.set()
                 self.assertTrue(release.wait(2))
+                return result
 
             def import_worker():
                 try:
@@ -2146,7 +2147,7 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     imported.set()
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -2209,9 +2210,9 @@ class MozarieTests(unittest.TestCase):
             active_lock = threading.Lock()
             overlap = threading.Event()
             release = threading.Event()
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(data):
+            def blocked_inspect(path, suffix):
                 nonlocal active, peak
                 with active_lock:
                     active += 1
@@ -2220,7 +2221,7 @@ class MozarieTests(unittest.TestCase):
                         overlap.set()
                 try:
                     self.assertTrue(release.wait(2))
-                    return original_verify(data)
+                    return original_inspect(path, suffix)
                 finally:
                     with active_lock:
                         active -= 1
@@ -2232,7 +2233,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 first = threading.Thread(target=worker, args=("first.png",))
                 second = threading.Thread(target=worker, args=("second.png",))
                 first.start(); second.start()
@@ -2405,12 +2406,13 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             errors: list[Exception] = []
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(raw):
-                original_verify(raw)
+            def blocked_inspect(path, suffix):
+                result = original_inspect(path, suffix)
                 entered.set()
                 self.assertTrue(release.wait(2))
+                return result
 
             def import_worker():
                 try:
@@ -2418,7 +2420,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
