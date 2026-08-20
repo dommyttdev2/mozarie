@@ -9,18 +9,26 @@ globals().update({name: value for name, value in vars(_image_io).items() if not 
 class CatalogMixin:
     def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
         with self.lock:
-            self._assert_catalog_mutable()
-            self.images = {record.image_id: record for record in records}
-            self.order = [record.image_id for record in records]
-            self.candidates = {}
-            self.candidate_revisions = {record.image_id: 0 for record in records}
-            self._clear_browser_save_tokens_unchecked()
-            self.root = root
+            previous_ids = tuple(self.images)
+        locks = [(image_id, self.image_io_lock(image_id)) for image_id in previous_ids]
+        with ExitStack() as stack:
+            for _image_id, image_lock in sorted(locks):
+                stack.enter_context(image_lock)
+            with self.lock:
+                self._assert_catalog_mutable()
+                self.images = {record.image_id: record for record in records}
+                self.order = [record.image_id for record in records]
+                self.candidates = {}
+                self.candidate_revisions = {record.image_id: 0 for record in records}
+                self._clear_browser_save_tokens_unchecked()
+                self.root = root
+                self._invalidate_sam_cache()
+                self.job = Job()
+                self.catalog_generation += 1
+                session = self._detach_session_unchecked()
             self._clear_cache()
-            self._invalidate_sam_cache()
-            self.job = Job()
-            self.catalog_generation += 1
-            self._clear_session_unchecked()
+            self._release_detached_session(session)
+        self.cleanup_expired_browser_save_tokens()
         return self.list_images()
 
     def _has_active_worker(self) -> bool:
@@ -80,16 +88,24 @@ class CatalogMixin:
     def clear_catalog(self) -> None:
         with self.import_lock:
             with self.lock:
-                self._assert_catalog_mutable()
-                self.images = {}
-                self.order = []
-                self.candidates = {}
-                self.candidate_revisions = {}
-                self._clear_browser_save_tokens_unchecked()
+                image_ids = tuple(self.images)
+            locks = [(image_id, self.image_io_lock(image_id)) for image_id in image_ids]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    self._assert_catalog_mutable()
+                    self.images = {}
+                    self.order = []
+                    self.candidates = {}
+                    self.candidate_revisions = {}
+                    self._clear_browser_save_tokens_unchecked()
+                    self._invalidate_sam_cache()
+                    self.catalog_generation += 1
+                    session = self._detach_session_unchecked()
                 self._clear_cache()
-                self._invalidate_sam_cache()
-                self.catalog_generation += 1
-                self._clear_session_unchecked()
+                self._release_detached_session(session)
+        self.cleanup_expired_browser_save_tokens()
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
         """Remove one image's working state without deleting its source file."""
@@ -106,18 +122,42 @@ class CatalogMixin:
             with self.lock:
                 self._assert_catalog_mutable()
                 records = [self.images[image_id] for image_id in requested_ids if image_id in self.images]
-                removed_ids = [record.image_id for record in records]
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    self._assert_catalog_mutable()
+                    records = [self.images[record.image_id] for record in records if record.image_id in self.images]
+                    removed_ids = [record.image_id for record in records]
+                    mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
+                    session_paths = [record.path for record in records if record.source_kind == "session"]
+                    session_imports_dir = self.session_imports_dir
+                    for record in records:
+                        self.images.pop(record.image_id, None)
+                        self.candidates.pop(record.image_id, None)
+                        self.candidate_revisions.pop(record.image_id, None)
+                    if removed_ids:
+                        removed_set = set(removed_ids)
+                        self.order = [current_id for current_id in self.order if current_id not in removed_set]
+                        self.catalog_generation += 1
+                    self._clear_browser_save_tokens_unchecked()
+                self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
                 for record in records:
-                    self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
-                    self.images.pop(record.image_id, None)
-                    self.candidates.pop(record.image_id, None)
-                    self.candidate_revisions.pop(record.image_id, None)
-                if removed_ids:
-                    removed_set = set(removed_ids)
-                    self.order = [current_id for current_id in self.order if current_id not in removed_set]
-                self._clear_browser_save_tokens_unchecked()
-                if removed_ids:
-                    self.catalog_generation += 1
+                    shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
+                    for thumbnail_path in (self.cache_dir / "thumbnails").glob(f"{record.image_id}-*.jpg"):
+                        thumbnail_path.unlink(missing_ok=True)
+                for path in session_paths:
+                    path.unlink(missing_ok=True)
+                    if session_imports_dir is not None:
+                        parent = path.parent
+                        while parent != session_imports_dir and parent.is_relative_to(session_imports_dir):
+                            try:
+                                parent.rmdir()
+                            except OSError:
+                                break
+                            parent = parent.parent
+        self.cleanup_expired_browser_save_tokens()
         for image_id in removed_ids:
             self.invalidate_sam_image(image_id)
         return {"images": self.list_images(), "removedImageIds": removed_ids}
@@ -139,12 +179,22 @@ class CatalogMixin:
             return
         with self.import_lock:
             with self.lock:
-                self._clear_session_unchecked()
-                self._clear_browser_save_tokens_unchecked()
+                image_ids = tuple(self.images)
+            locks = [(image_id, self.image_io_lock(image_id)) for image_id in image_ids]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    session = self._detach_session_unchecked()
+                    self._clear_browser_save_tokens_unchecked()
+                    cache_lock = self._cache_lock_handle if self._owns_process_cache else None
+                    if self._owns_process_cache:
+                        self._cache_lock_handle = None
+                self._release_detached_session(session)
+                self._release_directory_lock(cache_lock)
                 if self._owns_process_cache:
-                    self._release_directory_lock(self._cache_lock_handle)
-                    self._cache_lock_handle = None
                     shutil.rmtree(self.cache_dir, ignore_errors=True)
+        self.cleanup_expired_browser_save_tokens()
 
     def _touch_candidates(self, image_id: str) -> int:
         revision = self.candidate_revisions.get(image_id, 0) + 1
@@ -153,6 +203,16 @@ class CatalogMixin:
 
     def _candidate_revision(self, image_id: str) -> int:
         return self.candidate_revisions.get(image_id, 0)
+
+    def image_io_lock(self, image_id: str) -> threading.RLock:
+        """Return the small per-image lock used around filesystem I/O.
+
+        Callers obtain this before taking ``self.lock`` for their final state
+        revalidation.  This keeps a slow disk operation for one image from
+        blocking the catalogue or a different image.
+        """
+        with self.lock:
+            return self._image_io_locks.setdefault(image_id, threading.RLock())
 
     def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, int, str]:
         self._assert_record_fresh(record)
@@ -165,7 +225,7 @@ class CatalogMixin:
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
         if details is not None:
-            details.rendered_path.unlink(missing_ok=True)
+            self._pending_browser_save_cleanup.append(details.rendered_path)
         return details
 
     def _clear_browser_save_tokens_unchecked(self) -> None:
@@ -186,23 +246,33 @@ class CatalogMixin:
             if receipt.completed_at < cutoff:
                 self.browser_save_receipts.pop(token, None)
 
+    def cleanup_expired_browser_save_tokens(self) -> None:
+        """Cheap polling-path expiry: detach under lock, unlink afterwards."""
+        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
+        with self.lock:
+            expired_paths = self._pending_browser_save_cleanup
+            self._pending_browser_save_cleanup = []
+            expired_paths += [
+                self.browser_save_tokens.pop(token).rendered_path
+                for token, details in tuple(self.browser_save_tokens.items())
+                if details.issued_at < cutoff
+            ]
+            for token, receipt in tuple(self.browser_save_receipts.items()):
+                if receipt.completed_at < cutoff:
+                    self.browser_save_receipts.pop(token, None)
+        for path in expired_paths:
+            path.unlink(missing_ok=True)
+
     def _issue_browser_save_token_unchecked(
         self,
         record: ImageRecord,
         revision: int,
-        source_fingerprint: tuple[int, int],
+        source_fingerprint: tuple[int, int, int, str],
         catalog_generation: int,
-        output: bytes,
+        rendered_path: Path,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
-        rendered_dir = self.cache_dir / "browser-save"
-        rendered_dir.mkdir(parents=True, exist_ok=True)
-        rendered_path = rendered_dir / f"{token}{record.path.suffix.lower()}"
-        with rendered_path.open("xb") as handle:
-            handle.write(output)
-            handle.flush()
-            os.fsync(handle.fileno())
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,
             candidate_revision=revision,
@@ -226,11 +296,42 @@ class CatalogMixin:
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
-        with self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                raise ClientError("処理中はモザイク候補をクリアできません。")
-            self._clear_masks_unchecked(records)
+        # Acquire multiple per-image locks in a stable order before briefly
+        # taking the catalogue lock.  A mask response therefore cannot race a
+        # clear for the same image, while unrelated image reads continue.
+        locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+        with ExitStack() as stack:
+            for _image_id, image_lock in sorted(locks):
+                stack.enter_context(image_lock)
+            with self.lock:
+                if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中はモザイク候補をクリアできません。")
+                mask_paths = [
+                    candidate.mask_path
+                    for record in records
+                    for candidate in self.candidates.get(record.image_id, [])
+                ]
+                for record in records:
+                    self.candidates[record.image_id] = []
+                    self._touch_candidates(record.image_id)
+            self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
+
+    @staticmethod
+    def _delete_mask_files(mask_paths: list[Path], candidate_dirs: list[Path]) -> None:
+        """Best-effort cleanup after the state transition has been published."""
+        for mask_path in mask_paths:
+            try:
+                mask_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove stale mask %s: %s", mask_path, exc)
+        for candidate_dir in candidate_dirs:
+            try:
+                if candidate_dir.exists():
+                    for mask_path in candidate_dir.glob("*.png"):
+                        mask_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
     def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
         for record in records:
@@ -310,22 +411,33 @@ class CatalogMixin:
                 relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
                 if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                raw_value = file_data.get("raw")
-                if isinstance(raw_value, bytes):
-                    raw = raw_value
-                else:
-                    try:
-                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                    except (binascii.Error, ValueError) as exc:
-                        raise ClientError("追加画像を読み込めません。") from exc
-                if not raw:
-                    continue
-                _verify_decodable_image(raw)
-                with Image.open(io.BytesIO(raw)) as image:
-                    _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                    width, height = oriented_image_size(image)
                 temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
-                temporary.write_bytes(raw)
+                staged_path = file_data.get("stagedPath")
+                if isinstance(staged_path, Path):
+                    width, height = inspect_import_image(staged_path, relative_path.suffix)
+                    with staged_path.open("rb") as source, temporary.open("xb") as destination:
+                        shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                else:
+                    raw_value = file_data.get("raw")
+                    if isinstance(raw_value, bytes):
+                        raw = raw_value
+                    else:
+                        try:
+                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                        except (binascii.Error, ValueError) as exc:
+                            raise ClientError("追加画像を読み込めません。") from exc
+                    if not raw:
+                        continue
+                    _verify_decodable_image(raw)
+                    with Image.open(io.BytesIO(raw)) as image:
+                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
+                        width, height = oriented_image_size(image)
+                    with temporary.open("xb") as destination:
+                        destination.write(raw)
+                        destination.flush()
+                        os.fsync(destination.fileno())
                 pending.append((temporary, relative_path.as_posix(), width, height, client_key))
 
             with self.import_lock, self.lock:
@@ -390,6 +502,24 @@ class CatalogMixin:
             "name": name,
             "relativePath": relative_path,
             "raw": raw,
+        }], include_images=include_images)
+
+    def import_image_file_for_api(
+        self,
+        staged_path: Path,
+        *,
+        name: str,
+        relative_path: str,
+        client_key: str,
+        include_images: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not isinstance(client_key, str) or not client_key:
+            raise ClientError("追加画像のclientKeyが不正です。")
+        return self._import_images([{
+            "clientKey": client_key,
+            "name": name,
+            "relativePath": relative_path,
+            "stagedPath": staged_path,
         }], include_images=include_images)
 
     def _clear_cache(self) -> None:
@@ -485,7 +615,9 @@ class CatalogMixin:
                         "width": record.width,
                         "height": record.height,
                         "mtimeNs": record.mtime_ns,
+                        "sizeBytes": record.size_bytes,
                         "contentVersion": record.content_version,
+                        "assetVersion": self.asset_version(record),
                         "candidateCount": len(self.candidates.get(image_id, [])),
                         "enabledCandidateCount": sum(
                             candidate.enabled and candidate.role == CandidateRole.APPLY
@@ -504,25 +636,33 @@ class CatalogMixin:
         return self.candidate_snapshot(image_id)["candidates"]
 
     def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
-        """Return candidates and their revision from one state-lock epoch."""
-        with self.lock:
-            if image_id not in self.images:
-                raise ClientError("画像が見つかりません。")
-            stored_candidates = self.candidates.get(image_id, [])
-            candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
-            if len(candidates) != len(stored_candidates):
-                self._touch_candidates(image_id)
-            self.candidates[image_id] = candidates
-            return {
-                "candidates": [
-                    candidate.as_api_dict(
-                        SOURCE_LABELS.get(candidate.source, candidate.source),
-                        REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-                    )
-                    for candidate in candidates
-                ],
-                "candidateRevision": self._candidate_revision(image_id),
-            }
+        """Return candidates and revision without filesystem probes under lock."""
+        for _attempt in range(2):
+            with self.lock:
+                if image_id not in self.images:
+                    raise ClientError("画像が見つかりません。")
+                revision = self._candidate_revision(image_id)
+                snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+            available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
+            with self.lock:
+                if self._candidate_revision(image_id) != revision:
+                    continue
+                stored_candidates = self.candidates.get(image_id, [])
+                candidates = [candidate for candidate in stored_candidates if candidate.candidate_id in available]
+                if len(candidates) != len(stored_candidates):
+                    self.candidates[image_id] = candidates
+                    self._touch_candidates(image_id)
+                return {
+                    "candidates": [
+                        candidate.as_api_dict(
+                            SOURCE_LABELS.get(candidate.source, candidate.source),
+                            REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+                        )
+                        for candidate in candidates
+                    ],
+                    "candidateRevision": self._candidate_revision(image_id),
+                }
+        raise ClientError("検出候補が更新されました。もう一度読み込んでください。")
 
     def image_snapshot(self, image_id: str) -> ImageRecord:
         """Capture a checked catalogue record before image I/O begins."""
@@ -532,19 +672,29 @@ class CatalogMixin:
                 raise ClientError("画像が見つかりません。")
             return replace(record)
 
+    @staticmethod
+    def asset_version(record: ImageRecord) -> str:
+        """The content-addressed HTTP version for an image response."""
+        return f"{record.mtime_ns}-{record.size_bytes}-{record.content_version}"
+
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])
         self.candidates[image_id] = [candidate for candidate in candidates if candidate.candidate_id != candidate_id]
 
-    def read_candidate_mask_png(self, image_id: str, candidate_id: str) -> bytes:
-        """Read a mask while retaining the state lock so cleanup cannot unlink it."""
-        with self.lock:
-            candidate = next(
-                (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
-                None,
-            )
-            if candidate is None:
-                raise StaleMaskError("検出候補は既に更新されています。")
+    def read_candidate_mask_png(self, image_id: str, candidate_id: str, *, expected_revision: int | None = None) -> bytes:
+        """Convert one mask without holding the catalogue lock during PNG I/O."""
+        with self.image_io_lock(image_id):
+            with self.lock:
+                candidate = next(
+                    (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
+                    None,
+                )
+                if candidate is None:
+                    raise StaleMaskError("検出候補は既に更新されています。")
+                candidate = replace(candidate)
+                revision = self._candidate_revision(image_id)
+                if expected_revision is not None and revision != expected_revision:
+                    raise StaleMaskError("検出候補は既に更新されています。")
             try:
                 with Image.open(candidate.mask_path) as mask_image:
                     alpha = mask_image.convert("L")
@@ -552,11 +702,25 @@ class CatalogMixin:
                     rgba.putalpha(alpha)
                     output = io.BytesIO()
                     rgba.save(output, format="PNG")
-                    return output.getvalue()
             except FileNotFoundError as exc:
-                self._remove_candidate_unchecked(image_id, candidate_id)
-                self._touch_candidates(image_id)
+                with self.lock:
+                    if self._candidate_revision(image_id) == revision:
+                        self._remove_candidate_unchecked(image_id, candidate_id)
+                        self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
+            with self.lock:
+                current = next(
+                    (item for item in self.candidates.get(image_id, []) if item.candidate_id == candidate_id),
+                    None,
+                )
+                if (
+                    current is None
+                    or current.mask_path != candidate.mask_path
+                    or self._candidate_revision(image_id) != revision
+                    or (expected_revision is not None and revision != expected_revision)
+                ):
+                    raise StaleMaskError("検出候補は既に更新されています。")
+            return output.getvalue()
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)
@@ -588,32 +752,34 @@ class CatalogMixin:
         operation = payload.get("operation")
         if role not in {"apply", "exclude"} or operation not in {"enable", "disable", "delete"}:
             raise ClientError("候補の一括操作が正しくありません。")
-        with self.lock:
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。")
-            selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
-            if operation == "delete":
-                for item in selected:
-                    try:
-                        item.mask_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
-            else:
-                for item in selected:
-                    item.enabled = operation == "enable"
-            return self._touch_candidates(image_id)
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
+                if operation == "delete":
+                    self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
+                    paths = [item.mask_path for item in selected]
+                else:
+                    paths = []
+                    for item in selected:
+                        item.enabled = operation == "enable"
+                revision = self._touch_candidates(image_id)
+            for path in paths:
+                path.unlink(missing_ok=True)
+            return revision
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
-        with self.lock:
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。")
-            candidates = self.candidates.get(image_id, [])
-            candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
-            if candidate is None:
-                return False
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                candidates = self.candidates.get(image_id, [])
+                candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
+                if candidate is None:
+                    return False
+                self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
+                self._touch_candidates(image_id)
             candidate.mask_path.unlink(missing_ok=True)
-            self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
-            self._touch_candidates(image_id)
             return True

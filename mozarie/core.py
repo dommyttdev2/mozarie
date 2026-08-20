@@ -7,6 +7,7 @@ under a user-selected root, then addressed through opaque catalogue ids.
 from __future__ import annotations
 
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -40,7 +41,7 @@ from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
 import numpy as np
@@ -105,6 +106,8 @@ DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_BODY_BYTES = 80 * 1024 * 1024
+IO_CHUNK_BYTES = 1024 * 1024
+THUMBNAIL_WORKERS = 4
 SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
 

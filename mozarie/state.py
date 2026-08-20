@@ -35,8 +35,15 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
         self.candidate_revisions: dict[str, int] = {}
+        # These locks only serialize work for the same catalogue record.  State
+        # mutation still uses ``lock``; never acquire an image lock while that
+        # global lock is held.
+        self._image_io_locks: dict[str, threading.RLock] = {}
+        self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
+        self.import_staging_gate = threading.BoundedSemaphore(4)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
+        self._pending_browser_save_cleanup: list[Path] = []
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
@@ -254,12 +261,17 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self._session_lock_handle = lock_handle
         return imports_dir
 
-    def _clear_session_unchecked(self) -> None:
+    def _detach_session_unchecked(self) -> tuple[Path | None, Any | None]:
         session_dir = self.session_dir
         lock_handle = self._session_lock_handle
         self.session_dir = None
         self.session_imports_dir = None
         self._session_lock_handle = None
+        return session_dir, lock_handle
+
+    @staticmethod
+    def _release_detached_session(session: tuple[Path | None, Any | None]) -> None:
+        session_dir, lock_handle = session
         if lock_handle is not None:
             try:
                 lock_handle.seek(0)
@@ -269,6 +281,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             lock_handle.close()
         if session_dir is not None:
             shutil.rmtree(session_dir, ignore_errors=True)
+
+    def _clear_session_unchecked(self) -> None:
+        self._release_detached_session(self._detach_session_unchecked())
 
 
 

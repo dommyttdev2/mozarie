@@ -171,10 +171,17 @@ class JobsMixin:
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
     ) -> np.ndarray | None:
-        record = self.image_for_id(image_id)
         add_mask, exclusion_mask = draft or (None, None)
-        with self.lock:
-            candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+        with self.image_io_lock(image_id):
+            with self.lock:
+                current_record = self.images.get(image_id)
+                if current_record is None:
+                    raise ClientError("画像が見つかりません。")
+                record = replace(current_record)
+                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+                revision = self._candidate_revision(image_id)
+                catalog_generation = self.catalog_generation
+            self._assert_record_fresh(record)
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
             if not apply_candidates and add_mask is None:
                 return None
@@ -189,7 +196,13 @@ class JobsMixin:
                 if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                 (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
-        return compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+            result = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+            with self.lock:
+                current_record = self.images.get(image_id)
+                if (current_record is None or current_record.path != record.path
+                        or self.catalog_generation != catalog_generation or self._candidate_revision(image_id) != revision):
+                    raise ClientError("候補が変更されました。もう一度実行してください。")
+            return result
 
     def _set_job_current(
         self,

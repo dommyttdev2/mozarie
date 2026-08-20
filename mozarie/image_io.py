@@ -203,6 +203,17 @@ def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -
         raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
+def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
+    """Fully decode a staged upload without reading its full body into memory."""
+    try:
+        with Image.open(path) as image:
+            image.load()
+            _assert_image_suffix_matches_format(expected_suffix, image.format)
+            return oriented_image_size(image)
+    except (OSError, UnidentifiedImageError) as exc:
+        raise ClientError("追加画像を読み込めません。") from exc
+
+
 def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
     source_segments, _source_scan = _parse_jpeg_header(source)
     metadata_segments: list[tuple[int, bytes]] = []
@@ -330,14 +341,14 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
         )
         output = image_array.copy()
         output[..., :3] = np.where(mask[..., None] > 0, np.clip(np.rint(pixelated_rgb), 0, 255).astype(np.uint8), image_array[..., :3])
-        return Image.fromarray(output, "RGBA")
+        return Image.fromarray(output)
 
     pixelated = image.resize(
         (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size))),
         Image.Resampling.BOX,
     ).resize((width, height), Image.Resampling.NEAREST)
     output = np.where(mask[..., None] > 0, np.asarray(pixelated), image_array) if original_mode == "RGB" else np.where(mask > 0, np.asarray(pixelated), image_array)
-    return Image.fromarray(output, original_mode)
+    return Image.fromarray(output)
 
 
 def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:

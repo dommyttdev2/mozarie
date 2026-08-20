@@ -101,7 +101,8 @@ function lruRemember(cache, key, value, limit, release = null) {
   return value;
 }
 
-function imageCacheKey(record) { return `${record.id}:${record.contentVersion || record.mtimeNs || 0}`; }
+function imageAssetVersion(record) { return typeof record.assetVersion === "string" ? record.assetVersion : ""; }
+function imageCacheKey(record) { return `${record.id}:${imageAssetVersion(record)}`; }
 function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }
 
 async function cachedImage(record) {
@@ -110,7 +111,8 @@ async function cachedImage(record) {
   if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
   const pending = state.imageInflight.get(key);
   if (pending) return pending;
-  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(record.contentVersion || record.mtimeNs || 0)}`)
+  const version = imageAssetVersion(record);
+  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`)
     .then((image) => lruRemember(state.imageCache, key, image, 6, releaseImageResource))
     .finally(() => state.imageInflight.delete(key));
   state.imageInflight.set(key, request);
@@ -199,7 +201,7 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
   try {
     const candidateImages = new Map();
     await Promise.all(candidateData.candidates.map(async (candidate) => {
-      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?v=${encodeURIComponent(candidateData.candidateRevision || 0)}`));
+      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?v=${encodeURIComponent(`${candidateData.candidateRevision || 0}-${candidate.id}`)}`));
     }));
     return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages, candidateRevision: Number(candidateData.candidateRevision || 0) }, 12, releaseCandidateBundle);
   } catch (error) {
