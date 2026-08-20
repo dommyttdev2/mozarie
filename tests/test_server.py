@@ -2985,6 +2985,12 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
+            version = state.list_images()[0]["assetVersion"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            candidate_revision = state._touch_candidates(image_id)
             with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -2996,6 +3002,21 @@ class MozarieTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.getheader("Cache-Control"), "no-store")
                     response.read()
+                    for endpoint in (
+                        f"/api/image/{image_id}",
+                        f"/api/thumbnail/{image_id}",
+                        f"/api/mask/{image_id}/candidate",
+                    ):
+                        expected_version = f"{candidate_revision}-candidate" if "/mask/" in endpoint else version
+                        connection.request("GET", f"{endpoint}?v={expected_version}")
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.getheader("Cache-Control"), "private, max-age=31536000, immutable")
+                        self.assertTrue(response.read())
+                        connection.request("GET", f"{endpoint}?v=stale")
+                        stale = connection.getresponse()
+                        self.assertEqual(stale.status, 404 if "/mask/" in endpoint else 400)
+                        self.assertNotEqual(stale.read(), source.read_bytes())
                 finally:
                     connection.close()
                     httpd.shutdown()
