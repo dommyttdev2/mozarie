@@ -154,6 +154,14 @@ async function assertDesktopLayout(page, width, height) {
   assert.ok(appbar.appbar.right - appbar.actions.right <= 12, `appbar actions use only the right padding gap at ${width}x${height}`);
   assert.ok(appbar.status.right <= appbar.actions.left, `status keeps the central flex space at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
+  if (width >= 1280) {
+    const heading = await page.evaluate(() => {
+      const pane = document.querySelector("#galleryPane").getBoundingClientRect();
+      const action = document.querySelector("#batchMoreButton").getBoundingClientRect();
+      return { rightGap: pane.right - action.right };
+    });
+    assert.ok(heading.rightGap <= 12, `all-image actions align with the gallery right edge at ${width}x${height}`);
+  }
   if (width === 1280 && height === 720) {
     const heading = await page.evaluate(() => {
       const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
