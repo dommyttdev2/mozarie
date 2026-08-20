@@ -24,8 +24,12 @@ const state = {
   // The save folder handle is browser-local and never sent to the server.
   outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
   galleryCollapsed: false, inspectorCollapsed: false,
-  settings: null, settingsStatus: null,
-  imageCache: new Map(), candidateBundleCache: new Map(),
+  settings: null, settingsStatus: null, jobPollTimer: null,
+  imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(),
+  prefetchQueue: [], prefetchActive: 0, prefetchTimer: null,
+  fillWorker: null, fillPending: false,
+  renderFrame: 0,
+  maskDirty: false,
 };
 
 const canvas = $("#editorCanvas");
@@ -195,10 +199,22 @@ function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor())
 function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
-    || state.catalogMutation || state.boundaryPending;
+    || state.catalogMutation || state.boundaryPending || state.fillPending;
 }
 function beginCatalogEpoch() { state.catalogGeneration += 1; state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
+function catalogRecordMatches(record, epoch, { version = imageAssetVersion(record), revision = null } = {}) {
+  const current = state.images.find((image) => image.id === record?.id);
+  return Boolean(record) && isCurrentCatalogEpoch(epoch) && current === record && imageAssetVersion(current) === version
+    && (revision == null || Number(current.candidateRevision || 0) === Number(revision));
+}
+function abortCatalogLoads() {
+  for (const controller of state.catalogLoadControllers) controller.abort();
+  state.catalogLoadControllers.clear();
+  state.imageInflight.clear(); state.candidateInflight.clear(); state.prefetchQueue = [];
+  clearTimeout(state.prefetchTimer); state.prefetchTimer = null;
+}
+function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
 function saveTargets() { return state.images.filter((image) => !isHidden(image) && imageHasMask(image)).map((image) => image.id); }
@@ -222,6 +238,16 @@ function setHidden(image, hidden) {
   if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
   if (key) try { if (hidden) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Session state remains usable. */ }
   renderCatalogViews(); updateSelectionActionBar();
+}
+function clearStoredCatalogState(root = state.reviewRoot) {
+  const prefix = root ? `mozarie.reviewed.v1:${root}:` : "";
+  if (!prefix) return;
+  try {
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index); if (key?.startsWith(prefix)) localStorage.removeItem(key);
+    }
+  } catch { /* Storage is an optional convenience. */ }
+  state.reviewedPaths.clear(); state.hiddenPaths.clear();
 }
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
 function updateSelectionActionBar() {
@@ -337,11 +363,15 @@ async function persistNavigationShortcuts(enabled) {
 }
 function handleReviewStorageEvent(event) {
   const prefix = reviewStoragePrefix();
-  if (!prefix || !event.key?.startsWith(prefix)) return;
-  const path = event.key.slice(prefix.length);
+  if (!prefix) return;
+  if (event.key === null) { loadReviewedPaths(); refreshReviewViews(); return; }
+  if (!event.key.startsWith(prefix)) return;
+  const rawPath = event.key.slice(prefix.length);
+  const hidden = rawPath.startsWith("hidden:");
+  const path = hidden ? rawPath.slice("hidden:".length) : rawPath;
   if (!path) return;
-  if (event.newValue === "true") state.reviewedPaths.add(path);
-  else state.reviewedPaths.delete(path);
+  const paths = hidden ? state.hiddenPaths : state.reviewedPaths;
+  if (event.newValue === "true") paths.add(path); else paths.delete(path);
   refreshReviewViews();
 }
 
@@ -446,13 +476,17 @@ function setMosaicPreviewEnabled(enabled) {
 
 function resetCatalog(images, root) {
   closeBoundaryModeMenu({ restoreFocus: true });
+  closeCatalogContextMenu();
+  abortCatalogLoads();
+  cancelFillWork();
   releaseImageCaches();
   state.images = images;
   state.sourceAccess.clear();
   state.reviewRoot = normaliseReviewRoot(root);
+  state.overviewFolder = "";
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); clearBoundaryInteraction();
+  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; state.blinkCandidateIds.clear(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
   state.candidateUpdateVersions.clear(); state.candidateDeleting.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
@@ -462,7 +496,7 @@ function resetCatalog(images, root) {
 function discardCatalogNodes(nodes, container) {
   for (const item of nodes.values()) {
     const preview = item.querySelector?.("img");
-    if (preview) preview.src = "";
+    if (preview) forgetThumbnail(preview);
     item.remove?.();
   }
   nodes.clear();

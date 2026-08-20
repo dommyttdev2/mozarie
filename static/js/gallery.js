@@ -1,3 +1,22 @@
+const thumbnailObservers = new Map();
+function thumbnailObserver(scope) {
+  if (typeof IntersectionObserver !== "function") return null;
+  if (thumbnailObservers.has(scope)) return thumbnailObservers.get(scope);
+  const root = scope === "overview" ? $("#overviewGrid") : $("#gallery");
+  const observer = new IntersectionObserver((entries) => { for (const entry of entries) { if (!entry.isIntersecting) continue; observer.unobserve(entry.target); loadThumbnail(entry.target); } }, { root, rootMargin: "320px" });
+  thumbnailObservers.set(scope, observer); return observer;
+}
+function thumbnailSource(record) { const version = imageAssetVersion(record); return `/api/thumbnail/${encodeURIComponent(record.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`; }
+function loadThumbnail(image) { const source = image.dataset.src; if (!source || image.dataset.loaded === source) return; image.dataset.loaded = source; image.src = source; }
+function observeThumbnail(image, record, scope = "gallery") {
+  const source = thumbnailSource(record);
+  if (image.dataset.src !== source) forgetThumbnail(image);
+  image.dataset.src = source; image.loading = "lazy"; image.decoding = "async";
+  if (image.dataset.loaded === source) return;
+  const observer = thumbnailObserver(scope); if (observer) observer.observe(image); else loadThumbnail(image);
+}
+function forgetThumbnail(image) { if (!image) return; for (const observer of thumbnailObservers.values()) observer.unobserve(image); image.removeAttribute?.("src"); image.dataset.src = ""; delete image.dataset.loaded; }
+
 function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
   const gallery = $("#gallery");
@@ -11,7 +30,7 @@ function renderGallery(force = false) {
   const template = $("#galleryItemTemplate");
   const visibleIds = new Set(visibleImages.map((image) => image.id));
   for (const [imageId, item] of state.galleryNodes) {
-    if (!visibleIds.has(imageId)) { item.remove?.(); state.galleryNodes.delete(imageId); }
+    if (!visibleIds.has(imageId)) { forgetThumbnail(item.querySelector("img")); item.remove?.(); state.galleryNodes.delete(imageId); }
   }
   for (const image of visibleImages) {
     let item = state.galleryNodes.get(image.id);
@@ -24,16 +43,14 @@ function renderGallery(force = false) {
     item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
-    const version = imageAssetVersion(image);
-    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`;
-    if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
+    observeThumbnail(preview, image, "gallery");
     preview.alt = image.relativePath;
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
     item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.onclick = (event) => selectCatalogImage(image.id, event);
-    item.onmouseenter = () => { void cachedImage(image).catch(() => {}); void loadCandidateBundle(image.id, state.imageGeneration).catch(() => {}); prefetchNeighbors(image); };
+    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
@@ -112,7 +129,7 @@ function renderOverview(force = false) {
   const visibleIds = new Set(visibleImages.map((image) => image.id));
   $("#overviewEmptyState").hidden = visibleImages.length !== 0;
   for (const [imageId, item] of state.overviewNodes) {
-    if (!visibleIds.has(imageId)) { item.remove?.(); state.overviewNodes.delete(imageId); }
+    if (!visibleIds.has(imageId)) { forgetThumbnail(item.querySelector("img")); item.remove?.(); state.overviewNodes.delete(imageId); }
   }
   for (const image of visibleImages) {
     let item = state.overviewNodes.get(image.id);
@@ -123,9 +140,7 @@ function renderOverview(force = false) {
     item.dataset.id = image.id;
     item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
     const preview = item.querySelector("img");
-    const version = imageAssetVersion(image);
-    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`;
-    if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
+    observeThumbnail(preview, image, "overview");
     preview.alt = image.relativePath;
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
     item.querySelector(".overview-item-path").textContent = image.relativePath;

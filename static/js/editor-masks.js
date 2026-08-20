@@ -21,6 +21,7 @@ function renderCandidates() {
     enabled.addEventListener("change", () => {
       if (isBusy() || state.importing) { enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled; return; }
       if (isApply) state.manualEnabled = enabled.checked; else state.manualExclusionEnabled = enabled.checked;
+      markMaskDirty();
       setReviewed(currentRecord(), false);
       resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
@@ -230,6 +231,7 @@ async function batchCandidateOperation(spec) {
     if (operation === "delete") role === "apply" ? deleteManualMask() : deleteManualExclusion();
     else if (role === "apply") state.manualEnabled = operation === "enable";
     else state.manualExclusionEnabled = operation === "enable";
+    markMaskDirty();
   }
   const changed = state.candidates.filter((item) => item.role === role);
   if (!changed.length) { renderCandidates(); render(); return; }
@@ -355,7 +357,7 @@ function paintStrokeOnContexts(addContext, exclusionContext, from, to, erase, si
 
 function paintStroke(from, to, erase, size) {
   paintStrokeOnContexts(addCtx, exclusionCtx, from, to, erase, size);
-  composeCurrentMask();
+  markMaskDirty();
 }
 
 function fillAt(point) {
@@ -363,36 +365,32 @@ function fillAt(point) {
   const width = originalCanvas.width; const height = originalCanvas.height;
   const pixels = originalCtx.getImageData(0, 0, width, height).data;
   const x = Math.min(width - 1, Math.max(0, Math.floor(point.x))); const y = Math.min(height - 1, Math.max(0, Math.floor(point.y)));
-  const start = (y * width + x) * 4; const seed = [pixels[start], pixels[start + 1], pixels[start + 2]];
   const tolerance = Math.max(0, Math.min(255, Number($("#bucketTolerance").value) || 0));
-  const seen = new Uint8Array(width * height); const accepted = new Uint8Array(width * height); const queue = [y * width + x]; seen[queue[0]] = 1;
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const index = queue[cursor]; const offset = index * 4; const distance = Math.max(Math.abs(pixels[offset] - seed[0]), Math.abs(pixels[offset + 1] - seed[1]), Math.abs(pixels[offset + 2] - seed[2]));
-    if (distance > tolerance) continue;
-    accepted[index] = 1; const px = index % width; const py = Math.floor(index / width);
-    for (const neighbor of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
-      const [nx, ny] = neighbor; const next = ny * width + nx;
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height && !seen[next]) { seen[next] = 1; queue.push(next); }
-    }
-  }
-  const spans = [];
-  for (let row = 0; row < height; row += 1) for (let column = 0; column < width;) {
-    if (!accepted[row * width + column]) { column += 1; continue; }
-    const startColumn = column; while (column < width && accepted[row * width + column]) column += 1;
-    spans.push([row, startColumn, column]);
-  }
-  applyFillSpans(spans); state.history.splice(state.historyIndex); state.history.push({ tool: "bucket", spans });
-  if (state.history.length > 12) { const oldest = state.history.shift(); replayManualStroke(oldest, historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d")); }
-  state.historyIndex = state.history.length; state.manualMaskPresent = true; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  const generation = state.imageGeneration; const epoch = state.catalogEpoch; const imageId = state.currentId; const record = currentRecord(); const version = imageAssetVersion(record); const revision = Number(record?.candidateRevision || 0);
+  const apply = (spans) => {
+    if (!catalogRecordMatches(record, epoch, { version, revision }) || !isCurrentGeneration(generation) || state.currentId !== imageId) { state.fillPending = false; return; }
+    applyFillSpans(spans); state.history.splice(state.historyIndex); state.history.push({ tool: "bucket", spans }); trimHistory();
+    state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  };
+  if (typeof Worker !== "function") { setStatus(t("error.requestFailed"), "error"); return; }
+  state.fillWorker?.terminate?.(); state.fillPending = true;
+  let worker;
+  try { worker = state.fillWorker = new Worker("/js/flood-fill-worker.js"); }
+  catch { state.fillPending = false; setStatus(t("error.requestFailed"), "error"); return; }
+  worker.onmessage = ({ data }) => { if (state.fillWorker !== worker) return; state.fillWorker = null; worker.terminate(); apply(data.spans); };
+  worker.onerror = () => { if (state.fillWorker === worker) { state.fillWorker = null; state.fillPending = false; setStatus(t("error.requestFailed"), "error"); } worker.terminate(); };
+  worker.postMessage({ pixels: pixels.buffer, width, height, x, y, tolerance }, [pixels.buffer]);
 }
 
 function paintFillSpans(addContext, exclusionContext, spans) {
   addContext.save(); addContext.fillStyle = "#ffffff";
   exclusionContext.save(); exclusionContext.globalCompositeOperation = "destination-out";
-  for (const [row, start, end] of spans) { addContext.fillRect(start, row, end - start, 1); exclusionContext.fillRect(start, row, end - start, 1); }
+  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); exclusionContext.fillRect(start, row, end - start, 1); }
   addContext.restore(); exclusionContext.restore();
 }
-function applyFillSpans(spans) { paintFillSpans(addCtx, exclusionCtx, spans); composeCurrentMask(); }
+function applyFillSpans(spans) {
+  paintFillSpans(addCtx, exclusionCtx, spans); markMaskDirty(); flushMaskComposition();
+}
 
 function drawStroke(from, to, erase, size = Number($("#brushSize").value)) {
   paintStroke(from, to, erase, size);
@@ -421,13 +419,21 @@ function replayManualStroke(stroke, addContext = addCtx, exclusionContext = excl
   }
 }
 
+function historyWeight(stroke) { return stroke.spans?.byteLength || (stroke.spans?.length || 0) * 4 || (stroke.points?.length || 0) * 16; }
+function trimHistory() {
+  while (state.history.length > 12 || state.history.reduce((total, stroke) => total + historyWeight(stroke), 0) > 64 * 1024 * 1024) {
+    replayManualStroke(state.history.shift(), historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"));
+  }
+}
+
 function rebuildManualMaskFromHistory() {
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   addCtx.drawImage(historyAddCanvas, 0, 0); exclusionCtx.drawImage(historyExclusionCanvas, 0, 0);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
-  composeCurrentMask();
+  markMaskDirty();
+  flushMaskComposition();
 }
 
 function completeManualStroke() {
@@ -436,10 +442,7 @@ function completeManualStroke() {
   if (!stroke?.points?.length) return;
   state.history.splice(state.historyIndex);
   state.history.push(stroke);
-  if (state.history.length > 12) {
-    const oldest = state.history.shift();
-    replayManualStroke(oldest, historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"));
-  }
+  trimHistory();
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   setReviewed(currentRecord(), false);
@@ -456,6 +459,6 @@ function restoreSnapshot(index) {
 
 function buildCombinedMask() {
   if (!state.currentImage) return null;
-  composeCurrentMask();
+  flushMaskComposition();
   return combinedCanvas.toDataURL("image/png");
 }

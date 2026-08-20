@@ -237,7 +237,7 @@ function bindEvents() {
     if (state.tool === "bucket") { state.drawing = false; fillAt(point); return; }
     beginManualStroke(point); render();
   });
-  canvas.addEventListener("pointermove", (event) => {
+  const processPointerMove = (event) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
@@ -262,6 +262,10 @@ function bindEvents() {
       } else { appendManualStrokePoint(point); state.pointer = point; }
     }
     render();
+  };
+  canvas.addEventListener("pointermove", (event) => {
+    const events = event.getCoalescedEvents?.() || [event];
+    for (const pointEvent of events) processPointerMove(pointEvent);
   });
   function finishCanvasGesture(event, cancelled = false) {
     const wasDrawing = state.drawing;
@@ -275,7 +279,7 @@ function bindEvents() {
         state.polygonPoints = [];
         setStatusKey("status.boundaryReady");
       }
-      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); render(); return;
+      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
@@ -300,7 +304,7 @@ function bindEvents() {
         }
       }
     }
-    render();
+    flushRender();
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));
@@ -318,6 +322,7 @@ function bindEvents() {
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.fillWorker) { event.preventDefault(); cancelFillWork(); return; }
     if (event.key === "Escape" && !$("#boundaryModeMenu").hidden) {
       event.preventDefault(); closeBoundaryModeMenu(); focusElement($("#boundaryTool")); return;
     }
@@ -356,13 +361,14 @@ function bindEvents() {
 
 async function initialise() {
   try {
-    const settings = await api("/api/settings");
+    const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
   await restoreOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
-  new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
+  new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
+  document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {

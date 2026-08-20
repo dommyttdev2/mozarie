@@ -2,6 +2,7 @@
 // browser loader and the Node contract test.
 window.MOZARIE_SCRIPT_ORDER = [
   "core.js",
+  "resources.js",
   "gallery.js",
   "editor-canvas.js",
   "editor-masks.js",

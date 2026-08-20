@@ -1871,6 +1871,34 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_settings_status_query_skips_expensive_status_probe(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(http_module.STATE, "settings_status", return_value={"models": {"target": {"valid": True}}}) as settings_status:
+                connection.request("GET", "/api/settings?status=0")
+                response = connection.getresponse()
+                lightweight = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(response.status, 200)
+                self.assertIn("settings", lightweight)
+                self.assertNotIn("status", lightweight)
+                settings_status.assert_not_called()
+
+                connection.request("GET", "/api/settings")
+                response = connection.getresponse()
+                complete = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(response.status, 200)
+                self.assertEqual(complete["status"], {"models": {"target": {"valid": True}}})
+                settings_status.assert_called_once()
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_candidate_delete_api_returns_the_idempotent_result(self):
         from http.server import ThreadingHTTPServer
 

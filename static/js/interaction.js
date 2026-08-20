@@ -112,9 +112,8 @@ async function clearCatalog() {
   try {
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
-    releaseImageCaches();
-    state.images = []; state.sourceAccess.clear(); state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-    state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.overviewFolder = ""; clearEditor(); renderCatalogViews();
+    clearStoredCatalogState();
+    resetCatalog([], "");
     setStatusKey("status.chooseFolder");
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }

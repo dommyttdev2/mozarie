@@ -1,0 +1,53 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const gallerySource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "gallery.js"), "utf8");
+const canvasSource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "editor-canvas.js"), "utf8");
+const resourcesSource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "resources.js"), "utf8").replace(/async function fetchBitmap[^\n]*/, "async function fetchBitmap(...args) { return globalThis.__fetchBitmap(...args); }");
+assert.match(gallerySource, /onmouseenter = \(\) => \{ schedulePrefetch\(image, 2\); prefetchNeighbors\(image\); \}/);
+assert.doesNotMatch(gallerySource, /onmouseenter[^\n]*loadCandidateBundle/);
+assert.match(canvasSource, /candidateBundleCache\.take\(oldKey\)/, "candidate revisions transfer cache ownership without closing displayed masks");
+const state = { currentId: null, pendingImageId: null, candidateImages: new Map(), imageInflight: new Map(), prefetchQueue: [], prefetchTimer: null, prefetchActive: 0, catalogEpoch: 1, catalogLoadControllers: new Set() };
+const context = { state, setTimeout() { return 1; }, clearTimeout() {}, fetch() {}, document: { querySelector() { return null; } }, encodeURIComponent, Promise, Set, Map, Math, AbortController, DOMException, __fetchBitmap: null };
+vm.runInNewContext(`${resourcesSource}\nglobalThis.resourceTest = { WeightedLru, drainPrefetchQueue };`, context);
+vm.runInNewContext(canvasSource, context);
+const closed = []; const cache = new context.resourceTest.WeightedLru(8, (value) => closed.push(value.id));
+cache.set("one", { id: "one" }, 4); cache.set("two", { id: "two" }, 4); cache.get("one"); cache.set("three", { id: "three" }, 4);
+assert.equal(cache.has("one"), true, "recent entry remains"); assert.equal(cache.has("two"), false, "least-recent entry is evicted"); assert.deepEqual(closed, ["two"]);
+const owned = cache.take("one");
+assert.equal(owned.id, "one"); assert.deepEqual(closed, ["two"], "take transfers ownership without release");
+cache.delete("three"); assert.deepEqual(closed, ["two", "three"], "explicit delete releases once");
+cache.set("oversize", { id: "oversize" }, 9);
+assert.equal(cache.has("oversize"), false, "oversize decoded resource is never cached");
+assert.deepEqual(closed, ["two", "three"], "uncached oversize remains with its caller");
+const current = { id: "current" }; const pinned = new context.resourceTest.WeightedLru(4, (value) => closed.push(value.id), (key) => key === "current");
+pinned.set("current", current, 4); pinned.set("next", { id: "next" }, 4);
+assert.equal(pinned.has("current"), true, "current resource is pinned during cache pressure");
+pinned.trim(); pinned.delete("current");
+assert.deepEqual(closed, ["two", "three", "next", "current"], "trim and explicit removal release each owned resource once");
+
+const calls = []; const thumbnailContext = { state: { images: [], viewMode: "edit", galleryNodes: new Map(), galleryFilter: "all" }, Map, encodeURIComponent, IntersectionObserver: class { observe() {} unobserve() { calls.push("unobserve"); } }, $: () => ({ scrollTop: 0 }), t: () => "", imageAssetVersion: () => "", updateActionButtons() {}, document: { querySelectorAll() { return []; } } };
+vm.runInNewContext(`${gallerySource}\nglobalThis.thumbnailTest = { observeThumbnail, renderGallery, thumbnailObservers };`, thumbnailContext);
+const preview = { dataset: {}, removeAttribute() {} }; thumbnailContext.thumbnailTest.observeThumbnail(preview, { id: "old" }); thumbnailContext.thumbnailTest.thumbnailObservers.get("gallery").unobserve = () => calls.push("unobserve");
+thumbnailContext.state.galleryNodes.set("old", { querySelector() { return preview; }, remove() { calls.push("remove"); } });
+thumbnailContext.thumbnailTest.renderGallery();
+assert.deepEqual(calls, ["unobserve", "remove"], "filtered thumbnail nodes unobserve before removal");
+
+(async () => {
+  const record = { id: "oversize", assetVersion: "v1" }; let releases = 0; let resolveBitmap;
+  context.catalogRecordMatches = (candidate, epoch, { version } = {}) => candidate === record && epoch === state.catalogEpoch && version === record.assetVersion;
+  context.__fetchBitmap = () => new Promise((resolve) => { resolveBitmap = resolve; });
+  state.prefetchQueue.push({ record }); context.resourceTest.drainPrefetchQueue();
+  resolveBitmap({ width: 6000, height: 6000, close() { releases += 1; } });
+  for (let index = 0; index < 4 && state.prefetchActive; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases, 1, "uncached background prefetch releases its bitmap exactly once");
+  assert.equal(state.imageCache.has("oversize:v1"), false, "oversize prefetch remains uncached");
+
+  const joined = { id: "joined", assetVersion: "v1" }; context.catalogRecordMatches = (candidate, epoch, { version } = {}) => candidate === joined && epoch === state.catalogEpoch && version === joined.assetVersion;
+  state.currentId = null; state.prefetchQueue.push({ record: joined }); context.resourceTest.drainPrefetchQueue();
+  state.currentId = joined.id; resolveBitmap({ width: 6000, height: 6000, close() { releases += 1; } });
+  for (let index = 0; index < 4 && state.prefetchActive; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases, 1, "joined foreground image remains available when its prefetch cannot cache it");
+  console.log("test_resources: passed");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
