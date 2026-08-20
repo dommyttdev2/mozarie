@@ -172,12 +172,9 @@ class ImageRecord:
     width: int
     height: int
     mtime_ns: int
+    content_digest: str
     size_bytes: int = 0
     source_kind: str = "filesystem"
-    # A digest is the durable identity of a source.  The all-zero value only
-    # exists for small synthetic records used by algorithm-only unit tests;
-    # catalogue and import records always provide a real SHA-256 digest.
-    content_digest: str = "0" * 64
 
 
 @dataclass(frozen=True)

@@ -90,12 +90,21 @@ function loadImage(source) {
 
 function imageAssetVersion(record) { return typeof record?.assetVersion === "string" ? record.assetVersion : ""; }
 function invalidateStaleAsset(imageId) {
-  releaseStaleImageVersions(imageId, "", "");
-  releaseCandidateBundles(imageId);
+  const bitmaps = new Set();
+  for (const [key] of [...state.imageCache.items]) if (key.startsWith(`${imageId}:`)) bitmaps.add(state.imageCache.take(key));
+  for (const [key] of [...state.candidateBundleCache.items]) {
+    if (!key.startsWith(`${imageId}:`)) continue;
+    for (const bitmap of state.candidateBundleCache.take(key)?.candidateImages?.values() || []) bitmaps.add(bitmap);
+  }
+  for (const key of state.imageInflight.keys()) if (key.startsWith(`${imageId}:`)) state.imageInflight.delete(key);
+  for (const key of state.candidateInflight.keys()) if (key.startsWith(`${imageId}:`)) state.candidateInflight.delete(key);
   const gallery = state.galleryNodes.get(imageId)?.querySelector("img");
   const overview = state.overviewNodes.get(imageId)?.querySelector("img");
   forgetThumbnail(gallery); forgetThumbnail(overview);
   if (state.currentId !== imageId) return;
+  bitmaps.add(state.currentImage);
+  for (const bitmap of state.candidateImages.values()) bitmaps.add(bitmap);
+  for (const bitmap of bitmaps) closeBitmap(bitmap);
   closeBoundaryModeMenu({ restoreFocus: true });
   state.currentId = null; state.currentImage = null; state.candidates = []; state.candidateImages = new Map();
   clearEditor(); updateGallerySelection();

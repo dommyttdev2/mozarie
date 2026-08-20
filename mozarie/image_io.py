@@ -421,7 +421,7 @@ def _default_output_destination(record: ImageRecord, suffix: str = "_censored", 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
-    if record.content_digest != "0" * 64 and hashlib.sha256(source).hexdigest() != record.content_digest:
+    if hashlib.sha256(source).hexdigest() != record.content_digest:
         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
@@ -440,7 +440,7 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
 
 def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> str:
     """Atomically replace a catalogued source with a previously verified render."""
-    if record.content_digest != "0" * 64 and file_sha256(record.path) != record.content_digest:
+    if file_sha256(record.path) != record.content_digest:
         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     original_stat = record.path.stat()
     temporary_path: Path | None = None
@@ -493,7 +493,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> st
     destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
-    if record.content_digest != "0" * 64 and hashlib.sha256(source).hexdigest() != record.content_digest:
+    if hashlib.sha256(source).hexdigest() != record.content_digest:
         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:

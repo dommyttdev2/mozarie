@@ -309,5 +309,6 @@
   "update.available": "A new version is available",
   "update.current": "Up to date ({version})",
   "update.title": "Start update",
-  "update.message": "Mozarie will close before the update starts."
+  "update.message": "Mozarie will close before the update starts.",
+  "errorCode.stale_asset": "The source image changed outside Mozarie. Reload the folder."
 }

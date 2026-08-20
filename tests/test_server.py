@@ -69,6 +69,8 @@ from server import (  # noqa: E402
     _schedule_browser_open,
 )
 
+SYNTHETIC_DIGEST = hashlib.sha256(b"mozarie-test-record").hexdigest()
+
 
 class MozarieTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -88,7 +90,10 @@ class MozarieTests(unittest.TestCase):
 
     @staticmethod
     def _record(path: Path, width: int, height: int) -> ImageRecord:
-        return ImageRecord("test", path, path.name, width, height, path.stat().st_mtime_ns)
+        return ImageRecord(
+            image_id="test", path=path, relative_path=path.name, width=width, height=height,
+            mtime_ns=path.stat().st_mtime_ns, content_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
 
     @staticmethod
     def _mask(width: int, height: int) -> np.ndarray:
@@ -231,7 +236,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_job_lifecycle_logs_start_completion_and_failure(self):
         state = self.new_state()
-        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         with patch("server.threading.Thread"):
             with self.assertLogs(server_module.LOGGER, "INFO") as logs:
                 state._start_job("detect", [record], lambda *_args, **_kwargs: None)
@@ -296,7 +301,7 @@ class MozarieTests(unittest.TestCase):
             original_manifest = png_ancillary_manifest(original)
             original_mtime_ns = path.stat().st_mtime_ns
 
-            record = ImageRecord("test", path, "source.png", 16, 16, original_mtime_ns)
+            record = ImageRecord(image_id="test", path=path, relative_path="source.png", width=16, height=16, mtime_ns=original_mtime_ns, content_digest=hashlib.sha256(path.read_bytes()).hexdigest())
             save_with_mask(record, self._mask(16, 16), 4)
 
             saved = path.read_bytes()
@@ -367,7 +372,7 @@ class MozarieTests(unittest.TestCase):
             metadata.add_itxt("workflow", '{"nodes": []}', lang="ja", tkey="workflow")
             Image.new("RGB", (40, 20), "#6688aa").save(path, format="PNG", exif=exif.tobytes(), pnginfo=metadata)
             source = path.read_bytes()
-            record = ImageRecord("test", path, path.name, 20, 40, path.stat().st_mtime_ns)
+            record = self._record(path, 20, 40)
             mask = np.zeros((40, 20), dtype=np.uint8)
             mask[4:12, 4:12] = 255
 
@@ -393,7 +398,7 @@ class MozarieTests(unittest.TestCase):
                 path, format="WEBP", exif=exif.tobytes(), icc_profile=b"Mosaic ICC", xmp=b"<x:xmpmeta>test</x:xmpmeta>",
             )
             source = path.read_bytes()
-            record = ImageRecord("test", path, path.name, 20, 40, path.stat().st_mtime_ns)
+            record = self._record(path, 20, 40)
             mask = np.zeros((40, 20), dtype=np.uint8)
             mask[4:12, 4:12] = 255
 
@@ -678,7 +683,7 @@ class MozarieTests(unittest.TestCase):
 
         state.request_cancel()
         state._run_fixed_workers(
-            [ImageRecord("record", Path(__file__), "record.png", 1, 1, 0)], 1,
+            [ImageRecord(image_id="record", path=Path(__file__), relative_path="record.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)], 1,
             lambda _index, record: processed.append(record.image_id), control, None, None,
         )
 
@@ -1111,7 +1116,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_pause_waits_for_all_claimed_records_before_becoming_paused(self):
         state = self.new_state()
-        records = [ImageRecord(str(index), Path(f"image-{index}.png"), f"image-{index}.png", 1, 1, 0) for index in range(3)]
+        records = [ImageRecord(image_id=str(index), path=Path(f"image-{index}.png"), relative_path=f"image-{index}.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST) for index in range(3)]
         control = server_module.JobControl()
         state.job = server_module.Job(kind="apply", state="running", total=3, image_ids=tuple(record.image_id for record in records))
         state.job_control = control
@@ -1546,7 +1551,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         precise_mask = np.zeros((16, 16), dtype=np.uint8)
         precise_mask[4:12, 4:12] = 255
-        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         sam_mask = np.zeros((1, 16, 16), dtype=bool)
         sam_mask[0, 4:8, 4:8] = True
         predictor = Mock()
@@ -1564,7 +1569,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
-        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         base_mask = np.zeros((16, 16), dtype=np.uint8)
         base_mask[4:12, 4:12] = 255
 
@@ -1595,7 +1600,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         pussy = np.zeros((16, 16), dtype=np.uint8)
         pussy[4:12, 4:12] = 255
-        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
@@ -1614,7 +1619,7 @@ class MozarieTests(unittest.TestCase):
         sam_mask[0, 4:8, 4:8] = True
         predictor = Mock()
         predictor.predict.return_value = sam_mask, np.asarray([0.95]), None
-        record = ImageRecord("image", Path(__file__), "image.png", 24, 24, 0)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=24, height=24, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
             state, "_sam_predictor_for", return_value=predictor
         ):
@@ -1631,7 +1636,7 @@ class MozarieTests(unittest.TestCase):
         state.settings["detection"]["fluid_exclusion_enabled"] = False
         penis = np.zeros((16, 16), dtype=np.uint8)
         penis[2:14, 2:14] = 255
-        record = ImageRecord("image", Path(__file__), "image.png", 16, 16, 0)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
@@ -2056,7 +2061,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
-        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
         self.assertEqual(start.call_args.args[0], "detect")
@@ -2436,8 +2441,8 @@ class MozarieTests(unittest.TestCase):
     def test_job_api_exposes_immutable_target_image_ids(self):
         state = self.new_state()
         records = [
-            ImageRecord("first", Path(__file__), "first.png", 1, 1, 0),
-            ImageRecord("second", Path(__file__), "second.png", 1, 1, 0),
+            ImageRecord(image_id="first", path=Path(__file__), relative_path="first.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST),
+            ImageRecord(image_id="second", path=Path(__file__), relative_path="second.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST),
         ]
         with patch("server.threading.Thread"):
             state._start_job("apply", records, lambda *_args, **_kwargs: None)
@@ -2796,7 +2801,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(release.wait(2))
             state._cancel_job(kwargs["job_generation"], kwargs["catalog_generation"])
 
-        record = ImageRecord("test", Path(__file__), "test.png", 1, 1, 0)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
         state._start_job("apply", [record], worker)
         self.assertTrue(entered.wait(2))
         state.request_cancel()
@@ -3080,7 +3085,7 @@ class MozarieTests(unittest.TestCase):
         thread.start()
         connection = None
         try:
-            record = ImageRecord("image", Path("image.png"), "image.png", 16, 16, 1)
+            record = ImageRecord(image_id="image", path=Path("image.png"), relative_path="image.png", width=16, height=16, mtime_ns=1, content_digest=SYNTHETIC_DIGEST)
             with patch.object(server_module.STATE, "render_browser_save", return_value=(b"png", record, 3, "one-time-token")):
                 connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
                 body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None}).encode("utf-8")
@@ -4239,7 +4244,7 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(events, ["server", "state", "batch"])
 
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
-        record = ImageRecord("id", Path("C:/source.png"), "nested/source.png", 1, 1, 0, 0)
+        record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0, content_digest=SYNTHETIC_DIGEST)
         destination = server_module._default_output_destination(record, "_mosaic")
         self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
         with self.assertRaises(ClientError): server_module._read_save_suffix("../bad")
@@ -4264,6 +4269,52 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(raised.exception.error_code, "stale_asset")
             self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
             self.assertTrue(mask_path.is_file())
+
+    def test_folder_scan_is_bounded_to_two_hashers_and_sorted_deterministically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("c.png", "B.png", "a.png", "nested/d.png"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (8, 8), "white").save(path)
+            active = peak = 0
+            active_lock = threading.Lock()
+            original_hash = catalog_module.file_sha256
+
+            def tracked_hash(path):
+                nonlocal active, peak
+                with active_lock:
+                    active += 1
+                    peak = max(peak, active)
+                try:
+                    time.sleep(0.01)
+                    return original_hash(path)
+                finally:
+                    with active_lock:
+                        active -= 1
+
+            with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
+                records = self.new_state().set_root(directory)
+            self.assertLessEqual(peak, 2)
+            self.assertEqual([record["relativePath"] for record in records], ["a.png", "B.png", "c.png", "nested/d.png"])
+
+    def test_session_imports_store_the_digest_streamed_while_staging(self):
+        raw = io.BytesIO()
+        Image.new("RGB", (8, 8), "#112233").save(raw, format="PNG")
+        payload = raw.getvalue()
+        expected = hashlib.sha256(payload).hexdigest()
+        state = self.new_state()
+        images, _imported = state.import_images_for_api([{
+            "clientKey": "raw", "name": "raw.png", "data": base64.b64encode(payload).decode("ascii"),
+        }])
+        self.assertEqual(state.image_for_id(images[0]["id"]).content_digest, expected)
+        with tempfile.TemporaryDirectory() as directory:
+            staged = Path(directory) / "staged.png"
+            staged.write_bytes(payload)
+            _images, imported = state.import_image_file_for_api(
+                staged, name="staged.png", relative_path="staged.png", client_key="staged",
+            )
+        self.assertEqual(state.image_for_id(imported[0]["imageId"]).content_digest, expected)
 
 if __name__ == "__main__":
     unittest.main()

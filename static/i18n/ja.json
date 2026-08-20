@@ -312,5 +312,6 @@
   "update.available": "新しいバージョンがあります",
   "update.current": "現在最新 ({version})",
   "update.title": "更新を開始します",
-  "update.message": "Mozarieを閉じて更新を開始します。"
+  "update.message": "Mozarieを閉じて更新を開始します。",
+  "errorCode.stale_asset": "元画像が外部で変更されました。フォルダを再読み込みしてください。"
 }
