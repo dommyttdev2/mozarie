@@ -2940,6 +2940,31 @@ class MozarieTests(unittest.TestCase):
             self.assertIn("保存するモザイク範囲", state.job.error)
             self.assertEqual(source.read_bytes(), original)
 
+    def test_copy_save_empty_record_does_not_consume_a_later_output_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "empty.png")
+            Image.new("RGB", (16, 16), "black").save(root / "masked.png")
+            state = self.new_state()
+            first_id, second_id = (item["id"] for item in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in (first_id, second_id)]
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            output = root / "output.png"
+            written: list[Path] = []
+
+            def colliding_destination(_record, _suffix, reserved):
+                return output if output not in reserved else root / "output_2.png"
+
+            with patch.object(saving_module, "_default_output_destination", side_effect=colliding_destination), \
+                 patch.object(saving_module, "write_rendered_copy", side_effect=lambda path, _data: written.append(path)):
+                state._apply_worker(
+                    records, 100, {first_id: np.zeros((16, 16), dtype=np.uint8), second_id: self._mask(16, 16)},
+                    copy_to_default=True, saving_parallelism=2,
+                )
+
+            self.assertEqual(state.job.outputs, [str(output)])
+            self.assertEqual(written, [output])
+
     def test_removed_image_lock_is_pruned_and_unknown_images_do_not_allocate_one(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"

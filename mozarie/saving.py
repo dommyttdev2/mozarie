@@ -258,19 +258,34 @@ class SavingMixin:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            # Reserve every fallback path before any worker starts.  This makes
-            # duplicate names deterministic even when rendering completes out of order.
-            destinations: dict[int, Path] = {}
-            if copy_to_default:
-                reserved: set[Path] = set()
-                for index, record in enumerate(records):
-                    destination = _default_output_destination(record, suffix, reserved)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destinations[index] = destination
-                    reserved.add(destination)
-
             empty_indices: set[int] = set()
-            empty_lock = threading.Lock()
+            destination_condition = threading.Condition()
+            reserved: set[Path] = set()
+            next_destination_index = 0
+
+            def advance_empty_destination(index: int) -> None:
+                nonlocal next_destination_index
+                if not copy_to_default:
+                    return
+                with destination_condition:
+                    empty_indices.add(index)
+                    while next_destination_index in empty_indices:
+                        next_destination_index += 1
+                    destination_condition.notify_all()
+
+            def reserve_destination(index: int, record: ImageRecord) -> Path:
+                nonlocal next_destination_index
+                with destination_condition:
+                    while index != next_destination_index:
+                        destination_condition.wait()
+                    try:
+                        destination = _default_output_destination(record, suffix, reserved)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        reserved.add(destination)
+                        return destination
+                    finally:
+                        next_destination_index += 1
+                        destination_condition.notify_all()
 
             def save_record(index: int, record: ImageRecord) -> None:
                 with self.image_io_lock(record.image_id):
@@ -280,10 +295,11 @@ class SavingMixin:
                         record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
                     ))
                     if mask is None or not np.any(mask):
-                        with empty_lock:
+                        with destination_condition:
                             empty_indices.add(index)
+                        advance_empty_destination(index)
                         return
-                    output_path = destinations.get(index, record.path)
+                    output_path = reserve_destination(index, record) if copy_to_default else record.path
                     if copy_to_default:
                         output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         self._assert_record_fresh(record)

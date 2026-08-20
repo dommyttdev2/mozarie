@@ -414,7 +414,7 @@ function updateActionButtons() {
   $("#nextImageButton").disabled = running || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
   $("#nextUnreviewedButton").disabled = running || switchingImages || !nextUnreviewedImage();
   $("#reviewAndNextButton").disabled = running || switchingImages || !hasImage;
-  $("#removeAndNextButton").disabled = running || !hasImage;
+  $("#removeAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#hideAndNextButton").disabled = running || switchingImages || !hasImage;
   updateCandidateBatchButtons(hasImage, locked);
   updateHistoryButtons();
