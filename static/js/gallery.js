@@ -39,7 +39,12 @@ function renderGallery(force = false) {
       state.galleryNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
+    const current = image.id === state.currentId;
+    const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
+    item.classList.toggle("current", current);
+    item.classList.toggle("batch-selected", batchSelected);
+    if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
+    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
     item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
@@ -56,7 +61,7 @@ function renderGallery(force = false) {
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `${image.relativePath}、${isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")}`);
     item.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void selectImage(image.id); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id, event); }
       else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
     };
     gallery.append(item);
@@ -76,7 +81,14 @@ function imageMatchesGalleryFilter(image) {
 }
 
 function updateGallerySelection() {
-  for (const item of $("#gallery").children) item.classList.toggle("selected", item.dataset.id === state.currentId);
+  for (const item of $("#gallery").children) {
+    const current = item.dataset.id === state.currentId;
+    const batchSelected = state.batchMode && state.selectedImageIds.has(item.dataset.id);
+    item.classList.toggle("current", current);
+    item.classList.toggle("batch-selected", batchSelected);
+    if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
+    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
+  }
   updateActionButtons();
 }
 
@@ -138,7 +150,7 @@ function renderOverview(force = false) {
       state.overviewNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
+    item.classList.toggle("current", image.id === state.currentId);
     const preview = item.querySelector("img");
     observeThumbnail(preview, image, "overview");
     preview.alt = image.relativePath;

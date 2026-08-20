@@ -11,11 +11,7 @@
 <body>
   <header class="appbar">
     <div class="brand" data-i18n="app.brand">Mozarie</div>
-    <nav class="appbar-commands" data-i18n-aria-label="appbar.actions" aria-label="全画像の操作">
-      <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-      <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button>
-    </nav>
-    <div class="appbar-status"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="settingsButton" type="button" data-i18n="settings.open">設定</button></div>
+    <div class="appbar-commands"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button><button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button></div>
     <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
@@ -29,19 +25,16 @@
         <input id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden>
       </div>
     </div>
-    <div class="job-status appbar-status">
-      <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
-    </div>
+    <div class="appbar-spacer" aria-hidden="true"></div>
+    <button id="settingsButton" type="button" data-i18n="settings.open">設定</button>
   </header>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
+  <div id="statusLine" class="status-line" hidden><div id="status" class="status" aria-live="polite"></div></div>
 
   <main class="studio-grid">
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
       <div id="galleryPaneContent" class="pane-content">
-      <div class="pane-heading gallery-heading">
-        <div class="gallery-heading-main"><div class="gallery-title"><h2 data-i18n="gallery.title">画像</h2><span class="gallery-local-count muted">0件</span></div><div class="gallery-heading-actions"><button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.actions">全画像操作</button><div id="batchMoreMenu" class="batch-more-menu" popover><button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button><button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button></div></div></div>
-        <button id="batchModeButton" class="gallery-batch-mode" type="button" aria-pressed="false" data-i18n="selection.batchMode">一括編集</button>
-      </div>
+      <div class="pane-heading gallery-heading"><div class="gallery-title"><h2 data-i18n="gallery.title">画像</h2><span class="gallery-local-count muted">0件</span></div><div class="gallery-heading-actions"><button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.actions">全画像操作</button><div id="batchMoreMenu" class="batch-more-menu" popover><button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button><button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button></div></div></div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
         <select id="galleryFilter" data-i18n-aria-label="gallery.tabs">
           <option value="all" data-i18n="gallery.tabAll">すべて</option>
@@ -52,6 +45,17 @@
           <option value="unreviewed" data-i18n="gallery.tabUnreviewed">未確認</option>
         </select>
         <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
+      </div>
+      <div class="gallery-batch-bar">
+        <button id="batchModeButton" type="button" aria-pressed="false" disabled data-i18n="selection.batchMode">一括編集</button>
+        <div id="batchSelectionControls" class="batch-selection-controls" hidden>
+          <output id="selectionCount" aria-live="polite">0件を選択中</output>
+          <button id="selectionActionsButton" type="button" popovertarget="selectionActionsMenu" aria-expanded="false" data-i18n="selection.actions">一括操作</button>
+          <div id="selectionActionsMenu" class="batch-more-menu" popover>
+            <button data-selection-action="remove" type="button" data-i18n="selection.remove">一覧から削除</button><button data-selection-action="hide" type="button" data-i18n="selection.hide">非表示</button><button data-selection-action="show" type="button" data-i18n="selection.show">再表示</button><button data-selection-action="clear" type="button" data-i18n="selection.clear">モザイククリア</button><button data-selection-action="detect" type="button" data-i18n="selection.detect">自動検出</button><button data-selection-action="reviewed" type="button" data-i18n="selection.reviewed">確認済</button><button data-selection-action="unreviewed" type="button" data-i18n="selection.unreviewed">未確認</button>
+          </div>
+          <button id="selectionClearButton" type="button" data-i18n="selection.end">終了</button>
+        </div>
       </div>
       <div class="gallery-viewport">
         <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">
@@ -164,8 +168,6 @@
     </section>
   </main>
 
-  <div id="selectionActionBar" class="selection-action-bar" hidden><output id="selectionCount"></output><button data-selection-action="remove" type="button">一覧から削除</button><button data-selection-action="hide" type="button">非表示</button><button data-selection-action="show" type="button">再表示</button><button data-selection-action="clear" type="button">モザイククリア</button><button data-selection-action="detect" type="button">自動検出</button><button data-selection-action="reviewed" type="button">確認済</button><button data-selection-action="unreviewed" type="button">未確認</button><button id="selectionClearButton" type="button" data-i18n="selection.end">解除</button></div>
-
   <template id="galleryItemTemplate">
     <button class="gallery-item" type="button" aria-haspopup="menu">
       <img loading="lazy" alt="">
@@ -241,9 +243,10 @@
         <div class="form-row"><span data-i18n="settings.defaultOutputDirectory">既定の保存先</span><span class="inline-field"><output id="settingsDefaultOutputDirectory" class="truncate" data-i18n-dynamic></output><button id="settingsChooseOutputDirectory" type="button" data-i18n="settings.browseOutputDirectory">変更</button></span></div>
         <label class="form-row"><span data-i18n="settings.importParallelism">画像読み込み同時処理数</span><input id="settingsImportParallelism" type="number" min="1" max="10" step="1"></label>
         <label class="form-row"><span data-i18n="settings.saveParallelism">ファイル保存同時処理数</span><input id="settingsSaveParallelism" type="number" min="1" max="8" step="1"></label>
-        <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
+        <label class="form-row"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span><input id="settingsOpenBrowser" type="checkbox"></label>
       </section>
       <section id="settingsPanelModels" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabModels" data-settings-panel="models" hidden>
+        <div class="settings-status-action"><button id="settingsStatusButton" type="button" data-i18n="settings.statusCheck">モデル・GPU情報を確認</button><output id="settingsStatusResult" class="dialog-result" aria-live="polite"></output></div>
         <label class="form-row"><span data-i18n="settings.provider">推論プロバイダー</span><select id="settingsProvider"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
         <label class="form-row"><span data-i18n="settings.gpu">GPU</span><select id="settingsGpuDevice"></select></label>
         <section class="settings-model-section" aria-labelledby="settingsGenitalDetectionHeading">
@@ -252,7 +255,7 @@
           <section id="settingsNtd11Card" class="model-card"><div class="model-card-heading"><h4 id="settingsNtd11Title" data-i18n="settings.ntd11Model">NTD11</h4><button type="button" class="help-button" data-model-help="ntd11" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsNtd11Toggle" type="checkbox" role="switch" aria-labelledby="settingsNtd11Title" data-model-toggle="ntd11"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><input id="settingsNtd11Model" type="text" spellcheck="false" data-i18n-aria-label="settings.ntd11Model"></section>
           <section id="settingsSensitiveCard" class="model-card"><div class="model-card-heading"><h4 id="settingsSensitiveTitle" data-i18n="settings.sensitiveModel">Sensitive</h4><button type="button" class="help-button" data-model-help="sensitive" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsSensitiveToggle" type="checkbox" role="switch" aria-labelledby="settingsSensitiveTitle" data-model-toggle="sensitive"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><input id="settingsSensitiveModel" type="text" spellcheck="false" data-i18n-aria-label="settings.sensitiveModel"></section>
           <section id="settingsPrecisionCard" class="model-card"><div class="model-card-heading"><h4 id="settingsPrecisionTitle" data-i18n="settings.precisionModel">自動検出の輪郭を補正</h4><button type="button" class="help-button" data-model-help="precision" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsPrecisionToggle" type="checkbox" role="switch" aria-labelledby="settingsPrecisionTitle" data-precision-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><input id="settingsSamModel" type="text" spellcheck="false" data-i18n-aria-label="settings.samModel"></section>
-          <label class="form-row"><span data-i18n="settings.samType">輪郭抽出モデルの種類</span><span class="inline-field"><select id="settingsSamType"><option value="vit_b">vit_b</option><option value="vit_l">vit_l</option><option value="vit_h">vit_h</option></select><button type="button" class="help-button" data-model-help="samType" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button></span></label>
+          <label class="form-row"><span class="setting-label"><span data-i18n="settings.samType">輪郭抽出モデルの種類</span><button type="button" class="help-button" data-model-help="samType" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button></span><select id="settingsSamType"><option value="vit_b">vit_b</option><option value="vit_l">vit_l</option><option value="vit_h">vit_h</option></select></label>
         </section>
         <section class="settings-model-section" aria-labelledby="settingsExclusionHeading">
           <h3 id="settingsExclusionHeading" class="settings-section-heading" data-i18n="settings.exclusionProcessing">除外処理</h3>
@@ -272,23 +275,13 @@
       <section id="settingsPanelShortcuts" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabShortcuts" data-settings-panel="shortcuts" hidden>
         <label class="choice-row"><input id="settingsShortcutsEnabled" type="checkbox"><span data-i18n="settings.shortcuts">キーボードショートカット</span></label>
         <div id="shortcutBindings" class="shortcut-bindings"></div>
-        <table class="shortcut-help-table"><tbody>
-          <tr><th>Ctrl / Cmd + Z</th><td data-i18n="settings.helpUndo">元に戻す</td></tr>
-          <tr><th>Ctrl / Cmd + Shift + Z</th><td data-i18n="settings.helpRedo">やり直す</td></tr>
-          <tr><th>G</th><td data-i18n="settings.helpOverview">画像一覧</td></tr>
-          <tr><th>&larr; / &rarr;</th><td data-i18n="settings.helpNavigate">前後の画像</td></tr>
-          <tr><th>Shift + &rarr;</th><td data-i18n="settings.helpNextUnreviewed">次の未確認</td></tr>
-          <tr><th>Home / End</th><td data-i18n="settings.helpEdge">最初 / 最後</td></tr>
-          <tr><th>Enter</th><td data-i18n="settings.helpReview">確認済にして次へ</td></tr>
-          <tr><th>Enter / Esc</th><td data-i18n="settings.helpBoundary">境界の検出 / 取消</td></tr>
-          <tr><th>Shift + Wheel</th><td data-i18n="settings.helpBrush">ブラシ径を変更</td></tr>
-        </tbody></table>
+        <p class="fixed-note" data-i18n="settings.shortcutHint">キー欄を選択して、割り当てたいキーを押してください。</p>
       </section>
       <section id="settingsPanelConfirm" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabConfirm" data-settings-panel="confirm" hidden>
         <label class="choice-row"><input id="confirmClearMasks" type="checkbox"><span data-i18n="confirm.clearMasks">モザイククリア</span></label><label class="choice-row"><input id="confirmClearCatalog" type="checkbox"><span data-i18n="confirm.clearCatalog">一覧をクリア</span></label><label class="choice-row"><input id="confirmRemoveImage" type="checkbox"><span data-i18n="confirm.removeImage">一覧から削除</span></label><label class="choice-row"><input id="confirmCandidateDelete" type="checkbox"><span data-i18n="confirm.candidateDelete">候補を削除</span></label><label class="choice-row"><input id="confirmCandidateRoleDelete" type="checkbox"><span data-i18n="confirm.candidateRoleDelete">候補を全削除</span></label><label class="choice-row"><input id="confirmOverwriteSource" type="checkbox"><span data-i18n="confirm.overwriteSource">元画像を上書き</span></label><label class="choice-row"><input id="confirmDeleteSourceAfterCopy" type="checkbox"><span data-i18n="confirm.deleteSourceAfterCopy">コピー後に元画像を削除</span></label>
       </section>
       <section id="settingsPanelInfo" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabInfo" data-settings-panel="info" hidden>
-        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd id="settingsVersion">-</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl><button id="checkUpdateButton" type="button" data-i18n="update.check">確認</button>
+        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd class="settings-version-row"><span id="settingsVersion">-</span><button id="checkUpdateButton" type="button" data-i18n="update.check">更新を確認</button></dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl><output id="updateStatus" class="dialog-result" aria-live="polite"></output>
       </section>
       <output id="settingsResult" class="dialog-result" aria-live="polite"></output>
       <div class="dialog-actions"><button id="settingsResetButton" type="button" data-i18n="settings.reset">初期値に戻す</button><button id="settingsSaveButton" type="submit" class="primary" data-i18n="settings.save">保存</button></div>

@@ -21,7 +21,7 @@ function element(tagName = "") {
         if (enabled) classes.add(name); else classes.delete(name);
         return enabled;
       },
-    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -56,17 +56,21 @@ const elements = new Map();
 for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "removeAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
-  "status", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
+  "status", "statusLine", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "batchSelectionControls", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
   elements.set(`#${id}`, value);
 }
 elements.get("#applySuffix").value = "_censored";
+elements.get("#statusLine").hidden = true;
 elements.get("#applyDivisor").value = "100";
 elements.get("#divisor").value = "100";
 elements.get("#detectParallelism").value = "2";
+for (const id of ["settingsButton", "settingsStatusButton", "settingsStatusResult", "checkUpdateButton", "updateStatus", "settingsGpuDevice"]) {
+  const value = element(); value.id = id; elements.set(`#${id}`, value);
+}
 const gallery = elements.get("#gallery");
 gallery.children = [];
 let galleryAppendCount = 0;
@@ -270,11 +274,14 @@ assert.equal(translationFixtures.ja["detection.help"], "高いほど誤検出は
 assert.equal(translationFixtures.en["detection.help"], "Higher values reduce false positives but can miss targets.");
 assert.match(markup, /id="boundaryActions"[^>]*hidden/);
 assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
-assert.match(markup, /<nav class="appbar-commands" data-i18n-aria-label="appbar\.actions"/);
-assert.equal(translationFixtures.en["appbar.actions"], "Image actions");
+assert.match(markup, /<div class="appbar-spacer" aria-hidden="true"><\/div>\s*<button id="settingsButton"/);
+assert.match(markup, /<div id="statusLine" class="status-line" hidden><div id="status"/);
+assert.match(markup, /<div id="status" class="status" aria-live="polite"><\/div>/);
+assert.doesNotMatch(markup, /status\.chooseFolder/);
+assert.doesNotMatch(markup, /appbar-actions|appbar-status|selectionActionBar/);
 assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="polygonCancelButton"/);
 assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
-assert.match(styles, /\.settings-dialog\s*\{\s*width:\s*min\(620px/);
+assert.match(styles, /\.settings-dialog\s*\{\s*width:\s*min\(680px/);
 assert.match(markup, /id="settingsTabGeneral"[^>]*aria-controls="settingsPanelGeneral"[^>]*aria-selected="true"[^>]*tabindex="0"/);
 assert.match(markup, /id="settingsPanelGeneral"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsTabGeneral"/);
 for (const id of ["imageInfo", "reviewStatus", "candidateStatus", "applyOutputDirectoryStatus"]) {
@@ -293,15 +300,40 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/aria-label="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-aria-label=/.test(tag), `Japanese ARIA label lacks a translation key: ${tag}`);
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
-  const { render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
+  const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
+  assert.equal(elements.get("#statusLine").hidden, true, "the status line starts hidden with no notification");
+  clearStatus();
+  assert.equal(elements.get("#statusLine").hidden, true, "clearing status hides its entire line");
+  setStatus("Working", "running");
+  assert.equal(elements.get("#statusLine").hidden, false, "a status message restores the compact line");
+  assert.equal(elements.get("#status").textContent, "Working");
+  clearStatus();
+  assert.equal(elements.get("#statusLine").hidden, true);
+  state.batchMode = true;
+  state.selectedImageIds = new Set(["one", "two"]);
+  state.selectionAnchorId = "one";
+  updateSelectionActionBar();
+  assert.equal(elements.get("#batchModeButton").hidden, true, "batch mode replaces its entry button with the gallery work row");
+  assert.equal(elements.get("#batchSelectionControls").hidden, false, "batch controls are visible only while editing a selection");
+  assert.equal(elements.get("#selectionCount").textContent, "selection.count");
+  state.batchMode = false;
+  clearBatchSelection();
+  updateSelectionActionBar();
+  assert.equal(state.selectedImageIds.size, 0, "leaving batch mode clears selected ids without retaining green state");
+  assert.equal(state.selectionAnchorId, null, "leaving batch mode clears the range anchor");
+  assert.equal(elements.get("#batchModeButton").hidden, false);
+  assert.equal(elements.get("#batchSelectionControls").hidden, true);
+  state.images = [];
+  updateActionButtons();
+  assert.equal(elements.get("#batchModeButton").disabled, true, "batch edit is unavailable while the catalog is empty");
   for (const [position, orientation] of [["left", "vertical"], ["right", "vertical"], ["top", "horizontal"], ["bottom", "horizontal"]]) {
     elements.get("#boundaryModeMenu").hidden = false;
     applyToolPosition(position);
@@ -449,7 +481,6 @@ const completionWatchdog = setTimeout(() => {
   state.translations["candidates.delete"] = "{label}を削除";
   state.translations["candidates.deleteManual"] = "手書きを削除";
   state.translations["candidates.none"] = "候補はありません";
-  state.translations["status.chooseFolder"] = "Choose folder";
   state.images = [
     { id: "remove", relativePath: "remove.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
     { id: "keep", relativePath: "keep.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
@@ -2236,6 +2267,7 @@ const completionWatchdog = setTimeout(() => {
   let preventedSettingsSubmit = false;
   const languageSwitchSave = saveSettings({ preventDefault() { preventedSettingsSubmit = true; } });
   assert.equal(preventedSettingsSubmit, true);
+  assert.equal(requests.at(-1).path, "/api/settings?status=0", "saving settings skips the expensive status probe");
   resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } } }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get("#settingsResult").textContent, "", "settings success text waits for the replacement language dictionary");
@@ -2243,14 +2275,53 @@ const completionWatchdog = setTimeout(() => {
   await languageSwitchSave;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
-  const settingsRequestsBeforeReopen = requests.filter((request) => request.path === "/api/settings").length;
+  assert.equal(state.settingsStatus, null, "saving leaves model and GPU status unverified");
+  const resetSettingsRun = context.__mosaicTest.resetSettings();
+  assert.equal(requests.at(-1).path, "/api/settings/reset?status=0", "resetting settings skips the expensive status probe");
+  resolvePendingFetch("/api/settings/reset?status=0", { ok: true, json: async () => ({ settings: englishSettings, version: "v0.3.1" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
+  await resetSettingsRun;
+  assert.equal(state.settingsStatus, null, "resetting leaves model and GPU status unverified");
+  const settingsRequestsBeforeReopen = requests.filter((request) => request.path.startsWith("/api/settings")).length;
   state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
   elements.get("#settingsVersion").textContent = "v0.2.0";
-  const reopenSettings = openSettings();
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: {} }, version: "v0.3.0" }) });
-  await reopenSettings;
-  assert.equal(requests.filter((request) => request.path === "/api/settings").length, settingsRequestsBeforeReopen + 1, "the settings modal reads current status on every open");
-  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "opening settings refreshes a stale displayed version");
+  elements.get("#settingsButton").click();
+  assert.equal(elements.get("#settingsDialog").open, true, "opening settings uses the already loaded settings immediately");
+  assert.equal(requests.filter((request) => request.path.startsWith("/api/settings")).length, settingsRequestsBeforeReopen, "opening settings does not request model status again");
+  state.settings = null;
+  elements.get("#settingsButton").click();
+  assert.equal(requests.at(-1).path, "/api/settings?status=0", "settings falls back to the lightweight response only when state is unavailable");
+  resolvePendingFetch("/api/settings?status=0", { ok: true, json: async () => ({ settings: englishSettings, version: "v0.3.0" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "the fallback updates the local version without status work");
+  elements.get("#settingsTargetModel").value = "unsaved.onnx";
+  elements.get("#settingsStatusButton").click();
+  assert.equal(elements.get("#settingsStatusButton").disabled, true, "model and GPU status button is disabled while checking");
+  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: startupSettings, status: { gpus: [{ id: 2, name: "GPU" }], models: {} } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsTargetModel").value, "unsaved.onnx", "model status refresh does not overwrite unsaved settings");
+  assert.equal(state.settingsStatus.gpus[0].id, 2, "model status refresh updates only status state");
+  elements.get("#settingsStatusButton").click();
+  assert.equal(elements.get("#settingsStatusResult").textContent, translationFixtures.en["settings.statusChecking"], "model status check reports loading");
+  resolvePendingFetch("/api/settings", { ok: false, json: async () => ({ error: "backend" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsStatusResult").classList.contains("error"), true, "model status errors stay in the live result");
+  elements.get("#checkUpdateButton").click();
+  assert.equal(elements.get("#checkUpdateButton").disabled, true, "update check button is disabled while checking");
+  resolvePendingFetch("/api/update/status", { ok: true, json: async () => ({ current: "v0.3.1", latest: "v0.3.1", available: false }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.current"].replace("{version}", "v0.3.1"), "explicit update checks report the current release");
+  elements.get("#checkUpdateButton").click();
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.checking"], "update checks report loading");
+  resolvePendingFetch("/api/update/status", { ok: true, json: async () => ({ current: "v0.3.1", latest: "v0.3.2", available: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.available"], "available updates are announced");
+  elements.get("#checkUpdateButton").dataset.available = "false";
+  elements.get("#checkUpdateButton").click();
+  resolvePendingFetch("/api/update/status", { ok: false, json: async () => ({ error: "backend" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.checkFailed"], "update errors use localized guidance");
 
   // Flood-fill responses are token-bound: a switch discards stale spans and
   // releases the busy state without touching history.

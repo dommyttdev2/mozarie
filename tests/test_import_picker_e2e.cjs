@@ -16,22 +16,35 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 
 function startFixtureServer() {
   const detectRequests = [];
+  const settingsRequests = [];
+  const updateRequests = [];
+  let releaseFullSettings = null;
+  let deferFullSettings = false;
+  const settings = {
+    general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
+    display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
+    importing: { parallelism: 3 }, saving: { parallelism: 2 },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
+    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+  };
   const server = http.createServer(async (request, response) => {
-    const requestPath = new URL(request.url, "http://127.0.0.1").pathname;
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    const requestPath = requestUrl.pathname;
     if (requestPath === "/api/settings") {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ settings: {
-        general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
-        models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", provider: "gpu" },
-        display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
-        detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2 },
-      }, status: { models: {} } }));
+      settingsRequests.push(requestUrl.search);
+      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
+      if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
+      reply();
       return;
     }
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        images: [{ id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }],
+        images: [
+          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+        ],
         root: "G:/fixture",
       }));
       return;
@@ -42,6 +55,7 @@ function startFixtureServer() {
       return;
     }
     if (requestPath === "/api/update/status") {
+      updateRequests.push(requestUrl.search);
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
       return;
@@ -54,7 +68,7 @@ function startFixtureServer() {
       response.end(JSON.stringify({ ok: true }));
       return;
     }
-    if (requestPath === "/api/candidates/sample") {
+    if (requestPath.startsWith("/api/candidates/")) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
       return;
@@ -90,7 +104,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -135,6 +149,22 @@ async function assertDesktopLayout(page, width, height) {
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
   await assertVisibleButtons(page, `${width}x${height} edit`);
+  const appbar = await page.evaluate(() => {
+    const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+    const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
+  });
+  assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
+  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
+  assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
+  if (width >= 1280) {
+    const heading = await page.evaluate(() => {
+      const pane = document.querySelector("#galleryPane").getBoundingClientRect();
+      const action = document.querySelector("#batchMoreButton").getBoundingClientRect();
+      return { rightGap: pane.right - action.right };
+    });
+    assert.ok(heading.rightGap <= 12, `all-image actions align with the gallery right edge at ${width}x${height}`);
+  }
   if (width === 1280 && height === 720) {
     const heading = await page.evaluate(() => {
       const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
@@ -150,14 +180,42 @@ async function assertDesktopLayout(page, width, height) {
     });
     assert.equal(batchTarget, "batchModeButton", "the gallery filter must not cover batch edit");
     await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit must accept a physical click");
-    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch edit opens its gallery work row");
+    await page.locator("#selectionClearButton").click();
   }
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
   await assertVisibleButtons(page, `${width}x${height} overview`);
   await page.locator("#closeOverviewButton").click();
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+}
+
+async function assertSettingsDialogLayout(page, width, height) {
+  await page.setViewportSize({ width, height });
+  await page.locator("#settingsButton").click();
+  await page.locator("#settingsTabGeneral").click();
+  const alignment = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
+    const starts = rows.map((row) => row.lastElementChild.getBoundingClientRect().left);
+    const gaps = rows.map((row) => row.lastElementChild.getBoundingClientRect().left - row.firstElementChild.getBoundingClientRect().right);
+    return { starts, gaps };
+  });
+  assert.equal(alignment.starts.every((start) => Math.abs(start - alignment.starts[0]) <= 2) && alignment.gaps.every((gap) => gap >= 12 && gap <= 20), true, `settings labels and inputs keep one compact aligned column at ${width}x${height}: ${JSON.stringify(alignment)}`);
+  assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
+    const rect = input.getBoundingClientRect();
+    return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === input;
+  }), true, `the startup-browser checkbox owns its hit target at ${width}x${height}`);
+  const openBrowser = page.locator("#settingsOpenBrowser");
+  const checked = await openBrowser.isChecked();
+  await openBrowser.click();
+  assert.equal(await openBrowser.isChecked(), !checked, `the startup-browser checkbox accepts a physical click at ${width}x${height}`);
+  await openBrowser.click();
+  await page.locator("#settingsTabShortcuts").click();
+  assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+    const children = [...row.children]; const rowRect = row.getBoundingClientRect(); return children.length === 3 && children.every((child) => { const rect = child.getBoundingClientRect(); return Math.abs((rect.y + rect.height / 2) - (rowRect.y + rowRect.height / 2)) <= 2; });
+  })), true, `shortcut bindings stay single-row at ${width}x${height}`);
+  await page.locator("#settingsTabModels").click();
+  assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
+  await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
 }
 
 async function assertToolRailLayout(page, position) {
@@ -201,9 +259,32 @@ async function main() {
   let browser;
   let fixtureUrl;
   let detectRequests;
+  let settingsRequests;
+  let updateRequests;
+  let deferFullSettings;
+  let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
+    const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    await initialPage.addInitScript(() => {
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => {
+        const url = String(args[0]?.url || args[0]);
+        if (url.includes("/api/images")) return new Promise((resolve) => { window.__releaseInitialImages = () => fetchOriginal(...args).then(resolve); });
+        return fetchOriginal(...args);
+      };
+    });
+    await initialPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await initialPage.waitForFunction(() => typeof window.__releaseInitialImages === "function");
+    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "the initial empty catalog has no blank status line");
+    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the hidden status line leaves no 24px gap at 1280x720");
+    assert.equal(await initialPage.evaluate(() => typeof setStatus), "function");
+    await initialPage.evaluate(() => setStatus("Test notification"));
+    assert.equal(await initialPage.locator("#statusLine").isVisible(), true, "setStatus shows the notification line");
+    await initialPage.evaluate(() => clearStatus());
+    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "clearStatus hides the notification line again");
+    await initialPage.close();
     const page = await browser.newPage();
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
@@ -220,6 +301,44 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
+    const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
+    await page.locator("#settingsButton").click();
+    assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
+    assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
+    await page.locator("#settingsTabModels").click();
+    await page.locator("#settingsTargetModel").fill("unsaved.onnx");
+    deferFullSettings();
+    await page.locator("#settingsStatusButton").click();
+    assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen + 1, "model confirmation starts exactly one full settings request");
+    assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
+    assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
+    releaseFullSettings();
+    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
+    assert.equal(await page.locator("#settingsTargetModel").inputValue(), "unsaved.onnx", "model status refresh keeps unsaved form values");
+    assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
+      const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
+    })), true, "all model help buttons, including SAM type, share the compact 28px target");
+    await page.locator("#settingsTabShortcuts").click();
+    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+      const children = [...row.children];
+      return children.length === 3 && children.every((child) => Math.abs((child.getBoundingClientRect().y + child.getBoundingClientRect().height / 2) - (row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2)) < 2);
+    })), true, "all shortcut bindings keep one three-column row");
+    await page.locator("#settingsTabInfo").click();
+    const versionRow = await page.evaluate(() => {
+      const version = document.querySelector("#settingsVersion").getBoundingClientRect();
+      const button = document.querySelector("#checkUpdateButton").getBoundingClientRect();
+      return { sameRow: Math.abs((version.y + version.height / 2) - (button.y + button.height / 2)) < 2, buttonWidth: button.width };
+    });
+    assert.equal(versionRow.sameRow, true, "the update button shares the version row");
+    assert.ok(versionRow.buttonWidth > 0 && versionRow.buttonWidth < 180, "the update button remains compact and clickable");
+    assert.equal(await page.locator("#checkUpdateButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the version update button owns its hit target");
+    const updatesBeforeClick = updateRequests.length;
+    await page.locator("#checkUpdateButton").click();
+    assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
+    assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
+    await page.waitForFunction(() => document.querySelector("#updateStatus").textContent.includes("最新"));
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");
     await page.locator("#boundaryTool").click();
     await page.locator("#bucketTool").click();
@@ -230,7 +349,7 @@ async function main() {
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
     for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) {
       await page.setViewportSize(viewport);
       const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
@@ -239,11 +358,14 @@ async function main() {
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible in the inspector");
     }
     for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertDesktopLayout(page, viewport.width, viewport.height);
+    for (const viewport of [
+      { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
+    ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
-    assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 700), true, "the canvas stage must keep at least 700px at 1024x768");
+    assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 690), true, "the canvas stage keeps a full editing surface beneath the compact status line at 1024x768");
     for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
@@ -359,7 +481,8 @@ async function main() {
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
-    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch controls replace the entry in the image list");
+    await page.locator("#selectionClearButton").click();
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
@@ -393,6 +516,31 @@ async function main() {
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
+
+    await page.locator("#batchModeButton").click();
+    await page.locator('.gallery-item[data-id="sample"]').focus();
+    await page.keyboard.press("Space");
+    await page.locator('.gallery-item[data-id="sample-two"]').click();
+    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
+    assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("current")), true, "the current image state remains separate from batch selection");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').getAttribute("aria-current"), "true", "the current image exposes its neutral current state");
+    assert.equal(await page.locator('.gallery-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard batch selection exposes its selected state");
+    const batchDetectBefore = detectRequests.length;
+    await page.locator("#selectionActionsButton").click();
+    await page.locator('[data-selection-action="detect"]').click();
+    await page.locator("#detectStartButton").click();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(detectRequests.length, batchDetectBefore + 1, "batch auto detect sends exactly one request");
+    assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
+    await page.locator("#selectionClearButton").click();
+    assert.equal(await page.locator('.gallery-item.batch-selected').count(), 0, "exiting batch edit clears every green selection");
+    assert.equal(await page.locator('.gallery-item[aria-pressed]').count(), 0, "exiting batch edit removes batch selection semantics");
+    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#selectionCount").textContent(), "0件を選択中", "re-entering batch edit starts with no stale selection");
+    await page.locator("#selectionClearButton").click();
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

@@ -2067,6 +2067,33 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_settings_reset_status_query_skips_expensive_status_probe(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(http_module.STATE, "reset_settings", return_value=http_module.STATE.settings) as reset_settings, \
+                 patch.object(http_module.STATE, "settings_status") as settings_status:
+                connection.request("POST", "/api/settings/reset?status=0", b"{}", {
+                    "Content-Type": "application/json",
+                    "X-Mozarie-Token": http_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertIn("settings", payload)
+            self.assertNotIn("status", payload)
+            reset_settings.assert_called_once()
+            settings_status.assert_not_called()
+        finally:
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_candidate_delete_api_returns_the_idempotent_result(self):
         from http.server import ThreadingHTTPServer
 
