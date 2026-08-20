@@ -25,6 +25,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as server_module  # noqa: E402
+import mozarie.http as http_module  # noqa: E402
+import mozarie.image_io as image_io_module  # noqa: E402
+import mozarie.state as state_module  # noqa: E402
 from server import (  # noqa: E402
     Candidate,
     ClientError,
@@ -406,7 +409,7 @@ class MozarieTests(unittest.TestCase):
             path = Path(directory) / "source.jpg"
             Image.new("RGB", (16, 16), "#6688aa").save(path, format="JPEG")
             original = path.read_bytes()
-            with patch("server.jpeg_metadata_manifest", side_effect=[[], ["mismatch"]]):
+            with patch("mozarie.image_io.jpeg_metadata_manifest", side_effect=[[], ["mismatch"]]):
                 with self.assertRaisesRegex(ClientError, "JPEGメタデータ検証"):
                     save_with_mask(self._record(path, 16, 16), self._mask(16, 16), 4)
             self.assertEqual(original, path.read_bytes())
@@ -889,13 +892,13 @@ class MozarieTests(unittest.TestCase):
             masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
             control = server_module.JobControl()
             state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
-            original_save = server_module.save_with_mask
+            original_save = state_module.save_with_mask
 
             def save_then_cancel(*args, **kwargs):
                 original_save(*args, **kwargs)
                 control.cancel_requested.set()
 
-            with patch.object(server_module, "save_with_mask", side_effect=save_then_cancel):
+            with patch.object(state_module, "save_with_mask", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -910,7 +913,7 @@ class MozarieTests(unittest.TestCase):
                     raise RuntimeError("second image failed")
                 original_save(*args, **kwargs)
 
-            with patch.object(server_module, "save_with_mask", side_effect=save_then_fail):
+            with patch.object(state_module, "save_with_mask", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -1158,8 +1161,8 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         precise = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "TargetSegmenter", return_value=precise) as segmenter:
+            state_module, "assert_onnx_cuda_available"
+        ), patch.object(state_module, "TargetSegmenter", return_value=precise) as segmenter:
             first = state._ensure_models()
             second = state._ensure_models()
         self.assertIs(first, second)
@@ -1197,8 +1200,8 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "TargetSegmenter", return_value=Mock()) as segmenter:
+            state_module, "assert_onnx_cuda_available"
+        ), patch.object(state_module, "TargetSegmenter", return_value=Mock()) as segmenter:
             models = state._ensure_models()
         self.assertEqual(models.auxiliaries, [])
         self.assertEqual(segmenter.call_count, 1)
@@ -1208,9 +1211,9 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"].update({"ntd11_enabled": True, "sensitive_enabled": True})
         paths = iter((Path("target.onnx"), Path("ntd11.onnx"), Path("sensitive.onnx")))
         with patch.object(state, "_configured_model_path", side_effect=lambda *_args: next(paths)), patch.object(
-            server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "TargetSegmenter", return_value=Mock()), patch.object(
-            server_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
+            state_module, "assert_onnx_cuda_available"
+        ), patch.object(state_module, "TargetSegmenter", return_value=Mock()), patch.object(
+            state_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
         ):
             models = state._load_detection_models()
         self.assertEqual([source for source, _model in models.auxiliaries], ["ntd11", "sensitive"])
@@ -1251,8 +1254,8 @@ class MozarieTests(unittest.TestCase):
         models = DetectionModels(Mock())
         hand = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(
-            server_module, "assert_onnx_cuda_available"
-        ), patch.object(server_module, "HandDetector", return_value=hand) as detector:
+            state_module, "assert_onnx_cuda_available"
+        ), patch.object(state_module, "HandDetector", return_value=hand) as detector:
             first = state._ensure_hand_model(models)
             second = state._ensure_hand_model(models)
         self.assertIs(first, second)
@@ -1787,7 +1790,7 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             imported = threading.Event()
             errors: list[Exception] = []
-            original_verify = server_module._verify_decodable_image
+            original_verify = state_module._verify_decodable_image
 
             def blocked_verify(raw):
                 original_verify(raw)
@@ -1802,7 +1805,7 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     imported.set()
 
-            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -1865,7 +1868,7 @@ class MozarieTests(unittest.TestCase):
             active_lock = threading.Lock()
             overlap = threading.Event()
             release = threading.Event()
-            original_verify = server_module._verify_decodable_image
+            original_verify = state_module._verify_decodable_image
 
             def blocked_verify(data):
                 nonlocal active, peak
@@ -1888,7 +1891,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
                 first = threading.Thread(target=worker, args=("first.png",))
                 second = threading.Thread(target=worker, args=("second.png",))
                 first.start(); second.start()
@@ -2013,7 +2016,7 @@ class MozarieTests(unittest.TestCase):
             pending = cache_base / "process-pending"
             pending.mkdir(parents=True)
 
-            with patch.object(server_module, "CACHE_BASE_DIR", cache_base):
+            with patch.object(state_module, "CACHE_BASE_DIR", cache_base):
                 StudioState._cleanup_stale_process_caches()
                 self.assertTrue(pending.exists())
 
@@ -2061,7 +2064,7 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             errors: list[Exception] = []
-            original_verify = server_module._verify_decodable_image
+            original_verify = state_module._verify_decodable_image
 
             def blocked_verify(raw):
                 original_verify(raw)
@@ -2074,7 +2077,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(server_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -2191,7 +2194,7 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("missing", "penis", 0.9, missing)]
             revision_before_read = state._touch_candidates(image_id)
             previous_state = server_module.STATE
-            server_module.STATE = state
+            server_module.STATE = state; http_module.STATE = state
             httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             thread.start()
@@ -2213,7 +2216,7 @@ class MozarieTests(unittest.TestCase):
                 connection.close()
                 httpd.shutdown()
                 httpd.server_close()
-                server_module.STATE = previous_state
+                server_module.STATE = previous_state; http_module.STATE = previous_state
 
     def test_missing_enabled_mask_aborts_apply_before_any_file_or_candidate_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2304,7 +2307,8 @@ class MozarieTests(unittest.TestCase):
 
     def test_frontend_contract_has_safe_mouse_and_localized_controls(self):
         root = Path(__file__).resolve().parents[1]
-        app = (root / "static" / "app.js").read_text(encoding="utf-8")
+        manifest = (root / "static" / "js" / "manifest.js").read_text(encoding="utf-8")
+        app = "\n".join((root / "static" / "js" / name).read_text(encoding="utf-8") for name in re.findall(r'"([a-z-]+\.js)"', manifest))
         page = (root / "static" / "index.html").read_text(encoding="utf-8")
         styles = (root / "static" / "style.css").read_text(encoding="utf-8")
         dictionary = json.loads((root / "static" / "i18n" / "ja.json").read_text(encoding="utf-8"))
@@ -2377,7 +2381,7 @@ class MozarieTests(unittest.TestCase):
         self.assertNotIn('id="selectAllButton"', page)
         self.assertNotIn('id="applyButton"', page)
         self.assertIn('id="boundaryTool"', page)
-        self.assertIn('path == "/api/boundary"', (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn('path == "/api/boundary"', (root / "mozarie" / "http.py").read_text(encoding="utf-8"))
         self.assertIn('drawBoundaryRoi()', app)
         self.assertIn('function boundaryRequests()', app)
         self.assertIn('function drawBoundaryScrim(shapes)', app)
@@ -2430,7 +2434,7 @@ class MozarieTests(unittest.TestCase):
         self.assertNotIn("batch.more", dictionary)
         self.assertIn('async function cancelDetection()', app)
         self.assertIn('"/api/job/cancel"', app)
-        self.assertIn('control.cancel_requested.is_set()', (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn('control.cancel_requested.is_set()', (root / "mozarie" / "state.py").read_text(encoding="utf-8"))
         self.assertIn('settings.shortcuts', dictionary)
         self.assertIn('overview.searchPlaceholder', dictionary)
         self.assertIn('getAsFileSystemHandle', app)
@@ -2496,7 +2500,7 @@ class MozarieTests(unittest.TestCase):
         self.assertIn('menu.showPopover?.();\n  positionCatalogContextMenu(menu, event.clientX, event.clientY);', app)
         self.assertIn("confirm.removeImage.message", dictionary)
         self.assertNotIn('Math.sin(Date.now()', app)
-        backend = (root / "server.py").read_text(encoding="utf-8")
+        backend = "\n".join((root / "mozarie" / name).read_text(encoding="utf-8") for name in ("core.py", "state.py", "image_io.py", "http.py"))
         self.assertIn('path == "/api/import"', backend)
         self.assertNotIn('path == "/api/picker/images"', backend)
         self.assertNotIn('path == "/api/picker/folder"', backend)
@@ -2720,7 +2724,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
-            with patch.object(server_module, "STATE", state):
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
                 thread.start()
@@ -3153,7 +3157,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     outcome["error"] = exc
 
-            with patch.object(server_module, "render_with_mask", side_effect=capture_snapshot):
+            with patch.object(state_module, "render_with_mask", side_effect=capture_snapshot):
                 thread = threading.Thread(target=run_render)
                 thread.start()
                 self.assertTrue(render_started.wait(2))
