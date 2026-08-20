@@ -1,0 +1,572 @@
+"""Mozarie local image-review and mosaic editor.
+
+The server never accepts a client supplied file path.  Files are first found
+under a user-selected root, then addressed through opaque catalogue ids.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent.parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+import base64
+import binascii
+import argparse
+import atexit
+from concurrent.futures import ThreadPoolExecutor, wait
+import heapq
+import hashlib
+import io
+import json
+import logging
+import math
+import mimetypes
+import msvcrt
+import os
+import secrets
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import uuid
+import webbrowser
+import zlib
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+import cv2
+import numpy as np
+from PIL import Image, ImageOps, UnidentifiedImageError
+from mozarie.domain import Candidate, CandidateRole
+from mozarie.masks import compose_masks
+from mozarie.boundary import polygon_roi_and_point
+from mozarie.config import SettingsError, SettingsStore
+from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter
+from mozarie.inference.profiles import (
+    ModelProfileError,
+    profile_summary,
+    validate_generic_yolo_segment_profile,
+    validate_hand_profile,
+    validate_target_profile,
+)
+from mozarie.inference.yolo_detect import HandDetector
+from mozarie.inference.yolo_segment import TargetSegmenter
+
+
+STATIC_DIR = APP_DIR / "static"
+CACHE_BASE_DIR = APP_DIR / ".mozarie-cache"
+SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
+
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+TARGET_CLASSES = {"pussy", "penis"}
+SOURCE_PRIORITY = {"target": 3, "ntd11": 2, "sensitive": 1}
+TARGET_OVERLAP_IOU = 0.20
+TARGET_CONTAINMENT = 0.60
+HAND_CONFIDENCE = 0.395
+HAND_SAM_MIN_SCORE = 0.88
+HAND_MAX_REMOVAL_RATIO = 0.70
+HAND_MIN_REMAINING_RATIO = 0.15
+HAND_MIN_REMAINING_PIXELS = 32
+HAND_BOX_PADDING_RATIO = 0.03
+HAND_BOX_PADDING_MIN = 2
+HAND_BOX_PADDING_MAX = 16
+FLUID_MAX_COMPONENTS = 8
+FLUID_MAX_COMPONENT_RATIO = 0.15
+FLUID_MAX_TOTAL_RATIO = 0.20
+SOURCE_LABELS = {
+    "target": "対象セグメンテーションモデル",
+    "ntd11": "NTD11補助モデル",
+    "sensitive": "Sensitive補助モデル",
+    "boundary": "境界選択",
+    "hand_exclusion": "手を除外",
+    "fluid_exclusion": "白い体液を除外",
+}
+REFINEMENT_LABELS = {
+    "hand": "手の重なりを除外",
+    "fluid": "白い体液を除外",
+    "hand_fluid": "手の重なりと白い体液を除外",
+}
+DEFAULT_COLORS = {
+    "pussy": "#ed6a5a",
+    "penis": "#e6b450",
+    "anus": "#a8c256",
+    "testicles": "#5bb6d5",
+}
+DEFAULT_DETECTION_CONFIDENCE = 0.50
+SECONDARY_MIN_CONFIDENCE = 0.50
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_BODY_BYTES = 80 * 1024 * 1024
+SAVE_TOKEN_TTL_SECONDS = 10 * 60
+LOGGER = logging.getLogger(__name__)
+
+
+def torch_module() -> Any:
+    """Load PyTorch only for GPU-backed operations, never during test startup."""
+    try:
+        import torch
+        return torch
+    except ImportError:
+        return type("NoTorch", (), {"cuda": type("NoCuda", (), {
+            "is_available": staticmethod(lambda: False),
+            "device_count": staticmethod(lambda: 0),
+            "get_device_name": staticmethod(lambda _index: ""),
+        })})()
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
+
+class ClientError(ValueError):
+    """An invalid request that can be shown directly in the UI."""
+
+    def __init__(self, message: str, error_code: str = "invalid_request", params: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.params = params or {}
+
+
+class ForbiddenClientError(ClientError):
+    """A request that was not issued by this local browser session."""
+
+
+class StaleMaskError(LookupError):
+    """A candidate mask was removed while a browser still referenced it."""
+
+
+def oriented_image_size(image: Image.Image) -> tuple[int, int]:
+    width, height = image.size
+    if image.getexif().get(274, 1) in {5, 6, 7, 8}:
+        return height, width
+    return width, height
+
+
+def safe_import_relative_path(value: Any) -> Path:
+    """Validate a client-provided TEMP-session relative path."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ClientError("画像の相対パスが不正です。")
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
+        raise ClientError("画像の相対パスが不正です。")
+    parts = normalized.split("/")
+    if any(not part or part in {".", ".."} or ":" in part for part in parts):
+        raise ClientError("画像の相対パスが不正です。")
+    return Path(*parts)
+
+
+@dataclass
+class ImageRecord:
+    image_id: str
+    path: Path
+    relative_path: str
+    width: int
+    height: int
+    mtime_ns: int
+    size_bytes: int = 0
+    source_kind: str = "filesystem"
+    content_version: int = 0
+
+
+@dataclass(frozen=True)
+class BrowserSaveToken:
+    image_id: str
+    candidate_revision: int
+    source_fingerprint: tuple[int, int, int, str]
+    catalog_generation: int
+    issued_at: float
+    rendered_path: Path
+
+
+@dataclass(frozen=True)
+class BrowserSaveReceipt:
+    """Completed browser save kept briefly so a lost response can be retried safely."""
+
+    image_id: str
+    candidate_revision: int
+    source_action: str
+    cleared: bool
+    stale: bool
+    deleted: bool
+    completed_at: float
+
+
+@dataclass
+class Job:
+    kind: str = "idle"
+    state: str = "idle"
+    total: int = 0
+    completed: int = 0
+    current: str = ""
+    error: str = ""
+    started_at: float | None = None
+    outputs: list[str] = field(default_factory=list)
+    image_ids: tuple[str, ...] = ()
+    completed_image_ids: tuple[str, ...] = ()
+    active_count: int = 0
+    remove_after_save: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "state": self.state,
+            "total": self.total,
+            "completed": self.completed,
+            "current": self.current,
+            "error": self.error,
+            "startedAt": self.started_at,
+            "outputs": self.outputs,
+            "imageIds": list(self.image_ids),
+            "completedImageIds": list(self.completed_image_ids),
+            "activeCount": self.active_count,
+            "removeAfterSave": self.remove_after_save,
+        }
+
+
+@dataclass
+class JobControl:
+    pause_requested: threading.Event = field(default_factory=threading.Event)
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
+
+
+def detection_tiles(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """Full image plus 65%-sized overlapping horizontal, vertical, and corner tiles."""
+    tile_width = min(width, max(1, math.ceil(width * 0.65)))
+    tile_height = min(height, max(1, math.ceil(height * 0.65)))
+    x_offsets = (0, max(0, width - tile_width))
+    y_offsets = (0, max(0, height - tile_height))
+    specs = [(0, 0, width, height)]
+    specs.extend((x, 0, tile_width, height) for x in x_offsets)
+    specs.extend((0, y, width, tile_height) for y in y_offsets)
+    specs.extend((x, y, tile_width, tile_height) for x in x_offsets for y in y_offsets)
+    unique_specs: list[tuple[int, int, int, int]] = []
+    for spec in specs:
+        if spec not in unique_specs:
+            unique_specs.append(spec)
+    return unique_specs
+
+
+def restore_tile_mask(mask: np.ndarray, full_width: int, full_height: int, x_offset: int, y_offset: int) -> np.ndarray:
+    """Place a tile-local binary mask in its exact original-image coordinates."""
+    tile_height, tile_width = mask.shape[:2]
+    restored = np.zeros((full_height, full_width), dtype=np.uint8)
+    restored[y_offset:y_offset + tile_height, x_offset:x_offset + tile_width] = mask
+    return restored
+
+
+def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    left_bool = left > 0
+    right_bool = right > 0
+    union = np.count_nonzero(left_bool | right_bool)
+    if union == 0:
+        return 0.0
+    return float(np.count_nonzero(left_bool & right_bool) / union)
+
+
+def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
+    """Return overlap relative to the smaller non-empty mask."""
+    left_bool = left > 0
+    right_bool = right > 0
+    smallest = min(np.count_nonzero(left_bool), np.count_nonzero(right_bool))
+    if smallest == 0:
+        return 0.0
+    return float(np.count_nonzero(left_bool & right_bool) / smallest)
+
+
+def model_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def assert_onnx_cuda_available() -> None:
+    """Fail early instead of allowing an ONNX model to take an accidental CPU path."""
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise ClientError("ONNX Runtimeを読み込めません。onnxruntime-gpu を確認してください。") from exc
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise ClientError(
+            "ONNX RuntimeのCUDAExecutionProviderが利用できません。"
+            "GPU版ONNX RuntimeとNVIDIAドライバを確認してください。"
+        )
+    if not torch_module().cuda.is_available():
+        raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
+
+
+def segment_overlaps(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:
+    return (
+        left["class_name"] == right["class_name"]
+        and (
+            mask_iou(left["mask"], right["mask"]) >= iou_threshold
+            or mask_containment(left["mask"], right["mask"]) >= containment_threshold
+        )
+    )
+
+
+def _segment_rank(segment: dict[str, Any]) -> tuple[int, float]:
+    return (SOURCE_PRIORITY.get(str(segment["source"]), 0), float(segment["confidence"]))
+
+
+def merge_segment(
+    segments: list[dict[str, Any]],
+    class_name: str,
+    confidence: float,
+    mask: np.ndarray,
+    source: str = "target",
+    iou_threshold: float = 0.75,
+    containment_threshold: float = 0.95,
+) -> None:
+    """Keep one precise representative for overlapping tile/model duplicates."""
+    matching = [
+        segment
+        for segment in segments
+        if segment["class_name"] == class_name
+        and (
+            mask_iou(segment["mask"], mask) >= iou_threshold
+            or mask_containment(segment["mask"], mask) >= containment_threshold
+        )
+    ]
+    if not matching:
+        segments.append({"class_name": class_name, "confidence": confidence, "mask": mask, "source": source})
+        return
+    candidate = {"class_name": class_name, "confidence": confidence, "mask": mask, "source": source}
+    winner = max([*matching, candidate], key=_segment_rank)
+    for duplicate in matching:
+        segments.remove(duplicate)
+    segments.append(winner)
+
+
+def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer tighter precise segments without merging distinct nearby organs."""
+    ordered = sorted(
+        segments,
+        key=lambda segment: (-SOURCE_PRIORITY.get(str(segment["source"]), 0), -float(segment["confidence"])),
+    )
+    accepted: list[dict[str, Any]] = []
+    for segment in ordered:
+        duplicate = False
+        for winner in accepted:
+            if winner["source"] == segment["source"]:
+                continue
+            if winner["source"] == "target" or segment["source"] == "target":
+                iou_threshold, containment_threshold = TARGET_OVERLAP_IOU, TARGET_CONTAINMENT
+            else:
+                iou_threshold, containment_threshold = 0.75, 0.95
+            if segment_overlaps(winner, segment, iou_threshold, containment_threshold):
+                duplicate = True
+                break
+        if not duplicate:
+            accepted.append(segment)
+    return accepted
+
+
+def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.ndarray, str]:
+    """Remove a SAM-confirmed hand overlap while retaining a usable genital mask."""
+    genital = np.asarray(mask > 0, dtype=np.uint8)
+    hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+    area = int(np.count_nonzero(genital))
+    if area == 0 or hand.shape != genital.shape:
+        return mask, "skipped"
+    removed = (genital > 0) & (hand > 0)
+    removal_count = int(np.count_nonzero(removed))
+    if removal_count == 0:
+        return mask, "unchanged"
+    if removal_count / area > HAND_MAX_REMOVAL_RATIO:
+        return mask, "over_cap"
+    remaining = area - removal_count
+    if remaining < max(math.ceil(area * HAND_MIN_REMAINING_RATIO), HAND_MIN_REMAINING_PIXELS):
+        return mask, "too_small"
+    refined = genital.copy()
+    refined[removed] = 0
+    return refined.astype(np.uint8) * 255, "refined"
+
+
+def padded_hand_box(box: tuple[int, int, int, int], shape: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Expand a detected hand box slightly while keeping it inside the image."""
+    left, top, right, bottom = box
+    height, width = shape
+    padding = max(HAND_BOX_PADDING_MIN, min(HAND_BOX_PADDING_MAX, math.ceil(max(right - left, bottom - top) * HAND_BOX_PADDING_RATIO)))
+    left, top = max(0, left - padding), max(0, top - padding)
+    right, bottom = min(width, right + padding), min(height, bottom + padding)
+    return (left, top, right, bottom) if left < right and top < bottom else None
+
+
+def accepted_hand_sam_mask(
+    masks: np.ndarray, scores: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int]
+) -> np.ndarray | None:
+    """Return a high-confidence SAM hand mask contained by its padded detection box."""
+    left, top, right, bottom = box
+    if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+    box_area = (right - left) * (bottom - top)
+    for index in np.argsort(-np.asarray(scores), kind="stable"):
+        score = float(scores[index])
+        if score < HAND_SAM_MIN_SCORE:
+            break
+        hand_mask = np.asarray(masks[index])
+        if hand_mask.shape[:2] != expected_shape:
+            continue
+        hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+        total = int(np.count_nonzero(hand))
+        if total == 0:
+            continue
+        inside = int(np.count_nonzero(hand[top:bottom, left:right]))
+        if inside / total < 0.85:
+            continue
+        clipped = np.zeros_like(hand, dtype=np.uint8)
+        clipped[top:bottom, left:right] = hand[top:bottom, left:right]
+        clipped_area = int(np.count_nonzero(clipped))
+        if 0.03 <= clipped_area / box_area <= 0.95:
+            return clipped * 255
+    return None
+
+
+def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
+    """Find small, neutral-white regions contained by a penis segment."""
+    penis = np.asarray(penis_mask > 0, dtype=np.uint8)
+    penis_area = int(np.count_nonzero(penis))
+    empty = np.zeros_like(penis, dtype=np.uint8)
+    if penis_area == 0:
+        return empty
+    pixels = np.asarray(rgb)
+    hsv = cv2.cvtColor(pixels, cv2.COLOR_RGB2HSV)
+    saturation, value = hsv[:, :, 1], hsv[:, :, 2]
+    channel_min = pixels.min(axis=2)
+    channel_spread = pixels.max(axis=2) - channel_min
+    candidate = (penis > 0) & (saturation <= 80) & (value >= 180) & (channel_spread <= 24) & (channel_min >= 215)
+    seed = candidate & (saturation <= 45) & (value >= 225) & (channel_spread <= 18) & (channel_min >= 230)
+    closed = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)) > 0
+    count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(closed.astype(np.uint8), connectivity=8)
+    minimum = max(4, math.ceil(penis_area * 0.001))
+    maximum = math.floor(penis_area * FLUID_MAX_COMPONENT_RATIO)
+    total_cap = math.floor(penis_area * FLUID_MAX_TOTAL_RATIO)
+    flat_labels = np.asarray(labels).ravel()
+    areas = np.bincount(flat_labels[candidate.ravel()], minlength=count)
+    seed_counts = np.bincount(flat_labels[seed.ravel()], minlength=count)
+    eligible = [
+        label
+        for label in range(1, count)
+        if minimum <= areas[label] <= maximum and seed_counts[label] >= 2 and seed_counts[label] / areas[label] >= 0.10
+    ]
+    candidates = heapq.nlargest(FLUID_MAX_COMPONENTS, eligible, key=lambda label: (areas[label], -label))
+    selected_labels: list[int] = []
+    selected_area = 0
+    for label in candidates:
+        area = int(areas[label])
+        if selected_area + area > total_cap:
+            continue
+        selected_labels.append(label)
+        selected_area += area
+    selected = np.isin(labels, selected_labels) & candidate & (penis > 0)
+    return np.asarray(selected, dtype=np.uint8) * 255
+
+
+def read_detection_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ClientError("判定しきい値が正しくありません。") from exc
+    if not 0.10 <= confidence <= 1.00:
+        raise ClientError("判定しきい値は0.10から1.00の範囲で指定してください。")
+    return confidence
+
+
+def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[float, float]]:
+    """Validate a SAM point prompt and its limiting ROI in image coordinates."""
+    try:
+        roi_data = payload["roi"]
+        point_data = payload["point"]
+        left = int(round(float(roi_data["left"])))
+        top = int(round(float(roi_data["top"])))
+        right = int(round(float(roi_data["right"])))
+        bottom = int(round(float(roi_data["bottom"])))
+        point = (float(point_data["x"]), float(point_data["y"]))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ClientError("境界の範囲またはクリック位置が正しくありません。") from exc
+
+    if not all(math.isfinite(value) for value in (*point,)):
+        raise ClientError("境界のクリック座標が正しくありません。")
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        raise ClientError("境界の範囲は画像内にドラッグしてください。")
+    inside_x = left <= point[0] < right or (right == width and point[0] == width)
+    inside_y = top <= point[1] < bottom or (bottom == height and point[1] == height)
+    if not (inside_x and inside_y):
+        raise ClientError("クリック位置は選択範囲の内側にしてください。")
+    return (left, top, right, bottom), (min(point[0], width - 1), min(point[1], height - 1))
+
+
+def read_polygon_boundary_request(payload: dict[str, Any], width: int, height: int) -> tuple[tuple[int, int, int, int], tuple[float, float], np.ndarray]:
+    """Validate a four-point boundary and return one SAM box/point prompt."""
+
+    raw_points = payload.get("points")
+    if not isinstance(raw_points, list):
+        raise ClientError("4点境界の座標が正しくありません。")
+    try:
+        points = tuple((float(point["x"]), float(point["y"])) for point in raw_points)
+        return polygon_roi_and_point(points, width, height)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ClientError("4点境界は画像内の4点で指定してください。") from exc
+
+
+def clip_mask_to_roi(mask: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
+    """Keep only the part of a SAM mask inside the user-selected ROI."""
+    left, top, right, bottom = roi
+    clipped = np.zeros_like(mask, dtype=np.uint8)
+    clipped[top:bottom, left:right] = np.asarray(mask[top:bottom, left:right] > 0, dtype=np.uint8) * 255
+    return clipped
+
+
+def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, float]:
+    """Select SAM's highest-scoring proposed object mask."""
+    if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+    index = int(np.argmax(scores))
+    return np.asarray(masks[index]), float(scores[index])
+
+
+def confidence_for_source(source: str, confidence: float) -> float:
+    if source == "ntd11":
+        return max(0.10, confidence - 0.15)
+    if source == "sensitive":
+        return max(confidence, SECONDARY_MIN_CONFIDENCE)
+    return confidence
+
+
+def _read_mosaic_divisor(value: Any) -> int:
+    try:
+        divisor = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ClientError("モザイク粗さが正しくありません。") from exc
+    if not 1 <= divisor <= 10000:
+        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
+    return divisor
+
+
+def _read_detection_parallelism(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        raise ClientError("並列数は1から4で指定してください。")
+    return value
+
+
+def _read_save_suffix(value: Any) -> str:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+    return value
+
+
+def _read_target_classes(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        raise ClientError("検出対象の形式が正しくありません。")
+    targets = {str(item) for item in value}
+    if not targets or not targets <= TARGET_CLASSES:
+        raise ClientError("検出対象は penis または pussy を選択してください。")
+    return targets

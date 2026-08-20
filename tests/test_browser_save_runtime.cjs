@@ -3,7 +3,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const appPath = path.join(__dirname, "..", "static", "app.js");
+const staticRoot = path.join(__dirname, "..", "static");
+const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
+const appPaths = [...manifest.matchAll(/"([a-z-]+\.js)"/g)].map((match) => path.join(staticRoot, "js", match[1]));
 
 function element() {
   return {
@@ -163,8 +165,8 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
     Promise,
     Uint8Array,
     ArrayBuffer,
-    setTimeout,
-    clearTimeout,
+    setTimeout(callback) { callback(); return 1; },
+    clearTimeout() {},
     requestAnimationFrame(callback) { callback(); },
     localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     Image: class {},
@@ -192,9 +194,9 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
     },
   };
 
-  let source = fs.readFileSync(appPath, "utf8");
+  let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory };\n");
-  vm.runInNewContext(source, context, { filename: "static/app.js" });
+  vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
   const { state, ensureSaveSources, runBrowserSave, saveTargets, outputDirectoryForSave, chooseOutputDirectory } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.translations = {
