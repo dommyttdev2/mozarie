@@ -584,25 +584,33 @@ class CatalogMixin:
         return self.candidate_snapshot(image_id)["candidates"]
 
     def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
-        """Return candidates and their revision from one state-lock epoch."""
-        with self.lock:
-            if image_id not in self.images:
-                raise ClientError("画像が見つかりません。")
-            stored_candidates = self.candidates.get(image_id, [])
-            candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
-            if len(candidates) != len(stored_candidates):
-                self._touch_candidates(image_id)
-            self.candidates[image_id] = candidates
-            return {
-                "candidates": [
-                    candidate.as_api_dict(
-                        SOURCE_LABELS.get(candidate.source, candidate.source),
-                        REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-                    )
-                    for candidate in candidates
-                ],
-                "candidateRevision": self._candidate_revision(image_id),
-            }
+        """Return candidates and revision without filesystem probes under lock."""
+        for _attempt in range(2):
+            with self.lock:
+                if image_id not in self.images:
+                    raise ClientError("画像が見つかりません。")
+                revision = self._candidate_revision(image_id)
+                snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+            available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
+            with self.lock:
+                if self._candidate_revision(image_id) != revision:
+                    continue
+                stored_candidates = self.candidates.get(image_id, [])
+                candidates = [candidate for candidate in stored_candidates if candidate.candidate_id in available]
+                if len(candidates) != len(stored_candidates):
+                    self.candidates[image_id] = candidates
+                    self._touch_candidates(image_id)
+                return {
+                    "candidates": [
+                        candidate.as_api_dict(
+                            SOURCE_LABELS.get(candidate.source, candidate.source),
+                            REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+                        )
+                        for candidate in candidates
+                    ],
+                    "candidateRevision": self._candidate_revision(image_id),
+                }
+        raise ClientError("検出候補が更新されました。もう一度読み込んでください。")
 
     def image_snapshot(self, image_id: str) -> ImageRecord:
         """Capture a checked catalogue record before image I/O begins."""
