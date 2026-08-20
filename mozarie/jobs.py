@@ -171,13 +171,17 @@ class JobsMixin:
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
     ) -> np.ndarray | None:
-        record = self.image_snapshot(image_id)
-        self._assert_record_fresh(record)
         add_mask, exclusion_mask = draft or (None, None)
         with self.image_io_lock(image_id):
             with self.lock:
+                current_record = self.images.get(image_id)
+                if current_record is None:
+                    raise ClientError("画像が見つかりません。")
+                record = replace(current_record)
                 candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
                 revision = self._candidate_revision(image_id)
+                catalog_generation = self.catalog_generation
+            self._assert_record_fresh(record)
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
             if not apply_candidates and add_mask is None:
                 return None
@@ -194,7 +198,9 @@ class JobsMixin:
                 (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
             result = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
             with self.lock:
-                if self.images.get(image_id) is None or self._candidate_revision(image_id) != revision:
+                current_record = self.images.get(image_id)
+                if (current_record is None or current_record.path != record.path
+                        or self.catalog_generation != catalog_generation or self._candidate_revision(image_id) != revision):
                     raise ClientError("候補が変更されました。もう一度実行してください。")
             return result
 

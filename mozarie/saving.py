@@ -304,7 +304,8 @@ class SavingMixin:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
                     self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
-                self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
+                with self.image_io_lock(record.image_id):
+                    self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
                 self.invalidate_sam_image(record.image_id)
                 self._set_job_current(record.relative_path, job_generation, catalog_generation)
 

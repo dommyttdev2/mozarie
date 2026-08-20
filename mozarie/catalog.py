@@ -106,18 +106,33 @@ class CatalogMixin:
             with self.lock:
                 self._assert_catalog_mutable()
                 records = [self.images[image_id] for image_id in requested_ids if image_id in self.images]
-                removed_ids = [record.image_id for record in records]
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    self._assert_catalog_mutable()
+                    records = [self.images[record.image_id] for record in records if record.image_id in self.images]
+                    removed_ids = [record.image_id for record in records]
+                    mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
+                    session_paths = [record.path for record in records if record.source_kind == "session"]
+                    for record in records:
+                        self.images.pop(record.image_id, None)
+                        self.candidates.pop(record.image_id, None)
+                        self.candidate_revisions.pop(record.image_id, None)
+                    if removed_ids:
+                        removed_set = set(removed_ids)
+                        self.order = [current_id for current_id in self.order if current_id not in removed_set]
+                        self.catalog_generation += 1
+                    self._clear_browser_save_tokens_unchecked()
+                self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
                 for record in records:
-                    self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
-                    self.images.pop(record.image_id, None)
-                    self.candidates.pop(record.image_id, None)
-                    self.candidate_revisions.pop(record.image_id, None)
-                if removed_ids:
-                    removed_set = set(removed_ids)
-                    self.order = [current_id for current_id in self.order if current_id not in removed_set]
-                self._clear_browser_save_tokens_unchecked()
-                if removed_ids:
-                    self.catalog_generation += 1
+                    shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
+                    for thumbnail_path in (self.cache_dir / "thumbnails").glob(f"{record.image_id}-*.jpg"):
+                        thumbnail_path.unlink(missing_ok=True)
+                for path in session_paths:
+                    path.unlink(missing_ok=True)
+        self.cleanup_expired_browser_save_tokens()
         for image_id in removed_ids:
             self.invalidate_sam_image(image_id)
         return {"images": self.list_images(), "removedImageIds": removed_ids}
