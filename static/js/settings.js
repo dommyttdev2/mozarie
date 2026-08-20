@@ -78,8 +78,21 @@ function handleToolRailKeydown(event) {
   focusElement(items[next]);
 }
 
+function renderSettingsStatus(status) {
+  state.settingsStatus = status;
+  const gpuSelect = $("#settingsGpuDevice");
+  const selected = gpuSelect.value || String(state.settings?.models?.gpu_device ?? 0);
+  const configured = String(state.settings?.models?.gpu_device ?? 0);
+  gpuSelect.textContent = "";
+  const gpus = status?.gpus || [];
+  if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; gpuSelect.append(option); }
+  else for (const gpu of gpus) { const option = document.createElement("option"); option.value = String(gpu.id); option.textContent = `GPU ${gpu.id}: ${gpu.name}`; gpuSelect.append(option); }
+  if ([...gpuSelect.children].some((option) => option.value === selected)) gpuSelect.value = selected;
+  renderModelStatus();
+}
+
 function setSettingsForm(settings, status = null) {
-  state.settings = settings; state.settingsStatus = status;
+  state.settings = settings;
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
@@ -100,11 +113,6 @@ function setSettingsForm(settings, status = null) {
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
-  const gpuSelect = $("#settingsGpuDevice"); gpuSelect.textContent = "";
-  const gpus = status?.gpus || [];
-  if (!gpus.length) { const option = document.createElement("option"); option.value = "0"; option.textContent = "GPU 0"; gpuSelect.append(option); }
-  else for (const gpu of gpus) { const option = document.createElement("option"); option.value = String(gpu.id); option.textContent = `GPU ${gpu.id}: ${gpu.name}`; gpuSelect.append(option); }
-  gpuSelect.value = String(settings.models.gpu_device || 0);
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
@@ -125,7 +133,7 @@ function setSettingsForm(settings, status = null) {
   $("#confirmOverwriteSource").checked = settings.confirmations?.overwriteSource !== false;
   $("#confirmDeleteSourceAfterCopy").checked = settings.confirmations?.deleteSourceAfterCopy !== false;
   renderShortcutBindings(settings.shortcuts?.bindings || {}, settings.shortcuts?.actions || {});
-  renderModelStatus();
+  renderSettingsStatus(status);
 }
 
 const SHORTCUT_LABELS = { previous: "←", next: "→", previousVisible: "↑", nextVisible: "↓", first: "Home", last: "End", nextUnreviewed: "次へ", reviewAndNext: "確認済にして次へ", toggleOverview: "一覧切替", undo: "Undo", redo: "Redo" };
@@ -198,21 +206,25 @@ function moveSettingsTab(event) {
 
 async function openSettings() {
   if (isBusy()) return;
-  try {
-    const data = await api("/api/settings");
-    setSettingsForm(data.settings, data.status);
-    $("#settingsVersion").textContent = data.version;
-    selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
-  } catch (error) { setStatus(error.message, "error"); }
+  if (!state.settings) {
+    try {
+      const data = await api("/api/settings?status=0");
+      setSettingsForm(data.settings);
+      $("#settingsVersion").textContent = data.version;
+    } catch (error) { setStatus(error.message, "error"); return; }
+  }
+  setSettingsForm(state.settings, state.settingsStatus);
+  selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
 }
 
 async function saveSettings(event) {
   event.preventDefault();
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
   try {
-    const data = await api("/api/settings", { method: "POST", body: JSON.stringify(settingsPayload()) });
+    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;
-    setSettingsForm(data.settings, data.status);
+    setSettingsForm(data.settings);
+    $("#settingsVersion").textContent = data.version;
     setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     if (languageChanged) await loadTranslations();
@@ -223,8 +235,9 @@ async function saveSettings(event) {
 async function resetSettings() {
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
   try {
-    const data = await api("/api/settings/reset", { method: "POST", body: JSON.stringify({}) });
-    setSettingsForm(data.settings, data.status);
+    const data = await api("/api/settings/reset?status=0", { method: "POST", body: JSON.stringify({}) });
+    setSettingsForm(data.settings);
+    $("#settingsVersion").textContent = data.version;
     setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     await loadTranslations();
@@ -240,14 +253,30 @@ async function chooseSettingsOutputDirectory() {
   }
 }
 
-async function checkForUpdate() {
+async function refreshSettingsStatus() {
+  const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
+  button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");
+  try {
+    const data = await api("/api/settings");
+    renderSettingsStatus(data.status);
+    result.textContent = t("settings.statusChecked");
+  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
+  finally { button.disabled = false; button.textContent = t("settings.statusCheck"); }
+}
+
+async function checkForUpdate({ silent = false } = {}) {
+  const button = $("#checkUpdateButton"); const result = $("#updateStatus");
+  if (!silent) { button.disabled = true; button.textContent = t("update.checking"); result.textContent = t("update.checking"); result.classList.remove("error"); }
   try {
     const update = await api("/api/update/status");
     $("#settingsVersion").textContent = update.current;
-    const button = $("#checkUpdateButton"); button.textContent = update.available ? t("update.start") : t("update.check");
+    button.textContent = update.available ? t("update.start") : t("update.check");
     button.classList.toggle("primary", update.available); button.dataset.available = String(update.available);
     $("#updateToast").hidden = !update.available;
-  } catch { /* Offline update checks stay quiet. */ }
+    if (!silent) result.textContent = update.available ? t("update.available") : t("update.current", { version: update.current });
+  } catch (error) {
+    if (!silent) { result.textContent = error.message; result.classList.add("error"); }
+  } finally { if (!silent) button.disabled = false; }
 }
 
 async function startUpdate() {

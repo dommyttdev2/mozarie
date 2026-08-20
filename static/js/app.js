@@ -25,6 +25,7 @@ function bindEvents() {
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
+  $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
@@ -380,7 +381,7 @@ async function initialise() {
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
   } catch (error) { setStatus(error.message, "error"); }
-  if (document.visibilityState === "visible") setTimeout(() => { void checkForUpdate(); }, 1000);
+  if (document.visibilityState === "visible") setTimeout(() => { void checkForUpdate({ silent: true }); }, 1000);
 }
 
 initialise();

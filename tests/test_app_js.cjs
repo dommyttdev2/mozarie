@@ -67,6 +67,9 @@ elements.get("#applySuffix").value = "_censored";
 elements.get("#applyDivisor").value = "100";
 elements.get("#divisor").value = "100";
 elements.get("#detectParallelism").value = "2";
+for (const id of ["settingsButton", "settingsStatusButton", "settingsStatusResult", "checkUpdateButton", "updateStatus", "settingsGpuDevice"]) {
+  const value = element(); value.id = id; elements.set(`#${id}`, value);
+}
 const gallery = elements.get("#gallery");
 gallery.children = [];
 let galleryAppendCount = 0;
@@ -270,7 +273,7 @@ assert.equal(translationFixtures.ja["detection.help"], "高いほど誤検出は
 assert.equal(translationFixtures.en["detection.help"], "Higher values reduce false positives but can miss targets.");
 assert.match(markup, /id="boundaryActions"[^>]*hidden/);
 assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
-assert.match(markup, /<nav class="appbar-commands" data-i18n-aria-label="appbar\.actions"/);
+assert.match(markup, /<nav class="appbar-actions" data-i18n-aria-label="appbar\.actions"/);
 assert.equal(translationFixtures.en["appbar.actions"], "Image actions");
 assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="polygonCancelButton"/);
 assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
@@ -2236,6 +2239,7 @@ const completionWatchdog = setTimeout(() => {
   let preventedSettingsSubmit = false;
   const languageSwitchSave = saveSettings({ preventDefault() { preventedSettingsSubmit = true; } });
   assert.equal(preventedSettingsSubmit, true);
+  assert.equal(requests.at(-1).path, "/api/settings?status=0", "saving settings skips the expensive status probe");
   resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } } }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get("#settingsResult").textContent, "", "settings success text waits for the replacement language dictionary");
@@ -2243,14 +2247,30 @@ const completionWatchdog = setTimeout(() => {
   await languageSwitchSave;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
-  const settingsRequestsBeforeReopen = requests.filter((request) => request.path === "/api/settings").length;
+  const settingsRequestsBeforeReopen = requests.filter((request) => request.path.startsWith("/api/settings")).length;
   state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
   elements.get("#settingsVersion").textContent = "v0.2.0";
-  const reopenSettings = openSettings();
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: {} }, version: "v0.3.0" }) });
-  await reopenSettings;
-  assert.equal(requests.filter((request) => request.path === "/api/settings").length, settingsRequestsBeforeReopen + 1, "the settings modal reads current status on every open");
-  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "opening settings refreshes a stale displayed version");
+  elements.get("#settingsButton").click();
+  assert.equal(elements.get("#settingsDialog").open, true, "opening settings uses the already loaded settings immediately");
+  assert.equal(requests.filter((request) => request.path.startsWith("/api/settings")).length, settingsRequestsBeforeReopen, "opening settings does not request model status again");
+  state.settings = null;
+  elements.get("#settingsButton").click();
+  assert.equal(requests.at(-1).path, "/api/settings?status=0", "settings falls back to the lightweight response only when state is unavailable");
+  resolvePendingFetch("/api/settings?status=0", { ok: true, json: async () => ({ settings: englishSettings, version: "v0.3.0" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "the fallback updates the local version without status work");
+  elements.get("#settingsTargetModel").value = "unsaved.onnx";
+  elements.get("#settingsStatusButton").click();
+  assert.equal(elements.get("#settingsStatusButton").disabled, true, "model and GPU status button is disabled while checking");
+  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: startupSettings, status: { gpus: [{ id: 2, name: "GPU" }], models: {} } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsTargetModel").value, "unsaved.onnx", "model status refresh does not overwrite unsaved settings");
+  assert.equal(state.settingsStatus.gpus[0].id, 2, "model status refresh updates only status state");
+  elements.get("#checkUpdateButton").click();
+  assert.equal(elements.get("#checkUpdateButton").disabled, true, "update check button is disabled while checking");
+  resolvePendingFetch("/api/update/status", { ok: true, json: async () => ({ current: "v0.3.1", latest: "v0.3.1", available: false }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.current"].replace("{version}", "v0.3.1"), "explicit update checks report the current release");
 
   // Flood-fill responses are token-bound: a switch discards stale spans and
   // releases the busy state without touching history.

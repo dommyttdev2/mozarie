@@ -11,11 +11,7 @@
 <body>
   <header class="appbar">
     <div class="brand" data-i18n="app.brand">Mozarie</div>
-    <nav class="appbar-commands" data-i18n-aria-label="appbar.actions" aria-label="全画像の操作">
-      <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
-      <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button>
-    </nav>
-    <div class="appbar-status"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="settingsButton" type="button" data-i18n="settings.open">設定</button></div>
+    <div class="appbar-commands"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="settingsButton" type="button" data-i18n="settings.open">設定</button></div>
     <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
@@ -32,6 +28,10 @@
     <div class="job-status appbar-status">
       <div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div>
     </div>
+    <nav class="appbar-actions" data-i18n-aria-label="appbar.actions" aria-label="全画像の操作">
+      <button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button>
+      <button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button>
+    </nav>
   </header>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
 
@@ -244,6 +244,7 @@
         <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
       </section>
       <section id="settingsPanelModels" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabModels" data-settings-panel="models" hidden>
+        <div class="settings-status-action"><button id="settingsStatusButton" type="button" data-i18n="settings.statusCheck">モデル・GPU情報を確認</button><output id="settingsStatusResult" class="dialog-result" aria-live="polite"></output></div>
         <label class="form-row"><span data-i18n="settings.provider">推論プロバイダー</span><select id="settingsProvider"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
         <label class="form-row"><span data-i18n="settings.gpu">GPU</span><select id="settingsGpuDevice"></select></label>
         <section class="settings-model-section" aria-labelledby="settingsGenitalDetectionHeading">
@@ -288,7 +289,7 @@
         <label class="choice-row"><input id="confirmClearMasks" type="checkbox"><span data-i18n="confirm.clearMasks">モザイククリア</span></label><label class="choice-row"><input id="confirmClearCatalog" type="checkbox"><span data-i18n="confirm.clearCatalog">一覧をクリア</span></label><label class="choice-row"><input id="confirmRemoveImage" type="checkbox"><span data-i18n="confirm.removeImage">一覧から削除</span></label><label class="choice-row"><input id="confirmCandidateDelete" type="checkbox"><span data-i18n="confirm.candidateDelete">候補を削除</span></label><label class="choice-row"><input id="confirmCandidateRoleDelete" type="checkbox"><span data-i18n="confirm.candidateRoleDelete">候補を全削除</span></label><label class="choice-row"><input id="confirmOverwriteSource" type="checkbox"><span data-i18n="confirm.overwriteSource">元画像を上書き</span></label><label class="choice-row"><input id="confirmDeleteSourceAfterCopy" type="checkbox"><span data-i18n="confirm.deleteSourceAfterCopy">コピー後に元画像を削除</span></label>
       </section>
       <section id="settingsPanelInfo" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabInfo" data-settings-panel="info" hidden>
-        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd id="settingsVersion">-</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl><button id="checkUpdateButton" type="button" data-i18n="update.check">確認</button>
+        <dl class="settings-info-list"><dt data-i18n="settings.version">バージョン</dt><dd id="settingsVersion">-</dd><dt>GitHub</dt><dd><a href="https://github.com/norqis/mozarie" target="_blank" rel="noreferrer">norqis/mozarie</a></dd><dt data-i18n="settings.license">ライセンス</dt><dd>MIT</dd></dl><div class="settings-update-action"><button id="checkUpdateButton" type="button" data-i18n="update.check">確認</button><output id="updateStatus" class="dialog-result" aria-live="polite"></output></div>
       </section>
       <output id="settingsResult" class="dialog-result" aria-live="polite"></output>
       <div class="dialog-actions"><button id="settingsResetButton" type="button" data-i18n="settings.reset">初期値に戻す</button><button id="settingsSaveButton" type="submit" class="primary" data-i18n="settings.save">保存</button></div>

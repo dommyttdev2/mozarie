@@ -159,7 +159,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json(response)
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
-                self._json({"settings": settings, "status": STATE.settings_status()})
+                response = {"settings": settings, "version": _local_version()}
+                if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
+                    response["status"] = STATE.settings_status()
+                self._json(response)
             elif path == "/api/update/start":
                 self._json({"ok": True})
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
