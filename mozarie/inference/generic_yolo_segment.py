@@ -14,8 +14,8 @@ from .profiles import yolo_class_names
 class GenericYoloSegmenter(BaseOnnxModel):
     """Decode a 1024px Ultralytics segment export using its embedded class names."""
 
-    def __init__(self, path: Path, *, device: str = "gpu", input_size: int = 1024) -> None:
-        super().__init__(path, device=device)
+    def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0, input_size: int = 1024) -> None:
+        super().__init__(path, device=device, gpu_device=gpu_device)
         self.input_size = input_size
         self.class_names = yolo_class_names(dict(self.session.get_modelmeta().custom_metadata_map))
 
@@ -60,7 +60,8 @@ class GenericYoloSegmenter(BaseOnnxModel):
         constrained[top:bottom, left:right] = (restored[top:bottom, left:right] >= 0.5).astype(np.uint8) * 255
         return constrained
 
-    def detect(self, rgb: np.ndarray, confidence: float, source: str) -> list[dict[str, object]]:
+    def detect(self, rgb: np.ndarray, confidence: float, source: str, targets: set[str] | None = None) -> list[dict[str, object]]:
+        targets = targets or {"penis", "pussy"}
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         prediction, prototype = self._outputs(self.run(tensor))
         boxes: list[tuple[int, int, int, int]] = []
@@ -73,7 +74,7 @@ class GenericYoloSegmenter(BaseOnnxModel):
             raw_name = self.class_names[class_id]
             class_name = "pussy" if raw_name in {"pussy", "vagina"} else "penis" if raw_name == "penis" else None
             score = float(row[4 + class_id])
-            if class_name is None or score < confidence:
+            if class_name not in targets or score < confidence:
                 continue
             box = restore_box(row[:4], transform, xywh=True)
             if box is None:

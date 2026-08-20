@@ -501,7 +501,7 @@ const completionWatchdog = setTimeout(() => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(requests.length, requestsBeforeCurrentDetection + 1);
   assert.equal(requests.at(-1).path, "/api/detect");
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 1.00, parallelism: 1 });
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 1.00, parallelism: 1, targetClasses: ["penis", "pussy"] });
   state.job = null;
   state.detectCancelRequested = false;
   state.currentId = null;
@@ -520,7 +520,7 @@ const completionWatchdog = setTimeout(() => {
   resolveFetch({ ok: true, json: async () => ({ ok: true }) });
   await startDetection;
   assert.equal(requests.at(-1).path, "/api/detect");
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 0.67, parallelism: 2 });
+  assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 0.67, parallelism: 2, targetClasses: ["penis", "pussy"] });
   assert.equal(elements.get("#confidence").value, "0.67", "dialog confidence should synchronize to the right pane");
   updateActionButtons();
   assert.equal(elements.get("#detectAllButton").disabled, false, "stop must remain available while detecting");

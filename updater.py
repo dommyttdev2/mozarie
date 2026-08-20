@@ -268,9 +268,6 @@ def perform_update(
     opener: Callable[..., Any] = urllib.request.urlopen,
     input_fn: Callable[[str], str] = input,
 ) -> int:
-    if is_mozarie_running(app_dir):
-        raise UpdateError("Mozarieが起動中です。終了してからもう一度実行してください。")
-
     current_raw = read_local_version(app_dir)
     release = fetch_latest_release(opener)
     latest_raw = release["tag_name"]
@@ -278,8 +275,11 @@ def perform_update(
     latest = display_version(latest_raw)
 
     if parse_version(latest_raw) <= parse_version(current_raw):
-        print(f"{current} は最新版です。")
+        print(f"現在最新バージョンです ({current})。")
         return EXIT_CURRENT
+
+    if is_mozarie_running(app_dir):
+        raise UpdateError("新しいバージョンがあります。先にMozarieを閉じて、もう一度 update.bat を実行してください。")
 
     print(f"{current} → {latest}")
     answer = input_fn("アップデートしますか？ [y/N]: ").strip().lower()
@@ -305,6 +305,7 @@ def perform_update(
 
     print(f"{current} → {latest}")
     print(f"{current} から {latest} へアップデートしました。")
+    print("Mozarieを起動し直してください。")
     return EXIT_UPDATED
 
 

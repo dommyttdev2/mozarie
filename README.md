@@ -76,7 +76,7 @@ Saving preserves image metadata supported by PNG, JPEG, and WebP files. Review s
 
 ## Update
 
-Close Mozarie, then double-click `update.bat`. It checks the latest public GitHub Release, shows the version change, and asks before replacing application files. Local settings, models, caches, and working images are preserved. The updater never starts Mozarie automatically.
+Double-click `update.bat` to check the latest public GitHub Release. Close Mozarie before applying an available update. Local settings, models, caches, and working images are preserved.
 
 ## Development
 

@@ -40,6 +40,11 @@ function startFixtureServer() {
       response.end(JSON.stringify({ state: "idle" }));
       return;
     }
+    if (requestPath === "/api/update/status") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      return;
+    }
     if (requestPath === "/api/detect" && request.method === "POST") {
       let body = "";
       for await (const chunk of request) body += chunk;
@@ -307,7 +312,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#batchMoreButton").getAttribute("aria-expanded") === "false");
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
-    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "確認済み", "未確認"]);
+    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
     assert.equal(await page.locator("#galleryFilteredEmptyState").count(), 1, "the gallery needs a filtered-empty state");
     assert.equal(await page.locator("#overviewEmptyState").count(), 1, "the overview needs an empty state");

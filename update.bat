@@ -55,6 +55,7 @@ set "EXIT_CODE=%ERRORLEVEL%"
 if "%EXIT_CODE%"=="10" (
   echo.
   echo アップデートが完了しました。
+  echo Mozarieを起動し直してください。
   goto :finish
 )
 if "%EXIT_CODE%"=="0" goto :finish

@@ -2,7 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
-  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), reviewRoot: "",
+  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
+  selectedImageIds: new Set(), selectionAnchorId: null,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
@@ -36,6 +37,7 @@ const exclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
 const mosaicCanvas = document.createElement("canvas");
 const mosaicSourceCanvas = document.createElement("canvas");
+const originalCanvas = document.createElement("canvas");
 const historyAddCanvas = document.createElement("canvas");
 const historyExclusionCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
@@ -46,6 +48,7 @@ const exclusionCtx = exclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
 const mosaicCtx = mosaicCanvas.getContext("2d");
 const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
+const originalCtx = originalCanvas.getContext("2d", { willReadFrequently: true });
 const layerCtx = layerCanvas.getContext("2d");
 const boundaryOverlayCtx = boundaryOverlayCanvas.getContext("2d");
 const blinkCtx = blinkCanvas.getContext("2d");
@@ -196,19 +199,44 @@ function beginCatalogEpoch() { state.catalogGeneration += 1; state.catalogEpoch 
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
-function saveTargets() { return state.images.filter(imageHasMask).map((image) => image.id); }
+function saveTargets() { return state.images.filter((image) => !isHidden(image) && imageHasMask(image)).map((image) => image.id); }
 function normaliseReviewRoot(value) { return String(value || "").trim().replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
 function reviewStoragePrefix() { return state.reviewRoot ? `mozarie.reviewed.v1:${state.reviewRoot}:` : ""; }
 function reviewPath(image) { return String(image?.relativePath || "").replaceAll("\\", "/").toLowerCase(); }
 function reviewStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}${path}` : ""; }
+function hiddenStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}hidden:${path}` : ""; }
 function isReviewed(image) { return state.reviewedPaths.has(reviewPath(image)); }
+function isHidden(image) { return state.hiddenPaths.has(reviewPath(image)); }
 function loadReviewedPaths() {
-  if (!reviewStoragePrefix()) { state.reviewedPaths = new Set(); return; }
+  if (!reviewStoragePrefix()) { state.reviewedPaths = new Set(); state.hiddenPaths = new Set(); return; }
   try {
-    state.reviewedPaths = new Set(state.images
-      .filter((image) => localStorage.getItem(reviewStorageKey(image)) === "true")
-      .map(reviewPath));
+    state.reviewedPaths = new Set(state.images.filter((image) => localStorage.getItem(reviewStorageKey(image)) === "true").map(reviewPath));
+    state.hiddenPaths = new Set(state.images.filter((image) => localStorage.getItem(hiddenStorageKey(image)) === "true").map(reviewPath));
   } catch { /* Keep the in-session review state when storage is unavailable. */ }
+}
+function setHidden(image, hidden) {
+  if (!image) return;
+  const path = reviewPath(image); const key = hiddenStorageKey(image);
+  if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
+  if (key) try { if (hidden) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Session state remains usable. */ }
+  renderCatalogViews(); updateSelectionActionBar();
+}
+function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
+function updateSelectionActionBar() {
+  const count = state.selectedImageIds.size; const bar = $("#selectionActionBar");
+  bar.hidden = !count; $("#selectionCount").textContent = t("selection.count", { count });
+}
+function selectCatalogImage(imageId, event = null) {
+  const index = state.images.findIndex((image) => image.id === imageId); if (index < 0) return;
+  if (event?.shiftKey && state.selectionAnchorId) {
+    const anchor = state.images.findIndex((image) => image.id === state.selectionAnchorId);
+    const range = state.images.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
+    if (event.ctrlKey || event.metaKey) range.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(range);
+  } else if (event?.ctrlKey || event?.metaKey) {
+    if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
+    state.selectionAnchorId = imageId;
+  } else { state.selectedImageIds = new Set([imageId]); state.selectionAnchorId = imageId; }
+  updateSelectionActionBar(); renderCatalogViews(); void selectImage(imageId);
 }
 function refreshReviewViews() {
   renderGallery(true);
@@ -469,7 +497,8 @@ function renderGallery(force = false) {
       state.galleryNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", image.id === state.currentId);
+    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
+    item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
     const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
@@ -479,7 +508,7 @@ function renderGallery(force = false) {
     item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
-    item.onclick = () => selectImage(image.id);
+    item.onclick = (event) => selectCatalogImage(image.id, event);
     item.onmouseenter = () => { void cachedImage(image).catch(() => {}); void loadCandidateBundle(image.id, state.imageGeneration).catch(() => {}); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
@@ -496,7 +525,10 @@ function renderGallery(force = false) {
 }
 
 function imageMatchesGalleryFilter(image) {
+  if (state.galleryFilter !== "hidden" && isHidden(image)) return false;
   if (state.galleryFilter === "masked") return imageHasMask(image);
+  if (state.galleryFilter === "unmasked") return !imageHasMask(image);
+  if (state.galleryFilter === "hidden") return isHidden(image);
   if (state.galleryFilter === "reviewed") return isReviewed(image);
   if (state.galleryFilter === "unreviewed") return !isReviewed(image);
   return true;
@@ -519,9 +551,12 @@ function overviewImages() {
   const query = state.overviewQuery.trim().toLowerCase();
   const folder = state.overviewFolder;
   return state.images.filter((image) => {
+    if (state.overviewFilter !== "hidden" && isHidden(image)) return false;
+    if (state.overviewFilter === "hidden" && !isHidden(image)) return false;
     if (state.overviewFilter === "unreviewed" && isReviewed(image)) return false;
     if (state.overviewFilter === "reviewed" && !isReviewed(image)) return false;
     if (state.overviewFilter === "masked" && !imageHasMask(image)) return false;
+    if (state.overviewFilter === "unmasked" && imageHasMask(image)) return false;
     const path = image.relativePath.replaceAll("\\", "/");
     if (folder && path !== folder && !path.startsWith(`${folder}/`)) return false;
     return !query || path.toLowerCase().includes(query);
@@ -562,7 +597,7 @@ function renderOverview(force = false) {
       state.overviewNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", image.id === state.currentId);
+    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
     const preview = item.querySelector("img");
     const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
     if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
@@ -576,7 +611,7 @@ function renderOverview(force = false) {
     stateLabel.textContent = statuses.join(" / ");
     stateLabel.classList.toggle("reviewed", isReviewed(image));
     stateLabel.classList.toggle("masked", imageHasMask(image));
-    item.onclick = () => { setViewMode("edit"); void selectImage(image.id); };
+    item.onclick = (event) => { setViewMode("edit"); selectCatalogImage(image.id, event); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     grid.append(item);
   }
@@ -604,13 +639,13 @@ function setViewMode(mode, refreshGallery = true) {
 }
 function moveCurrentBy(offset) {
   if (isGestureActive()) return;
-  const index = imageIndex();
-  const target = state.images[index + offset];
+  const visible = state.images.filter((image) => !isHidden(image)); const index = visible.findIndex((image) => image.id === state.currentId);
+  const target = visible[index + offset];
   if (target) void selectImage(target.id);
 }
 function nextUnreviewedImage() {
   const current = imageIndex();
-  for (let index = Math.max(0, current + 1); index < state.images.length; index += 1) if (!isReviewed(state.images[index])) return state.images[index];
+  for (let index = Math.max(0, current + 1); index < state.images.length; index += 1) if (!isHidden(state.images[index]) && !isReviewed(state.images[index])) return state.images[index];
   return null;
 }
 function moveToNextUnreviewed() { if (isGestureActive()) return; const target = nextUnreviewedImage(); if (target) void selectImage(target.id); }
@@ -618,10 +653,18 @@ function reviewAndMoveNext() {
   if (isGestureActive()) return null;
   const current = currentRecord();
   if (!current) return null;
-  const target = state.images[imageIndex(current.id) + 1] || null;
+  const target = state.images.slice(imageIndex(current.id) + 1).find((image) => !isHidden(image)) || null;
   setReviewed(current, true);
   if (target) void selectImage(target.id);
   return target;
+}
+async function hideAndMoveNext() {
+  if (isGestureActive()) return;
+  const current = currentRecord();
+  if (!current) return;
+  const target = state.images.slice(imageIndex(current.id) + 1).find((image) => !isHidden(image)) || null;
+  setHidden(current, true);
+  if (target) await selectImage(target.id);
 }
 function runNavigationAction(action) {
   action();
@@ -700,6 +743,8 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     updateCandidateStatus();
     renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatusKey("status.editReady");
+    state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
+    state.overviewNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
@@ -971,6 +1016,8 @@ function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; co
 
 function rebuildMosaicPreview() {
   if (!state.currentImage) return;
+  originalCanvas.width = state.currentImage.width; originalCanvas.height = state.currentImage.height;
+  originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height); originalCtx.drawImage(state.currentImage, 0, 0);
   const blockSize = calculatedBlockSize();
   mosaicSourceCanvas.width = Math.max(1, Math.ceil(state.currentImage.width / blockSize));
   mosaicSourceCanvas.height = Math.max(1, Math.ceil(state.currentImage.height / blockSize));
@@ -1567,6 +1614,35 @@ function deleteManualExclusion() {
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
+async function batchCandidateOperation(spec) {
+  if (!state.currentId || isBusy() || state.importing) return;
+  const [role, operation] = spec.split(":");
+  const manual = role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas);
+  if (operation === "blink") {
+    const ids = state.candidates.filter((item) => item.role === role).map((item) => item.id);
+    if (manual) ids.push(`manual:${role}`);
+    const allActive = ids.length && ids.every((id) => state.blinkCandidateIds.has(id));
+    ids.forEach((id) => allActive ? state.blinkCandidateIds.delete(id) : state.blinkCandidateIds.add(id));
+    renderCandidates(); render(); return;
+  }
+  if (manual) {
+    if (operation === "delete") role === "apply" ? deleteManualMask() : deleteManualExclusion();
+    else if (role === "apply") state.manualEnabled = operation === "enable";
+    else state.manualExclusionEnabled = operation === "enable";
+  }
+  const changed = state.candidates.filter((item) => item.role === role);
+  if (!changed.length) { renderCandidates(); render(); return; }
+  try {
+    const result = await api("/api/candidates/batch", { method: "POST", body: JSON.stringify({ imageId: state.currentId, role, operation }) });
+    if (operation === "delete") {
+      changed.forEach((item) => state.candidateImages.delete(item.id));
+      state.candidates = state.candidates.filter((item) => item.role !== role);
+    } else changed.forEach((item) => { item.enabled = operation === "enable"; });
+    retainCurrentCandidateBundle(state.currentId, result.candidateRevision);
+    setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  } catch (error) { setStatus(error.message, "error"); }
+}
+
 async function addBoundaryCandidate() {
   if (!canDetectBoundary()) return;
   const imageId = state.currentId;
@@ -1681,6 +1757,28 @@ function paintStroke(from, to, erase, size) {
   composeCurrentMask();
 }
 
+function fillAt(point) {
+  if (!state.currentImage) return;
+  const width = originalCanvas.width; const height = originalCanvas.height;
+  const pixels = originalCtx.getImageData(0, 0, width, height).data;
+  const x = Math.min(width - 1, Math.max(0, Math.floor(point.x))); const y = Math.min(height - 1, Math.max(0, Math.floor(point.y)));
+  const start = (y * width + x) * 4; const seed = [pixels[start], pixels[start + 1], pixels[start + 2]];
+  const tolerance = Math.max(0, Math.min(255, Number($("#bucketTolerance").value) || 0));
+  const mask = document.createElement("canvas"); mask.width = width; mask.height = height;
+  const maskCtx = mask.getContext("2d"); const image = maskCtx.createImageData(width, height); const seen = new Uint8Array(width * height); const queue = [y * width + x]; seen[queue[0]] = 1;
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const index = queue[cursor]; const offset = index * 4; const distance = Math.max(Math.abs(pixels[offset] - seed[0]), Math.abs(pixels[offset + 1] - seed[1]), Math.abs(pixels[offset + 2] - seed[2]));
+    if (distance > tolerance) continue;
+    image.data[offset + 3] = 255; const px = index % width; const py = Math.floor(index / width);
+    for (const neighbor of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
+      const [nx, ny] = neighbor; const next = ny * width + nx;
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height && !seen[next]) { seen[next] = 1; queue.push(next); }
+    }
+  }
+  maskCtx.putImageData(image, 0, 0); addCtx.drawImage(mask, 0, 0); exclusionCtx.save(); exclusionCtx.globalCompositeOperation = "destination-out"; exclusionCtx.drawImage(mask, 0, 0); exclusionCtx.restore();
+  state.manualMaskPresent = true; setReviewed(currentRecord(), false); resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+}
+
 function drawStroke(from, to, erase, size = Number($("#brushSize").value)) {
   paintStroke(from, to, erase, size);
 }
@@ -1750,6 +1848,14 @@ function detectionParallelism() {
   const value = Number($("#detectParallelism").value);
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
+function detectionTargets(prefix = "detectTarget") {
+  const selected = ["penis", "pussy"].filter((name) => $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked === true);
+  return selected.length ? selected : (state.settings?.detection?.targets || ["penis", "pussy"]);
+}
+function setDetectionTargets(targets, prefix = "detectTarget") {
+  const selected = new Set(targets || ["penis", "pussy"]);
+  for (const name of ["penis", "pussy"]) $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked = selected.has(name);
+}
 
 function normaliseImportParallelism(value) {
   if (String(value ?? "").trim() === "") return 3;
@@ -1766,16 +1872,18 @@ function openDetectionDialog(imageIds) {
   state.pendingDetectionTargetIds = [...imageIds];
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
+  setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
   $("#detectDialog").showModal();
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {
   if (!imageIds.length || isBusy() || state.importing) return;
   state.detectionStarting = true;
   updateActionButtons();
   try {
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))) }) });
+    if (!targetClasses.length) throw new Error("penis または pussy を選択してください。");
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
@@ -1791,15 +1899,16 @@ async function startDetectionFromDialog(event) {
   if (!imageIds.length) return;
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
+  const targetClasses = detectionTargets("dialogTarget");
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism };
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
     try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }
-  await runDetection(imageIds, confidence, parallelism);
+  await runDetection(imageIds, confidence, parallelism, targetClasses);
 }
 
 async function cancelDetection() {
@@ -1872,7 +1981,7 @@ function syncApplyMode() {
   const outputDirectory = state.outputDirectoryHandle;
   $("#applyOutputDirectoryStatus").textContent = outputDirectory
     ? t("apply.outputDirectorySelected", { name: outputDirectory.name })
-    : t("apply.outputDirectoryUnset");
+    : t("apply.outputDirectorySelected", { name: "Mozarie/output" });
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
@@ -1957,7 +2066,7 @@ async function ensureOutputHandlePermission(handle) {
 }
 
 function renderOutputHandle() {
-  const label = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
+  const label = state.outputDirectoryHandle?.name || "Mozarie/output";
   $("#settingsDefaultOutputDirectory").textContent = label;
   syncApplyMode();
 }
@@ -2201,10 +2310,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
   updateActionButtons();
   try {
     await navigator.locks.request("mozarie-output", { mode: "exclusive" }, async () => {
-      for (const entry of save.entries) {
-        // Cancellation is observed only before an entry starts. Once an output or source has
-        // changed, commit that entry so browser files and catalog state remain consistent.
-        if (!await waitForBrowserSave(save)) break;
+      const saveEntry = async (entry) => {
         showBrowserSaveProgress(save, entry);
         const draft = draftPayload([entry.imageId])[entry.imageId] || null;
         const response = await fetch("/api/save/render", {
@@ -2258,7 +2364,19 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
         pruneSourceAccess();
         save.completed += 1;
         showBrowserSaveProgress(save, entry);
-      }
+      };
+      let nextEntry = 0;
+      const parallelism = Math.min(save.entries.length, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 1)));
+      await Promise.all(Array.from({ length: parallelism }, async () => {
+        while (true) {
+          // Cancellation is observed only before an entry starts. Once an output or source has
+          // changed, commit that entry so browser files and catalog state remain consistent.
+          if (!await waitForBrowserSave(save)) return;
+          const entry = save.entries[nextEntry++];
+          if (!entry) return;
+          await saveEntry(entry);
+        }
+      }));
     });
     const cancelled = save.cancelled;
     setApplyResult(cancelled
@@ -2314,6 +2432,12 @@ async function startApplyFromDialog(event) {
   state.saving = true;
   state.applyRunning = true;
   updateActionButtons();
+  if (copy && !state.outputDirectoryHandle) {
+    try {
+      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
+      state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
+    } catch (error) { setApplyResult(error.message, true); return finishSaveStart(); }
+  }
   try {
     // Permission requests must begin while this submit is still a user action.
     await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
@@ -2516,11 +2640,11 @@ async function pollJob() {
 function setTool(tool) {
   if (isBusy() || state.importing) return;
   const focusedInBoundaryMenu = closeBoundaryModeMenu();
-  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush"]);
+  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush", "bucket"]);
   if (!boundaryTools.has(tool)) clearBoundaryInteraction();
   else if (state.tool !== tool) clearBoundaryConstruction();
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
@@ -2556,12 +2680,20 @@ function updateBlockSizeDisplay() {
   $("#applyBlockSize").textContent = applyBlockSize ? t("editor.calculatedPixels", { value: applyBlockSize }) : "";
 }
 
-function confirmAction(title, message) {
+function confirmAction(title, message, key = null) {
+  if (key && state.settings?.confirmations?.[key] === false) return Promise.resolve(true);
   const dialog = $("#confirmDialog");
   $("#confirmTitle").textContent = title;
   $("#confirmMessage").textContent = message;
   return new Promise((resolve) => {
-    const finish = () => resolve(dialog.returnValue === "confirm");
+    const finish = () => {
+      const accepted = dialog.returnValue === "confirm";
+      if (accepted && key && $("#confirmNeverShow").checked && state.settings) {
+        state.settings.confirmations = { ...state.settings.confirmations, [key]: false };
+        void api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }).catch(() => {});
+      }
+      $("#confirmNeverShow").checked = false; resolve(accepted);
+    };
     dialog.addEventListener("close", finish, { once: true });
     dialog.showModal();
   });
@@ -2577,7 +2709,7 @@ function resetCurrentDraft() {
 
 async function clearMasks(imageIds, titleKey, messageKey) {
   if (!imageIds.length || isBusy() || state.importing) return;
-  if (!await confirmAction(t(titleKey), t(messageKey))) return;
+  if (!await confirmAction(t(titleKey), t(messageKey), "clearMasks")) return;
   state.masksClearing = true;
   const catalogEpoch = beginCatalogEpoch();
   ++state.imageGeneration;
@@ -2605,7 +2737,7 @@ async function clearMasks(imageIds, titleKey, messageKey) {
 
 async function clearCatalog() {
   if (!state.images.length || isBusy() || state.importing) return;
-  if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"))) return;
+  if (!await confirmAction(t("confirm.clearCatalog.title"), t("confirm.clearCatalog.message"), "clearCatalog")) return;
   state.catalogMutation = true;
   const catalogEpoch = beginCatalogEpoch();
   ++state.imageGeneration;
@@ -2667,7 +2799,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
   if (!imageId || isBusy() || state.importing) return;
   const image = state.images.find((item) => item.id === imageId);
   if (!image) return;
-  if (!await confirmAction(t("confirm.removeImage.title"), t("confirm.removeImage.message"))) return;
+  if (!await confirmAction(t("confirm.removeImage.title"), t("confirm.removeImage.message"), "removeImage")) return;
 
   closeCatalogContextMenu();
   const index = state.images.findIndex((item) => item.id === imageId);
@@ -2700,6 +2832,19 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
     }
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }
+}
+
+async function runSelectionAction(action) {
+  const images = selectedImages(); if (!images.length || isBusy() || state.importing) return;
+  const ids = images.map((image) => image.id);
+  if (action === "hide" || action === "show") { images.forEach((image) => setHidden(image, action === "hide")); return; }
+  if (action === "reviewed" || action === "unreviewed") { images.forEach((image) => setReviewed(image, action === "reviewed")); renderCatalogViews(); return; }
+  if (action === "detect") return openDetectionDialog(ids);
+  if (action === "clear") return clearMasks(ids, "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
+  if (action === "remove") {
+    for (const image of [...images]) await removeImageFromCatalog(image.id);
+    state.selectedImageIds.clear(); updateSelectionActionBar();
+  }
 }
 
 function droppedFile(file, relativePath = file.name, fileHandle = null, parentHandle = null) {
@@ -2943,9 +3088,11 @@ function setGalleryDropOverlay(visible) {
 function handleEditorKeydown(event) {
   if (isBusy() || state.importing || isEditableTarget(document.activeElement) || hasOpenDialog()) return false;
   if (state.viewMode !== "edit") return false;
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+  const binding = shortcutFromEvent(event);
+  const shortcuts = state.settings?.shortcuts?.bindings || { undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
+  if (binding === shortcuts.undo || binding === shortcuts.redo) {
     event.preventDefault();
-    void restoreSnapshot(event.shiftKey ? state.historyIndex + 1 : state.historyIndex - 1);
+    void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
     return true;
   }
   return false;
@@ -2953,16 +3100,13 @@ function handleEditorKeydown(event) {
 
 function navigationShortcutAction(event) {
   if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || isEditableTarget(document.activeElement) || hasOpenDialog()) return null;
-  if (event.ctrlKey || event.metaKey || event.altKey) return null;
-  if (event.key === "g" || event.key === "G") return "toggleOverview";
+  const binding = shortcutFromEvent(event);
+  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
+  const actionForBinding = Object.entries(bindings).find(([, value]) => value === binding)?.[0];
+  if (!actionForBinding) return null;
+  if (actionForBinding === "toggleOverview") return "toggleOverview";
   if (state.viewMode !== "edit") return null;
-  if (event.key === "ArrowLeft") return "previous";
-  if (event.key === "ArrowRight" && event.shiftKey) return "nextUnreviewed";
-  if (event.key === "ArrowRight") return "next";
-  if (event.key === "Home") return "first";
-  if (event.key === "End") return "last";
-  if (event.key === "Enter") return "reviewAndNext";
-  return null;
+  return actionForBinding;
 }
 
 function handleNavigationKeydown(event) {
@@ -2976,6 +3120,8 @@ function handleNavigationKeydown(event) {
   else if (action === "first" && state.images[0]) void selectImage(state.images[0].id);
   else if (action === "last" && state.images.at(-1)) void selectImage(state.images.at(-1).id);
   else if (action === "reviewAndNext") reviewAndMoveNext();
+  else if (action === "undo") void restoreSnapshot(state.historyIndex - 1);
+  else if (action === "redo") void restoreSnapshot(state.historyIndex + 1);
   return true;
 }
 
@@ -3070,8 +3216,11 @@ function setSettingsForm(settings, status = null) {
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
   $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
+  $("#settingsSaveParallelism").value = String(settings.saving?.parallelism || 2);
+  $("#settingsShortcutsEnabled").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
+  $("#settingsShortcuts").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
   renderOutputHandle();
-  setNavigationShortcutsEnabled(settings.general.shortcuts_enabled);
+  setNavigationShortcutsEnabled(settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
   setModelCardEnabled("ntd11", settings.models.ntd11_enabled);
@@ -3084,6 +3233,11 @@ function setSettingsForm(settings, status = null) {
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
+  const gpuSelect = $("#settingsGpuDevice"); gpuSelect.textContent = "";
+  const gpus = status?.gpus || [];
+  if (!gpus.length) { const option = document.createElement("option"); option.value = "0"; option.textContent = "GPU 0"; gpuSelect.append(option); }
+  else for (const gpu of gpus) { const option = document.createElement("option"); option.value = String(gpu.id); option.textContent = `GPU ${gpu.id}: ${gpu.name}`; gpuSelect.append(option); }
+  gpuSelect.value = String(settings.models.gpu_device || 0);
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
@@ -3095,17 +3249,38 @@ function setSettingsForm(settings, status = null) {
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
   $("#detectParallelism").value = String(settings.detection.parallelism);
+  setDetectionTargets(settings.detection.targets);
+  $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
+  $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
+  $("#confirmRemoveImage").checked = settings.confirmations?.removeImage !== false;
+  renderShortcutBindings(settings.shortcuts?.bindings || {});
   renderModelStatus();
+}
+
+const SHORTCUT_LABELS = { previous: "←", next: "→", first: "Home", last: "End", nextUnreviewed: "次へ", reviewAndNext: "確認済にして次へ", toggleOverview: "一覧切替", undo: "Undo", redo: "Redo" };
+function renderShortcutBindings(bindings) {
+  const root = $("#shortcutBindings"); root.textContent = "";
+  for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
+    const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = label;
+    const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off";
+    input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, input); root.append(row);
+  }
+}
+function shortcutFromEvent(event) { return `${event.ctrlKey || event.metaKey ? "Ctrl+" : ""}${event.shiftKey ? "Shift+" : ""}${event.altKey ? "Alt+" : ""}${event.key.length === 1 ? event.key.toUpperCase() : event.key}`; }
+function shortcutBindingsPayload() {
+  const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value.trim()]));
+  if (!Object.values(bindings).every(Boolean) || new Set(Object.values(bindings)).size !== Object.keys(bindings).length) throw new Error("ショートカットのキーは重複なく設定してください。");
+  return bindings;
 }
 
 function settingsPayload() {
   return {
-    general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcuts").checked },
+    general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcutsEnabled").checked },
     models: {
       target_segmentation: $("#settingsTargetModel").value.trim(), ntd11: $("#settingsNtd11Model").value.trim(), ntd11_enabled: modelCardEnabled("ntd11"),
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
-      sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value,
+      sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
     },
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
@@ -3117,8 +3292,11 @@ function settingsPayload() {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
       parallelism: detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
-      fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
+      fluid_exclusion_enabled: $("#settingsFluidToggle").checked, targets: detectionTargets(),
     },
+    saving: { parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))) },
+    shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload() },
+    confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked },
   };
 }
 
@@ -3188,6 +3366,22 @@ async function chooseSettingsOutputDirectory() {
   }
 }
 
+async function checkForUpdate() {
+  try {
+    const update = await api("/api/update/status");
+    $("#settingsVersion").textContent = update.current;
+    const button = $("#checkUpdateButton"); button.textContent = update.available ? t("update.start") : t("update.current", { version: update.current });
+    button.classList.toggle("primary", update.available); button.dataset.available = String(update.available);
+    $("#updateToast").hidden = !update.available;
+  } catch { /* Offline update checks stay quiet. */ }
+}
+
+async function startUpdate() {
+  if ($("#checkUpdateButton").dataset.available !== "true") return checkForUpdate();
+  if (!await confirmAction(t("update.title"), t("update.message"))) return;
+  try { await api("/api/update/start", { method: "POST", body: JSON.stringify({}) }); } catch (error) { $("#settingsResult").textContent = error.message; }
+}
+
 function openModelHelp(key) {
   $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
   $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
@@ -3199,6 +3393,7 @@ function bindEvents() {
     if (event.target === dialog) close();
   });
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
+  $("#updateToast").addEventListener("click", () => { void openSettings().then(() => selectSettingsTab("info")); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
@@ -3214,6 +3409,7 @@ function bindEvents() {
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
+  $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
   $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
@@ -3248,7 +3444,7 @@ function bindEvents() {
   $("#loadFolderButton").addEventListener("click", loadFolder);
   const detectAll = () => {
     if (activeDetection()) void cancelDetection();
-    else openDetectionDialog(state.images.map((image) => image.id));
+    else openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
@@ -3267,6 +3463,10 @@ function bindEvents() {
   $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
   $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
   $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
+  $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
+  $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
+  document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
+  document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
   $("#settingsShortcuts").addEventListener("change", () => {});
   $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
@@ -3284,6 +3484,7 @@ function bindEvents() {
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
   });
+  $("#bucketTool").addEventListener("click", () => setTool("bucket"));
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
   $("#boundaryBrushTool").addEventListener("click", () => setTool("boundary_brush"));
@@ -3416,6 +3617,7 @@ function bindEvents() {
       updateBoundaryActions(); render(); return;
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
+    if (state.tool === "bucket") { state.drawing = false; fillAt(point); return; }
     beginManualStroke(point); render();
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -3489,7 +3691,10 @@ function bindEvents() {
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
-    if (event.shiftKey) return updateBrushSize(Number($("#brushSize").value) * (event.deltaY < 0 ? 1.1 : 1 / 1.1));
+    if (event.shiftKey) {
+      const current = Number($("#brushSize").value); const direction = event.deltaY < 0 ? 1 : -1;
+      return updateBrushSize(Math.max(1, current + direction * Math.max(1, Math.round(current * 0.1))));
+    }
     const rect = canvas.getBoundingClientRect(); const mouseX = event.clientX - rect.left; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
     state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
@@ -3551,6 +3756,7 @@ async function initialise() {
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
   } catch (error) { setStatus(error.message, "error"); }
+  if (document.visibilityState === "visible") setTimeout(() => { void checkForUpdate(); }, 1000);
 }
 
 initialise();

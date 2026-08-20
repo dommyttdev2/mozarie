@@ -81,6 +81,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
     display = _expect_dict(settings.get("display"), "display")
     importing = _expect_dict(settings.get("importing"), "importing")
     detection = _expect_dict(settings.get("detection"), "detection")
+    saving = _expect_dict(settings.get("saving", {}), "saving")
+    shortcuts = _expect_dict(settings.get("shortcuts", {}), "shortcuts")
+    confirmations = _expect_dict(settings.get("confirmations", {}), "confirmations")
     language = general.get("language")
     if language not in {"ja", "en"}:
         raise SettingsError("general.language must be ja or en")
@@ -117,7 +120,13 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "port": int(port),
             "shortcuts_enabled": _expect_bool(general.get("shortcuts_enabled"), "general.shortcuts_enabled"),
         },
-        "models": {**paths, **enabled, "sam_model_type": sam_model_type, "provider": provider},
+        "models": {
+            **paths,
+            **enabled,
+            "sam_model_type": sam_model_type,
+            "provider": provider,
+            "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, 64)),
+        },
         "display": {
             "apply_color": _expect_color(display.get("apply_color"), "display.apply_color"),
             "exclude_color": _expect_color(display.get("exclude_color"), "display.exclude_color"),
@@ -133,5 +142,34 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
+            "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
+        },
+        "saving": {"parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8))},
+        "shortcuts": {
+            "enabled": _expect_bool(shortcuts.get("enabled", general.get("shortcuts_enabled", True)), "shortcuts.enabled"),
+            "bindings": _validate_shortcuts(shortcuts.get("bindings", _DEFAULT_SHORTCUTS)),
+        },
+        "confirmations": {
+            key: _expect_bool(confirmations.get(key, True), f"confirmations.{key}")
+            for key in ("clearMasks", "clearCatalog", "removeImage")
         },
     }
+
+
+def _validate_targets(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value or any(item not in {"penis", "pussy"} for item in value):
+        raise SettingsError("detection.targets must contain penis and/or pussy")
+    return list(dict.fromkeys(value))
+
+
+_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "first": "Home", "last": "End", "nextUnreviewed": "Shift+ArrowRight", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
+_SHORTCUT_ACTIONS = set(_DEFAULT_SHORTCUTS)
+
+
+def _validate_shortcuts(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise SettingsError("shortcuts.bindings must be an object")
+    bindings = {str(key): str(binding).strip() for key, binding in value.items() if key in _SHORTCUT_ACTIONS}
+    if set(bindings) != _SHORTCUT_ACTIONS or not all(bindings.values()) or len(set(bindings.values())) != len(bindings):
+        raise SettingsError("shortcut bindings must be complete and unique")
+    return bindings
