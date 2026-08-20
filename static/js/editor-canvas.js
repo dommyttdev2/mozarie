@@ -22,7 +22,7 @@ function clearEditor() {
 }
 
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
-  if ((isBusy() || state.importing || isGestureActive()) && !force) return;
+  if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
   cancelFillWork();

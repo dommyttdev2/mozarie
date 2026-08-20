@@ -380,6 +380,7 @@ function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;
   const mutatingCandidates = state.candidateUpdateChains.size > 0;
+  const switchingImages = state.candidateBatchPending.size > 0;
   const detecting = activeDetection();
   const current = currentRecord();
   const hasImage = Boolean(state.currentId && state.currentImage && current);
@@ -409,12 +410,12 @@ function updateActionButtons() {
   $("#saveButton").disabled = currentSaveDisabled;
   $("#applyStartButton").disabled = running || mutatingCandidates || Boolean(applyRestrictionMessage());
   $("#overviewButton").disabled = running || state.images.length === 0;
-  $("#previousImageButton").disabled = running || imageIndex() <= 0;
-  $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
-  $("#nextUnreviewedButton").disabled = running || !nextUnreviewedImage();
-  $("#reviewAndNextButton").disabled = running || !hasImage;
+  $("#previousImageButton").disabled = running || switchingImages || imageIndex() <= 0;
+  $("#nextImageButton").disabled = running || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
+  $("#nextUnreviewedButton").disabled = running || switchingImages || !nextUnreviewedImage();
+  $("#reviewAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#removeAndNextButton").disabled = running || !hasImage;
-  $("#hideAndNextButton").disabled = running || !hasImage;
+  $("#hideAndNextButton").disabled = running || switchingImages || !hasImage;
   updateCandidateBatchButtons(hasImage, locked);
   updateHistoryButtons();
   if (locked) for (const control of controls) {

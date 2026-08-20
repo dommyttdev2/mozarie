@@ -905,6 +905,36 @@ class MozarieTests(unittest.TestCase):
             detect_image.assert_not_called()
             self.assertEqual(state.job.state, "cancelled")
 
+    def test_detection_pause_defers_the_next_model_slot_until_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first.png", "second.png"):
+                Image.new("RGB", (16, 16), "white").save(root / name)
+            state = self.new_state()
+            records = [state.image_for_id(item["id"]) for item in state.set_root(str(root))]
+            control = server_module.JobControl()
+            state.job = server_module.Job(kind="detect", state="running", total=2, image_ids=tuple(record.image_id for record in records))
+            first_loaded = threading.Event()
+
+            def load_first_slot():
+                control.pause_requested.set()
+                first_loaded.set()
+                return object()
+
+            worker = threading.Thread(target=state._detect_worker, args=(records, DEFAULT_DETECTION_CONFIDENCE, 2), kwargs={"control": control})
+            with patch.object(state, "_ensure_models", side_effect=load_first_slot), \
+                 patch.object(state, "_load_detection_models", return_value=object()) as load_more, \
+                 patch.object(state, "_detect_image", return_value=[]):
+                worker.start()
+                self.assertTrue(first_loaded.wait(2))
+                self.assertFalse(load_more.called)
+                control.pause_requested.clear()
+                worker.join(2)
+
+            self.assertFalse(worker.is_alive())
+            load_more.assert_called_once()
+            self.assertEqual(state.job.state, "complete")
+
     def test_parallel_detection_progress_never_moves_backward(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
