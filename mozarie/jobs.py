@@ -302,4 +302,5 @@ class JobsMixin:
             self.job.error = str(exc)
             self.job.current = ""
             self.job.active_count = 0
-        LOGGER.exception("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind))
+        LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind),
+                     exc_info=(type(exc), exc, exc.__traceback__))
