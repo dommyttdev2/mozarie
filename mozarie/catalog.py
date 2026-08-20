@@ -244,10 +244,17 @@ class CatalogMixin:
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
-        with self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                raise ClientError("処理中はモザイク候補をクリアできません。")
-            self._clear_masks_unchecked(records)
+        # Acquire multiple per-image locks in a stable order before briefly
+        # taking the catalogue lock.  A mask response therefore cannot race a
+        # clear for the same image, while unrelated image reads continue.
+        locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+        with ExitStack() as stack:
+            for _image_id, image_lock in sorted(locks):
+                stack.enter_context(image_lock)
+            with self.lock:
+                if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中はモザイク候補をクリアできません。")
+                self._clear_masks_unchecked(records)
         return len(records)
 
     def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
@@ -591,14 +598,17 @@ class CatalogMixin:
         self.candidates[image_id] = [candidate for candidate in candidates if candidate.candidate_id != candidate_id]
 
     def read_candidate_mask_png(self, image_id: str, candidate_id: str) -> bytes:
-        """Read a mask while retaining the state lock so cleanup cannot unlink it."""
-        with self.lock:
-            candidate = next(
-                (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
-                None,
-            )
-            if candidate is None:
-                raise StaleMaskError("検出候補は既に更新されています。")
+        """Convert one mask without holding the catalogue lock during PNG I/O."""
+        with self.image_io_lock(image_id):
+            with self.lock:
+                candidate = next(
+                    (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
+                    None,
+                )
+                if candidate is None:
+                    raise StaleMaskError("検出候補は既に更新されています。")
+                candidate = replace(candidate)
+                revision = self._candidate_revision(image_id)
             try:
                 with Image.open(candidate.mask_path) as mask_image:
                     alpha = mask_image.convert("L")
@@ -606,11 +616,20 @@ class CatalogMixin:
                     rgba.putalpha(alpha)
                     output = io.BytesIO()
                     rgba.save(output, format="PNG")
-                    return output.getvalue()
             except FileNotFoundError as exc:
-                self._remove_candidate_unchecked(image_id, candidate_id)
-                self._touch_candidates(image_id)
+                with self.lock:
+                    if self._candidate_revision(image_id) == revision:
+                        self._remove_candidate_unchecked(image_id, candidate_id)
+                        self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
+            with self.lock:
+                current = next(
+                    (item for item in self.candidates.get(image_id, []) if item.candidate_id == candidate_id),
+                    None,
+                )
+                if current is None or current.mask_path != candidate.mask_path or self._candidate_revision(image_id) != revision:
+                    raise StaleMaskError("検出候補は既に更新されています。")
+            return output.getvalue()
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)

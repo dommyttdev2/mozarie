@@ -7,6 +7,7 @@ under a user-selected root, then addressed through opaque catalogue ids.
 from __future__ import annotations
 
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent.parent
