@@ -57,7 +57,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "removeAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
   "status", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
@@ -374,8 +374,17 @@ const completionWatchdog = setTimeout(() => {
 }, 250);
 
 (async () => {
+  document.visibilityState = "hidden";
+  const startupSettings = {
+    general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
+    display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true, tool_position: "left" },
+    importing: { parallelism: 3 },
+    detection: { threshold: 0.5, parallelism: 2, mode: "high_precision", fluid_exclusion_enabled: true },
+    confirmations: { candidateDelete: false, candidateRoleDelete: false, overwriteSource: false, deleteSourceAfterCopy: false },
+  };
   const initialiseRun = initialise();
-  resolveFetch({ ok: true, json: async () => ({}) });
+  resolveFetch({ ok: true, json: async () => ({ settings: startupSettings, version: "v0.3.0" }) });
   await new Promise((resolve) => setImmediate(resolve));
   resolveFetch({ ok: true, json: async () => ({}) });
   await new Promise((resolve) => setImmediate(resolve));
@@ -384,14 +393,9 @@ const completionWatchdog = setTimeout(() => {
   await initialiseRun;
   assert.equal(requests.at(-1).path, "/api/images");
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), [initialImage]);
-  state.settings = {
-    general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "cpu" },
-    display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true, tool_position: "left" },
-    importing: { parallelism: 3 },
-    detection: { threshold: 0.5, parallelism: 2, mode: "high_precision", fluid_exclusion_enabled: true },
-    confirmations: { candidateDelete: false, candidateRoleDelete: false, overwriteSource: false, deleteSourceAfterCopy: false },
-  };
+  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "startup settings display the local version without an update check");
+  assert.equal(requests.some((request) => request.path === "/api/update/status"), false, "hidden startup does not need an online update check to display the local version");
+  state.settings = startupSettings;
   const persistShortcuts = persistNavigationShortcuts(false);
   resolveFetch({ ok: true, json: async () => ({ settings: state.settings }) });
   await persistShortcuts;
@@ -2241,10 +2245,12 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
   const settingsRequestsBeforeReopen = requests.filter((request) => request.path === "/api/settings").length;
   state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
+  elements.get("#settingsVersion").textContent = "v0.2.0";
   const reopenSettings = openSettings();
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: {} } }) });
+  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: englishSettings, status: { models: {} }, version: "v0.3.0" }) });
   await reopenSettings;
   assert.equal(requests.filter((request) => request.path === "/api/settings").length, settingsRequestsBeforeReopen + 1, "the settings modal reads current status on every open");
+  assert.equal(elements.get("#settingsVersion").textContent, "v0.3.0", "opening settings refreshes a stale displayed version");
 
   // Flood-fill responses are token-bound: a switch discards stale spans and
   // releases the busy state without touching history.

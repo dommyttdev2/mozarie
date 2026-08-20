@@ -32,6 +32,7 @@ import mozarie.catalog as catalog_module  # noqa: E402
 import mozarie.detection as detection_module  # noqa: E402
 import mozarie.jobs as jobs_module  # noqa: E402
 import mozarie.saving as saving_module  # noqa: E402
+import updater  # noqa: E402
 from server import (  # noqa: E402
     Candidate,
     ClientError,
@@ -2043,14 +2044,17 @@ class MozarieTests(unittest.TestCase):
         thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
         try:
-            with patch.object(http_module.STATE, "settings_status", return_value={"models": {"target": {"valid": True}}}) as settings_status:
+            with patch.object(http_module.STATE, "settings_status", return_value={"models": {"target": {"valid": True}}}) as settings_status, \
+                 patch.object(updater, "fetch_latest_release") as fetch_latest_release:
                 connection.request("GET", "/api/settings?status=0")
                 response = connection.getresponse()
                 lightweight = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(response.status, 200)
                 self.assertIn("settings", lightweight)
+                self.assertEqual(lightweight["version"], updater.display_version((Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip()))
                 self.assertNotIn("status", lightweight)
                 settings_status.assert_not_called()
+                fetch_latest_release.assert_not_called()
 
                 connection.request("GET", "/api/settings")
                 response = connection.getresponse()

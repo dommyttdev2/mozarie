@@ -363,6 +363,7 @@ async function initialise() {
   try {
     const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
+    $("#settingsVersion").textContent = settings.version;
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
   await restoreOutputDirectory();
