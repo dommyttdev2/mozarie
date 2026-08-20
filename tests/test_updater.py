@@ -193,14 +193,27 @@ class UpdaterTests(unittest.TestCase):
             messages = [call.args[0] for call in output.call_args_list if call.args]
             self.assertIn("v1.1.0 → v1.2.0", messages)
             self.assertIn("v1.1.0 から v1.2.0 へアップデートしました。", messages)
+            self.assertEqual(messages.count("Mozarieを起動し直してください。"), 1)
 
-    def test_update_batch_pauses_and_never_starts_mozarie(self):
+    def test_update_batch_delegates_status_to_updater_and_never_starts_mozarie(self):
         batch_path = Path(__file__).parents[1] / "update.bat"
         raw = batch_path.read_bytes()
         batch = raw.decode("utf-8")
-        self.assertIn("アップデートが完了しました。", batch)
         self.assertIn("何かキーを押すと閉じます...", batch)
         self.assertIn("pause >nul", batch)
+        self.assertEqual(batch.count('"%PYTHON%" %PYTHON_ARGS% "%APP_DIR%updater.py"'), 1)
+        self.assertIn(
+            '"%PYTHON%" %PYTHON_ARGS% "%APP_DIR%updater.py"\r\n'
+            'set "EXIT_CODE=%ERRORLEVEL%"\r\n'
+            "goto :finish",
+            batch,
+        )
+        self.assertIn("exit /b %EXIT_CODE%", batch)
+        self.assertNotIn('"%EXIT_CODE%"==', batch)
+        self.assertEqual(batch.lower().count("pause"), 1)
+        self.assertNotIn("アップデート", batch)
+        self.assertNotIn("起動し直して", batch)
+        self.assertNotIn("失敗しました", batch)
         self.assertNotIn("run.bat", batch.lower())
         self.assertIn(b"\r\n", raw)
         self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
