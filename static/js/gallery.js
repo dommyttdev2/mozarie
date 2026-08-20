@@ -24,7 +24,7 @@ function renderGallery(force = false) {
     item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
-    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
+    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(imageAssetVersion(image))}`;
     if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
     preview.alt = image.relativePath;
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
@@ -122,7 +122,7 @@ function renderOverview(force = false) {
     item.dataset.id = image.id;
     item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
     const preview = item.querySelector("img");
-    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(`${image.mtimeNs || ""}-${image.contentVersion || 0}`)}`;
+    const previewSource = `/api/thumbnail/${encodeURIComponent(image.id)}?v=${encodeURIComponent(imageAssetVersion(image))}`;
     if (!String(preview.src || "").endsWith(previewSource)) preview.src = previewSource;
     preview.alt = image.relativePath;
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();

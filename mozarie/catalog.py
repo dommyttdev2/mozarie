@@ -154,6 +154,16 @@ class CatalogMixin:
     def _candidate_revision(self, image_id: str) -> int:
         return self.candidate_revisions.get(image_id, 0)
 
+    def image_io_lock(self, image_id: str) -> threading.RLock:
+        """Return the small per-image lock used around filesystem I/O.
+
+        Callers obtain this before taking ``self.lock`` for their final state
+        revalidation.  This keeps a slow disk operation for one image from
+        blocking the catalogue or a different image.
+        """
+        with self.lock:
+            return self._image_io_locks.setdefault(image_id, threading.RLock())
+
     def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, int, str]:
         self._assert_record_fresh(record)
         try:
@@ -190,19 +200,12 @@ class CatalogMixin:
         self,
         record: ImageRecord,
         revision: int,
-        source_fingerprint: tuple[int, int],
+        source_fingerprint: tuple[int, int, int, str],
         catalog_generation: int,
-        output: bytes,
+        rendered_path: Path,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
-        rendered_dir = self.cache_dir / "browser-save"
-        rendered_dir.mkdir(parents=True, exist_ok=True)
-        rendered_path = rendered_dir / f"{token}{record.path.suffix.lower()}"
-        with rendered_path.open("xb") as handle:
-            handle.write(output)
-            handle.flush()
-            os.fsync(handle.fileno())
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,
             candidate_revision=revision,
@@ -310,22 +313,33 @@ class CatalogMixin:
                 relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
                 if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                raw_value = file_data.get("raw")
-                if isinstance(raw_value, bytes):
-                    raw = raw_value
-                else:
-                    try:
-                        raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                    except (binascii.Error, ValueError) as exc:
-                        raise ClientError("追加画像を読み込めません。") from exc
-                if not raw:
-                    continue
-                _verify_decodable_image(raw)
-                with Image.open(io.BytesIO(raw)) as image:
-                    _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                    width, height = oriented_image_size(image)
                 temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
-                temporary.write_bytes(raw)
+                staged_path = file_data.get("stagedPath")
+                if isinstance(staged_path, Path):
+                    width, height = inspect_import_image(staged_path, relative_path.suffix)
+                    with staged_path.open("rb") as source, temporary.open("xb") as destination:
+                        shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                else:
+                    raw_value = file_data.get("raw")
+                    if isinstance(raw_value, bytes):
+                        raw = raw_value
+                    else:
+                        try:
+                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                        except (binascii.Error, ValueError) as exc:
+                            raise ClientError("追加画像を読み込めません。") from exc
+                    if not raw:
+                        continue
+                    _verify_decodable_image(raw)
+                    with Image.open(io.BytesIO(raw)) as image:
+                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
+                        width, height = oriented_image_size(image)
+                    with temporary.open("xb") as destination:
+                        destination.write(raw)
+                        destination.flush()
+                        os.fsync(destination.fileno())
                 pending.append((temporary, relative_path.as_posix(), width, height, client_key))
 
             with self.import_lock, self.lock:
@@ -390,6 +404,24 @@ class CatalogMixin:
             "name": name,
             "relativePath": relative_path,
             "raw": raw,
+        }], include_images=include_images)
+
+    def import_image_file_for_api(
+        self,
+        staged_path: Path,
+        *,
+        name: str,
+        relative_path: str,
+        client_key: str,
+        include_images: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not isinstance(client_key, str) or not client_key:
+            raise ClientError("追加画像のclientKeyが不正です。")
+        return self._import_images([{
+            "clientKey": client_key,
+            "name": name,
+            "relativePath": relative_path,
+            "stagedPath": staged_path,
         }], include_images=include_images)
 
     def _clear_cache(self) -> None:
@@ -485,7 +517,9 @@ class CatalogMixin:
                         "width": record.width,
                         "height": record.height,
                         "mtimeNs": record.mtime_ns,
+                        "sizeBytes": record.size_bytes,
                         "contentVersion": record.content_version,
+                        "assetVersion": self.asset_version(record),
                         "candidateCount": len(self.candidates.get(image_id, [])),
                         "enabledCandidateCount": sum(
                             candidate.enabled and candidate.role == CandidateRole.APPLY
@@ -531,6 +565,11 @@ class CatalogMixin:
             if record is None:
                 raise ClientError("画像が見つかりません。")
             return replace(record)
+
+    @staticmethod
+    def asset_version(record: ImageRecord) -> str:
+        """The content-addressed HTTP version for an image response."""
+        return f"{record.mtime_ns}-{record.size_bytes}-{record.content_version}"
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])

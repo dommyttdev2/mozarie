@@ -67,15 +67,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 with STATE.lock:
                     self._json(STATE.job.as_dict())
             elif path.startswith("/api/image/"):
-                self._send_image(path.removeprefix("/api/image/"), thumbnail=False)
+                self._send_image(path.removeprefix("/api/image/"), thumbnail=False, version=_request_version(parsed.query))
             elif path.startswith("/api/thumbnail/"):
-                self._send_image(path.removeprefix("/api/thumbnail/"), thumbnail=True)
+                self._send_image(path.removeprefix("/api/thumbnail/"), thumbnail=True, version=_request_version(parsed.query))
             elif path.startswith("/api/candidates/"):
                 image_id = path.removeprefix("/api/candidates/")
                 self._json(STATE.candidate_snapshot(image_id))
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
-                self._binary(STATE.read_candidate_mask_png(image_id, candidate_id), "image/png")
+                self._send_candidate_mask(image_id, candidate_id, _request_version(parsed.query))
             else:
                 self._send_static(path)
         except StaleMaskError as exc:
@@ -94,17 +94,21 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/import/file":
                 self._require_binary_import_request()
-                raw = self._read_binary_body()
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
-                _images, imported = STATE.import_image_bytes_for_api(
-                    raw,
-                    name=name,
-                    relative_path=relative_path,
-                    client_key=client_key,
-                    include_images=False,
-                )
+                with STATE.import_staging_gate:
+                    staged_path = self._read_binary_body_to_file()
+                    try:
+                        _images, imported = STATE.import_image_file_for_api(
+                            staged_path,
+                            name=name,
+                            relative_path=relative_path,
+                            client_key=client_key,
+                            include_images=False,
+                        )
+                    finally:
+                        staged_path.unlink(missing_ok=True)
                 self._json({"imported": imported})
                 return
             self._require_json_request()
@@ -244,47 +248,88 @@ class MosaicHandler(BaseHTTPRequestHandler):
             raise ClientError("JSONオブジェクトが必要です。")
         return payload
 
-    def _read_binary_body(self) -> bytes:
+    def _read_binary_body_to_file(self) -> Path:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None or not raw_length.isdigit():
             raise ClientError("リクエストサイズが不正です。")
         content_length = int(raw_length)
         if content_length <= 0 or content_length > MAX_BODY_BYTES:
             raise ClientError("リクエストサイズが正しくありません。")
-        raw = self.rfile.read(content_length)
-        if len(raw) != content_length:
-            raise ClientError("画像データを最後まで読み込めません。")
-        return raw
+        staging_dir = STATE.cache_dir / "import-staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        remaining = content_length
+        try:
+            with tempfile.NamedTemporaryFile(dir=staging_dir, suffix=".upload.tmp", delete=False) as handle:
+                temporary_path = Path(handle.name)
+                while remaining:
+                    chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise ClientError("画像データを最後まで読み込めません。")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            result = temporary_path
+            temporary_path = None
+            return result
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
-    def _send_image(self, image_id: str, thumbnail: bool) -> None:
+    def _send_image(self, image_id: str, thumbnail: bool, version: str | None) -> None:
         record = STATE.image_snapshot(image_id)
+        STATE._assert_record_fresh(record)
+        asset_version = STATE.asset_version(record)
+        if version is not None and version != asset_version:
+            raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+        cache_control = "private, max-age=31536000, immutable" if version == asset_version else "no-store"
         if not thumbnail:
-            self._binary(record.path.read_bytes(), mimetypes.guess_type(record.path.name)[0] or "application/octet-stream")
+            self._stream_file(record.path, mimetypes.guess_type(record.path.name)[0] or "application/octet-stream", cache_control)
             return
         thumbnail_dir = STATE.cache_dir / "thumbnails"
         thumbnail_dir.mkdir(parents=True, exist_ok=True)
-        thumbnail_path = thumbnail_dir / f"{record.image_id}-{record.mtime_ns}-{record.size_bytes}-{record.content_version}.jpg"
-        for stale_thumbnail in thumbnail_dir.glob(f"{record.image_id}-*.jpg"):
-            if stale_thumbnail != thumbnail_path:
-                stale_thumbnail.unlink(missing_ok=True)
-        if not thumbnail_path.is_file():
-            with Image.open(record.path) as image:
-                image = ImageOps.exif_transpose(image)
-                image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-                output = io.BytesIO()
-                image.convert("RGB").save(output, format="JPEG", quality=82)
-            temporary_path: Path | None = None
-            try:
-                with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
-                    temporary_path = Path(handle.name)
-                    handle.write(output.getvalue())
-                    handle.flush()
-                os.replace(temporary_path, thumbnail_path)
-                temporary_path = None
-            finally:
-                if temporary_path is not None:
-                    temporary_path.unlink(missing_ok=True)
-        self._binary(thumbnail_path.read_bytes(), "image/jpeg")
+        thumbnail_path = thumbnail_dir / f"{record.image_id}-{asset_version}.jpg"
+        # Single-flight first: waiters for the same thumbnail do not consume a
+        # global generation slot.  Only its cache-miss producer takes one.
+        with STATE.image_io_lock(image_id):
+            if not thumbnail_path.is_file():
+                with STATE.thumbnail_gate:
+                    if not thumbnail_path.is_file():
+                        with STATE.lock:
+                            current = STATE.images.get(image_id)
+                            if current is None or STATE.asset_version(current) != asset_version:
+                                raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                        temporary_path: Path | None = None
+                        try:
+                            with Image.open(record.path) as image:
+                                image = ImageOps.exif_transpose(image)
+                                image.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                                output = io.BytesIO()
+                                image.convert("RGB").save(output, format="JPEG", quality=82)
+                            with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
+                                temporary_path = Path(handle.name)
+                                handle.write(output.getvalue())
+                                handle.flush()
+                                os.fsync(handle.fileno())
+                            with STATE.lock:
+                                current = STATE.images.get(image_id)
+                                if current is None or STATE.asset_version(current) != asset_version:
+                                    raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                            os.replace(temporary_path, thumbnail_path)
+                            temporary_path = None
+                        finally:
+                            if temporary_path is not None:
+                                temporary_path.unlink(missing_ok=True)
+        self._stream_file(thumbnail_path, "image/jpeg", cache_control)
+
+    def _send_candidate_mask(self, image_id: str, candidate_id: str, version: str | None) -> None:
+        snapshot = STATE.candidate_snapshot(image_id)
+        mask_version = f"{snapshot['candidateRevision']}-{candidate_id}"
+        if version is not None and version != mask_version:
+            raise StaleMaskError("検出候補は既に更新されています。")
+        cache_control = "private, max-age=31536000, immutable" if version == mask_version else "no-store"
+        self._binary(STATE.read_candidate_mask_png(image_id, candidate_id), "image/png", cache_control=cache_control)
 
     def _send_static(self, path: str) -> None:
         requested = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -331,6 +376,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _stream_file(self, path: Path, content_type: str, cache_control: str) -> None:
+        try:
+            size = path.stat().st_size
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            with path.open("rb") as handle:
+                while chunk := handle.read(IO_CHUNK_BYTES):
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser navigation can close a large-image response mid-stream.
+            return
+        except FileNotFoundError as exc:
+            raise ClientError("画像ファイルが見つかりません。") from exc
+
     def log_message(self, format: str, *args: Any) -> None:
         try:
             status = int(args[1])
@@ -354,6 +419,15 @@ def _read_mosaic_divisor(value: Any) -> int:
     if not 1 <= divisor <= 10000:
         raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
     return divisor
+
+
+def _request_version(query: str) -> str | None:
+    values = parse_qs(query, keep_blank_values=True).get("v")
+    if values is None:
+        return None
+    if len(values) != 1 or not values[0]:
+        raise ClientError("画像の版番号が不正です。", "stale_asset")
+    return values[0]
 
 
 def _read_candidate_revision(value: Any) -> int:

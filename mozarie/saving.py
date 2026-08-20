@@ -71,58 +71,79 @@ class SavingMixin:
         divisor: int,
         draft: Any,
     ) -> tuple[bytes, ImageRecord, int, str]:
-        record = self.image_for_id(image_id)
+        record = self.image_snapshot(image_id)
+        self._assert_record_fresh(record)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
-        with self.lock:
-            current_record = self.images.get(image_id)
-            if current_record is not record:
-                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
-
-            # A vanished mask changes the candidate state; force a fresh render rather
-            # than silently composing a different image under the old revision.
-            stored_candidates = self.candidates.get(image_id, [])
-            candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
-            if len(candidates) != len(stored_candidates):
-                self.candidates[image_id] = candidates
-                self._touch_candidates(image_id)
-            current_revision = self._candidate_revision(image_id)
-            if revision != current_revision:
-                raise ClientError("候補が変更されました。保存をやり直してください。")
-
-            source_fingerprint = self._source_fingerprint(record)
-            catalog_generation = self.catalog_generation
-            enabled_candidates = [candidate for candidate in candidates if candidate.enabled]
-            add_mask, exclusion_mask = draft_masks
-            enabled_apply_candidates = [candidate for candidate in enabled_candidates if candidate.role == CandidateRole.APPLY]
-            if not enabled_apply_candidates and add_mask is None:
-                raise ClientError("保存するモザイク範囲がありません。")
-            apply_masks: list[np.ndarray] = []
-            exclude_masks: list[np.ndarray] = []
-            for candidate in enabled_candidates:
-                try:
-                    with Image.open(candidate.mask_path) as mask_image:
-                        candidate_mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
-                except FileNotFoundError:
-                    self._remove_candidate_unchecked(image_id, candidate.candidate_id)
-                    self._touch_candidates(image_id)
-                    raise ClientError("検出候補のマスクが見つかりません。保存をやり直してください。")
-                if candidate_mask.shape != (record.height, record.width):
-                    raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(candidate_mask)
-            mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
-        if mask is None or not np.any(mask):
-            raise ClientError("保存するモザイク範囲がありません。")
         divisor = _read_mosaic_divisor(divisor)
-        output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-        with self.lock:
-            if self.catalog_generation != catalog_generation:
-                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
-            save_token = self._issue_browser_save_token_unchecked(
-                record, current_revision, source_fingerprint, catalog_generation, output,
-            )
-        return output, record, current_revision, save_token
+        rendered_path: Path | None = None
+        image_lock = self.image_io_lock(image_id)
+        try:
+            # The per-image lock comes first.  The state lock only captures an
+            # immutable epoch; PNG decode, source hashing, rendering and fsync do
+            # not block requests for other images.
+            with image_lock:
+                with self.lock:
+                    current_record = self.images.get(image_id)
+                    if current_record is None or current_record.path != record.path:
+                        raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+                    record = replace(current_record)
+                    if self._has_active_worker():
+                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
+                    current_revision = self._candidate_revision(image_id)
+                    if revision != current_revision:
+                        raise ClientError("候補が変更されました。保存をやり直してください。")
+                    catalog_generation = self.catalog_generation
+                    candidates = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+                # A candidate can disappear between the metadata snapshot and the
+                # disk read.  Do not compose a silently reduced mask.
+                apply_masks: list[np.ndarray] = []
+                exclude_masks: list[np.ndarray] = []
+                add_mask, exclusion_mask = draft_masks
+                enabled_apply_candidates = [candidate for candidate in candidates if candidate.enabled and candidate.role == CandidateRole.APPLY]
+                if not enabled_apply_candidates and add_mask is None:
+                    raise ClientError("保存するモザイク範囲がありません。")
+                for candidate in candidates:
+                    try:
+                        with Image.open(candidate.mask_path) as mask_image:
+                            candidate_mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
+                    except FileNotFoundError as exc:
+                        with self.lock:
+                            if self.images.get(image_id) is not None:
+                                self._remove_candidate_unchecked(image_id, candidate.candidate_id)
+                                self._touch_candidates(image_id)
+                        raise ClientError("候補が変更されました。保存をやり直してください。") from exc
+                    if candidate_mask.shape != (record.height, record.width):
+                        raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
+                    if candidate.enabled:
+                        (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(candidate_mask)
+                mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+                if mask is None or not np.any(mask):
+                    raise ClientError("保存するモザイク範囲がありません。")
+                source_fingerprint = self._source_fingerprint(record)
+                output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                if self._source_fingerprint(record) != source_fingerprint:
+                    raise ClientError("元画像が変更されました。保存をやり直してください。")
+                rendered_dir = self.cache_dir / "browser-save"
+                rendered_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=record.path.suffix.lower(), delete=False) as handle:
+                    rendered_path = Path(handle.name)
+                    handle.write(output)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+                with self.lock:
+                    if self.images.get(image_id) is None or self.catalog_generation != catalog_generation:
+                        raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                    if self._has_active_worker():
+                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
+                    save_token = self._issue_browser_save_token_unchecked(
+                        record, current_revision, source_fingerprint, catalog_generation, rendered_path,
+                    )
+                    rendered_path = None
+            return output, record, current_revision, save_token
+        finally:
+            if rendered_path is not None:
+                rendered_path.unlink(missing_ok=True)
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:

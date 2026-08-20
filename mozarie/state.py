@@ -35,6 +35,12 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
         self.candidate_revisions: dict[str, int] = {}
+        # These locks only serialize work for the same catalogue record.  State
+        # mutation still uses ``lock``; never acquire an image lock while that
+        # global lock is held.
+        self._image_io_locks: dict[str, threading.RLock] = {}
+        self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
+        self.import_staging_gate = threading.BoundedSemaphore(4)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self.session_token = secrets.token_urlsafe(32)

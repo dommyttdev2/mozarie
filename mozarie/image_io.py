@@ -203,6 +203,17 @@ def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -
         raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
+def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
+    """Fully decode a staged upload without reading its full body into memory."""
+    try:
+        with Image.open(path) as image:
+            image.load()
+            _assert_image_suffix_matches_format(expected_suffix, image.format)
+            return oriented_image_size(image)
+    except (OSError, UnidentifiedImageError) as exc:
+        raise ClientError("追加画像を読み込めません。") from exc
+
+
 def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
     source_segments, _source_scan = _parse_jpeg_header(source)
     metadata_segments: list[tuple[int, bytes]] = []
