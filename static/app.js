@@ -381,6 +381,9 @@ function updateActionButtons() {
   $("#nextImageButton").disabled = running || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
   $("#nextUnreviewedButton").disabled = running || !nextUnreviewedImage();
   $("#reviewAndNextButton").disabled = running || !hasImage;
+  $("#removeAndNextButton").disabled = running || !hasImage;
+  $("#hideAndNextButton").disabled = running || !hasImage;
+  updateCandidateBatchButtons(hasImage, locked);
   updateHistoryButtons();
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
@@ -392,6 +395,14 @@ function updateActionButtons() {
   $("#gallery").classList.toggle("locked", locked);
   canvas.style.pointerEvents = locked ? "none" : "";
   canvas.setAttribute("aria-disabled", String(locked));
+}
+
+function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing, hasManualExclude = false) {
+  for (const button of document.querySelectorAll("[data-candidate-batch]")) {
+    const [role] = button.dataset.candidateBatch.split(":");
+    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
+    button.disabled = locked || !hasRoleCandidate;
+  }
 }
 
 function clearBoundaryInteraction() {
@@ -1408,10 +1419,10 @@ function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
-  if (!state.currentId) return;
+  if (!state.currentId) { updateCandidateBatchButtons(false); return; }
   const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
   if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); return;
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
@@ -1484,6 +1495,7 @@ function renderCandidates() {
     row.append(enabled, blink, label, remove); (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
+  updateCandidateBatchButtons(undefined, undefined, hasManualExclude);
 }
 
 function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }

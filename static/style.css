@@ -37,8 +37,12 @@ input[type="range"] { accent-color: #4bb99d; }
 h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12px; }
 .text-button { min-height: 28px; padding-inline: 6px; border-color: transparent; background: transparent; color: #a9dacd; }
 .text-button:hover { border-color: #4e5660; background: #2c333b; }
-.gallery-heading > :first-child { display: flex; flex-wrap: wrap; gap: 3px 6px; align-items: baseline; min-width: 0; }
-.gallery-heading h2 { margin: 0; } .gallery-heading-actions { display: flex; gap: 4px; align-items: center; min-width: 0; }
+.gallery-heading { display: grid; align-items: center; gap: 5px; }
+.gallery-heading-main, .gallery-title, .gallery-heading-actions { display: flex; align-items: center; min-width: 0; }
+.gallery-heading-main { justify-content: space-between; gap: 5px; }
+.gallery-title { flex: 0 1 auto; gap: 6px; white-space: nowrap; }
+.gallery-heading h2 { margin: 0; } .gallery-heading-actions { flex: 0 0 auto; }
+.gallery-batch-mode { justify-self: start; min-height: 28px; padding-block: 3px; }
 #batchMoreButton { anchor-name: --batch-menu; }
 #batchMoreMenu { position-anchor: --batch-menu; inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 5px; }
 .gallery-tabs { display: flex; gap: 4px; align-items: center; padding: 7px 8px; border-bottom: 1px solid #3b424a; }
@@ -192,6 +196,7 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .gallery-name { padding-top: 4px; }
 .canvas-stage { position: absolute; inset: 0; }
 .canvas-tool-rail, .canvas-settings-bar, .canvas-navigation-bar { position: absolute; z-index: 4; display: flex; align-items: center; gap: 5px; border: 1px solid #48515a; border-radius: 5px; background: #20252aed; box-shadow: 0 8px 20px #0007; backdrop-filter: blur(4px); }
+#bucketToleranceControl[hidden] { display: none; }
 .canvas-tool-rail { padding: 5px; }
 .canvas-stage:not([data-tool-position]) .canvas-tool-rail, .canvas-stage[data-tool-position="left"] .canvas-tool-rail { top: 50%; left: 12px; flex-direction: column; transform: translateY(-50%); }
 .canvas-stage[data-tool-position="right"] .canvas-tool-rail { top: 50%; right: 12px; flex-direction: column; transform: translateY(-50%); }
@@ -246,7 +251,7 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .gallery-pane > .pane-rail { top: auto; right: 6px; bottom: 6px; }
 .candidate-pane > .pane-rail { left: 6px; }
 .pane-rail:hover { background: #2c333b; }
-.gallery-heading { padding-right: 42px; }
+.gallery-heading { padding-right: 10px; }
 .inspector-heading { padding-left: 42px; }
 .pane-content { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
 .studio-grid.gallery-collapsed { grid-template-columns: 40px minmax(0, 1fr) 240px; }

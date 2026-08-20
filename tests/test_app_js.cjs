@@ -252,6 +252,8 @@ assert.equal(translationFixtures.ja["settings.models"], "検出");
 assert.equal(translationFixtures.en["settings.models"], "Detection");
 assert.equal(translationFixtures.ja["settings.precisionModel"], "自動検出の輪郭を補正");
 assert.equal(translationFixtures.en["settings.fluidExclusion"], "Exclude semen");
+assert.equal(translationFixtures.ja["detectDialog.help"], "高いほど誤検出は減りますが、見逃しは増えます。");
+assert.equal(translationFixtures.en["detectDialog.help"], "Higher values reduce false positives but can miss targets.");
 assert.match(markup, /id="boundaryActions"[^>]*hidden/);
 assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
 assert.match(markup, /<nav class="appbar-commands" data-i18n-aria-label="appbar\.actions"/);

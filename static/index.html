@@ -39,11 +39,8 @@
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
       <div id="galleryPaneContent" class="pane-content">
       <div class="pane-heading gallery-heading">
-        <div>
-          <h2 data-i18n="gallery.title">画像</h2>
-          <span class="gallery-local-count muted">0件</span>
-        </div>
-        <div class="gallery-heading-actions"><button id="batchModeButton" type="button" aria-pressed="false" data-i18n="selection.batchMode">一括編集</button><button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.actions">全画像操作</button><div id="batchMoreMenu" class="batch-more-menu" popover><button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button><button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button></div></div>
+        <div class="gallery-heading-main"><div class="gallery-title"><h2 data-i18n="gallery.title">画像</h2><span class="gallery-local-count muted">0件</span></div><div class="gallery-heading-actions"><button id="batchMoreButton" type="button" popovertarget="batchMoreMenu" aria-expanded="false" data-i18n="batch.actions">全画像操作</button><div id="batchMoreMenu" class="batch-more-menu" popover><button id="clearAllMasksButton" class="danger" type="button" data-i18n="gallery.clearAllMasks">全画像のモザイク指定をクリア</button><button id="clearCatalogButton" class="danger" type="button" data-i18n="gallery.clearCatalog">読み込んだ画像をすべてクリア</button></div></div></div>
+        <button id="batchModeButton" class="gallery-batch-mode" type="button" aria-pressed="false" data-i18n="selection.batchMode">一括編集</button>
       </div>
       <div class="gallery-tabs" data-i18n-aria-label="gallery.tabs" aria-label="画像一覧の表示">
         <select id="galleryFilter" data-i18n-aria-label="gallery.tabs">
