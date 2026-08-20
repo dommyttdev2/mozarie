@@ -429,7 +429,10 @@ class CatalogMixin:
                                 raise ClientError("追加画像を読み込めません。") from exc
                         if not raw:
                             continue
-                        width, height = _verify_decodable_image(raw, expected_suffix=relative_path.suffix)
+                        _verify_decodable_image(raw)
+                        with Image.open(io.BytesIO(raw)) as image:
+                            _assert_image_suffix_matches_format(relative_path.suffix, image.format)
+                            width, height = oriented_image_size(image)
                         with temporary.open("xb") as destination:
                             destination.write(raw)
                             destination.flush()

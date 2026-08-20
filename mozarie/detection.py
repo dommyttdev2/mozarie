@@ -146,8 +146,9 @@ class DetectionMixin:
                         stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
                     for candidate in candidates:
                         final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                        os.replace(candidate.mask_path, final_path)
-                        candidate.mask_path = final_path
+                        if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                            os.replace(candidate.mask_path, final_path)
+                            candidate.mask_path = final_path
                     with self.lock:
                         if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
                                 or not self._job_is_current(job_generation, catalog_generation)
@@ -446,7 +447,7 @@ class DetectionMixin:
                 for item, candidate_mask in zip(created, masks):
                     temporary = item.mask_path.with_name(f".mozarie-pending-{item.candidate_id}.tmp")
                     item.mask_path.parent.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(candidate_mask).save(temporary, format="PNG")
+                    Image.fromarray(np.asarray(candidate_mask, dtype=np.uint8)).save(temporary, format="PNG")
                     temporary_paths.append(temporary)
                 with self.image_io_lock(image_id):
                     self._assert_record_fresh(record)
