@@ -2389,6 +2389,53 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
 
+    def test_candidate_compose_keeps_catalog_responsive_and_rejects_revision_race(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            opened = threading.Event()
+            release = threading.Event()
+            catalog_done = threading.Event()
+            job_done = threading.Event()
+            outcome = {}
+            original_open = jobs_module.Image.open
+
+            def delayed_open(path, *args, **kwargs):
+                if Path(path) == mask_path:
+                    opened.set()
+                    self.assertTrue(release.wait(2))
+                return original_open(path, *args, **kwargs)
+
+            def compose():
+                try:
+                    outcome["mask"] = state.combined_candidate_mask(image_id)
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
+                worker = threading.Thread(target=compose)
+                worker.start()
+                self.assertTrue(opened.wait(2))
+                catalog_thread = threading.Thread(target=lambda: (state.catalog_snapshot(), catalog_done.set()))
+                job_thread = threading.Thread(target=lambda: (state.job.as_dict(), job_done.set()))
+                catalog_thread.start(); job_thread.start()
+                self.assertTrue(catalog_done.wait(2))
+                self.assertTrue(job_done.wait(2))
+                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                release.set()
+                worker.join(2); catalog_thread.join(2); job_thread.join(2)
+
+            self.assertIsInstance(outcome.get("error"), ClientError)
+            self.assertIn("候補が変更", str(outcome["error"]))
+
     def test_list_candidates_prunes_missing_masks_and_advances_revision_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

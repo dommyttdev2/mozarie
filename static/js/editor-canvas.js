@@ -101,7 +101,7 @@ function lruRemember(cache, key, value, limit, release = null) {
   return value;
 }
 
-function imageAssetVersion(record) { return String(record.assetVersion || `${record.mtimeNs || 0}-${record.sizeBytes || 0}-${record.contentVersion || 0}`); }
+function imageAssetVersion(record) { return typeof record.assetVersion === "string" ? record.assetVersion : ""; }
 function imageCacheKey(record) { return `${record.id}:${imageAssetVersion(record)}`; }
 function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }
 
@@ -111,7 +111,8 @@ async function cachedImage(record) {
   if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
   const pending = state.imageInflight.get(key);
   if (pending) return pending;
-  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}?v=${encodeURIComponent(imageAssetVersion(record))}`)
+  const version = imageAssetVersion(record);
+  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`)
     .then((image) => lruRemember(state.imageCache, key, image, 6, releaseImageResource))
     .finally(() => state.imageInflight.delete(key));
   state.imageInflight.set(key, request);
