@@ -123,7 +123,7 @@ class MozarieTests(unittest.TestCase):
         rgba[..., 3] = 0
         rgba[2:4, 3:5, 3] = 255
 
-        decoded = server_module._decode_mask(self._png_data_url(Image.fromarray(rgba, "RGBA")), 8, 8)
+        decoded = server_module._decode_mask(self._png_data_url(Image.fromarray(rgba)), 8, 8)
 
         self.assertEqual(np.count_nonzero(decoded), 4)
         self.assertTrue(np.all(decoded[2:4, 3:5] == 255))
@@ -142,7 +142,7 @@ class MozarieTests(unittest.TestCase):
         rgba = np.zeros((2, 2, 4), dtype=np.uint8)
         rgba[0, 0] = (255, 0, 0, 255)
         output = server_module._apply_mosaic_to_image(
-            Image.fromarray(rgba, "RGBA"), np.full((2, 2), 255, dtype=np.uint8), 2,
+            Image.fromarray(rgba), np.full((2, 2), 255, dtype=np.uint8), 2,
         )
 
         self.assertEqual(tuple(np.asarray(output)[0, 0]), (255, 0, 0, 255))
@@ -291,7 +291,7 @@ class MozarieTests(unittest.TestCase):
             metadata = PngImagePlugin.PngInfo()
             metadata.add_text("prompt", '{"seed": 123}')
             metadata.add_itxt("workflow", '{"nodes": []}', lang="ja", tkey="workflow")
-            Image.fromarray(pixels, "RGB").save(path, format="PNG", pnginfo=metadata)
+            Image.fromarray(pixels).save(path, format="PNG", pnginfo=metadata)
             original = path.read_bytes()
             original_manifest = png_ancillary_manifest(original)
             original_mtime_ns = path.stat().st_mtime_ns
@@ -500,7 +500,7 @@ class MozarieTests(unittest.TestCase):
             image_id = images[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             self.assertEqual(state.clear_masks([image_id]), 1)
             self.assertEqual(state.list_candidates(image_id), [])
@@ -514,7 +514,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
 
             self.assertTrue(state.delete_candidate(image_id, "candidate"))
@@ -530,7 +530,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate-enabled.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [
                 Candidate("enabled", "penis", 0.9, mask_path, enabled=True),
                 Candidate("disabled", "penis", 0.9, mask_path, enabled=False),
@@ -562,7 +562,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id)
 
@@ -617,7 +617,7 @@ class MozarieTests(unittest.TestCase):
         record = state.image_for_id(image_id)
         mask_path = state.cache_dir / image_id / "candidate.png"
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+        Image.fromarray(self._mask(16, 16)).save(mask_path)
         state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
         thumbnail_dir = state.cache_dir / "thumbnails"
         thumbnail_dir.mkdir(parents=True, exist_ok=True)
@@ -696,7 +696,7 @@ class MozarieTests(unittest.TestCase):
             def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
                 if record.image_id == second_id:
                     control.cancel_requested.set()
                 return [Candidate(record.image_id, "penis", 0.9, mask_path)]
@@ -724,7 +724,7 @@ class MozarieTests(unittest.TestCase):
 
             old_mask_path = state.cache_dir / image_id / "old.png"
             old_mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(old_mask_path)
+            Image.fromarray(self._mask(16, 16)).save(old_mask_path)
             old_candidate = Candidate("old", "penis", 0.8, old_mask_path)
             state.candidates[image_id] = [old_candidate]
             new_mask_path = state.cache_dir / image_id / "new.png"
@@ -743,7 +743,7 @@ class MozarieTests(unittest.TestCase):
 
             def detect_image(*_args):
                 nonlocal inject_cancel
-                Image.fromarray(self._mask(16, 16), mode="L").save(new_mask_path)
+                Image.fromarray(self._mask(16, 16)).save(new_mask_path)
                 inject_cancel = True
                 return [Candidate("new", "penis", 0.9, new_mask_path)]
 
@@ -792,7 +792,7 @@ class MozarieTests(unittest.TestCase):
                 seen_models.append(id(models))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
                 return [Candidate(record.image_id, "penis", 0.9, mask_path)]
 
             with patch.object(state, "_ensure_models", return_value=base_models), patch.object(state, "_load_detection_models", return_value=second_models), patch.object(state, "_detect_image", side_effect=detect_image):
@@ -833,7 +833,7 @@ class MozarieTests(unittest.TestCase):
                     self.assertTrue(second_started.wait(2))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
                 return [Candidate(record.image_id, "penis", 0.9, mask_path)]
 
             thread = threading.Thread(
@@ -864,7 +864,7 @@ class MozarieTests(unittest.TestCase):
             def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
                 if record is records[0]:
                     started.set()
                     self.assertTrue(release.wait(2))
@@ -1336,7 +1336,7 @@ class MozarieTests(unittest.TestCase):
         penis = np.zeros((24, 24), dtype=np.uint8)
         penis[2:22, 2:22] = 255
         rgb[8:12, 8:12] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
         self.assertEqual(np.count_nonzero(fluid), 16)
 
     def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
@@ -1346,7 +1346,7 @@ class MozarieTests(unittest.TestCase):
         rgb[3:13, 3:13] = 255
         rgb[15:19, 3:7] = (255, 40, 40)
         rgb[20, 20] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
         self.assertFalse(np.any(fluid))
 
     def test_white_fluid_mask_rejects_pale_skin_connected_to_white_seeds(self):
@@ -1355,7 +1355,7 @@ class MozarieTests(unittest.TestCase):
         penis[2:22, 2:22] = 255
         rgb[6:11, 6:14] = (245, 230, 215)
         rgb[(6, 6, 10, 10), (6, 10, 6, 10)] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
         self.assertFalse(np.any(fluid))
 
     def test_white_fluid_mask_filters_many_components_without_per_label_equality_scans(self):
@@ -1381,7 +1381,7 @@ class MozarieTests(unittest.TestCase):
             "connectedComponentsWithStats",
             return_value=(len(components) + 1, tracked_labels, stats, np.zeros((len(components) + 1, 2))),
         ):
-            fluid = white_fluid_mask(Image.fromarray(rgb, mode="RGB"), penis)
+            fluid = white_fluid_mask(Image.fromarray(rgb), penis)
         self.assertEqual(TrackingLabels.equality_scans, 0)
         self.assertEqual(np.count_nonzero(fluid), 8 * 16)
         for top, left in components[:8]:
@@ -1604,7 +1604,7 @@ class MozarieTests(unittest.TestCase):
             state, "_sam_predictor_for", return_value=predictor
         ):
             result = state._refine_detected_segments(
-                Mock(), record, Image.fromarray(rgb, mode="RGB"),
+                Mock(), record, Image.fromarray(rgb),
                 [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "target"}],
             )
         self.assertEqual(result[0]["refinement"], "hand_fluid")
@@ -1823,10 +1823,10 @@ class MozarieTests(unittest.TestCase):
             boundary_hand_path = cache / "boundary-hand.png"
             old_auto_path = cache / "old-auto.png"
             new_auto_path = cache / "new-auto.png"
-            Image.fromarray(self._mask(12, 12), mode="L").save(boundary_path)
-            Image.fromarray(self._mask(12, 12), mode="L").save(boundary_hand_path)
-            Image.fromarray(self._mask(12, 12), mode="L").save(old_auto_path)
-            Image.fromarray(self._mask(12, 12), mode="L").save(new_auto_path)
+            Image.fromarray(self._mask(12, 12)).save(boundary_path)
+            Image.fromarray(self._mask(12, 12)).save(boundary_hand_path)
+            Image.fromarray(self._mask(12, 12)).save(old_auto_path)
+            Image.fromarray(self._mask(12, 12)).save(new_auto_path)
             boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary", origin="boundary")
             boundary_hand = Candidate("boundary-hand", "手を除外", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=server_module.CandidateRole.EXCLUDE)
             old_auto = Candidate("old-auto", "penis", 0.8, old_auto_path)
@@ -2225,7 +2225,7 @@ class MozarieTests(unittest.TestCase):
             source = state.image_for_id(session_id)
             mask_path = state.cache_dir / session_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[session_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(session_id)
 
@@ -2396,7 +2396,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
 
             opened = threading.Event()
@@ -2439,7 +2439,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             expected_revision = state._touch_candidates(image_id)
             state._touch_candidates(image_id)
@@ -2460,7 +2460,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             original_snapshot = state.candidate_snapshot
             snapshotted = threading.Event()
@@ -2510,7 +2510,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id)
             opened = threading.Event()
@@ -2578,7 +2578,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
 
@@ -2652,7 +2652,7 @@ class MozarieTests(unittest.TestCase):
             first_id, second_id = (image["id"] for image in listed)
             valid = state.cache_dir / first_id / "valid.png"
             valid.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(valid)
+            Image.fromarray(self._mask(16, 16)).save(valid)
             missing = state.cache_dir / second_id / "missing.png"
             state.candidates[first_id] = [Candidate("valid", "penis", 0.9, valid)]
             state.candidates[second_id] = [Candidate("missing", "penis", 0.9, missing)]
@@ -2692,7 +2692,7 @@ class MozarieTests(unittest.TestCase):
 
             stale = Candidate("stale", "penis", 0.9, state.cache_dir / image_id / "stale.png")
             stale.mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(stale.mask_path)
+            Image.fromarray(self._mask(16, 16)).save(stale.mask_path)
             def stale_detection(*_args):
                 state.catalog_generation += 1
                 return [stale]
@@ -3148,7 +3148,7 @@ class MozarieTests(unittest.TestCase):
             version = state.list_images()[0]["assetVersion"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             candidate_revision = state._touch_candidates(image_id)
             with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state):
@@ -3468,7 +3468,7 @@ class MozarieTests(unittest.TestCase):
             record = state.image_for_id(image_id)
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
@@ -3503,7 +3503,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
@@ -3526,7 +3526,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
@@ -3574,7 +3574,7 @@ class MozarieTests(unittest.TestCase):
         record = state.image_for_id(image_id)
         mask_path = state.cache_dir / image_id / "candidate.png"
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+        Image.fromarray(self._mask(16, 16)).save(mask_path)
         state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
         revision = state._touch_candidates(image_id)
 
@@ -3600,7 +3600,7 @@ class MozarieTests(unittest.TestCase):
         record = state.image_for_id(image_id)
         mask_path = state.cache_dir / image_id / "candidate.png"
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+        Image.fromarray(self._mask(16, 16)).save(mask_path)
         state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
         revision = state._touch_candidates(image_id)
 
@@ -3621,7 +3621,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
@@ -3648,7 +3648,7 @@ class MozarieTests(unittest.TestCase):
             pixels[..., 2] = (pixels[..., 0].astype(np.uint16) + pixels[..., 1]) % 256
             metadata = PngImagePlugin.PngInfo()
             metadata.add_text("prompt", '{"seed": 13}')
-            Image.fromarray(pixels, "RGB").save(source, pnginfo=metadata)
+            Image.fromarray(pixels).save(source, pnginfo=metadata)
 
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
@@ -3656,7 +3656,7 @@ class MozarieTests(unittest.TestCase):
             rgba_mask = np.full((height, width, 4), 255, dtype=np.uint8)
             rgba_mask[..., 3] = 0
             rgba_mask[600:616, 400:416, 3] = 255
-            draft = {"add": self._png_data_url(Image.fromarray(rgba_mask, "RGBA"))}
+            draft = {"add": self._png_data_url(Image.fromarray(rgba_mask))}
             binary_mask = np.zeros((height, width), dtype=np.uint8)
             binary_mask[600:616, 400:416] = 255
 
@@ -3685,7 +3685,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id)
 
@@ -3707,7 +3707,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id)
 
@@ -3730,7 +3730,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
 
@@ -3760,7 +3760,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, expired_token = state.render_browser_save(image_id, revision, 100, None)
@@ -3789,7 +3789,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(source.parent))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
@@ -3811,7 +3811,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, _rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
@@ -3828,7 +3828,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
 
@@ -3855,7 +3855,7 @@ class MozarieTests(unittest.TestCase):
         record = state.image_for_id(image_id)
         mask_path = state.cache_dir / image_id / "candidate.png"
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+        Image.fromarray(self._mask(16, 16)).save(mask_path)
         state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
         revision = state._touch_candidates(image_id)
 
@@ -3875,18 +3875,18 @@ class MozarieTests(unittest.TestCase):
             source = Path(directory) / "source.png"
             pixels = np.zeros((16, 16, 3), dtype=np.uint8)
             pixels[..., 0] = 50
-            Image.fromarray(pixels, "RGB").save(source, compress_level=0)
+            Image.fromarray(pixels).save(source, compress_level=0)
             state = self.new_state()
             image_id = state.set_root(str(source.parent))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
             original_stat = source.stat()
             pixels[..., 0] = 200
-            Image.fromarray(pixels, "RGB").save(source, compress_level=0)
+            Image.fromarray(pixels).save(source, compress_level=0)
             self.assertEqual(source.stat().st_size, original_stat.st_size)
             os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
@@ -3903,7 +3903,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
@@ -3923,7 +3923,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
@@ -3957,7 +3957,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             mask = self._mask(16, 16)
             mask[2:6, 2:6] = 255
-            Image.fromarray(mask, mode="L").save(mask_path)
+            Image.fromarray(mask).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             render_started = threading.Event()
@@ -4004,7 +4004,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             mask_path.unlink()
@@ -4034,7 +4034,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             Image.new("RGB", (16, 16), "black").save(source)
             with self.assertRaises(ClientError):
@@ -4067,7 +4067,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)

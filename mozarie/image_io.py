@@ -341,14 +341,14 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
         )
         output = image_array.copy()
         output[..., :3] = np.where(mask[..., None] > 0, np.clip(np.rint(pixelated_rgb), 0, 255).astype(np.uint8), image_array[..., :3])
-        return Image.fromarray(output, "RGBA")
+        return Image.fromarray(output)
 
     pixelated = image.resize(
         (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size))),
         Image.Resampling.BOX,
     ).resize((width, height), Image.Resampling.NEAREST)
     output = np.where(mask[..., None] > 0, np.asarray(pixelated), image_array) if original_mode == "RGB" else np.where(mask > 0, np.asarray(pixelated), image_array)
-    return Image.fromarray(output, original_mode)
+    return Image.fromarray(output)
 
 
 def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:

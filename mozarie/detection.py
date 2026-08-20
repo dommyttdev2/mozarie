@@ -322,7 +322,7 @@ class DetectionMixin:
             segment["mask"] = original_mask
             candidate_id = uuid.uuid4().hex
             mask_path = destination / f"{candidate_id}.png"
-            Image.fromarray(segment["mask"], mode="L").save(mask_path, format="PNG")
+            Image.fromarray(np.asarray(segment["mask"], dtype=np.uint8)).save(mask_path, format="PNG")
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
@@ -340,7 +340,7 @@ class DetectionMixin:
                 exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
                 exclusion_path = destination / f"{exclusion_id}.png"
-                Image.fromarray(exclusion_mask, mode="L").save(exclusion_path, format="PNG")
+                Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion_path, format="PNG")
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
                     class_name=SOURCE_LABELS[exclusion_source],
@@ -423,7 +423,7 @@ class DetectionMixin:
                 if self.images.get(image_id) is not record:
                     raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
                 candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
+                Image.fromarray(np.asarray(clipped, dtype=np.uint8)).save(candidate.mask_path, format="PNG")
                 created = [candidate]
                 self.candidates.setdefault(image_id, []).append(candidate)
                 for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
@@ -441,7 +441,7 @@ class DetectionMixin:
                         origin="boundary",
                         role=CandidateRole.EXCLUDE,
                     )
-                    Image.fromarray(exclusion_mask, mode="L").save(exclusion.mask_path, format="PNG")
+                    Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion.mask_path, format="PNG")
                     self.candidates[image_id].append(exclusion)
                     created.append(exclusion)
                 revision = self._touch_candidates(image_id)
