@@ -3299,6 +3299,49 @@ class MozarieTests(unittest.TestCase):
                     httpd.shutdown()
                     httpd.server_close()
 
+    def test_missing_full_image_after_preflight_returns_error_before_ok_headers(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            version = state.list_images()[0]["assetVersion"]
+            validated = threading.Event()
+            response_statuses = []
+            original_assert = state._assert_record_fresh
+            original_send_response = MosaicHandler.send_response
+
+            def remove_after_preflight(record):
+                original_assert(record)
+                source.unlink()
+                validated.set()
+
+            def record_response(handler, status, *args, **kwargs):
+                response_statuses.append(status)
+                return original_send_response(handler, status, *args, **kwargs)
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(state, "_assert_record_fresh", side_effect=remove_after_preflight), \
+                 patch.object(MosaicHandler, "send_response", new=record_response):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                try:
+                    connection.request("GET", f"/api/image/{image_id}?v={version}")
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertTrue(validated.is_set())
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(payload["error_code"], "invalid_request")
+                    self.assertEqual(response_statuses, [400])
+                finally:
+                    connection.close()
+                    httpd.shutdown()
+                    httpd.server_close()
+
     def test_exact_image_stream_holds_image_lock_until_opened_handle_finishes(self):
         from http.server import ThreadingHTTPServer
 
