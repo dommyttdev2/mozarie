@@ -922,6 +922,48 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
 
+    def test_apply_worker_serializes_the_same_image_but_overlaps_distinct_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "first.png")
+            Image.new("RGB", (16, 16), "black").save(root / "second.png")
+            state = self.new_state()
+            first_id, second_id = (image["id"] for image in state.set_root(str(root)))
+            first, second = (state.image_for_id(image_id) for image_id in (first_id, second_id))
+            masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
+            state.job = server_module.Job(kind="apply", state="running", total=3, image_ids=(first_id, first_id, second_id))
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release = threading.Event()
+            started: list[str] = []
+            started_lock = threading.Lock()
+
+            def delayed_save(record, _mask, _block_size):
+                with started_lock:
+                    started.append(record.image_id)
+                    if record.image_id == first_id and started.count(first_id) == 1:
+                        first_entered.set()
+                    if record.image_id == second_id:
+                        second_entered.set()
+                self.assertTrue(release.wait(2))
+
+            worker = threading.Thread(
+                target=state._apply_worker,
+                args=([first, first, second], 100, masks),
+                kwargs={"saving_parallelism": 3},
+            )
+            with patch.object(saving_module, "save_with_mask", side_effect=delayed_save):
+                worker.start()
+                self.assertTrue(first_entered.wait(2))
+                self.assertTrue(second_entered.wait(2))
+                with started_lock:
+                    self.assertEqual(started.count(first_id), 1)
+                release.set()
+                worker.join(3)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(started.count(first_id), 2)
+
     def test_parallel_apply_starts_two_workers_and_publishes_results_in_input_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2389,6 +2431,76 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
 
+    def test_candidate_mask_read_rejects_expected_revision_before_decoding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            expected_revision = state._touch_candidates(image_id)
+            state._touch_candidates(image_id)
+
+            with patch.object(catalog_module.Image, "open") as image_open:
+                with self.assertRaisesRegex(server_module.StaleMaskError, "更新"):
+                    state.read_candidate_mask_png(image_id, "candidate", expected_revision=expected_revision)
+
+            image_open.assert_not_called()
+
+    def test_http_candidate_mask_snapshot_rejects_a_revision_changed_before_decode(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            original_snapshot = state.candidate_snapshot
+            snapshotted = threading.Event()
+            release = threading.Event()
+
+            def delayed_snapshot(requested_id):
+                snapshot = original_snapshot(requested_id)
+                snapshotted.set()
+                self.assertTrue(release.wait(2))
+                return snapshot
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(state, "candidate_snapshot", side_effect=delayed_snapshot):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                result = {}
+
+                def request_mask():
+                    connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        connection.request("GET", f"/api/mask/{image_id}/candidate")
+                        response = connection.getresponse()
+                        result["status"] = response.status
+                        result["body"] = response.read()
+                    finally:
+                        connection.close()
+
+                request = threading.Thread(target=request_mask)
+                request.start()
+                self.assertTrue(snapshotted.wait(2))
+                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                release.set()
+                request.join(3)
+                httpd.shutdown()
+                httpd.server_close()
+
+            self.assertEqual(result["status"], 404)
+            self.assertNotEqual(result["body"], mask_path.read_bytes())
+
     def test_candidate_compose_keeps_catalog_responsive_and_rejects_revision_race(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3154,6 +3266,99 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(calls, 1)
             self.assertEqual([status for status, _body in results], [200] * 8)
 
+    def test_exact_image_version_rejects_mutation_after_preflight_before_headers(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            version = state.list_images()[0]["assetVersion"]
+            original_assert = state._assert_record_fresh
+
+            def mutate_after_preflight(record):
+                original_assert(record)
+                stat = source.stat()
+                os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(state, "_assert_record_fresh", side_effect=mutate_after_preflight):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                try:
+                    connection.request("GET", f"/api/image/{image_id}?v={version}")
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(payload["error_code"], "stale_asset")
+                finally:
+                    connection.close()
+                    httpd.shutdown()
+                    httpd.server_close()
+
+    def test_exact_image_stream_holds_image_lock_until_opened_handle_finishes(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            expected_body = source.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            version = state.list_images()[0]["assetVersion"]
+            started = threading.Event()
+            release = threading.Event()
+            writer_attempted = threading.Event()
+            writer_done = threading.Event()
+            result = {}
+            original_stream = MosaicHandler._stream_file
+
+            def delayed_stream(handler, handle, record, *args):
+                if record is not None:
+                    started.set()
+                    self.assertTrue(release.wait(2))
+                return original_stream(handler, handle, record, *args)
+
+            def request_image(port):
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    connection.request("GET", f"/api/image/{image_id}?v={version}")
+                    response = connection.getresponse()
+                    result["status"] = response.status
+                    result["body"] = response.read()
+                finally:
+                    connection.close()
+
+            def mutate_source():
+                writer_attempted.set()
+                with state.image_io_lock(image_id):
+                    Image.new("RGB", (16, 16), "black").save(source)
+                writer_done.set()
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(MosaicHandler, "_stream_file", new=delayed_stream):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                server_thread.start()
+                reader = threading.Thread(target=request_image, args=(httpd.server_port,))
+                reader.start()
+                self.assertTrue(started.wait(2))
+                writer = threading.Thread(target=mutate_source)
+                writer.start()
+                self.assertTrue(writer_attempted.wait(2))
+                self.assertFalse(writer_done.is_set())
+                release.set()
+                reader.join(3)
+                writer.join(3)
+                httpd.shutdown()
+                httpd.server_close()
+
+            self.assertEqual(result, {"status": 200, "body": expected_body})
+            self.assertTrue(writer_done.is_set())
+
     def test_thumbnail_generation_limits_distinct_images_to_four(self):
         from http.server import ThreadingHTTPServer
 
@@ -3232,6 +3437,86 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), output)
             self.assertEqual(record.size_bytes, source.stat().st_size)
             self.assertGreater(record.content_version, 0)
+
+    def test_browser_save_commit_acquires_import_lock_before_its_image_lock(self):
+        class RecordingLock:
+            def __init__(self, label, events):
+                self.label = label
+                self.events = events
+                self.lock = threading.RLock()
+
+            def __enter__(self):
+                self.events.append(self.label)
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                self.lock.release()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            events = []
+            original_import_lock = state.import_lock
+            state.import_lock = RecordingLock("import", events)
+            try:
+                with patch.object(state, "image_io_lock", return_value=RecordingLock("image", events)):
+                    state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            finally:
+                state.import_lock = original_import_lock
+
+            self.assertEqual(events[:2], ["import", "image"])
+
+    def test_catalog_clear_waits_for_browser_commit_to_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            fingerprint_started = threading.Event()
+            release = threading.Event()
+            clear_done = threading.Event()
+            commit_result = {}
+            original_fingerprint = state._source_fingerprint
+
+            def delayed_fingerprint(record):
+                fingerprint_started.set()
+                self.assertTrue(release.wait(2))
+                return original_fingerprint(record)
+
+            with patch.object(state, "_source_fingerprint", side_effect=delayed_fingerprint):
+                commit = threading.Thread(
+                    target=lambda: commit_result.setdefault(
+                        "value", state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                    )
+                )
+                commit.start()
+                self.assertTrue(fingerprint_started.wait(2))
+                clearer = threading.Thread(target=lambda: (state.clear_catalog(), clear_done.set()))
+                clearer.start()
+                self.assertFalse(clear_done.is_set())
+                release.set()
+                commit.join(3)
+                clearer.join(3)
+
+            self.assertFalse(commit.is_alive())
+            self.assertTrue(commit_result["value"]["cleared"])
+            self.assertTrue(clear_done.is_set())
+            self.assertEqual(state.list_images(), [])
 
     def test_browser_save_session_overwrite_synchronizes_the_session_image(self):
         raw = io.BytesIO()

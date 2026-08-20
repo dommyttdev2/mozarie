@@ -1,6 +1,7 @@
 from .core import *
 from .state import STATE
 from .image_io import *
+from typing import BinaryIO
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
@@ -279,21 +280,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 temporary_path.unlink(missing_ok=True)
 
     def _send_image(self, image_id: str, thumbnail: bool, version: str | None) -> None:
-        record = STATE.image_snapshot(image_id)
-        STATE._assert_record_fresh(record)
-        asset_version = STATE.asset_version(record)
-        if version is not None and version != asset_version:
-            raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-        cache_control = "private, max-age=31536000, immutable" if version == asset_version else "no-store"
-        if not thumbnail:
-            self._stream_file(record.path, mimetypes.guess_type(record.path.name)[0] or "application/octet-stream", cache_control)
-            return
-        thumbnail_dir = STATE.cache_dir / "thumbnails"
-        thumbnail_dir.mkdir(parents=True, exist_ok=True)
-        thumbnail_path = thumbnail_dir / f"{record.image_id}-{asset_version}.jpg"
-        # Single-flight first: waiters for the same thumbnail do not consume a
-        # global generation slot.  Only its cache-miss producer takes one.
         with STATE.image_io_lock(image_id):
+            record = STATE.image_snapshot(image_id)
+            STATE._assert_record_fresh(record)
+            asset_version = STATE.asset_version(record)
+            if version is not None and version != asset_version:
+                raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+            cache_control = "private, max-age=31536000, immutable" if version == asset_version else "no-store"
+            if not thumbnail:
+                try:
+                    with record.path.open("rb") as handle:
+                        self._stream_file(handle, record, mimetypes.guess_type(record.path.name)[0] or "application/octet-stream", cache_control)
+                except FileNotFoundError as exc:
+                    raise ClientError("画像ファイルが見つかりません。") from exc
+                return
+
+            thumbnail_dir = STATE.cache_dir / "thumbnails"
+            thumbnail_dir.mkdir(parents=True, exist_ok=True)
+            thumbnail_path = thumbnail_dir / f"{record.image_id}-{asset_version}.jpg"
+            # Single-flight first: waiters for the same thumbnail do not consume a
+            # global generation slot.  Only its cache-miss producer takes one.
             if not thumbnail_path.is_file():
                 with STATE.thumbnail_gate:
                     if not thumbnail_path.is_file():
@@ -322,7 +328,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         finally:
                             if temporary_path is not None:
                                 temporary_path.unlink(missing_ok=True)
-        self._stream_file(thumbnail_path, "image/jpeg", cache_control)
+            try:
+                with thumbnail_path.open("rb") as handle:
+                    self._stream_file(handle, None, "image/jpeg", cache_control)
+            except FileNotFoundError as exc:
+                raise ClientError("サムネイルを作成できませんでした。") from exc
 
     def _send_candidate_mask(self, image_id: str, candidate_id: str, version: str | None) -> None:
         snapshot = STATE.candidate_snapshot(image_id)
@@ -330,7 +340,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if version is not None and version != mask_version:
             raise StaleMaskError("検出候補は既に更新されています。")
         cache_control = "private, max-age=31536000, immutable" if version == mask_version else "no-store"
-        self._binary(STATE.read_candidate_mask_png(image_id, candidate_id), "image/png", cache_control=cache_control)
+        self._binary(
+            STATE.read_candidate_mask_png(image_id, candidate_id, expected_revision=snapshot["candidateRevision"]),
+            "image/png",
+            cache_control=cache_control,
+        )
 
     def _send_static(self, path: str) -> None:
         requested = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -377,9 +391,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _stream_file(self, path: Path, content_type: str, cache_control: str) -> None:
+    def _stream_file(self, handle: BinaryIO, record: ImageRecord | None, content_type: str, cache_control: str) -> None:
         try:
-            size = path.stat().st_size
+            stat = os.fstat(handle.fileno())
+            if record is not None and (stat.st_mtime_ns != record.mtime_ns or stat.st_size != record.size_bytes):
+                raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+            size = stat.st_size
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(size))
@@ -388,14 +405,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            with path.open("rb") as handle:
-                while chunk := handle.read(IO_CHUNK_BYTES):
-                    self.wfile.write(chunk)
+            while chunk := handle.read(IO_CHUNK_BYTES):
+                self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             # Browser navigation can close a large-image response mid-stream.
             return
-        except FileNotFoundError as exc:
-            raise ClientError("画像ファイルが見つかりません。") from exc
 
     def log_message(self, format: str, *args: Any) -> None:
         try:

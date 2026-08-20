@@ -9,19 +9,25 @@ globals().update({name: value for name, value in vars(_image_io).items() if not 
 class CatalogMixin:
     def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
         with self.lock:
-            self._assert_catalog_mutable()
-            self.images = {record.image_id: record for record in records}
-            self.order = [record.image_id for record in records]
-            self.candidates = {}
-            self.candidate_revisions = {record.image_id: 0 for record in records}
-            self._clear_browser_save_tokens_unchecked()
-            self.root = root
-            self._invalidate_sam_cache()
-            self.job = Job()
-            self.catalog_generation += 1
-            session = self._detach_session_unchecked()
-        self._clear_cache()
-        self._release_detached_session(session)
+            previous_ids = tuple(self.images)
+        locks = [(image_id, self.image_io_lock(image_id)) for image_id in previous_ids]
+        with ExitStack() as stack:
+            for _image_id, image_lock in sorted(locks):
+                stack.enter_context(image_lock)
+            with self.lock:
+                self._assert_catalog_mutable()
+                self.images = {record.image_id: record for record in records}
+                self.order = [record.image_id for record in records]
+                self.candidates = {}
+                self.candidate_revisions = {record.image_id: 0 for record in records}
+                self._clear_browser_save_tokens_unchecked()
+                self.root = root
+                self._invalidate_sam_cache()
+                self.job = Job()
+                self.catalog_generation += 1
+                session = self._detach_session_unchecked()
+            self._clear_cache()
+            self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
         return self.list_images()
 
@@ -82,17 +88,23 @@ class CatalogMixin:
     def clear_catalog(self) -> None:
         with self.import_lock:
             with self.lock:
-                self._assert_catalog_mutable()
-                self.images = {}
-                self.order = []
-                self.candidates = {}
-                self.candidate_revisions = {}
-                self._clear_browser_save_tokens_unchecked()
-                self._invalidate_sam_cache()
-                self.catalog_generation += 1
-                session = self._detach_session_unchecked()
-            self._clear_cache()
-            self._release_detached_session(session)
+                image_ids = tuple(self.images)
+            locks = [(image_id, self.image_io_lock(image_id)) for image_id in image_ids]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    self._assert_catalog_mutable()
+                    self.images = {}
+                    self.order = []
+                    self.candidates = {}
+                    self.candidate_revisions = {}
+                    self._clear_browser_save_tokens_unchecked()
+                    self._invalidate_sam_cache()
+                    self.catalog_generation += 1
+                    session = self._detach_session_unchecked()
+                self._clear_cache()
+                self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
@@ -167,15 +179,21 @@ class CatalogMixin:
             return
         with self.import_lock:
             with self.lock:
-                session = self._detach_session_unchecked()
-                self._clear_browser_save_tokens_unchecked()
-                cache_lock = self._cache_lock_handle if self._owns_process_cache else None
+                image_ids = tuple(self.images)
+            locks = [(image_id, self.image_io_lock(image_id)) for image_id in image_ids]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    session = self._detach_session_unchecked()
+                    self._clear_browser_save_tokens_unchecked()
+                    cache_lock = self._cache_lock_handle if self._owns_process_cache else None
+                    if self._owns_process_cache:
+                        self._cache_lock_handle = None
+                self._release_detached_session(session)
+                self._release_directory_lock(cache_lock)
                 if self._owns_process_cache:
-                    self._cache_lock_handle = None
-            self._release_detached_session(session)
-            self._release_directory_lock(cache_lock)
-            if self._owns_process_cache:
-                shutil.rmtree(self.cache_dir, ignore_errors=True)
+                    shutil.rmtree(self.cache_dir, ignore_errors=True)
         self.cleanup_expired_browser_save_tokens()
 
     def _touch_candidates(self, image_id: str) -> int:
@@ -663,7 +681,7 @@ class CatalogMixin:
         candidates = self.candidates.get(image_id, [])
         self.candidates[image_id] = [candidate for candidate in candidates if candidate.candidate_id != candidate_id]
 
-    def read_candidate_mask_png(self, image_id: str, candidate_id: str) -> bytes:
+    def read_candidate_mask_png(self, image_id: str, candidate_id: str, *, expected_revision: int | None = None) -> bytes:
         """Convert one mask without holding the catalogue lock during PNG I/O."""
         with self.image_io_lock(image_id):
             with self.lock:
@@ -675,6 +693,8 @@ class CatalogMixin:
                     raise StaleMaskError("検出候補は既に更新されています。")
                 candidate = replace(candidate)
                 revision = self._candidate_revision(image_id)
+                if expected_revision is not None and revision != expected_revision:
+                    raise StaleMaskError("検出候補は既に更新されています。")
             try:
                 with Image.open(candidate.mask_path) as mask_image:
                     alpha = mask_image.convert("L")
@@ -693,7 +713,12 @@ class CatalogMixin:
                     (item for item in self.candidates.get(image_id, []) if item.candidate_id == candidate_id),
                     None,
                 )
-                if current is None or current.mask_path != candidate.mask_path or self._candidate_revision(image_id) != revision:
+                if (
+                    current is None
+                    or current.mask_path != candidate.mask_path
+                    or self._candidate_revision(image_id) != revision
+                    or (expected_revision is not None and revision != expected_revision)
+                ):
                     raise StaleMaskError("検出候補は既に更新されています。")
             return output.getvalue()
 
