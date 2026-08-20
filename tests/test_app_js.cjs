@@ -298,7 +298,7 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
 }
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
@@ -2247,6 +2247,14 @@ const completionWatchdog = setTimeout(() => {
   await languageSwitchSave;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
+  assert.equal(state.settingsStatus, null, "saving leaves model and GPU status unverified");
+  const resetSettingsRun = context.__mosaicTest.resetSettings();
+  assert.equal(requests.at(-1).path, "/api/settings/reset?status=0", "resetting settings skips the expensive status probe");
+  resolvePendingFetch("/api/settings/reset?status=0", { ok: true, json: async () => ({ settings: englishSettings, version: "v0.3.1" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
+  await resetSettingsRun;
+  assert.equal(state.settingsStatus, null, "resetting leaves model and GPU status unverified");
   const settingsRequestsBeforeReopen = requests.filter((request) => request.path.startsWith("/api/settings")).length;
   state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
   elements.get("#settingsVersion").textContent = "v0.2.0";
@@ -2266,11 +2274,26 @@ const completionWatchdog = setTimeout(() => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get("#settingsTargetModel").value, "unsaved.onnx", "model status refresh does not overwrite unsaved settings");
   assert.equal(state.settingsStatus.gpus[0].id, 2, "model status refresh updates only status state");
+  elements.get("#settingsStatusButton").click();
+  assert.equal(elements.get("#settingsStatusResult").textContent, translationFixtures.en["settings.statusChecking"], "model status check reports loading");
+  resolvePendingFetch("/api/settings", { ok: false, json: async () => ({ error: "backend" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#settingsStatusResult").classList.contains("error"), true, "model status errors stay in the live result");
   elements.get("#checkUpdateButton").click();
   assert.equal(elements.get("#checkUpdateButton").disabled, true, "update check button is disabled while checking");
   resolvePendingFetch("/api/update/status", { ok: true, json: async () => ({ current: "v0.3.1", latest: "v0.3.1", available: false }) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.current"].replace("{version}", "v0.3.1"), "explicit update checks report the current release");
+  elements.get("#checkUpdateButton").click();
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.checking"], "update checks report loading");
+  resolvePendingFetch("/api/update/status", { ok: true, json: async () => ({ current: "v0.3.1", latest: "v0.3.2", available: true }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.available"], "available updates are announced");
+  elements.get("#checkUpdateButton").dataset.available = "false";
+  elements.get("#checkUpdateButton").click();
+  resolvePendingFetch("/api/update/status", { ok: false, json: async () => ({ error: "backend" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(elements.get("#updateStatus").textContent, translationFixtures.en["update.checkFailed"], "update errors use localized guidance");
 
   // Flood-fill responses are token-bound: a switch discards stale spans and
   // releases the busy state without touching history.

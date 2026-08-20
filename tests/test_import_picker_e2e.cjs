@@ -135,6 +135,12 @@ async function assertDesktopLayout(page, width, height) {
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
   await assertVisibleButtons(page, `${width}x${height} edit`);
+  const appbar = await page.evaluate(() => {
+    const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+    return { status: box("#status"), actions: box(".appbar-actions"), appbar: box(".appbar") };
+  });
+  assert.ok(appbar.actions.right <= appbar.appbar.right, `appbar actions stay right-aligned at ${width}x${height}`);
+  assert.ok(appbar.status.right <= appbar.actions.left, `status keeps the central flex space at ${width}x${height}`);
   if (width === 1280 && height === 720) {
     const heading = await page.evaluate(() => {
       const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
@@ -220,6 +226,32 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.locator("#settingsButton").click();
+    assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
+    await page.locator("#settingsTabModels").click();
+    await page.locator("#settingsTargetModel").fill("unsaved.onnx");
+    await page.locator("#settingsStatusButton").click();
+    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
+    assert.equal(await page.locator("#settingsTargetModel").inputValue(), "unsaved.onnx", "model status refresh keeps unsaved form values");
+    assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
+      const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
+    })), true, "all model help buttons, including SAM type, share the compact 28px target");
+    await page.locator("#settingsTabShortcuts").click();
+    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+      const children = [...row.children];
+      return children.length === 3 && children.every((child) => Math.abs((child.getBoundingClientRect().y + child.getBoundingClientRect().height / 2) - (row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2)) < 2);
+    })), true, "all shortcut bindings keep one three-column row");
+    await page.locator("#settingsTabInfo").click();
+    const versionRow = await page.evaluate(() => {
+      const version = document.querySelector("#settingsVersion").getBoundingClientRect();
+      const button = document.querySelector("#checkUpdateButton").getBoundingClientRect();
+      return { sameRow: Math.abs((version.y + version.height / 2) - (button.y + button.height / 2)) < 2, buttonWidth: button.width };
+    });
+    assert.equal(versionRow.sameRow, true, "the update button shares the version row");
+    assert.ok(versionRow.buttonWidth > 0, "the update button remains compact and clickable");
+    await page.locator("#checkUpdateButton").click();
+    await page.waitForFunction(() => document.querySelector("#updateStatus").textContent.includes("最新"));
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");
     await page.locator("#boundaryTool").click();
     await page.locator("#bucketTool").click();
@@ -230,7 +262,7 @@ async function main() {
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
     for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) {
       await page.setViewportSize(viewport);
       const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
@@ -239,7 +271,7 @@ async function main() {
       assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible in the inspector");
     }
     for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertDesktopLayout(page, viewport.width, viewport.height);
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
@@ -359,6 +391,7 @@ async function main() {
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
+    assert.equal(await page.locator("#batchModeButton").evaluate((button) => getComputedStyle(button).backgroundColor), "rgb(51, 93, 85)", "batch edit uses the selected visual state");
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);

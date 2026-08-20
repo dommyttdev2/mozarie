@@ -275,7 +275,7 @@ async function checkForUpdate({ silent = false } = {}) {
     $("#updateToast").hidden = !update.available;
     if (!silent) result.textContent = update.available ? t("update.available") : t("update.current", { version: update.current });
   } catch (error) {
-    if (!silent) { result.textContent = error.message; result.classList.add("error"); }
+    if (!silent) { result.textContent = t("update.checkFailed"); result.classList.add("error"); }
   } finally { if (!silent) button.disabled = false; }
 }
 
