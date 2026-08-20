@@ -49,5 +49,8 @@ assert.deepEqual(calls, ["unobserve", "remove"], "filtered thumbnail nodes unobs
   resolveBitmap({ width: 10000, height: 10000, close() { releases += 1; } });
   for (let index = 0; index < 4 && state.prefetchActive; index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(releases, 1, "the exact pending image key keeps a joined foreground image available");
+  const errorContext = { state: {}, fetch: async () => ({ ok: false, status: 400, json: async () => ({ error_code: "stale_asset" }) }), document: { querySelector() { return null; } }, t: () => "load failed", Promise, Set, Map, Math, AbortController, DOMException, encodeURIComponent };
+  vm.runInNewContext(`${fs.readFileSync(path.join(__dirname, "..", "static", "js", "resources.js"), "utf8")}\nglobalThis.fetchBitmapForTest = fetchBitmap;`, errorContext);
+  await assert.rejects(errorContext.fetchBitmapForTest("/api/image/stale"), (error) => error.code === "stale_asset" && error.status === 400, "full-image stale response retains its error code");
   console.log("test_resources: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

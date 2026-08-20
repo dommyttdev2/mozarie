@@ -172,16 +172,20 @@ class ImageRecord:
     width: int
     height: int
     mtime_ns: int
+    content_digest: str
     size_bytes: int = 0
     source_kind: str = "filesystem"
-    content_version: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content_digest, str) or len(self.content_digest) != 64 or any(char not in "0123456789abcdef" for char in self.content_digest):
+            raise ValueError("content_digest must be a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True)
 class BrowserSaveToken:
     image_id: str
     candidate_revision: int
-    source_fingerprint: tuple[int, int, int, str]
+    source_fingerprint: tuple[int, int, str]
     catalog_generation: int
     issued_at: float
     rendered_path: Path
@@ -308,7 +312,7 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.count_nonzero(left_bool & right_bool) / smallest)
 
 
-def model_sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):

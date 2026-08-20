@@ -12,11 +12,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         raise error
 
-    def _require_mutation_request(self) -> None:
+    def _require_local_host(self) -> str:
         host = self.headers.get("Host", "")
         expected_host = f"127.0.0.1:{self.server.server_port}"
         if host != expected_host:
             self._reject_unread_request(ForbiddenClientError("許可されていない接続先です。"))
+        return expected_host
+
+    def _require_mutation_request(self) -> None:
+        expected_host = self._require_local_host()
         origin = self.headers.get("Origin", "")
         if origin != f"http://{expected_host}":
             self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
@@ -40,6 +44,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         try:
+            self._require_local_host()
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             if path == "/api/health":
@@ -288,7 +293,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
     def _send_image(self, image_id: str, thumbnail: bool, version: str | None) -> None:
         with STATE.image_io_lock(image_id):
             record = STATE.image_snapshot(image_id)
-            STATE._assert_record_fresh(record)
+            STATE._assert_record_stat_matches(record)
             asset_version = STATE.asset_version(record)
             if version is not None and version != asset_version:
                 raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
@@ -341,13 +346,16 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 raise ClientError("サムネイルを作成できませんでした。") from exc
 
     def _send_candidate_mask(self, image_id: str, candidate_id: str, version: str | None) -> None:
-        snapshot = STATE.candidate_snapshot(image_id)
-        mask_version = f"{snapshot['candidateRevision']}-{candidate_id}"
+        with STATE.lock:
+            if image_id not in STATE.images:
+                raise StaleMaskError("検出候補は既に更新されています。")
+            revision = STATE._candidate_revision(image_id)
+        mask_version = f"{revision}-{candidate_id}"
         if version is not None and version != mask_version:
             raise StaleMaskError("検出候補は既に更新されています。")
         cache_control = "private, max-age=31536000, immutable" if version == mask_version else "no-store"
         self._binary(
-            STATE.read_candidate_mask_png(image_id, candidate_id, expected_revision=snapshot["candidateRevision"]),
+            STATE.read_candidate_mask_png(image_id, candidate_id, expected_revision=revision),
             "image/png",
             cache_control=cache_control,
         )
@@ -392,6 +400,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()

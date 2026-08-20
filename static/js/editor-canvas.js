@@ -22,7 +22,7 @@ function clearEditor() {
 }
 
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
-  if ((isBusy() || state.importing || isGestureActive()) && !force) return;
+  if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
   cancelFillWork();
@@ -76,6 +76,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     if (isCurrentGeneration(generation)) {
       clearTimeout(state.loadingDelay); state.loadingDelay = null;
       state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
+      if (error.code === "stale_asset") invalidateStaleAsset(imageId);
       setStatus(error.message, "error");
     }
   }
@@ -88,6 +89,27 @@ function loadImage(source) {
 }
 
 function imageAssetVersion(record) { return typeof record?.assetVersion === "string" ? record.assetVersion : ""; }
+function invalidateStaleAsset(imageId) {
+  abortCatalogLoads();
+  const bitmaps = new Set();
+  for (const [key] of [...state.imageCache.items]) if (key.startsWith(`${imageId}:`)) bitmaps.add(state.imageCache.take(key));
+  for (const [key] of [...state.candidateBundleCache.items]) {
+    if (!key.startsWith(`${imageId}:`)) continue;
+    for (const bitmap of state.candidateBundleCache.take(key)?.candidateImages?.values() || []) bitmaps.add(bitmap);
+  }
+  const gallery = state.galleryNodes.get(imageId)?.querySelector("img");
+  const overview = state.overviewNodes.get(imageId)?.querySelector("img");
+  forgetThumbnail(gallery); forgetThumbnail(overview);
+  if (state.currentId === imageId) {
+    bitmaps.add(state.currentImage);
+    for (const bitmap of state.candidateImages.values()) bitmaps.add(bitmap);
+  }
+  for (const bitmap of bitmaps) closeBitmap(bitmap);
+  if (state.currentId !== imageId) return;
+  closeBoundaryModeMenu({ restoreFocus: true });
+  state.currentId = null; state.currentImage = null; state.candidates = []; state.candidateImages = new Map();
+  clearEditor(); updateGallerySelection();
+}
 function imageCacheKey(record) { return `${record.id}:${imageAssetVersion(record)}`; }
 function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }
 
@@ -176,8 +198,6 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const version = imageAssetVersion(record);
   const knownRevision = Number(record?.candidateRevision || 0);
   const knownKey = candidateCacheKey(imageId, knownRevision);
-  const known = state.candidateBundleCache.get(knownKey);
-  if (known) return known;
   const pending = state.candidateInflight.get(knownKey);
   if (pending) return pending;
   let request;
@@ -187,12 +207,12 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     try {
       const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
       if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string") || !Number.isInteger(candidateData.candidateRevision)
-        || controller.signal.aborted || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+        || controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
       const revision = Number(candidateData.candidateRevision);
       const cacheKey = candidateCacheKey(imageId, revision);
       if (state.pendingImageId === imageId) state.pendingCandidateKey = cacheKey;
       const cached = state.candidateBundleCache.get(cacheKey);
-      if (cached) return cached;
+      if (cached) { record.candidateRevision = revision; return cached; }
       candidateImages = new Map();
       const pendingCandidates = [...candidateData.candidates];
       const workers = Array.from({ length: Math.min(4, pendingCandidates.length) }, async () => {
@@ -205,7 +225,7 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       const settled = await Promise.allSettled(workers);
       const failed = settled.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
-      if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+      if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
       record.candidateRevision = revision;
       const bundle = { candidates: candidateData.candidates, candidateImages, candidateRevision: revision };
       const weight = [...candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0);
@@ -426,7 +446,7 @@ function refreshMaskStatus(renderGalleryAfter = false) {
   const record = currentRecord();
   const previous = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : Boolean(record && Number(record.enabledCandidateCount || 0) > 0);
   markMaskDirty(); flushMaskComposition();
-  const current = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0);
+  const current = canvasHasPixels(combinedCtx, combinedCanvas);
   state.maskStatus.set(state.currentId, current);
   if (renderGalleryAfter && previous !== current) renderCatalogViews();
   else updateActionButtons();

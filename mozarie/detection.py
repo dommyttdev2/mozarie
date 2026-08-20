@@ -106,7 +106,15 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
-            model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
+            model_slots: list[DetectionModels] = []
+            for slot_index in range(worker_count):
+                self._wait_while_paused(control, job_generation, catalog_generation)
+                if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                    self._cancel_job(job_generation, catalog_generation)
+                    return
+                if not self._job_is_current(job_generation, catalog_generation):
+                    return
+                model_slots.append(self._ensure_models() if slot_index == 0 else self._load_detection_models())
             slot_lock = threading.Lock()
             next_slot = 0
 
@@ -130,7 +138,12 @@ class DetectionMixin:
                 if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                     self._discard_candidates(candidates)
                     return
-                with self.image_io_lock(record.image_id):
+                try:
+                    image_lock = self.image_io_lock(record.image_id)
+                except ClientError:
+                    self._discard_candidates(candidates)
+                    raise
+                with image_lock:
                     try:
                         self._assert_record_fresh(record)
                     except ClientError:
@@ -322,9 +335,12 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
         target_classes: set[str] | None = None,
     ) -> list[Candidate]:
-        self._assert_record_fresh(record)
-        with Image.open(record.path) as image:
-            rgb = ImageOps.exif_transpose(image).convert("RGB")
+        # Hash and decode are a short per-image phase.  Do not hold the image
+        # lock while detector/SAM inference runs.
+        with self.image_io_lock(record.image_id):
+            self._assert_record_fresh(record)
+            with Image.open(record.path) as image:
+                rgb = ImageOps.exif_transpose(image).convert("RGB")
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
         if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)
@@ -380,7 +396,9 @@ class DetectionMixin:
             # internal critical sections to re-enter it.
             with self.inference_lock:
                 return self.add_boundary_candidate(image_id, payload, _gate_held=True)
-        record = self.image_for_id(image_id)
+        with self.image_io_lock(image_id):
+            record = self.image_for_id(image_id)
+            self._assert_record_fresh(record)
         polygon_mask: np.ndarray | None = None
         if "points" in payload:
             roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)

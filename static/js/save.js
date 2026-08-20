@@ -291,9 +291,7 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
     state.sourceAccess.delete(imageId);
     state.drafts.delete(imageId);
     state.maskStatus.delete(imageId);
-    state.candidateUpdateChains.delete(imageId);
-    state.candidateUpdateVersions.delete(imageId);
-    state.candidateDeleting.delete(imageId);
+    clearCandidateMutationState(imageId);
     const image = recordsById.get(imageId);
     if (image) clearReviewForRemovedImage(image);
   }

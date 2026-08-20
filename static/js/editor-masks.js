@@ -49,7 +49,7 @@ function renderCandidates() {
     const role = candidate.role === "exclude" ? "exclude" : "apply";
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-${role}`;
     if (state.blinkCandidateIds.has(candidate.id)) row.classList.add(`blink-${role}`);
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled; enabled.disabled = deleting;
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled; enabled.disabled = deleting || state.candidateBatchPending.has(state.currentId);
     enabled.setAttribute("aria-label", t("candidates.toggle", { label: candidate.className }));
     enabled.addEventListener("change", async () => {
       if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
@@ -72,7 +72,7 @@ function renderCandidates() {
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
     confidence.textContent = Number.isFinite(candidate.confidence) ? `${Math.round(candidate.confidence * 100)}%` : "";
     label.append(name, confidence);
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting;
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting || state.candidateBatchPending.has(state.currentId);
     const deleteLabel = t("candidates.delete", { label: candidate.className });
     remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
     remove.addEventListener("click", () => deleteCandidate(candidate));
@@ -83,6 +83,12 @@ function renderCandidates() {
 }
 
 function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }
+function clearCandidateMutationState(imageId) {
+  state.candidateUpdateChains.delete(imageId);
+  state.candidateBatchPending.delete(imageId);
+  for (const key of state.candidateUpdateVersions.keys()) if (key.startsWith(`${imageId}:`)) state.candidateUpdateVersions.delete(key);
+  for (const key of state.candidateDeleting) if (key.startsWith(`${imageId}:`)) state.candidateDeleting.delete(key);
+}
 function nextCandidateMutationVersion(key) {
   const version = (state.candidateUpdateVersions.get(key) || 0) + 1;
   state.candidateUpdateVersions.set(key, version);
@@ -216,7 +222,9 @@ function deleteManualExclusion() {
 }
 
 async function batchCandidateOperation(spec) {
-  if (!state.currentId || isBusy() || state.importing) return;
+  const imageId = state.currentId;
+  const generation = state.imageGeneration;
+  if (!imageId || isBusy() || state.importing || state.candidateBatchPending.has(imageId)) return;
   const [role, operation] = spec.split(":");
   const manual = role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas);
   if (operation === "blink") {
@@ -227,23 +235,42 @@ async function batchCandidateOperation(spec) {
     renderCandidates(); render(); return;
   }
   if (operation === "delete" && confirmationRequired("candidateRoleDelete") && !await confirmAction(t("confirm.candidateRoleDelete.title"), t("confirm.candidateRoleDelete.message"), "candidateRoleDelete")) return;
-  if (manual) {
-    if (operation === "delete") role === "apply" ? deleteManualMask() : deleteManualExclusion();
-    else if (role === "apply") state.manualEnabled = operation === "enable";
-    else state.manualExclusionEnabled = operation === "enable";
-    markMaskDirty();
-  }
+  if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateBatchPending.has(imageId)) return;
   const changed = state.candidates.filter((item) => item.role === role);
-  if (!changed.length) { renderCandidates(); render(); return; }
-  try {
-    const result = await api("/api/candidates/batch", { method: "POST", body: JSON.stringify({ imageId: state.currentId, role, operation }) });
-    if (operation === "delete") {
-      changed.forEach((item) => releaseCandidateBitmap(item.id));
-      state.candidates = state.candidates.filter((item) => item.role !== role);
-    } else changed.forEach((item) => { item.enabled = operation === "enable"; });
-    retainCurrentCandidateBundle(state.currentId, result.candidateRevision);
-    setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); renderCandidates(); render();
-  } catch (error) { setStatus(error.message, "error"); }
+  state.candidateBatchPending.add(imageId);
+  const send = async () => {
+    try {
+      const result = await api("/api/candidates/batch", { method: "POST", body: JSON.stringify({ imageId, role, operation }) });
+      if (state.currentId !== imageId || !isCurrentGeneration(generation)) {
+        await refreshCandidateRecord(imageId, true);
+        renderCatalogViews();
+        return;
+      }
+      if (operation === "delete") {
+        changed.forEach((item) => releaseCandidateBitmap(item.id));
+        state.candidates = state.candidates.filter((item) => item.role !== role);
+        if (manual) role === "apply" ? deleteManualMask() : deleteManualExclusion();
+      } else {
+        changed.forEach((item) => { item.enabled = operation === "enable"; });
+        if (manual) {
+          if (role === "apply") state.manualEnabled = operation === "enable";
+          else state.manualExclusionEnabled = operation === "enable";
+          markMaskDirty();
+        }
+      }
+      retainCurrentCandidateBundle(imageId, result.candidateRevision);
+      setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+    } catch (error) {
+      if (state.currentId === imageId && isCurrentGeneration(generation)) setStatus(error.message, "error");
+    } finally {
+      state.candidateBatchPending.delete(imageId);
+      if (state.currentId === imageId && isCurrentGeneration(generation)) renderCandidates();
+      updateActionButtons();
+    }
+  };
+  const queued = enqueueCandidateMutation(imageId, send);
+  renderCandidates();
+  return queued;
 }
 
 async function addBoundaryCandidate() {

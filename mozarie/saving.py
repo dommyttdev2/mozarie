@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .core import *
-from .core import _read_mosaic_divisor, _read_save_suffix, _read_target_classes
+from .core import _read_mosaic_divisor, _read_save_suffix
 from .image_io import *
 from . import image_io as _image_io
 
@@ -22,16 +22,6 @@ class SavingMixin:
             raise ClientError("一時画像はコピー保存を選んでください。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
-        eligible_records: list[ImageRecord] = []
-        for record in records:
-            draft_masks = decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
-            mask = self.combined_candidate_mask(record.image_id, draft_masks)
-            if mask is not None and np.any(mask):
-                eligible_records.append(record)
-            del mask, draft_masks
-        records = eligible_records
-        if not records:
-            raise ClientError("保存するモザイク範囲がありません。")
         suffix = _read_save_suffix(suffix)
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
@@ -72,7 +62,6 @@ class SavingMixin:
         draft: Any,
     ) -> tuple[bytes, ImageRecord, int, str]:
         record = self.image_snapshot(image_id)
-        self._assert_record_fresh(record)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
@@ -119,7 +108,7 @@ class SavingMixin:
                 mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
-                source_fingerprint = self._source_fingerprint(record)
+                source_fingerprint = (record.mtime_ns, record.size_bytes, record.content_digest)
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                 if self._source_fingerprint(record) != source_fingerprint:
                     raise ClientError("元画像が変更されました。保存をやり直してください。")
@@ -155,8 +144,19 @@ class SavingMixin:
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
         expired_token = False
-        image_lock = self.image_io_lock(image_id)
         with self.import_lock:
+            with self.lock:
+                receipt = self.browser_save_receipts.get(save_token)
+                if receipt is not None:
+                    if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted, "images": self.list_images()}
+                token_details = self.browser_save_tokens.get(save_token)
+                if token_details is None:
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                if token_details.image_id != image_id or token_details.candidate_revision != revision:
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+            image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
                     receipt = self.browser_save_receipts.get(save_token)
@@ -197,11 +197,12 @@ class SavingMixin:
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。")
 
                 try:
-                    if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
-                        raise ClientError("元画像が変更されました。保存をやり直してください。")
                     if source_action == "overwrite":
-                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path)
-                    elif source_action == "deleted":
+                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint[2])
+                    else:
+                        if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
+                            raise ClientError("元画像が変更されました。保存をやり直してください。", "stale_asset")
+                    if source_action == "deleted":
                         record_snapshot.path.unlink()
                 except ClientError:
                     rendered_path = token_details.rendered_path
@@ -222,7 +223,7 @@ class SavingMixin:
                     if source_action == "overwrite":
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
-                        record.content_version = record_snapshot.content_version
+                        record.content_digest = record_snapshot.content_digest
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -230,6 +231,7 @@ class SavingMixin:
                         self.order = [current_id for current_id in self.order if current_id != image_id]
                         self.candidate_revisions.pop(image_id, None)
                         self.candidates.pop(image_id, None)
+                        self._image_io_locks.pop(image_id, None)
                     elif cleared:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -267,32 +269,64 @@ class SavingMixin:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            # Reserve every fallback path before any worker starts.  This makes
-            # duplicate names deterministic even when rendering completes out of order.
-            destinations: dict[int, Path] = {}
-            if copy_to_default:
-                reserved: set[Path] = set()
-                for index, record in enumerate(records):
-                    destination = _default_output_destination(record, suffix, reserved)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destinations[index] = destination
-                    reserved.add(destination)
+            empty_indices: set[int] = set()
+            skipped_destination_indices: set[int] = set()
+            destination_condition = threading.Condition()
+            reserved: set[Path] = set()
+            next_destination_index = 0
+
+            def advance_past_skipped_destinations() -> None:
+                nonlocal next_destination_index
+                while next_destination_index in skipped_destination_indices:
+                    skipped_destination_indices.remove(next_destination_index)
+                    next_destination_index += 1
+
+            def skip_destination(index: int) -> None:
+                if not copy_to_default:
+                    return
+                with destination_condition:
+                    skipped_destination_indices.add(index)
+                    advance_past_skipped_destinations()
+                    destination_condition.notify_all()
+
+            def reserve_destination(index: int, record: ImageRecord) -> Path:
+                nonlocal next_destination_index
+                with destination_condition:
+                    while index != next_destination_index:
+                        destination_condition.wait()
+                    try:
+                        destination = _default_output_destination(record, suffix, reserved)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        reserved.add(destination)
+                        return destination
+                    finally:
+                        next_destination_index += 1
+                        advance_past_skipped_destinations()
+                        destination_condition.notify_all()
 
             def save_record(index: int, record: ImageRecord) -> None:
                 with self.image_io_lock(record.image_id):
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    self._assert_record_fresh(record)
                     draft_or_mask = drafts_or_masks.get(record.image_id)
-                    mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
-                        record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
-                    ))
+                    try:
+                        mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
+                            record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
+                        ))
+                    except Exception:
+                        skip_destination(index)
+                        raise
                     if mask is None or not np.any(mask):
-                        raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                    output_path = destinations.get(index, record.path)
+                        with destination_condition:
+                            empty_indices.add(index)
+                        skip_destination(index)
+                        return
+                    output_path = reserve_destination(index, record) if copy_to_default else record.path
                     if copy_to_default:
-                        write_rendered_copy(output_path, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                        output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        self._assert_record_fresh(record)
+                        write_rendered_copy(output_path, output)
                     else:
-                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        output_digest = save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed
                     # record therefore keeps its masks, while successful records clear once.
@@ -302,7 +336,7 @@ class SavingMixin:
                         if not copy_to_default:
                             record.mtime_ns = output_stat.st_mtime_ns
                             record.size_bytes = output_stat.st_size
-                            record.content_version += 1
+                            record.content_digest = output_digest
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)
@@ -317,9 +351,22 @@ class SavingMixin:
             )
             if failures:
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
+            elif len(empty_indices) == len(records):
+                self._fail_job(ClientError("保存するモザイク範囲がありません。"), job_generation, catalog_generation)
             elif control is not None and control.cancel_requested.is_set():
                 self._cancel_job(job_generation, catalog_generation)
             else:
+                if empty_indices:
+                    with self.lock:
+                        if self._job_is_current(job_generation, catalog_generation):
+                            kept_indices = [index for index in range(len(records)) if index not in empty_indices]
+                            slots = getattr(self, "_job_output_slots", {})
+                            completed = set(self.job.completed_image_ids)
+                            self.job.image_ids = tuple(records[index].image_id for index in kept_indices)
+                            self.job.total = len(kept_indices)
+                            self.job.completed_image_ids = tuple(image_id for image_id in self.job.image_ids if image_id in completed)
+                            self.job.completed = len(self.job.completed_image_ids)
+                            self.job.outputs = [slots[index] for index in kept_indices if index in slots]
                 self._finish_job(job_generation, catalog_generation)
         except Exception as exc:
             self._fail_job(exc, job_generation, catalog_generation)
