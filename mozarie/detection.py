@@ -16,12 +16,16 @@ class DetectionMixin:
         parallelism: int = 2,
         target_classes: set[str] | None = None,
     ) -> None:
-        records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
-        args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
-        if targets != TARGET_CLASSES:
-            args = (*args, targets)
-        self._start_job("detect", records, self._detect_worker, *args, expected_catalog_generation=catalog_generation)
+        # The gate makes starting a detection mutually exclusive with boundary
+        # inference and model-cache replacement. It is deliberately not held
+        # during the complete background run, so distinct model slots can work.
+        with self.inference_lock:
+            records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
+            targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
+            args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
+            if targets != TARGET_CLASSES:
+                args = (*args, targets)
+            self._start_job("detect", records, self._detect_worker, *args, expected_catalog_generation=catalog_generation)
 
 
     def _load_detection_models(self) -> DetectionModels:
@@ -103,54 +107,47 @@ class DetectionMixin:
             mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
             model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
-            groups = [records[index::worker_count] for index in range(worker_count)]
-            with self.lock:
-                if self._job_is_current(job_generation, catalog_generation):
-                    self.job.active_count = worker_count
+            slot_lock = threading.Lock()
+            next_slot = 0
 
-            def run_slot(models: DetectionModels, assigned: list[ImageRecord]) -> None:
-                for record in assigned:
-                    if not self._job_is_current(job_generation, catalog_generation):
-                        return
-                    if control is not None and control.cancel_requested.is_set():
-                        return
-                    self._wait_while_paused(control, job_generation, catalog_generation)
-                    if control is not None and control.cancel_requested.is_set():
-                        return
-                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    try:
-                        self._detection_target_classes[id(models)] = target_classes or TARGET_CLASSES
-                        candidates = self._detect_image(models, record, confidence, mode)
-                    except RuntimeError as exc:
-                        if "out of memory" in str(exc).lower():
-                            if control is not None:
-                                control.cancel_requested.set()
-                            raise ClientError("GPUメモリが不足しました。並列数を下げてください。") from exc
-                        raise
-                    if control is not None and control.cancel_requested.is_set():
+            # Keep a stable slot per thread by handing each bounded worker its
+            # own model bundle, while records themselves are claimed dynamically.
+            slot_local = threading.local()
+            def claim_and_run(index: int, record: ImageRecord) -> None:
+                nonlocal next_slot
+                if not hasattr(slot_local, "models"):
+                    with slot_lock:
+                        slot_local.models = model_slots[next_slot]
+                        next_slot += 1
+                models = slot_local.models
+                self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                try:
+                    candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
+                except RuntimeError as exc:
+                    if "out of memory" in str(exc).lower():
+                        raise ClientError("GPUメモリが不足しました。並列数を下げてください。") from exc
+                    raise
+                if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                    self._discard_candidates(candidates)
+                    return
+                with self.lock:
+                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                            or not self._job_is_current(job_generation, catalog_generation)):
                         self._discard_candidates(candidates)
                         return
-                    with self.lock:
-                        if (control is not None and control.cancel_requested.is_set()) or not self._job_is_current(job_generation, catalog_generation):
-                            self._discard_candidates(candidates)
-                            return
-                        boundary_candidates = [
-                            candidate for candidate in self.candidates.get(record.image_id, [])
-                            if candidate.origin == "boundary"
-                        ]
-                        for candidate in self.candidates.get(record.image_id, []):
-                            if candidate.origin != "boundary":
-                                candidate.mask_path.unlink(missing_ok=True)
-                        self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                        self._touch_candidates(record.image_id)
-                        self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                        self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                    boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
+                    for candidate in self.candidates.get(record.image_id, []):
+                        if candidate.origin != "boundary":
+                            candidate.mask_path.unlink(missing_ok=True)
+                    self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                    self._touch_candidates(record.image_id)
+                    self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
+                self._set_job_current(record.relative_path, job_generation, catalog_generation)
 
-            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="MosaicDetect") as executor:
-                futures = [executor.submit(run_slot, models, group) for models, group in zip(model_slots, groups) if group]
-                wait(futures)
-                for future in futures:
-                    future.result()
+            failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
+            if failures:
+                self._fail_job(failures[0][1], job_generation, catalog_generation)
+                return
             if control is not None and control.cancel_requested.is_set():
                 self._cancel_job(job_generation, catalog_generation)
                 return
@@ -308,7 +305,7 @@ class DetectionMixin:
         self._assert_record_fresh(record)
         with Image.open(record.path) as image:
             rgb = ImageOps.exif_transpose(image).convert("RGB")
-        segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or self._detection_target_classes.get(id(models), TARGET_CLASSES))
+        segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
         if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
@@ -356,7 +353,13 @@ class DetectionMixin:
                 ))
         return candidates
 
-    def add_boundary_candidate(self, image_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def add_boundary_candidate(self, image_id: str, payload: dict[str, Any], *, _gate_held: bool = False) -> dict[str, Any]:
+        if not _gate_held:
+            # Keep this gate for the complete boundary pipeline, including SAM
+            # refinement and candidate publication, while allowing its small
+            # internal critical sections to re-enter it.
+            with self.inference_lock:
+                return self.add_boundary_candidate(image_id, payload, _gate_held=True)
         record = self.image_for_id(image_id)
         polygon_mask: np.ndarray | None = None
         if "points" in payload:
@@ -397,45 +400,51 @@ class DetectionMixin:
             "mask": clipped.copy(),
             "source": "boundary",
         }
-        refined_boundary = self._refine_detected_segments(
-            self._ensure_models(), record, rgb, [boundary_segment]
-        )[0]
-        candidate_id = uuid.uuid4().hex
-        candidate = Candidate(
-            candidate_id=candidate_id,
-            class_name="4点境界" if polygon_mask is not None else "境界",
-            confidence=confidence,
-            mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
-            color="#ffffff",
-            source="boundary",
-            origin="boundary",
-        )
-        with self.lock:
-            if self.images.get(image_id) is not record:
-                raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
-            candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
-            created = [candidate]
-            self.candidates.setdefault(image_id, []).append(candidate)
-            for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
-                if not np.any(exclusion_mask):
-                    continue
-                exclusion_source = f"{exclusion_kind}_exclusion"
-                exclusion_id = uuid.uuid4().hex
-                exclusion = Candidate(
-                    candidate_id=exclusion_id,
-                    class_name=SOURCE_LABELS[exclusion_source],
-                    confidence=None,
-                    mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png",
-                    color="#4ac3df",
-                    source=exclusion_source,
-                    origin="boundary",
-                    role=CandidateRole.EXCLUDE,
-                )
-                Image.fromarray(exclusion_mask, mode="L").save(exclusion.mask_path, format="PNG")
-                self.candidates[image_id].append(exclusion)
-                created.append(exclusion)
-            revision = self._touch_candidates(image_id)
+        # Reacquire the gate for model refinement and publication. A detection
+        # that started while image bytes were being decoded is rejected here.
+        with self.inference_lock:
+            with self.lock:
+                if self.job.state == "running" or self._has_active_worker():
+                    raise ClientError("既存の処理が完了してから境界を検出してください。")
+            refined_boundary = self._refine_detected_segments(
+                self._ensure_models(), record, rgb, [boundary_segment]
+            )[0]
+            candidate_id = uuid.uuid4().hex
+            candidate = Candidate(
+                candidate_id=candidate_id,
+                class_name="4点境界" if polygon_mask is not None else "境界",
+                confidence=confidence,
+                mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
+                color="#ffffff",
+                source="boundary",
+                origin="boundary",
+            )
+            with self.lock:
+                if self.images.get(image_id) is not record:
+                    raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+                candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(clipped, mode="L").save(candidate.mask_path, format="PNG")
+                created = [candidate]
+                self.candidates.setdefault(image_id, []).append(candidate)
+                for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
+                    if not np.any(exclusion_mask):
+                        continue
+                    exclusion_source = f"{exclusion_kind}_exclusion"
+                    exclusion_id = uuid.uuid4().hex
+                    exclusion = Candidate(
+                        candidate_id=exclusion_id,
+                        class_name=SOURCE_LABELS[exclusion_source],
+                        confidence=None,
+                        mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png",
+                        color="#4ac3df",
+                        source=exclusion_source,
+                        origin="boundary",
+                        role=CandidateRole.EXCLUDE,
+                    )
+                    Image.fromarray(exclusion_mask, mode="L").save(exclusion.mask_path, format="PNG")
+                    self.candidates[image_id].append(exclusion)
+                    created.append(exclusion)
+                revision = self._touch_candidates(image_id)
         return {
             "candidates": [
                 item.as_api_dict(SOURCE_LABELS.get(item.source, item.source), REFINEMENT_LABELS.get(item.refinement or "", ""))

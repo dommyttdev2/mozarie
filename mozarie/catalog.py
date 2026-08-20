@@ -469,6 +469,10 @@ class CatalogMixin:
         return record
 
     def list_images(self) -> list[dict[str, Any]]:
+        return self.catalog_snapshot()["images"]
+
+    def catalog_snapshot(self) -> dict[str, Any]:
+        """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
             output = []
             for image_id in self.order:
@@ -490,23 +494,43 @@ class CatalogMixin:
                         "candidateRevision": self._candidate_revision(image_id),
                     }
                 )
-            return output
+            return {
+                "root": str(self.root) if self.root else "",
+                "images": output,
+                "catalogGeneration": self.catalog_generation,
+            }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
-        self.image_for_id(image_id)
+        return self.candidate_snapshot(image_id)["candidates"]
+
+    def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
+        """Return candidates and their revision from one state-lock epoch."""
         with self.lock:
+            if image_id not in self.images:
+                raise ClientError("画像が見つかりません。")
             stored_candidates = self.candidates.get(image_id, [])
             candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
             if len(candidates) != len(stored_candidates):
                 self._touch_candidates(image_id)
             self.candidates[image_id] = candidates
-        return [
-            candidate.as_api_dict(
-                SOURCE_LABELS.get(candidate.source, candidate.source),
-                REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-            )
-            for candidate in candidates
-        ]
+            return {
+                "candidates": [
+                    candidate.as_api_dict(
+                        SOURCE_LABELS.get(candidate.source, candidate.source),
+                        REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+                    )
+                    for candidate in candidates
+                ],
+                "candidateRevision": self._candidate_revision(image_id),
+            }
+
+    def image_snapshot(self, image_id: str) -> ImageRecord:
+        """Capture a checked catalogue record before image I/O begins."""
+        with self.lock:
+            record = self.images.get(image_id)
+            if record is None:
+                raise ClientError("画像が見つかりません。")
+            return replace(record)
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])

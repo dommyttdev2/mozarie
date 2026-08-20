@@ -62,7 +62,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/update/status":
                 self._json(_update_status())
             elif path == "/api/images":
-                self._json({"root": str(STATE.root) if STATE.root else "", "images": STATE.list_images()})
+                self._json(STATE.catalog_snapshot())
             elif path == "/api/job":
                 with STATE.lock:
                     self._json(STATE.job.as_dict())
@@ -72,7 +72,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._send_image(path.removeprefix("/api/thumbnail/"), thumbnail=True)
             elif path.startswith("/api/candidates/"):
                 image_id = path.removeprefix("/api/candidates/")
-                self._json({"candidates": STATE.list_candidates(image_id), "candidateRevision": STATE._candidate_revision(image_id)})
+                self._json(STATE.candidate_snapshot(image_id))
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._binary(STATE.read_candidate_mask_png(image_id, candidate_id), "image/png")
@@ -257,7 +257,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         return raw
 
     def _send_image(self, image_id: str, thumbnail: bool) -> None:
-        record = STATE.image_for_id(image_id)
+        record = STATE.image_snapshot(image_id)
         if not thumbnail:
             self._binary(record.path.read_bytes(), mimetypes.guess_type(record.path.name)[0] or "application/octet-stream")
             return

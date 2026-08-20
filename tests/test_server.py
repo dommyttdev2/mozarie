@@ -693,7 +693,7 @@ class MozarieTests(unittest.TestCase):
             control = server_module.JobControl()
             state.job = server_module.Job(kind="detect", state="running", total=2, image_ids=(first_id, second_id))
 
-            def detect_image(_models, record, _confidence, _mode="standard"):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
@@ -788,7 +788,7 @@ class MozarieTests(unittest.TestCase):
             second_models = object()
             seen_models: list[int] = []
 
-            def detect_image(models, record, _confidence, _mode="standard"):
+            def detect_image(models, record, _confidence, _mode="standard", _targets=None):
                 seen_models.append(id(models))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -828,7 +828,7 @@ class MozarieTests(unittest.TestCase):
                     first_completed.set()
                 return result
 
-            def detect_image(_models, record, _confidence, _mode="standard"):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
                 if record is records[0]:
                     self.assertTrue(second_started.wait(2))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
@@ -861,7 +861,7 @@ class MozarieTests(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def detect_image(_models, record, _confidence, _mode="standard"):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
@@ -1729,7 +1729,7 @@ class MozarieTests(unittest.TestCase):
             state.settings["detection"]["mode"] = mode
             seen_modes: list[str] = []
             with patch.object(state, "_ensure_models", return_value=object()), \
-                 patch.object(state, "_detect_image", side_effect=lambda _models, _record, _confidence, detected_mode: seen_modes.append(detected_mode) or []):
+                 patch.object(state, "_detect_image", side_effect=lambda _models, _record, _confidence, detected_mode, _targets: seen_modes.append(detected_mode) or []):
                 state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
             self.assertEqual(seen_modes, [mode])
 
@@ -2185,6 +2185,36 @@ class MozarieTests(unittest.TestCase):
 
             self.assertEqual(state.list_candidates(image_id), [])
             self.assertEqual(state._candidate_revision(image_id), revision_after_prune)
+
+    def test_candidate_snapshot_keeps_candidates_and_revision_in_one_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            snapshot = state.candidate_snapshot(image_id)
+
+            self.assertEqual(snapshot["candidateRevision"], revision)
+            self.assertEqual([item["id"] for item in snapshot["candidates"]], ["candidate"])
+
+    def test_catalog_snapshot_is_self_consistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            state.set_root(str(root))
+
+            snapshot = state.catalog_snapshot()
+
+            self.assertEqual(snapshot["root"], str(root))
+            self.assertEqual(snapshot["catalogGeneration"], state.catalog_generation)
+            self.assertEqual(len(snapshot["images"]), 1)
 
     def test_missing_candidate_mask_removes_stale_candidate_and_returns_404(self):
         from http.server import ThreadingHTTPServer

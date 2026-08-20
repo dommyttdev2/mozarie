@@ -377,21 +377,21 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
     )
 
 
-def unique_session_import_destination(path: Path) -> Path:
-    if not path.exists():
+def unique_session_import_destination(path: Path, reserved: set[Path] | None = None) -> Path:
+    reserved = reserved if reserved is not None else set()
+    if not path.exists() and path not in reserved:
         return path
     for number in range(2, 10000):
         candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
-        if not candidate.exists():
+        if not candidate.exists() and candidate not in reserved:
             return candidate
     raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
 
 
-def _default_output_destination(record: ImageRecord, suffix: str = "_censored") -> Path:
-    from .state import STATE
+def _default_output_destination(record: ImageRecord, suffix: str = "_censored", reserved: set[Path] | None = None) -> Path:
     relative = safe_import_relative_path(record.relative_path)
     target = APP_DIR / "output" / relative
-    return unique_session_import_destination(target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"))
+    return unique_session_import_destination(target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"), reserved)
 
 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
