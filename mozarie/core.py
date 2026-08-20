@@ -174,14 +174,17 @@ class ImageRecord:
     mtime_ns: int
     size_bytes: int = 0
     source_kind: str = "filesystem"
-    content_version: int = 0
+    # A digest is the durable identity of a source.  The all-zero value only
+    # exists for small synthetic records used by algorithm-only unit tests;
+    # catalogue and import records always provide a real SHA-256 digest.
+    content_digest: str = "0" * 64
 
 
 @dataclass(frozen=True)
 class BrowserSaveToken:
     image_id: str
     candidate_revision: int
-    source_fingerprint: tuple[int, int, int, str]
+    source_fingerprint: tuple[int, int, str]
     catalog_generation: int
     issued_at: float
     rendered_path: Path
@@ -308,7 +311,7 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.count_nonzero(left_bool & right_bool) / smallest)
 
 
-def model_sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):

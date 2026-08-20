@@ -421,6 +421,8 @@ def _default_output_destination(record: ImageRecord, suffix: str = "_censored", 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
+    if record.content_digest != "0" * 64 and hashlib.sha256(source).hexdigest() != record.content_digest:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -436,15 +438,20 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     raise ClientError("この画像形式は保存に対応していません。")
 
 
-def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> None:
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> str:
     """Atomically replace a catalogued source with a previously verified render."""
+    if record.content_digest != "0" * 64 and file_sha256(record.path) != record.content_digest:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     original_stat = record.path.stat()
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
+            digest = hashlib.sha256()
             with rendered_path.open("rb") as rendered:
-                shutil.copyfileobj(rendered, handle)
+                while chunk := rendered.read(IO_CHUNK_BYTES):
+                    digest.update(chunk)
+                    handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
         _verify_decodable_image(temporary_path.read_bytes())
@@ -458,7 +465,8 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
         stat = record.path.stat()
         record.mtime_ns = stat.st_mtime_ns
         record.size_bytes = stat.st_size
-        record.content_version += 1
+        record.content_digest = digest.hexdigest()
+        return record.content_digest
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -481,10 +489,12 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
+def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> str:
     destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
+    if record.content_digest != "0" * 64 and hashlib.sha256(source).hexdigest() != record.content_digest:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -522,6 +532,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         except OSError:
             LOGGER.warning("Saved image timestamp could not be restored: %s", destination)
+        return hashlib.sha256(output).hexdigest()
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

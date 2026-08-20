@@ -118,6 +118,7 @@ function api(path, options = {}) {
           : (data.error || t("error.requestFailed"));
         const error = new Error(message);
         error.status = response.status;
+        error.code = data.error_code || "";
         throw error;
       }
       return data;

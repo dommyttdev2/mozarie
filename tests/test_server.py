@@ -3359,7 +3359,7 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
             version = state.list_images()[0]["assetVersion"]
-            original_assert = state._assert_record_fresh
+            original_assert = state._assert_record_stat_matches
 
             def mutate_after_preflight(record):
                 original_assert(record)
@@ -3367,7 +3367,7 @@ class MozarieTests(unittest.TestCase):
                 os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
 
             with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
-                 patch.object(state, "_assert_record_fresh", side_effect=mutate_after_preflight):
+                 patch.object(state, "_assert_record_stat_matches", side_effect=mutate_after_preflight):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
                 thread.start()
@@ -3563,7 +3563,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(committed["cleared"])
             self.assertEqual(source.read_bytes(), output)
             self.assertEqual(record.size_bytes, source.stat().st_size)
-            self.assertGreater(record.content_version, 0)
+            self.assertEqual(record.content_digest, hashlib.sha256(source.read_bytes()).hexdigest())
 
     def test_browser_save_commit_acquires_import_lock_before_its_image_lock(self):
         class RecordingLock:
@@ -3671,7 +3671,7 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(rendered_path.exists())
         self.assertEqual(Image.open(record.path).text["prompt"], '{"seed": 9}')
         self.assertEqual(state.candidates.get(image_id, []), [])
-        self.assertGreater(record.content_version, 0)
+        self.assertEqual(record.content_digest, hashlib.sha256(record.path.read_bytes()).hexdigest())
 
     def test_browser_save_session_deleted_removes_the_session_record_and_render(self):
         raw = io.BytesIO()
@@ -4243,6 +4243,27 @@ class MozarieTests(unittest.TestCase):
         destination = server_module._default_output_destination(record, "_mosaic")
         self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
         with self.assertRaises(ClientError): server_module._read_save_suffix("../bad")
+
+    def test_same_stat_replacement_is_digest_gated_without_losing_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original_stat = source.stat()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            Image.new("RGB", (16, 16), "blue").save(source)
+            self.assertEqual(source.stat().st_size, original_stat.st_size)
+            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                state.candidate_snapshot(image_id)
+            self.assertEqual(raised.exception.error_code, "stale_asset")
+            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
+            self.assertTrue(mask_path.is_file())
 
 if __name__ == "__main__":
     unittest.main()

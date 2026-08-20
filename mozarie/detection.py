@@ -322,9 +322,12 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
         target_classes: set[str] | None = None,
     ) -> list[Candidate]:
-        self._assert_record_fresh(record)
-        with Image.open(record.path) as image:
-            rgb = ImageOps.exif_transpose(image).convert("RGB")
+        # Hash and decode are a short per-image phase.  Do not hold the image
+        # lock while detector/SAM inference runs.
+        with self.image_io_lock(record.image_id):
+            self._assert_record_fresh(record)
+            with Image.open(record.path) as image:
+                rgb = ImageOps.exif_transpose(image).convert("RGB")
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
         if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)

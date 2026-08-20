@@ -57,30 +57,52 @@ class CatalogMixin:
         with self.lock:
             self._assert_catalog_mutable()
 
+        paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES]
         records: list[ImageRecord] = []
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
-                continue
-            try:
-                resolved = path.resolve()
-                resolved.relative_to(root)
-                width, height = inspect_import_image(resolved, resolved.suffix)
-                stat = resolved.stat()
-            except (OSError, UnidentifiedImageError, ValueError):
-                continue
-            records.append(
-                ImageRecord(
-                    image_id=uuid.uuid4().hex,
-                    path=resolved,
-                    relative_path=resolved.relative_to(root).as_posix(),
-                    width=width,
-                    height=height,
-                    mtime_ns=stat.st_mtime_ns,
-                    size_bytes=stat.st_size,
-                )
-            )
+        records_lock = threading.Lock()
+        next_path = 0
+        paths_lock = threading.Lock()
 
-        records.sort(key=lambda record: record.relative_path.lower())
+        def inspect_path() -> None:
+            nonlocal next_path
+            while True:
+                with paths_lock:
+                    if next_path >= len(paths):
+                        return
+                    path = paths[next_path]
+                    next_path += 1
+                try:
+                    resolved = path.resolve()
+                    relative_path = resolved.relative_to(root).as_posix()
+                    before = resolved.stat()
+                    width, height = inspect_import_image(resolved, resolved.suffix)
+                    digest = file_sha256(resolved)
+                    after = resolved.stat()
+                    if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                        continue
+                    record = ImageRecord(
+                        image_id=uuid.uuid4().hex,
+                        path=resolved,
+                        relative_path=relative_path,
+                        width=width,
+                        height=height,
+                        mtime_ns=after.st_mtime_ns,
+                        size_bytes=after.st_size,
+                        content_digest=digest,
+                    )
+                except (OSError, UnidentifiedImageError, ValueError, ClientError):
+                    continue
+                with records_lock:
+                    records.append(record)
+
+        # Folder discovery is intentionally fixed at two streaming workers:
+        # do not create one Future per file in a large folder.
+        workers = [threading.Thread(target=inspect_path) for _ in range(min(2, len(paths)))]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         return self._replace_catalog(root, records)
 
     def clear_catalog(self) -> None:
@@ -212,13 +234,9 @@ class CatalogMixin:
         with self.lock:
             return self._image_io_locks.setdefault(image_id, threading.RLock())
 
-    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, int, str]:
+    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, str]:
         self._assert_record_fresh(record)
-        try:
-            source_digest = model_sha256(record.path)
-        except OSError as exc:
-            raise ClientError("Could not read the source image for saving.") from exc
-        return record.mtime_ns, record.size_bytes, record.content_version, source_digest
+        return record.mtime_ns, record.size_bytes, record.content_digest
 
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
@@ -265,7 +283,7 @@ class CatalogMixin:
         self,
         record: ImageRecord,
         revision: int,
-        source_fingerprint: tuple[int, int, int, str],
+        source_fingerprint: tuple[int, int, str],
         catalog_generation: int,
         rendered_path: Path,
     ) -> str:
@@ -286,11 +304,23 @@ class CatalogMixin:
             stat = record.path.stat()
         except OSError as exc:
             raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。") from exc
-        if (
-            stat.st_mtime_ns != record.mtime_ns
-            or (record.size_bytes > 0 and stat.st_size != record.size_bytes)
-        ):
-            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。")
+        if stat.st_mtime_ns != record.mtime_ns or (record.size_bytes > 0 and stat.st_size != record.size_bytes):
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+        try:
+            if record.content_digest != "0" * 64 and file_sha256(record.path) != record.content_digest:
+                raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+        except OSError as exc:
+            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
+
+    @staticmethod
+    def _assert_record_stat_matches(record: ImageRecord) -> None:
+        """Fast transport-path guard; digest verification belongs to mutations."""
+        try:
+            stat = record.path.stat()
+        except OSError as exc:
+            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
+        if stat.st_mtime_ns != record.mtime_ns or stat.st_size != record.size_bytes:
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
 
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
@@ -398,7 +428,7 @@ class CatalogMixin:
             destination_dir = self._ensure_session()
             self.importing_count += 1
 
-        pending: list[tuple[Path, str, int, int, str]] = []
+        pending: list[tuple[Path, str, int, int, str, str]] = []
         try:
             # Decoding and staging can overlap across request threads. The short
             # catalogue commit below remains serialized.
@@ -411,10 +441,13 @@ class CatalogMixin:
                     continue
                 temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
                 try:
+                    digest = hashlib.sha256()
                     staged_path = file_data.get("stagedPath")
                     if isinstance(staged_path, Path):
                         with staged_path.open("rb") as source, temporary.open("xb") as destination:
-                            shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
+                            while chunk := source.read(IO_CHUNK_BYTES):
+                                digest.update(chunk)
+                                destination.write(chunk)
                             destination.flush()
                             os.fsync(destination.fileno())
                     else:
@@ -429,11 +462,12 @@ class CatalogMixin:
                         if not raw:
                             continue
                         with temporary.open("xb") as destination:
+                            digest.update(raw)
                             destination.write(raw)
                             destination.flush()
                             os.fsync(destination.fileno())
                     width, height = inspect_import_image(temporary, relative_path.suffix)
-                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
+                    pending.append((temporary, relative_path.as_posix(), width, height, client_key, digest.hexdigest()))
                 except Exception:
                     temporary.unlink(missing_ok=True)
                     raise
@@ -450,7 +484,7 @@ class CatalogMixin:
                 final_paths: list[Path] = []
                 try:
                     imported: list[dict[str, str]] = []
-                    for temporary, name, width, height, client_key in pending:
+                    for temporary, name, width, height, client_key, digest in pending:
                         destination = unique_session_import_destination(destination_dir / name)
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(temporary, destination)
@@ -458,14 +492,15 @@ class CatalogMixin:
                         stat = destination.stat()
                         image_id = uuid.uuid4().hex
                         added.append(ImageRecord(
-                            image_id,
-                            destination,
-                            destination.relative_to(destination_dir).as_posix(),
-                            width,
-                            height,
-                            stat.st_mtime_ns,
-                            stat.st_size,
-                            "session",
+                            image_id=image_id,
+                            path=destination,
+                            relative_path=destination.relative_to(destination_dir).as_posix(),
+                            width=width,
+                            height=height,
+                            mtime_ns=stat.st_mtime_ns,
+                            size_bytes=stat.st_size,
+                            source_kind="session",
+                            content_digest=digest,
                         ))
                         imported.append({"clientKey": client_key, "imageId": image_id})
                 except Exception:
@@ -479,7 +514,7 @@ class CatalogMixin:
                 images = self.list_images() if include_images else []
                 return images, imported
         finally:
-            for temporary, _name, _width, _height, _client_key in pending:
+            for temporary, _name, _width, _height, _client_key, _digest in pending:
                 temporary.unlink(missing_ok=True)
             with self.lock:
                 self.importing_count -= 1
@@ -614,7 +649,6 @@ class CatalogMixin:
                         "height": record.height,
                         "mtimeNs": record.mtime_ns,
                         "sizeBytes": record.size_bytes,
-                        "contentVersion": record.content_version,
                         "assetVersion": self.asset_version(record),
                         "candidateCount": len(self.candidates.get(image_id, [])),
                         "enabledCandidateCount": sum(
@@ -634,32 +668,36 @@ class CatalogMixin:
         return self.candidate_snapshot(image_id)["candidates"]
 
     def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
-        """Return candidates and revision without filesystem probes under lock."""
+        """Return a digest-gated candidate snapshot for the selected image."""
         for _attempt in range(2):
-            with self.lock:
-                if image_id not in self.images:
-                    raise ClientError("画像が見つかりません。")
-                revision = self._candidate_revision(image_id)
-                snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
-            available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
-            with self.lock:
-                if self._candidate_revision(image_id) != revision:
-                    continue
-                stored_candidates = self.candidates.get(image_id, [])
-                candidates = [candidate for candidate in stored_candidates if candidate.candidate_id in available]
-                if len(candidates) != len(stored_candidates):
-                    self.candidates[image_id] = candidates
-                    self._touch_candidates(image_id)
-                return {
-                    "candidates": [
-                        candidate.as_api_dict(
-                            SOURCE_LABELS.get(candidate.source, candidate.source),
-                            REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-                        )
-                        for candidate in candidates
-                    ],
-                    "candidateRevision": self._candidate_revision(image_id),
-                }
+            with self.image_io_lock(image_id):
+                with self.lock:
+                    record = self.images.get(image_id)
+                    if record is None:
+                        raise ClientError("画像が見つかりません。")
+                    record = replace(record)
+                    revision = self._candidate_revision(image_id)
+                    snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+                self._assert_record_fresh(record)
+                available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
+                with self.lock:
+                    if self._candidate_revision(image_id) != revision:
+                        continue
+                    stored_candidates = self.candidates.get(image_id, [])
+                    candidates = [candidate for candidate in stored_candidates if candidate.candidate_id in available]
+                    if len(candidates) != len(stored_candidates):
+                        self.candidates[image_id] = candidates
+                        self._touch_candidates(image_id)
+                    return {
+                        "candidates": [
+                            candidate.as_api_dict(
+                                SOURCE_LABELS.get(candidate.source, candidate.source),
+                                REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+                            )
+                            for candidate in candidates
+                        ],
+                        "candidateRevision": self._candidate_revision(image_id),
+                    }
         raise ClientError("検出候補が更新されました。もう一度読み込んでください。")
 
     def image_snapshot(self, image_id: str) -> ImageRecord:
@@ -673,7 +711,7 @@ class CatalogMixin:
     @staticmethod
     def asset_version(record: ImageRecord) -> str:
         """The content-addressed HTTP version for an image response."""
-        return f"{record.mtime_ns}-{record.size_bytes}-{record.content_version}"
+        return record.content_digest
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])

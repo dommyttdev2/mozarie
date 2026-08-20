@@ -222,7 +222,7 @@ class SavingMixin:
                     if source_action == "overwrite":
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
-                        record.content_version = record_snapshot.content_version
+                        record.content_digest = record_snapshot.content_digest
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -292,7 +292,7 @@ class SavingMixin:
                     if copy_to_default:
                         write_rendered_copy(output_path, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
                     else:
-                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        output_digest = save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed
                     # record therefore keeps its masks, while successful records clear once.
@@ -302,7 +302,7 @@ class SavingMixin:
                         if not copy_to_default:
                             record.mtime_ns = output_stat.st_mtime_ns
                             record.size_bytes = output_stat.st_size
-                            record.content_version += 1
+                            record.content_digest = output_digest
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)
