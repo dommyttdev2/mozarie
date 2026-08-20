@@ -120,7 +120,7 @@ async function clearCatalog() {
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     clearStoredCatalogState();
     resetCatalog([], "");
-    setStatusKey("status.chooseFolder");
+    clearStatus();
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }
 }
@@ -199,8 +199,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
       await selectImage(nextImageId, true, { saveCurrentDraft: false });
     } else {
       updateNavigationControls(); updateActionButtons();
-      if (state.images.length) clearStatus();
-      else setStatusKey("status.chooseFolder");
+      clearStatus();
     }
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.catalogMutation = false; updateActionButtons(); }

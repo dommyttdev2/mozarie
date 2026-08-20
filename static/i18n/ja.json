@@ -6,7 +6,6 @@
   "folder.load": "読み込む",
   "folder.pickImages": "画像ファイルを選択",
   "folder.pickFolder": "フォルダーを選択",
-  "status.chooseFolder": "フォルダを選択してください",
   "status.progress": "処理状況",
   "status.progressCount": "{completed} / {total}",
   "status.enterFolder": "Windowsフォルダを入力してください。",

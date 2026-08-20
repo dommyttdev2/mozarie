@@ -158,7 +158,6 @@
   "status.boundaryDetecting": "Detecting inside boundary...",
   "status.boundaryDone": "Boundary range added.",
   "status.boundaryReady": "Click inside to choose the detection point, then select Detect.",
-  "status.chooseFolder": "Choose an image folder.",
   "status.detectCancelled": "Detection cancelled after {completed} image(s).",
   "status.detectCancelling": "Stopping detection...",
   "status.detectDone": "Detection complete.",

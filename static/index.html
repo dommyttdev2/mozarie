@@ -28,7 +28,7 @@
     <div class="appbar-spacer" aria-hidden="true"></div>
     <button id="settingsButton" type="button" data-i18n="settings.open">設定</button>
   </header>
-  <div class="status-line"><div id="status" class="status" aria-live="polite" data-i18n="status.chooseFolder">フォルダを選択してください</div></div>
+  <div class="status-line"><div id="status" class="status" aria-live="polite"></div></div>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
 
   <main class="studio-grid">
@@ -47,7 +47,7 @@
         <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
       </div>
       <div class="gallery-batch-bar">
-        <button id="batchModeButton" type="button" aria-pressed="false" data-i18n="selection.batchMode">一括編集</button>
+        <button id="batchModeButton" type="button" aria-pressed="false" disabled data-i18n="selection.batchMode">一括編集</button>
         <div id="batchSelectionControls" class="batch-selection-controls" hidden>
           <output id="selectionCount" aria-live="polite">0件を選択中</output>
           <button id="selectionActionsButton" type="button" popovertarget="selectionActionsMenu" aria-expanded="false" data-i18n="selection.actions">一括操作</button>

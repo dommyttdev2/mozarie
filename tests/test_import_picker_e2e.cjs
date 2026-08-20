@@ -273,6 +273,7 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
     const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
@@ -489,12 +490,15 @@ async function main() {
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
     await page.locator("#batchModeButton").click();
-    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.locator('.gallery-item[data-id="sample"]').focus();
+    await page.keyboard.press("Space");
     await page.locator('.gallery-item[data-id="sample-two"]').click();
     assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
     assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
     assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
     assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("current")), true, "the current image state remains separate from batch selection");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').getAttribute("aria-current"), "true", "the current image exposes its neutral current state");
+    assert.equal(await page.locator('.gallery-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard batch selection exposes its selected state");
     const batchDetectBefore = detectRequests.length;
     await page.locator("#selectionActionsButton").click();
     await page.locator('[data-selection-action="detect"]').click();
@@ -505,6 +509,7 @@ async function main() {
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     await page.locator("#selectionClearButton").click();
     assert.equal(await page.locator('.gallery-item.batch-selected').count(), 0, "exiting batch edit clears every green selection");
+    assert.equal(await page.locator('.gallery-item[aria-pressed]').count(), 0, "exiting batch edit removes batch selection semantics");
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#selectionCount").textContent(), "0件を選択中", "re-entering batch edit starts with no stale selection");
     await page.locator("#selectionClearButton").click();

@@ -21,7 +21,7 @@ function element(tagName = "") {
         if (enabled) classes.add(name); else classes.delete(name);
         return enabled;
       },
-    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -275,6 +275,8 @@ assert.match(markup, /id="boundaryActions"[^>]*hidden/);
 assert.match(markup, /id="boundaryModeMenu"[^>]*hidden/);
 assert.match(markup, /<div class="appbar-spacer" aria-hidden="true"><\/div>\s*<button id="settingsButton"/);
 assert.match(markup, /<div class="status-line"><div id="status"/);
+assert.match(markup, /<div id="status" class="status" aria-live="polite"><\/div>/);
+assert.doesNotMatch(markup, /status\.chooseFolder/);
 assert.doesNotMatch(markup, /appbar-actions|appbar-status|selectionActionBar/);
 assert.doesNotMatch(markup, /id="polygonActions"|id="polygonDetectButton"|id="polygonCancelButton"/);
 assert.match(styles, /\.boundary-actions\[hidden\]\s*\{\s*display:\s*none/);
@@ -320,6 +322,9 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(state.selectionAnchorId, null, "leaving batch mode clears the range anchor");
   assert.equal(elements.get("#batchModeButton").hidden, false);
   assert.equal(elements.get("#batchSelectionControls").hidden, true);
+  state.images = [];
+  updateActionButtons();
+  assert.equal(elements.get("#batchModeButton").disabled, true, "batch edit is unavailable while the catalog is empty");
   for (const [position, orientation] of [["left", "vertical"], ["right", "vertical"], ["top", "horizontal"], ["bottom", "horizontal"]]) {
     elements.get("#boundaryModeMenu").hidden = false;
     applyToolPosition(position);
@@ -467,7 +472,6 @@ const completionWatchdog = setTimeout(() => {
   state.translations["candidates.delete"] = "{label}を削除";
   state.translations["candidates.deleteManual"] = "手書きを削除";
   state.translations["candidates.none"] = "候補はありません";
-  state.translations["status.chooseFolder"] = "Choose folder";
   state.images = [
     { id: "remove", relativePath: "remove.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
     { id: "keep", relativePath: "keep.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },

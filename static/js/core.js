@@ -410,6 +410,7 @@ function updateActionButtons() {
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
   $("#removeCurrentImageButton").disabled = running || !hasImage;
   for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
+  $("#batchModeButton").disabled = locked || state.images.length === 0;
   $("#galleryFilter").disabled = running;
   $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
   const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
@@ -427,6 +428,7 @@ function updateActionButtons() {
   if (locked) for (const control of controls) {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
     if (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing) continue;
+    if (control.id === "selectionClearButton" && state.batchMode) continue;
     if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
@@ -498,7 +500,7 @@ function resetCatalog(images, root) {
   state.candidateUpdateChains.clear(); state.candidateUpdateVersions.clear(); state.candidateDeleting.clear(); state.candidateBatchPending.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
-  renderCatalogViews(); clearEditor();
+  renderCatalogViews(); updateSelectionActionBar(); clearEditor();
 }
 
 function discardCatalogNodes(nodes, container) {
