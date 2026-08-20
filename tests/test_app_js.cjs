@@ -55,9 +55,9 @@ function overviewItem() {
 const elements = new Map();
 for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
-  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcuts",
+  "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
   "status", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
@@ -382,11 +382,12 @@ const completionWatchdog = setTimeout(() => {
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 },
     detection: { threshold: 0.5, parallelism: 2, mode: "high_precision", fluid_exclusion_enabled: true },
+    confirmations: { candidateDelete: false, candidateRoleDelete: false, overwriteSource: false, deleteSourceAfterCopy: false },
   };
   const persistShortcuts = persistNavigationShortcuts(false);
   resolveFetch({ ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
   await persistShortcuts;
-  assert.equal(elements.get("#settingsShortcuts").checked, false);
+  assert.equal(elements.get("#settingsShortcutsEnabled").checked, false);
   assert.equal(state.settings.general.shortcuts_enabled, false);
   assert.equal(requests.at(-1).path, "/api/settings");
   assert.equal(state.reviewRoot, "g:\\images\\initial");
@@ -436,7 +437,6 @@ const completionWatchdog = setTimeout(() => {
   state.translations["candidates.delete"] = "{label}を削除";
   state.translations["candidates.deleteManual"] = "手書きを削除";
   state.translations["candidates.none"] = "候補はありません";
-  state.translations["status.editReady"] = "Ready";
   state.translations["status.chooseFolder"] = "Choose folder";
   state.images = [
     { id: "remove", relativePath: "remove.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
@@ -1296,6 +1296,7 @@ const completionWatchdog = setTimeout(() => {
   const saveWaitCandidate = { id: "save-wait-candidate", className: "pussy", confidence: 0.8, enabled: true, color: "#ffffff" };
   state.candidates = [saveWaitDeleted, saveWaitCandidate];
   state.candidateImages = new Map([[saveWaitDeleted.id, {}], [saveWaitCandidate.id, {}]]);
+  state.settings.confirmations = { ...(state.settings.confirmations || {}), candidateDelete: false };
   elements.get("#applyDialog").close();
   const saveCurrentMutation = deleteCandidate(saveWaitDeleted);
   const pendingSaveCurrent = saveCurrent();
@@ -2052,7 +2053,7 @@ const completionWatchdog = setTimeout(() => {
   state.reviewedPaths = new Set(["dynamic-name.png"]);
   state.job = { kind: "detect", state: "running", completed: 2, total: 4 };
   state.outputDirectoryHandle = { name: "saved-output" };
-  setStatusKey("status.editReady");
+  setStatus("");
   const englishLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
   resolvePendingFetch("/i18n/en.json", { ok: true, json: async () => translationFixtures.en });
@@ -2072,7 +2073,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
   assert.equal(elements.get("#processingProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
-  assert.equal(elements.get("#status").textContent, translationFixtures.en["status.editReady"]);
+  assert.equal(elements.get("#status").textContent, "");
   assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "saved-output"));
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
@@ -2111,8 +2112,8 @@ const completionWatchdog = setTimeout(() => {
   // restores the persisted language. The settings shortcut control itself
   // does not alter the active global shortcut setting before Save.
   state.settings.general.shortcuts_enabled = true;
-  elements.get("#settingsShortcuts").checked = false;
-  elements.get("#settingsShortcuts").dispatch("change");
+  elements.get("#settingsShortcutsEnabled").checked = false;
+  elements.get("#settingsShortcutsEnabled").dispatch("change");
   assert.equal(state.navigationShortcutsEnabled, true);
   setStatusKey("status.applyProgress", { completed: 2, total: 4, current: "dynamic-name.png" }, "running");
   elements.get("#settingsLanguage").value = "en";

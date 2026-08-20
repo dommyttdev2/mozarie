@@ -43,6 +43,8 @@
     "bindings": {
       "previous": "ArrowLeft",
       "next": "ArrowRight",
+      "previousVisible": "ArrowUp",
+      "nextVisible": "ArrowDown",
       "first": "Home",
       "last": "End",
       "nextUnreviewed": "Shift+ArrowRight",
@@ -50,11 +52,16 @@
       "toggleOverview": "G",
       "undo": "Ctrl+Z",
       "redo": "Ctrl+Shift+Z"
-    }
+    },
+    "actions": {"previous": true, "next": true, "previousVisible": true, "nextVisible": true, "first": true, "last": true, "nextUnreviewed": true, "reviewAndNext": true, "toggleOverview": true, "undo": true, "redo": true}
   },
   "confirmations": {
     "clearMasks": true,
     "clearCatalog": true,
-    "removeImage": true
+    "removeImage": true,
+    "candidateDelete": true,
+    "candidateRoleDelete": true,
+    "overwriteSource": true,
+    "deleteSourceAfterCopy": true
   }
 }

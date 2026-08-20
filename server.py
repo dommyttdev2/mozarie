@@ -29,6 +29,7 @@ import msvcrt
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -1404,6 +1405,7 @@ class StudioState:
         drafts: dict[str, dict[str, Any]],
         remove_after_save: bool = False,
         copy_to_default: bool = False,
+        suffix: str = "_censored",
     ) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if not copy_to_default and any(record.source_kind != "filesystem" for record in records):
@@ -1420,8 +1422,9 @@ class StudioState:
         records = eligible_records
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
+        suffix = _read_save_suffix(suffix)
         self._start_job(
-            "apply", records, self._apply_worker, divisor, drafts, copy_to_default,
+            "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
             int(self.settings.get("saving", {}).get("parallelism", 2)),
             expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
         )
@@ -1436,8 +1439,7 @@ class StudioState:
     ) -> list[dict[str, Any]]:
         records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
         _read_mosaic_divisor(divisor)
-        if not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix:
-            raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+        _read_save_suffix(suffix)
         return [
             {
                 "imageId": record.image_id,
@@ -2144,6 +2146,7 @@ class StudioState:
         divisor: int,
         drafts_or_masks: dict[str, Any],
         copy_to_default: bool = False,
+        suffix: str = "_censored",
         saving_parallelism: int = 1,
         *,
         control: JobControl | None = None,
@@ -2151,8 +2154,8 @@ class StudioState:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            if copy_to_default and len(records) > 1 and saving_parallelism > 1:
-                def save_copy(record: ImageRecord) -> bool:
+            if len(records) > 1 and saving_parallelism > 1:
+                def save_record(record: ImageRecord) -> bool:
                     if not self._job_is_current(job_generation, catalog_generation):
                         return False
                     self._wait_while_paused(control, job_generation, catalog_generation)
@@ -2166,18 +2169,25 @@ class StudioState:
                     )
                     if mask is None or not np.any(mask):
                         raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                    destination = _default_output_destination(record)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                    if copy_to_default:
+                        destination = _default_output_destination(record, suffix)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                    else:
+                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        output_stat = record.path.stat()
+                        record.mtime_ns = output_stat.st_mtime_ns
+                        record.size_bytes = output_stat.st_size
+                        record.content_version += 1
                     with self.lock:
-                        self.job.outputs.append(str(destination))
+                        self.job.outputs.append(str(destination if copy_to_default else record.path))
                         self._clear_masks_unchecked([record])
                     self.invalidate_sam_image(record.image_id)
                     self._mark_image_completed(record.image_id, job_generation, catalog_generation)
                     return True
 
                 with ThreadPoolExecutor(max_workers=min(8, saving_parallelism, len(records))) as executor:
-                    results = [future.result() for future in (executor.submit(save_copy, record) for record in records)]
+                    results = [future.result() for future in (executor.submit(save_record, record) for record in records)]
                 if control is not None and control.cancel_requested.is_set() or not all(results):
                     self._cancel_job(job_generation, catalog_generation)
                 else:
@@ -2204,7 +2214,7 @@ class StudioState:
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
                 if copy_to_default:
-                    destination = _default_output_destination(record)
+                    destination = _default_output_destination(record, suffix)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
                 else:
@@ -2704,10 +2714,10 @@ def unique_session_import_destination(path: Path) -> Path:
     raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
 
 
-def _default_output_destination(record: ImageRecord) -> Path:
+def _default_output_destination(record: ImageRecord, suffix: str = "_censored") -> Path:
     relative = safe_import_relative_path(record.relative_path)
     target = APP_DIR / "output" / relative
-    return unique_session_import_destination(target.with_name(f"{target.stem}_censored{target.suffix}"))
+    return unique_session_import_destination(target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"))
 
 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
@@ -3005,6 +3015,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     payload.get("imageIds", []), divisor, payload.get("drafts", {}),
                     _read_bool(payload.get("removeAfterSave", False), "完了後、一覧から削除"),
                     _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー"),
+                    _read_save_suffix(payload.get("suffix", "_censored")),
                 )
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
@@ -3190,6 +3201,12 @@ def _read_detection_parallelism(value: Any) -> int:
     return value
 
 
+def _read_save_suffix(value: Any) -> str:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+    return value
+
+
 def _read_target_classes(value: Any) -> set[str]:
     if not isinstance(value, (list, tuple, set)):
         raise ClientError("検出対象の形式が正しくありません。")
@@ -3214,8 +3231,9 @@ def _update_status() -> dict[str, Any]:
 
 def _start_update_after_response(http_server: ThreadingHTTPServer) -> None:
     time.sleep(0.2)
-    subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
     http_server.shutdown()
+    STATE.shutdown()
+    subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
 
 
 def _open_browser(url: str) -> None:

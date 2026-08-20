@@ -3291,5 +3291,18 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(len(imported), 1)
             list_images.assert_not_called()
 
+    def test_update_stops_server_and_state_before_launching_batch(self):
+        events = []
+        http_server = Mock(); http_server.shutdown.side_effect = lambda: events.append("server")
+        with patch.object(server_module.time, "sleep"), patch.object(server_module.STATE, "shutdown", side_effect=lambda: events.append("state")), patch.object(server_module.subprocess, "Popen", side_effect=lambda *args, **kwargs: events.append("batch")):
+            server_module._start_update_after_response(http_server)
+        self.assertEqual(events, ["server", "state", "batch"])
+
+    def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
+        record = ImageRecord("id", Path("C:/source.png"), "nested/source.png", 1, 1, 0, 0)
+        destination = server_module._default_output_destination(record, "_mosaic")
+        self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
+        with self.assertRaises(ClientError): server_module._read_save_suffix("../bad")
+
 if __name__ == "__main__":
     unittest.main()

@@ -311,6 +311,11 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector("#batchMoreMenu").matches(":popover-open"));
     await page.waitForFunction(() => document.querySelector("#batchMoreButton").getAttribute("aria-expanded") === "false");
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
+    assert.equal(await page.locator(".appbar-commands #batchMoreButton").count(), 0, "batch menu belongs beside the image count, not in the appbar");
+    assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
+    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
+    await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");

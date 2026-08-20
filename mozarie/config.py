@@ -148,10 +148,11 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "shortcuts": {
             "enabled": _expect_bool(shortcuts.get("enabled", general.get("shortcuts_enabled", True)), "shortcuts.enabled"),
             "bindings": _validate_shortcuts(shortcuts.get("bindings", _DEFAULT_SHORTCUTS)),
+            "actions": _validate_shortcut_actions(shortcuts.get("actions", {})),
         },
         "confirmations": {
             key: _expect_bool(confirmations.get(key, True), f"confirmations.{key}")
-            for key in ("clearMasks", "clearCatalog", "removeImage")
+            for key in ("clearMasks", "clearCatalog", "removeImage", "candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy")
         },
     }
 
@@ -162,7 +163,7 @@ def _validate_targets(value: Any) -> list[str]:
     return list(dict.fromkeys(value))
 
 
-_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "first": "Home", "last": "End", "nextUnreviewed": "Shift+ArrowRight", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
+_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "previousVisible": "ArrowUp", "nextVisible": "ArrowDown", "first": "Home", "last": "End", "nextUnreviewed": "Shift+ArrowRight", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
 _SHORTCUT_ACTIONS = set(_DEFAULT_SHORTCUTS)
 
 
@@ -173,3 +174,9 @@ def _validate_shortcuts(value: Any) -> dict[str, str]:
     if set(bindings) != _SHORTCUT_ACTIONS or not all(bindings.values()) or len(set(bindings.values())) != len(bindings):
         raise SettingsError("shortcut bindings must be complete and unique")
     return bindings
+
+
+def _validate_shortcut_actions(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise SettingsError("shortcuts.actions must be an object")
+    return {action: _expect_bool(value.get(action, True), f"shortcuts.actions.{action}") for action in _SHORTCUT_ACTIONS}

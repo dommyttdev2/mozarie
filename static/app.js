@@ -3,7 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
   viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
-  selectedImageIds: new Set(), selectionAnchorId: null,
+  selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
@@ -129,6 +129,7 @@ function setStatusKey(key, params = {}, kind = "") {
   state.status = { key, params, kind };
   renderStatus();
 }
+function clearStatus() { state.status = { message: "", kind: "" }; renderStatus(); }
 
 function processingTitle(kind) {
   return t(kind === "detect" ? "processing.detect" : "processing.import");
@@ -224,7 +225,8 @@ function setHidden(image, hidden) {
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
 function updateSelectionActionBar() {
   const count = state.selectedImageIds.size; const bar = $("#selectionActionBar");
-  bar.hidden = !count; $("#selectionCount").textContent = t("selection.count", { count });
+  bar.hidden = !count || (!state.batchMode && count < 2); $("#selectionCount").textContent = t("selection.count", { count });
+  $("#batchModeButton").classList.toggle("active", state.batchMode); $("#batchModeButton").setAttribute("aria-pressed", String(state.batchMode));
 }
 function selectCatalogImage(imageId, event = null) {
   const index = state.images.findIndex((image) => image.id === imageId); if (index < 0) return;
@@ -232,7 +234,7 @@ function selectCatalogImage(imageId, event = null) {
     const anchor = state.images.findIndex((image) => image.id === state.selectionAnchorId);
     const range = state.images.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
     if (event.ctrlKey || event.metaKey) range.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(range);
-  } else if (event?.ctrlKey || event?.metaKey) {
+  } else if (event?.ctrlKey || event?.metaKey || state.batchMode) {
     if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
     state.selectionAnchorId = imageId;
   } else { state.selectedImageIds = new Set([imageId]); state.selectionAnchorId = imageId; }
@@ -313,7 +315,8 @@ function focusCanvas() { focusElement(canvas); }
 function setNavigationShortcutsEnabled(enabled) {
   state.navigationShortcutsEnabled = Boolean(enabled);
   if (state.settings?.general) state.settings.general.shortcuts_enabled = state.navigationShortcutsEnabled;
-  const settingsControl = $("#settingsShortcuts");
+  if (state.settings?.shortcuts) state.settings.shortcuts.enabled = state.navigationShortcutsEnabled;
+  const settingsControl = $("#settingsShortcutsEnabled");
   if (settingsControl) settingsControl.checked = state.navigationShortcutsEnabled;
   updateNavigationControls();
   focusCanvas();
@@ -325,9 +328,10 @@ async function persistNavigationShortcuts(enabled) {
   try {
     const payload = structuredClone(state.settings);
     payload.general.shortcuts_enabled = Boolean(enabled);
+    payload.shortcuts = { ...(payload.shortcuts || {}), enabled: Boolean(enabled) };
     const data = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
     setSettingsForm(data.settings, data.status);
-    setNavigationShortcutsEnabled(data.settings.general.shortcuts_enabled);
+    setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
   } catch (error) { setStatus(error.message, "error"); }
 }
 function handleReviewStorageEvent(event) {
@@ -742,7 +746,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     updateCandidateStatus();
-    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); setStatusKey("status.editReady");
+    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
     state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     state.overviewNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     prefetchNeighbors(record);
@@ -1558,6 +1562,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
 
 async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
+  if (confirmationRequired("candidateDelete") && !await confirmAction(t("confirm.candidateDelete.title"), t("confirm.candidateDelete.message"), "candidateDelete")) return;
   const imageId = state.currentId;
   setReviewed(currentRecord(), false);
   const generation = state.imageGeneration;
@@ -1625,6 +1630,7 @@ async function batchCandidateOperation(spec) {
     ids.forEach((id) => allActive ? state.blinkCandidateIds.delete(id) : state.blinkCandidateIds.add(id));
     renderCandidates(); render(); return;
   }
+  if (operation === "delete" && confirmationRequired("candidateRoleDelete") && !await confirmAction(t("confirm.candidateRoleDelete.title"), t("confirm.candidateRoleDelete.message"), "candidateRoleDelete")) return;
   if (manual) {
     if (operation === "delete") role === "apply" ? deleteManualMask() : deleteManualExclusion();
     else if (role === "apply") state.manualEnabled = operation === "enable";
@@ -1764,20 +1770,34 @@ function fillAt(point) {
   const x = Math.min(width - 1, Math.max(0, Math.floor(point.x))); const y = Math.min(height - 1, Math.max(0, Math.floor(point.y)));
   const start = (y * width + x) * 4; const seed = [pixels[start], pixels[start + 1], pixels[start + 2]];
   const tolerance = Math.max(0, Math.min(255, Number($("#bucketTolerance").value) || 0));
-  const mask = document.createElement("canvas"); mask.width = width; mask.height = height;
-  const maskCtx = mask.getContext("2d"); const image = maskCtx.createImageData(width, height); const seen = new Uint8Array(width * height); const queue = [y * width + x]; seen[queue[0]] = 1;
+  const seen = new Uint8Array(width * height); const accepted = new Uint8Array(width * height); const queue = [y * width + x]; seen[queue[0]] = 1;
   for (let cursor = 0; cursor < queue.length; cursor += 1) {
     const index = queue[cursor]; const offset = index * 4; const distance = Math.max(Math.abs(pixels[offset] - seed[0]), Math.abs(pixels[offset + 1] - seed[1]), Math.abs(pixels[offset + 2] - seed[2]));
     if (distance > tolerance) continue;
-    image.data[offset + 3] = 255; const px = index % width; const py = Math.floor(index / width);
+    accepted[index] = 1; const px = index % width; const py = Math.floor(index / width);
     for (const neighbor of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
       const [nx, ny] = neighbor; const next = ny * width + nx;
       if (nx >= 0 && nx < width && ny >= 0 && ny < height && !seen[next]) { seen[next] = 1; queue.push(next); }
     }
   }
-  maskCtx.putImageData(image, 0, 0); addCtx.drawImage(mask, 0, 0); exclusionCtx.save(); exclusionCtx.globalCompositeOperation = "destination-out"; exclusionCtx.drawImage(mask, 0, 0); exclusionCtx.restore();
-  state.manualMaskPresent = true; setReviewed(currentRecord(), false); resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  const spans = [];
+  for (let row = 0; row < height; row += 1) for (let column = 0; column < width;) {
+    if (!accepted[row * width + column]) { column += 1; continue; }
+    const startColumn = column; while (column < width && accepted[row * width + column]) column += 1;
+    spans.push([row, startColumn, column]);
+  }
+  applyFillSpans(spans); state.history.splice(state.historyIndex); state.history.push({ tool: "bucket", spans });
+  if (state.history.length > 12) { const oldest = state.history.shift(); replayManualStroke(oldest, historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d")); }
+  state.historyIndex = state.history.length; state.manualMaskPresent = true; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
+
+function paintFillSpans(addContext, exclusionContext, spans) {
+  addContext.save(); addContext.fillStyle = "#ffffff";
+  exclusionContext.save(); exclusionContext.globalCompositeOperation = "destination-out";
+  for (const [row, start, end] of spans) { addContext.fillRect(start, row, end - start, 1); exclusionContext.fillRect(start, row, end - start, 1); }
+  addContext.restore(); exclusionContext.restore();
+}
+function applyFillSpans(spans) { paintFillSpans(addCtx, exclusionCtx, spans); composeCurrentMask(); }
 
 function drawStroke(from, to, erase, size = Number($("#brushSize").value)) {
   paintStroke(from, to, erase, size);
@@ -1796,6 +1816,7 @@ function appendManualStrokePoint(point) {
 }
 
 function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx) {
+  if (stroke.tool === "bucket") { paintFillSpans(addContext, exclusionContext, stroke.spans); return; }
   const erase = stroke.tool === "eraser";
   const points = stroke.points;
   if (!points.length) return;
@@ -2426,6 +2447,8 @@ async function startApplyFromDialog(event) {
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value.trim();
   if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
+  if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
+  if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
   // This lock is intentionally set before the first await. A second submit must never create
   // another browser save loop while permissions or the output-directory picker are pending.
   state.saveStarting = true;
@@ -2434,7 +2457,7 @@ async function startApplyFromDialog(event) {
   updateActionButtons();
   if (copy && !state.outputDirectoryHandle) {
     try {
-      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
+      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
     } catch (error) { setApplyResult(error.message, true); return finishSaveStart(); }
   }
@@ -2649,6 +2672,7 @@ function setTool(tool) {
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
+  $("#bucketToleranceControl").hidden = tool !== "bucket";
   canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
   if (boundaryTools.has(tool) && state.boundaryDrafts.length) setStatusKey("status.boundaryReady");
   updateBoundaryActions(); render();
@@ -2681,7 +2705,8 @@ function updateBlockSizeDisplay() {
 }
 
 function confirmAction(title, message, key = null) {
-  if (key && state.settings?.confirmations?.[key] === false) return Promise.resolve(true);
+  const newConfirmation = new Set(["candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy"]);
+  if (key && (newConfirmation.has(key) ? state.settings?.confirmations?.[key] !== true : state.settings?.confirmations?.[key] === false)) return Promise.resolve(true);
   const dialog = $("#confirmDialog");
   $("#confirmTitle").textContent = title;
   $("#confirmMessage").textContent = message;
@@ -2697,6 +2722,10 @@ function confirmAction(title, message, key = null) {
     dialog.addEventListener("close", finish, { once: true });
     dialog.showModal();
   });
+}
+function confirmationRequired(key) {
+  const newConfirmation = new Set(["candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy"]);
+  return newConfirmation.has(key) ? state.settings?.confirmations?.[key] === true : state.settings?.confirmations?.[key] !== false;
 }
 
 function resetCurrentDraft() {
@@ -2730,7 +2759,7 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     });
     imageIds.forEach((imageId) => state.maskStatus.delete(imageId));
     markImagesUnreviewed(imageIds, false);
-    renderCatalogViews(); updateNavigationControls(); setStatusKey("status.editReady");
+    renderCatalogViews(); updateNavigationControls(); clearStatus();
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
   finally { state.masksClearing = false; updateActionButtons(); }
 }
@@ -2827,7 +2856,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
       await selectImage(nextImageId, true, { saveCurrentDraft: false });
     } else {
       updateNavigationControls(); updateActionButtons();
-      if (state.images.length) setStatusKey("status.editReady");
+      if (state.images.length) clearStatus();
       else setStatusKey("status.chooseFolder");
     }
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
@@ -3090,7 +3119,8 @@ function handleEditorKeydown(event) {
   if (state.viewMode !== "edit") return false;
   const binding = shortcutFromEvent(event);
   const shortcuts = state.settings?.shortcuts?.bindings || { undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
-  if (binding === shortcuts.undo || binding === shortcuts.redo) {
+  const enabled = state.settings?.shortcuts?.actions || {};
+  if ((binding === shortcuts.undo && enabled.undo !== false) || (binding === shortcuts.redo && enabled.redo !== false)) {
     event.preventDefault();
     void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
     return true;
@@ -3101,9 +3131,9 @@ function handleEditorKeydown(event) {
 function navigationShortcutAction(event) {
   if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || isEditableTarget(document.activeElement) || hasOpenDialog()) return null;
   const binding = shortcutFromEvent(event);
-  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
+  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
   const actionForBinding = Object.entries(bindings).find(([, value]) => value === binding)?.[0];
-  if (!actionForBinding) return null;
+  if (!actionForBinding || state.settings?.shortcuts?.actions?.[actionForBinding] === false) return null;
   if (actionForBinding === "toggleOverview") return "toggleOverview";
   if (state.viewMode !== "edit") return null;
   return actionForBinding;
@@ -3116,6 +3146,8 @@ function handleNavigationKeydown(event) {
   if (action === "toggleOverview") setViewMode(state.viewMode === "overview" ? "edit" : "overview");
   else if (action === "previous") moveCurrentBy(-1);
   else if (action === "next") moveCurrentBy(1);
+  else if (action === "previousVisible") moveCurrentBy(-1);
+  else if (action === "nextVisible") moveCurrentBy(1);
   else if (action === "nextUnreviewed") moveToNextUnreviewed();
   else if (action === "first" && state.images[0]) void selectImage(state.images[0].id);
   else if (action === "last" && state.images.at(-1)) void selectImage(state.images.at(-1).id);
@@ -3218,7 +3250,6 @@ function setSettingsForm(settings, status = null) {
   $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
   $("#settingsSaveParallelism").value = String(settings.saving?.parallelism || 2);
   $("#settingsShortcutsEnabled").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
-  $("#settingsShortcuts").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
   renderOutputHandle();
   setNavigationShortcutsEnabled(settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
@@ -3253,17 +3284,22 @@ function setSettingsForm(settings, status = null) {
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
   $("#confirmRemoveImage").checked = settings.confirmations?.removeImage !== false;
-  renderShortcutBindings(settings.shortcuts?.bindings || {});
+  $("#confirmCandidateDelete").checked = settings.confirmations?.candidateDelete !== false;
+  $("#confirmCandidateRoleDelete").checked = settings.confirmations?.candidateRoleDelete !== false;
+  $("#confirmOverwriteSource").checked = settings.confirmations?.overwriteSource !== false;
+  $("#confirmDeleteSourceAfterCopy").checked = settings.confirmations?.deleteSourceAfterCopy !== false;
+  renderShortcutBindings(settings.shortcuts?.bindings || {}, settings.shortcuts?.actions || {});
   renderModelStatus();
 }
 
-const SHORTCUT_LABELS = { previous: "←", next: "→", first: "Home", last: "End", nextUnreviewed: "次へ", reviewAndNext: "確認済にして次へ", toggleOverview: "一覧切替", undo: "Undo", redo: "Redo" };
-function renderShortcutBindings(bindings) {
+const SHORTCUT_LABELS = { previous: "←", next: "→", previousVisible: "↑", nextVisible: "↓", first: "Home", last: "End", nextUnreviewed: "次へ", reviewAndNext: "確認済にして次へ", toggleOverview: "一覧切替", undo: "Undo", redo: "Redo" };
+function renderShortcutBindings(bindings, actions) {
   const root = $("#shortcutBindings"); root.textContent = "";
   for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
     const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = label;
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false;
     const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off";
-    input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, input); root.append(row);
+    input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, enabled, input); root.append(row);
   }
 }
 function shortcutFromEvent(event) { return `${event.ctrlKey || event.metaKey ? "Ctrl+" : ""}${event.shiftKey ? "Shift+" : ""}${event.altKey ? "Alt+" : ""}${event.key.length === 1 ? event.key.toUpperCase() : event.key}`; }
@@ -3272,6 +3308,7 @@ function shortcutBindingsPayload() {
   if (!Object.values(bindings).every(Boolean) || new Set(Object.values(bindings)).size !== Object.keys(bindings).length) throw new Error("ショートカットのキーは重複なく設定してください。");
   return bindings;
 }
+function shortcutActionsPayload() { return Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked])); }
 
 function settingsPayload() {
   return {
@@ -3295,8 +3332,8 @@ function settingsPayload() {
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked, targets: detectionTargets(),
     },
     saving: { parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))) },
-    shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload() },
-    confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked },
+    shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload(), actions: shortcutActionsPayload() },
+    confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked, candidateDelete: $("#confirmCandidateDelete").checked, candidateRoleDelete: $("#confirmCandidateRoleDelete").checked, overwriteSource: $("#confirmOverwriteSource").checked, deleteSourceAfterCopy: $("#confirmDeleteSourceAfterCopy").checked },
   };
 }
 
@@ -3370,7 +3407,7 @@ async function checkForUpdate() {
   try {
     const update = await api("/api/update/status");
     $("#settingsVersion").textContent = update.current;
-    const button = $("#checkUpdateButton"); button.textContent = update.available ? t("update.start") : t("update.current", { version: update.current });
+    const button = $("#checkUpdateButton"); button.textContent = update.available ? t("update.start") : t("update.check");
     button.classList.toggle("primary", update.available); button.dataset.available = String(update.available);
     $("#updateToast").hidden = !update.available;
   } catch { /* Offline update checks stay quiet. */ }
@@ -3449,7 +3486,7 @@ function bindEvents() {
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
-  $("#removeCurrentImageButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
+  $("#removeCurrentImageButton").addEventListener("click", () => setHidden(currentRecord(), true));
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
   $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
@@ -3466,8 +3503,9 @@ function bindEvents() {
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
   document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
+  $("#selectionClearButton").addEventListener("click", () => { state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; renderCatalogViews(); updateSelectionActionBar(); });
+  $("#batchModeButton").addEventListener("click", () => { state.batchMode = !state.batchMode; if (!state.batchMode && state.selectedImageIds.size < 2) state.selectedImageIds.clear(); renderCatalogViews(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
-  $("#settingsShortcuts").addEventListener("change", () => {});
   $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
     if (isBusy() || state.importing) return;
@@ -3570,7 +3608,7 @@ function bindEvents() {
     if (image) setReviewed(image, !isReviewed(image));
     closeCatalogContextMenu();
   });
-  $("#removeImageMenuItem").addEventListener("click", () => { void removeImageFromCatalog(); });
+  $("#removeImageMenuItem").addEventListener("click", () => { setHidden(state.images.find((image) => image.id === state.contextMenuImageId), true); closeCatalogContextMenu(); });
   $("#gallery").addEventListener("dragenter", (event) => {
     if (!event.dataTransfer?.types?.includes("Files")) return;
     event.preventDefault(); setGalleryDropOverlay(true);
