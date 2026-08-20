@@ -3110,16 +3110,16 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
-            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+            _output, record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
 
             original_unlink = Path.unlink
 
             def fail_only_for_source(path: Path, *args, **kwargs):
-                if path == source:
+                if path == record.path:
                     raise PermissionError("locked")
                 return original_unlink(path, *args, **kwargs)
 
-            with patch.object(Path, "unlink", fail_only_for_source):
+            with patch.object(type(record.path), "unlink", autospec=True, side_effect=fail_only_for_source):
                 with self.assertRaisesRegex(ClientError, "候補は保持"):
                     state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
 

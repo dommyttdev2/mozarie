@@ -155,6 +155,8 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 @media (min-width: 900px) and (max-width: 1279px) {
   .studio-grid { grid-template-columns: 190px minmax(0, 1fr) 210px; }
   .gallery { grid-template-columns: 1fr; }
+  .overview-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .overview-filters, .overview-search-controls { grid-column: 1 / -1; }
   .overview-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 
