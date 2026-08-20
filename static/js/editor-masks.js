@@ -357,7 +357,7 @@ function paintStrokeOnContexts(addContext, exclusionContext, from, to, erase, si
 
 function paintStroke(from, to, erase, size) {
   paintStrokeOnContexts(addCtx, exclusionCtx, from, to, erase, size);
-  composeCurrentMask();
+  markMaskDirty();
 }
 
 function fillAt(point) {

@@ -237,7 +237,7 @@ function bindEvents() {
     if (state.tool === "bucket") { state.drawing = false; fillAt(point); return; }
     beginManualStroke(point); render();
   });
-  canvas.addEventListener("pointermove", (event) => {
+  const processPointerMove = (event) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
@@ -262,6 +262,10 @@ function bindEvents() {
       } else { appendManualStrokePoint(point); state.pointer = point; }
     }
     render();
+  };
+  canvas.addEventListener("pointermove", (event) => {
+    const events = event.getCoalescedEvents?.() || [event];
+    for (const pointEvent of events) processPointerMove(pointEvent);
   });
   function finishCanvasGesture(event, cancelled = false) {
     const wasDrawing = state.drawing;
@@ -275,7 +279,7 @@ function bindEvents() {
         state.polygonPoints = [];
         setStatusKey("status.boundaryReady");
       }
-      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); render(); return;
+      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
@@ -300,7 +304,7 @@ function bindEvents() {
         }
       }
     }
-    render();
+    flushRender();
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));

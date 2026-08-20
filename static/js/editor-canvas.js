@@ -2,6 +2,7 @@ function canvasSizeForImage(image) {
   for (const target of [addCanvas, exclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
+  state.maskDirty = true;
   state.manualMaskPresent = false;
   state.manualEnabled = true;
 }
@@ -11,6 +12,7 @@ function clearEditor() {
   cancelFillWork();
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true;
+  state.maskDirty = false;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -350,7 +352,10 @@ function composeCurrentMask() {
   }
   if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
+  state.maskDirty = false;
 }
+function markMaskDirty() { state.maskDirty = true; }
+function flushMaskComposition() { if (state.maskDirty) composeCurrentMask(); }
 
 function sourceVisibleAfterExclusion(source) {
   combinedCtx.globalCompositeOperation = "source-over";
@@ -695,7 +700,7 @@ function drawCandidateBlinkOverlay() {
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
 }
 
-function render() {
+function renderNow() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) return;

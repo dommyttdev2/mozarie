@@ -2244,6 +2244,20 @@ const completionWatchdog = setTimeout(() => {
   fillAt({ x: 0, y: 0 }); const cancelledFillWorker = workerInstances.at(-1); cancelFillWork();
   assert.equal(cancelledFillWorker.terminated, true); assert.equal(state.fillPending, false);
 
+  // A dense pointer stream preserves every point while composing and rendering
+  // only once in the next animation frame.
+  const queuedFrames = []; context.requestAnimationFrame = (callback) => { queuedFrames.push(callback); return queuedFrames.length; };
+  state.images = [{ id: "raf", relativePath: "raf.png", width: 100, height: 80, assetVersion: "raf-v", candidateRevision: 0 }];
+  state.currentId = "raf"; state.currentImage = { width: 100, height: 80 }; state.tool = "brush"; state.history = []; state.historyIndex = 0; state.maskDirty = false;
+  combinedMask._context.clearRectCalls = 0;
+  beginManualStroke({ x: 0, y: 0 });
+  for (let index = 1; index <= 100; index += 1) { appendManualStrokePoint({ x: index, y: 0 }); render(); }
+  assert.equal(state.activeStroke.points.length, 101, "all coalesced pointer samples are retained");
+  assert.equal(queuedFrames.length, 1, "only one RAF render is queued");
+  queuedFrames.shift()();
+  assert.equal(combinedMask._context.clearRectCalls, 1, "dirty mask composition runs once per RAF");
+  context.requestAnimationFrame = (callback) => { callback(); return 1; };
+
   for (const pending of [...pendingFetches]) if (pending.path.startsWith("/api/image/")) settlePendingFetch(pending, { ok: true, blob: async () => ({}) });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(pendingFetches.length, 0, `every mocked fetch must be resolved before this test completes: ${pendingFetches.map((item) => item.path).join(", ")}`);
