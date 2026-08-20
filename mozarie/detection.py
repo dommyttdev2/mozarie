@@ -138,7 +138,12 @@ class DetectionMixin:
                 if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                     self._discard_candidates(candidates)
                     return
-                with self.image_io_lock(record.image_id):
+                try:
+                    image_lock = self.image_io_lock(record.image_id)
+                except ClientError:
+                    self._discard_candidates(candidates)
+                    raise
+                with image_lock:
                     try:
                         self._assert_record_fresh(record)
                     except ClientError:

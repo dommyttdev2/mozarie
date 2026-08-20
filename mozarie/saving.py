@@ -144,8 +144,19 @@ class SavingMixin:
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
         expired_token = False
-        image_lock = self.image_io_lock(image_id)
         with self.import_lock:
+            with self.lock:
+                receipt = self.browser_save_receipts.get(save_token)
+                if receipt is not None:
+                    if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted, "images": self.list_images()}
+                token_details = self.browser_save_tokens.get(save_token)
+                if token_details is None:
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                if token_details.image_id != image_id or token_details.candidate_revision != revision:
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+            image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
                     receipt = self.browser_save_receipts.get(save_token)
