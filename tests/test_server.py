@@ -3533,10 +3533,9 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
-            with patch.object(state, "_clear_masks_unchecked", wraps=state._clear_masks_unchecked) as clear_masks:
-                first = state.commit_browser_save(image_id, rendered_revision, token, "keep")
-                retried = state.commit_browser_save(image_id, rendered_revision, token, "keep")
-            self.assertEqual(clear_masks.call_count, 1)
+            first = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            retried = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            self.assertFalse(mask_path.exists())
             self.assertEqual(retried["cleared"], first["cleared"])
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()

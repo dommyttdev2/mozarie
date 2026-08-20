@@ -150,77 +150,85 @@ class SavingMixin:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。")
         if source_action not in {"keep", "overwrite", "deleted"}:
             raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
-        with self.lock:
-            self._discard_expired_browser_save_tokens_unchecked()
-            receipt = self.browser_save_receipts.get(save_token)
-            if receipt is not None:
-                if (
-                    receipt.image_id != image_id
-                    or receipt.candidate_revision != revision
-                    or receipt.source_action != source_action
-                ):
+        rendered_path: Path | None = None
+        mask_paths: list[Path] = []
+        candidate_dirs: list[Path] = []
+        image_lock = self.image_io_lock(image_id)
+        with image_lock:
+            with self.lock:
+                self._discard_expired_browser_save_tokens_unchecked()
+                receipt = self.browser_save_receipts.get(save_token)
+                if receipt is not None:
+                    if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted, "images": self.list_images()}
+                token_details = self.browser_save_tokens.get(save_token)
+                record = self.images.get(image_id)
+                if token_details is None:
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-                return {
-                    "cleared": receipt.cleared,
-                    "stale": receipt.stale,
-                    "deleted": receipt.deleted,
-                    "images": self.list_images(),
-                }
-            token_details = self.browser_save_tokens.get(save_token)
-            if token_details is None:
-                raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
-            if token_details.image_id != image_id or token_details.candidate_revision != revision:
-                raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-            if token_details.catalog_generation != self.catalog_generation:
-                self._discard_browser_save_token_unchecked(save_token)
-                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
-            record = self.images.get(image_id)
-            if record is None:
-                self._discard_browser_save_token_unchecked(save_token)
-                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
+                if token_details.catalog_generation != self.catalog_generation or record is None:
+                    rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+                    raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
+                record_snapshot = replace(record)
+                catalog_generation = self.catalog_generation
+
             try:
-                current_fingerprint = self._source_fingerprint(record)
-            except ClientError:
-                self._discard_browser_save_token_unchecked(save_token)
-                raise
-            if current_fingerprint != token_details.source_fingerprint:
-                self._discard_browser_save_token_unchecked(save_token)
-                raise ClientError("元画像が変更されました。保存をやり直してください。")
-            current_revision = self._candidate_revision(image_id)
-            deleted = False
-            try:
+                if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
+                    raise ClientError("元画像が変更されました。保存をやり直してください。")
                 if source_action == "overwrite":
-                    _replace_record_with_rendered_output(record, token_details.rendered_path)
+                    _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path)
                 elif source_action == "deleted":
-                    if record.source_kind == "filesystem":
-                        record.path.unlink()
-                    self._cleanup_record_working_state_unchecked(record, remove_session_source=True)
-                    self.images.pop(record.image_id, None)
-                    self.order = [current_id for current_id in self.order if current_id != record.image_id]
-                    self.candidate_revisions.pop(record.image_id, None)
-                    self.candidates.pop(record.image_id, None)
-                    deleted = True
-                cleared = revision == current_revision
-                if cleared and not deleted:
-                    self._clear_masks_unchecked([record])
-            except OSError as exc:
-                self._discard_browser_save_token_unchecked(save_token)
-                raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
-            except Exception:
-                self._discard_browser_save_token_unchecked(save_token)
+                    record_snapshot.path.unlink()
+            except ClientError:
+                with self.lock:
+                    details = self.browser_save_tokens.pop(save_token, None)
+                    if details is not None:
+                        rendered_path = details.rendered_path
+                if rendered_path is not None:
+                    rendered_path.unlink(missing_ok=True)
                 raise
-            self.browser_save_receipts[save_token] = BrowserSaveReceipt(
-                image_id=image_id,
-                candidate_revision=revision,
-                source_action=source_action,
-                cleared=cleared,
-                stale=not cleared,
-                deleted=deleted,
-                completed_at=time.monotonic(),
-            )
-            self._discard_browser_save_token_unchecked(save_token)
+            except OSError as exc:
+                with self.lock:
+                    details = self.browser_save_tokens.pop(save_token, None)
+                    if details is not None:
+                        rendered_path = details.rendered_path
+                if rendered_path is not None:
+                    rendered_path.unlink(missing_ok=True)
+                raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
+
+            with self.lock:
+                record = self.images.get(image_id)
+                if record is None or self.catalog_generation != catalog_generation or self.browser_save_tokens.get(save_token) != token_details:
+                    raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                current_revision = self._candidate_revision(image_id)
+                deleted = source_action == "deleted"
+                cleared = revision == current_revision
+                if source_action == "overwrite":
+                    record.mtime_ns = record_snapshot.mtime_ns
+                    record.size_bytes = record_snapshot.size_bytes
+                    record.content_version = record_snapshot.content_version
+                if deleted:
+                    mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
+                    candidate_dirs = [self.cache_dir / image_id]
+                    self.images.pop(image_id, None)
+                    self.order = [current_id for current_id in self.order if current_id != image_id]
+                    self.candidate_revisions.pop(image_id, None)
+                    self.candidates.pop(image_id, None)
+                elif cleared:
+                    mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
+                    candidate_dirs = [self.cache_dir / image_id]
+                    self.candidates[image_id] = []
+                    self._touch_candidates(image_id)
+                self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
+                rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+        if mask_paths:
+            self._delete_mask_files(mask_paths, candidate_dirs)
+        if rendered_path is not None:
+            rendered_path.unlink(missing_ok=True)
         self.invalidate_sam_image(image_id)
         return {"cleared": cleared, "stale": not cleared, "deleted": deleted, "images": self.list_images()}
 
