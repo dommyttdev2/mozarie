@@ -130,18 +130,35 @@ class DetectionMixin:
                 if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                     self._discard_candidates(candidates)
                     return
-                with self.lock:
-                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                            or not self._job_is_current(job_generation, catalog_generation)):
+                with self.image_io_lock(record.image_id):
+                    try:
+                        self._assert_record_fresh(record)
+                    except ClientError:
                         self._discard_candidates(candidates)
-                        return
-                    boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
-                    for candidate in self.candidates.get(record.image_id, []):
-                        if candidate.origin != "boundary":
-                            candidate.mask_path.unlink(missing_ok=True)
-                    self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                    self._touch_candidates(record.image_id)
-                    self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
+                        raise
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or self.images.get(record.image_id) is not record):
+                            self._discard_candidates(candidates)
+                            return
+                        boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
+                        stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
+                    for candidate in candidates:
+                        final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                        os.replace(candidate.mask_path, final_path)
+                        candidate.mask_path = final_path
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or self.images.get(record.image_id) is not record):
+                            self._discard_candidates(candidates)
+                            return
+                        self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                        self._touch_candidates(record.image_id)
+                        self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
+                    for path in stale_paths:
+                        path.unlink(missing_ok=True)
                 self._set_job_current(record.relative_path, job_generation, catalog_generation)
 
             failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
@@ -214,10 +231,8 @@ class DetectionMixin:
             genital_mask = np.maximum(genital_mask, segment["mask"])
         hand_boxes = self._hand_boxes(models, rgb)
         intersecting_boxes = [box for box in hand_boxes if self._box_intersects_mask(box, genital_mask)]
-        if not intersecting_boxes:
-            hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
-        else:
-            hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
+        hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
+        if intersecting_boxes:
             # SAM caches one current image, so set_image and every predictor call share one lock.
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record)
@@ -321,7 +336,7 @@ class DetectionMixin:
             # underlying target mask when turned off.
             segment["mask"] = original_mask
             candidate_id = uuid.uuid4().hex
-            mask_path = destination / f"{candidate_id}.png"
+            mask_path = destination / f".mozarie-pending-{candidate_id}.tmp"
             Image.fromarray(np.asarray(segment["mask"], dtype=np.uint8)).save(mask_path, format="PNG")
             candidates.append(
                 Candidate(
@@ -339,7 +354,7 @@ class DetectionMixin:
                     continue
                 exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
-                exclusion_path = destination / f"{exclusion_id}.png"
+                exclusion_path = destination / f".mozarie-pending-{exclusion_id}.tmp"
                 Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion_path, format="PNG")
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
@@ -391,7 +406,6 @@ class DetectionMixin:
 
         # Keep the selected SAM shape as APPLY. Hand/fluid removal is represented
         # by an independently toggleable EXCLUDE candidate just as in auto detect.
-        original_mask = clipped.copy()
         with Image.open(record.path) as image:
             rgb = ImageOps.exif_transpose(image).convert("RGB")
         boundary_segment = {
@@ -400,8 +414,6 @@ class DetectionMixin:
             "mask": clipped.copy(),
             "source": "boundary",
         }
-        # Reacquire the gate for model refinement and publication. A detection
-        # that started while image bytes were being decoded is rejected here.
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
@@ -410,41 +422,49 @@ class DetectionMixin:
                 self._ensure_models(), record, rgb, [boundary_segment]
             )[0]
             candidate_id = uuid.uuid4().hex
-            candidate = Candidate(
+            created = [Candidate(
                 candidate_id=candidate_id,
                 class_name="4点境界" if polygon_mask is not None else "境界",
                 confidence=confidence,
                 mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
-                color="#ffffff",
-                source="boundary",
-                origin="boundary",
-            )
-            with self.lock:
-                if self.images.get(image_id) is not record:
-                    raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
-                candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(np.asarray(clipped, dtype=np.uint8)).save(candidate.mask_path, format="PNG")
-                created = [candidate]
-                self.candidates.setdefault(image_id, []).append(candidate)
-                for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
-                    if not np.any(exclusion_mask):
-                        continue
-                    exclusion_source = f"{exclusion_kind}_exclusion"
-                    exclusion_id = uuid.uuid4().hex
-                    exclusion = Candidate(
-                        candidate_id=exclusion_id,
-                        class_name=SOURCE_LABELS[exclusion_source],
-                        confidence=None,
-                        mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png",
-                        color="#4ac3df",
-                        source=exclusion_source,
-                        origin="boundary",
-                        role=CandidateRole.EXCLUDE,
-                    )
-                    Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion.mask_path, format="PNG")
-                    self.candidates[image_id].append(exclusion)
-                    created.append(exclusion)
-                revision = self._touch_candidates(image_id)
+                color="#ffffff", source="boundary", origin="boundary",
+            )]
+            masks = [np.asarray(clipped, dtype=np.uint8)]
+            for exclusion_kind, exclusion_mask in dict(refined_boundary.get("exclusions", {})).items():
+                if not np.any(exclusion_mask):
+                    continue
+                exclusion_source = f"{exclusion_kind}_exclusion"
+                exclusion_id = uuid.uuid4().hex
+                created.append(Candidate(
+                    candidate_id=exclusion_id, class_name=SOURCE_LABELS[exclusion_source], confidence=None,
+                    mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
+                    source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
+                ))
+                masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
+            temporary_paths: list[Path] = []
+            try:
+                for item, candidate_mask in zip(created, masks):
+                    temporary = item.mask_path.with_name(f".mozarie-pending-{item.candidate_id}.tmp")
+                    item.mask_path.parent.mkdir(parents=True, exist_ok=True)
+                    Image.fromarray(candidate_mask).save(temporary, format="PNG")
+                    temporary_paths.append(temporary)
+                with self.image_io_lock(image_id):
+                    self._assert_record_fresh(record)
+                    with self.lock:
+                        if self.images.get(image_id) is not record:
+                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+                    for temporary, candidate in zip(temporary_paths, created):
+                        os.replace(temporary, candidate.mask_path)
+                    temporary_paths.clear()
+                    with self.lock:
+                        if self.images.get(image_id) is not record:
+                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+                        self.candidates.setdefault(image_id, []).extend(created)
+                        revision = self._touch_candidates(image_id)
+            except Exception:
+                for path in [*temporary_paths, *(item.mask_path for item in created)]:
+                    path.unlink(missing_ok=True)
+                raise
         return {
             "candidates": [
                 item.as_api_dict(SOURCE_LABELS.get(item.source, item.source), REFINEMENT_LABELS.get(item.refinement or "", ""))

@@ -2434,22 +2434,27 @@ class MozarieTests(unittest.TestCase):
             original_open = server_module.Image.open
 
             def delayed_open(path, *args, **kwargs):
-                if Path(path) == mask_path:
+                if isinstance(path, io.BytesIO):
                     opened.set()
-                    self.assertTrue(release.wait(2))
+                    release.wait(2)
                 return original_open(path, *args, **kwargs)
 
             with patch.object(server_module.Image, "open", side_effect=delayed_open):
-                reader = threading.Thread(target=state.read_candidate_mask_png, args=(image_id, "candidate"))
+                outcome = {}
+                def read_mask():
+                    try:
+                        outcome["value"] = state.read_candidate_mask_png(image_id, "candidate")
+                    except Exception as exc:
+                        outcome["error"] = exc
+                reader = threading.Thread(target=read_mask)
                 clearer = threading.Thread(target=lambda: (state.clear_masks([image_id]), cleared.set()))
                 reader.start()
                 self.assertTrue(opened.wait(2))
                 clearer.start()
-                self.assertFalse(cleared.wait(0.1))
+                self.assertTrue(cleared.wait(2))
                 snapshotter = threading.Thread(target=lambda: (state.catalog_snapshot(), snapshot_done.set()))
                 snapshotter.start()
                 self.assertTrue(snapshot_done.wait(2))
-                self.assertTrue(mask_path.exists())
                 release.set()
                 reader.join(2)
                 clearer.join(2)
@@ -2458,6 +2463,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(cleared.is_set())
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
+            self.assertIsInstance(outcome.get("error"), server_module.StaleMaskError)
 
     def test_candidate_mask_read_rejects_expected_revision_before_decoding(self):
         with tempfile.TemporaryDirectory() as directory:

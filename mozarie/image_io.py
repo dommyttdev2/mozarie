@@ -1,5 +1,6 @@
 from .core import *
 from .core import _read_save_suffix
+import warnings
 
 
 def _valid_color(value: str) -> bool:
@@ -193,24 +194,29 @@ def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -
         raise ClientError("The image content does not match its file extension.")
 
 
-def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -> None:
+def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -> tuple[int, int]:
     try:
-        with Image.open(io.BytesIO(raw)) as image:
-            image.load()
-            if expected_suffix is not None:
-                _assert_image_suffix_matches_format(expected_suffix, image.format)
-    except (OSError, UnidentifiedImageError) as exc:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as image:
+                image.load()
+                if expected_suffix is not None:
+                    _assert_image_suffix_matches_format(expected_suffix, image.format)
+                return oriented_image_size(image)
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
     """Fully decode a staged upload without reading its full body into memory."""
     try:
-        with Image.open(path) as image:
-            image.load()
-            _assert_image_suffix_matches_format(expected_suffix, image.format)
-            return oriented_image_size(image)
-    except (OSError, UnidentifiedImageError) as exc:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                image.load()
+                _assert_image_suffix_matches_format(expected_suffix, image.format)
+                return oriented_image_size(image)
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ClientError("追加画像を読み込めません。") from exc
 
 

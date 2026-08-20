@@ -150,16 +150,15 @@ class SavingMixin:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。")
         if source_action not in {"keep", "overwrite", "deleted"}:
             raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
-        self.cleanup_expired_browser_save_tokens()
         rendered_path: Path | None = None
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
+        expired_token = False
         image_lock = self.image_io_lock(image_id)
         with self.import_lock:
             with image_lock:
                 with self.lock:
-                    self._discard_expired_browser_save_tokens_unchecked()
                     receipt = self.browser_save_receipts.get(save_token)
                     if receipt is not None:
                         if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
@@ -171,15 +170,27 @@ class SavingMixin:
                         raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
+                        rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+                        expired_token = True
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
-                    if catalog_invalid:
+                    if expired_token:
+                        pass
+                    elif catalog_invalid:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
                     else:
                         record_snapshot = replace(record)
                         catalog_generation = self.catalog_generation
+                        # Claim only after the per-image lock is held. Polling
+                        # cleanup cannot remove the render while source I/O runs.
+                        self.browser_save_tokens.pop(save_token)
 
+                if expired_token:
+                    assert rendered_path is not None
+                    rendered_path.unlink(missing_ok=True)
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                 if catalog_invalid:
                     assert rendered_path is not None
                     rendered_path.unlink(missing_ok=True)
@@ -193,25 +204,17 @@ class SavingMixin:
                     elif source_action == "deleted":
                         record_snapshot.path.unlink()
                 except ClientError:
-                    with self.lock:
-                        details = self.browser_save_tokens.pop(save_token, None)
-                        if details is not None:
-                            rendered_path = details.rendered_path
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
+                    rendered_path = token_details.rendered_path
+                    rendered_path.unlink(missing_ok=True)
                     raise
                 except OSError as exc:
-                    with self.lock:
-                        details = self.browser_save_tokens.pop(save_token, None)
-                        if details is not None:
-                            rendered_path = details.rendered_path
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
+                    rendered_path = token_details.rendered_path
+                    rendered_path.unlink(missing_ok=True)
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
 
                 with self.lock:
                     record = self.images.get(image_id)
-                    if record is None or self.catalog_generation != catalog_generation or self.browser_save_tokens.get(save_token) != token_details:
+                    if record is None or self.catalog_generation != catalog_generation:
                         raise ClientError("画像一覧が変更されました。保存をやり直してください。")
                     current_revision = self._candidate_revision(image_id)
                     deleted = source_action == "deleted"
@@ -233,9 +236,7 @@ class SavingMixin:
                         self.candidates[image_id] = []
                         self._touch_candidates(image_id)
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
-                    current_token = self.browser_save_tokens.pop(save_token, None)
-                    if current_token is not None:
-                        rendered_path = current_token.rendered_path
+                    rendered_path = token_details.rendered_path
                     if deleted:
                         self._discard_browser_save_tokens_for_image_unchecked(image_id)
                 if deleted:
