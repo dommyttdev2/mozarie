@@ -170,8 +170,6 @@ function retainCurrentCandidateBundle(imageId, revision) {
   state.candidateBundleCache.set(candidateCacheKey(imageId, record.candidateRevision), reusable, [...reusable.candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0));
 }
 
-async function loadCandidateMask(source, signal) { return fetchBitmap(source, signal); }
-
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const record = state.images.find((image) => image.id === imageId);
   const epoch = state.catalogEpoch;
@@ -200,7 +198,7 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       const workers = Array.from({ length: Math.min(4, pendingCandidates.length) }, async () => {
         while (pendingCandidates.length) {
           const candidate = pendingCandidates.shift();
-          try { candidateImages.set(candidate.id, await loadCandidateMask(maskUrl(imageId, candidate.id, revision), controller.signal)); }
+          try { candidateImages.set(candidate.id, await fetchBitmap(maskUrl(imageId, candidate.id, revision), controller.signal)); }
           catch (error) { controller.abort(); throw error; }
         }
       });

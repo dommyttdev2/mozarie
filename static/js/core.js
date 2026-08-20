@@ -12,7 +12,7 @@ const state = {
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(),
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
-  catalogMutation: false, imageGeneration: 0, catalogGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
@@ -201,7 +201,7 @@ function isBusy() {
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.catalogMutation || state.boundaryPending || state.fillPending;
 }
-function beginCatalogEpoch() { state.catalogGeneration += 1; state.catalogEpoch += 1; return state.catalogEpoch; }
+function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
 function catalogRecordMatches(record, epoch, { version = imageAssetVersion(record), revision = null } = {}) {
   const current = state.images.find((image) => image.id === record?.id);
@@ -356,8 +356,8 @@ async function persistNavigationShortcuts(enabled) {
     const payload = structuredClone(state.settings);
     payload.general.shortcuts_enabled = Boolean(enabled);
     payload.shortcuts = { ...(payload.shortcuts || {}), enabled: Boolean(enabled) };
-    const data = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
-    setSettingsForm(data.settings, data.status);
+    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(payload) });
+    setSettingsForm(data.settings, state.settingsStatus);
     setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
   } catch (error) { setStatus(error.message, "error"); }
 }

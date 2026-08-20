@@ -391,11 +391,11 @@ const completionWatchdog = setTimeout(() => {
     confirmations: { candidateDelete: false, candidateRoleDelete: false, overwriteSource: false, deleteSourceAfterCopy: false },
   };
   const persistShortcuts = persistNavigationShortcuts(false);
-  resolveFetch({ ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
+  resolveFetch({ ok: true, json: async () => ({ settings: state.settings }) });
   await persistShortcuts;
   assert.equal(elements.get("#settingsShortcutsEnabled").checked, false);
   assert.equal(state.settings.general.shortcuts_enabled, false);
-  assert.equal(requests.at(-1).path, "/api/settings");
+  assert.equal(requests.at(-1).path, "/api/settings?status=0");
   assert.equal(state.reviewRoot, "g:\\images\\initial");
   assert.notEqual(elements.get("#status").className, "status error");
 

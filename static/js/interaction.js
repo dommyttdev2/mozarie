@@ -53,7 +53,9 @@ function confirmAction(title, message, key = null) {
       const accepted = dialog.returnValue === "confirm";
       if (accepted && key && $("#confirmNeverShow").checked && state.settings) {
         state.settings.confirmations = { ...state.settings.confirmations, [key]: false };
-        void api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }).catch(() => {});
+        void api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }).then((data) => {
+          state.settings = data.settings;
+        }).catch(() => {});
       }
       $("#confirmNeverShow").checked = false; resolve(accepted);
     };
@@ -85,8 +87,9 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     await api("/api/masks/clear", { method: "POST", body: JSON.stringify({ imageIds }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     for (const imageId of imageIds) state.drafts.delete(imageId);
+    for (const imageId of imageIds) releaseCandidateBundles(imageId);
     if (imageIds.includes(state.currentId)) {
-      releaseCandidateBundles(state.currentId); state.candidates = []; resetCurrentDraft();
+      state.candidates = []; resetCurrentDraft();
       $("#candidateStatus").textContent = t("candidates.none"); renderCandidates();
     }
     const refreshed = await api("/api/images");
