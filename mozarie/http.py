@@ -12,11 +12,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         raise error
 
-    def _require_mutation_request(self) -> None:
+    def _require_local_host(self) -> str:
         host = self.headers.get("Host", "")
         expected_host = f"127.0.0.1:{self.server.server_port}"
         if host != expected_host:
             self._reject_unread_request(ForbiddenClientError("許可されていない接続先です。"))
+        return expected_host
+
+    def _require_mutation_request(self) -> None:
+        expected_host = self._require_local_host()
         origin = self.headers.get("Origin", "")
         if origin != f"http://{expected_host}":
             self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
@@ -40,6 +44,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         try:
+            self._require_local_host()
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             if path == "/api/health":
@@ -395,6 +400,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()

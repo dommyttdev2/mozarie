@@ -2171,6 +2171,33 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_get_rejects_hostile_host_before_state_or_file_access(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(http_module, "STATE") as guarded_state, \
+                 patch.object(MosaicHandler, "_send_static") as send_static, \
+                 patch.object(MosaicHandler, "_send_image") as send_image:
+                for path in ("/", "/api/settings", "/api/images", "/api/image/current"):
+                    connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        connection.request("GET", path, headers={"Host": "hostile.example"})
+                        response = connection.getresponse()
+                        response.read()
+                        self.assertEqual(response.status, 403)
+                        self.assertEqual(response.getheader("Connection"), "close")
+                    finally:
+                        connection.close()
+            self.assertEqual(guarded_state.mock_calls, [])
+            send_static.assert_not_called()
+            send_image.assert_not_called()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
         record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
