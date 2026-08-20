@@ -26,6 +26,7 @@ class CatalogMixin:
                 self.job = Job()
                 self.catalog_generation += 1
                 session = self._detach_session_unchecked()
+                self._image_io_locks.clear()
             self._clear_cache()
             self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
@@ -122,6 +123,7 @@ class CatalogMixin:
                     self._invalidate_sam_cache()
                     self.catalog_generation += 1
                     session = self._detach_session_unchecked()
+                    self._image_io_locks.clear()
                 self._clear_cache()
                 self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
@@ -156,6 +158,7 @@ class CatalogMixin:
                         self.images.pop(record.image_id, None)
                         self.candidates.pop(record.image_id, None)
                         self.candidate_revisions.pop(record.image_id, None)
+                        self._image_io_locks.pop(record.image_id, None)
                     if removed_ids:
                         removed_set = set(removed_ids)
                         self.order = [current_id for current_id in self.order if current_id not in removed_set]
@@ -206,6 +209,7 @@ class CatalogMixin:
                 with self.lock:
                     session = self._detach_session_unchecked()
                     self._clear_browser_save_tokens_unchecked()
+                    self._image_io_locks.clear()
                     cache_lock = self._cache_lock_handle if self._owns_process_cache else None
                     if self._owns_process_cache:
                         self._cache_lock_handle = None
@@ -231,7 +235,14 @@ class CatalogMixin:
         blocking the catalogue or a different image.
         """
         with self.lock:
-            return self._image_io_locks.setdefault(image_id, threading.RLock())
+            image_lock = self._image_io_locks.get(image_id)
+            if image_lock is not None:
+                return image_lock
+            if image_id not in self.images:
+                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+            image_lock = threading.RLock()
+            self._image_io_locks[image_id] = image_lock
+            return image_lock
 
     def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, str]:
         self._assert_record_fresh(record)
@@ -359,47 +370,6 @@ class CatalogMixin:
                         mask_path.unlink(missing_ok=True)
             except OSError as exc:
                 LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
-
-    def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
-        for record in records:
-            candidates = list(self.candidates.get(record.image_id, []))
-            for candidate in candidates:
-                try:
-                    candidate.mask_path.unlink(missing_ok=True)
-                except OSError as exc:
-                    LOGGER.warning("Could not remove stale mask %s: %s", candidate.mask_path, exc)
-            self.candidates[record.image_id] = []
-            self._touch_candidates(record.image_id)
-            candidate_dir = self.cache_dir / record.image_id
-            try:
-                if candidate_dir.exists():
-                    for mask_path in candidate_dir.glob("*.png"):
-                        mask_path.unlink(missing_ok=True)
-            except OSError as exc:
-                LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
-
-    def _cleanup_record_working_state_unchecked(self, record: ImageRecord, *, remove_session_source: bool) -> None:
-        """Remove this image's disposable cache state without touching external sources."""
-        self._clear_masks_unchecked([record])
-        shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
-        thumbnail_dir = self.cache_dir / "thumbnails"
-        for thumbnail_path in thumbnail_dir.glob(f"{record.image_id}-*.jpg"):
-            thumbnail_path.unlink(missing_ok=True)
-        self._discard_browser_save_tokens_for_image_unchecked(record.image_id)
-        if remove_session_source and record.source_kind == "session":
-            try:
-                record.path.unlink(missing_ok=True)
-            except PermissionError as exc:
-                LOGGER.warning("Session source will be cleaned up at shutdown: %s", exc)
-            imports_dir = self.session_imports_dir
-            if imports_dir is not None:
-                parent = record.path.parent
-                while parent != imports_dir and parent.is_relative_to(imports_dir):
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        break
-                    parent = parent.parent
 
     def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
         images, _imported = self._import_images(files)

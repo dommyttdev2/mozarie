@@ -16,7 +16,7 @@ const state = {
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
-  candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(),
+  candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
@@ -429,7 +429,7 @@ function updateActionButtons() {
   canvas.setAttribute("aria-disabled", String(locked));
 }
 
-function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing, hasManualExclude = false) {
+function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), hasManualExclude = false) {
   for (const button of document.querySelectorAll("[data-candidate-batch]")) {
     const [role] = button.dataset.candidateBatch.split(":");
     const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
@@ -488,7 +488,7 @@ function resetCatalog(images, root) {
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null; state.maskStatus.clear();
   state.candidates = []; state.candidateImages = new Map(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; state.blinkCandidateIds.clear(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
-  state.candidateUpdateVersions.clear(); state.candidateDeleting.clear();
+  state.candidateUpdateChains.clear(); state.candidateUpdateVersions.clear(); state.candidateDeleting.clear(); state.candidateBatchPending.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
   renderCatalogViews(); clearEditor();

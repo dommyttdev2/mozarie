@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .core import *
-from .core import _read_mosaic_divisor, _read_save_suffix, _read_target_classes
+from .core import _read_mosaic_divisor, _read_save_suffix
 from .image_io import *
 from . import image_io as _image_io
 
@@ -22,16 +22,6 @@ class SavingMixin:
             raise ClientError("一時画像はコピー保存を選んでください。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
-        eligible_records: list[ImageRecord] = []
-        for record in records:
-            draft_masks = decode_draft_masks(drafts.get(record.image_id), record.width, record.height)
-            mask = self.combined_candidate_mask(record.image_id, draft_masks)
-            if mask is not None and np.any(mask):
-                eligible_records.append(record)
-            del mask, draft_masks
-        records = eligible_records
-        if not records:
-            raise ClientError("保存するモザイク範囲がありません。")
         suffix = _read_save_suffix(suffix)
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
@@ -230,6 +220,7 @@ class SavingMixin:
                         self.order = [current_id for current_id in self.order if current_id != image_id]
                         self.candidate_revisions.pop(image_id, None)
                         self.candidates.pop(image_id, None)
+                        self._image_io_locks.pop(image_id, None)
                     elif cleared:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -278,6 +269,9 @@ class SavingMixin:
                     destinations[index] = destination
                     reserved.add(destination)
 
+            empty_indices: set[int] = set()
+            empty_lock = threading.Lock()
+
             def save_record(index: int, record: ImageRecord) -> None:
                 with self.image_io_lock(record.image_id):
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
@@ -286,7 +280,9 @@ class SavingMixin:
                         record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
                     ))
                     if mask is None or not np.any(mask):
-                        raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
+                        with empty_lock:
+                            empty_indices.add(index)
+                        return
                     output_path = destinations.get(index, record.path)
                     if copy_to_default:
                         output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
@@ -318,9 +314,22 @@ class SavingMixin:
             )
             if failures:
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
+            elif len(empty_indices) == len(records):
+                self._fail_job(ClientError("保存するモザイク範囲がありません。"), job_generation, catalog_generation)
             elif control is not None and control.cancel_requested.is_set():
                 self._cancel_job(job_generation, catalog_generation)
             else:
+                if empty_indices:
+                    with self.lock:
+                        if self._job_is_current(job_generation, catalog_generation):
+                            kept_indices = [index for index in range(len(records)) if index not in empty_indices]
+                            slots = getattr(self, "_job_output_slots", {})
+                            completed = set(self.job.completed_image_ids)
+                            self.job.image_ids = tuple(records[index].image_id for index in kept_indices)
+                            self.job.total = len(kept_indices)
+                            self.job.completed_image_ids = tuple(image_id for image_id in self.job.image_ids if image_id in completed)
+                            self.job.completed = len(self.job.completed_image_ids)
+                            self.job.outputs = [slots[index] for index in kept_indices if index in slots]
                 self._finish_job(job_generation, catalog_generation)
         except Exception as exc:
             self._fail_job(exc, job_generation, catalog_generation)

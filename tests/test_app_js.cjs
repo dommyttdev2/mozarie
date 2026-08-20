@@ -1005,7 +1005,7 @@ const completionWatchdog = setTimeout(() => {
   state.tool = "boundary";
   state.boundaryRoi = { left: 10, top: 10, right: 30, bottom: 30 };
   state.boundaryPromptPoint = { x: 20, y: 20 };
-  state.imageCache.clear();
+  for (const [key] of state.imageCache.items) state.imageCache.delete(key);
   state.imageCache.set("deferred:0", { width: 50, height: 40, src: "blob:deferred" }, 8000);
   setBoundaryModeMenuOpen(true);
   updateBoundaryActions();

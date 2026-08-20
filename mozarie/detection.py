@@ -106,7 +106,15 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
-            model_slots = [self._ensure_models(), *(self._load_detection_models() for _ in range(worker_count - 1))]
+            model_slots: list[DetectionModels] = []
+            for slot_index in range(worker_count):
+                self._wait_while_paused(control, job_generation, catalog_generation)
+                if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                    self._cancel_job(job_generation, catalog_generation)
+                    return
+                if not self._job_is_current(job_generation, catalog_generation):
+                    return
+                model_slots.append(self._ensure_models() if slot_index == 0 else self._load_detection_models())
             slot_lock = threading.Lock()
             next_slot = 0
 

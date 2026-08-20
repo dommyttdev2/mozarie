@@ -446,7 +446,7 @@ function refreshMaskStatus(renderGalleryAfter = false) {
   const record = currentRecord();
   const previous = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : Boolean(record && Number(record.enabledCandidateCount || 0) > 0);
   markMaskDirty(); flushMaskComposition();
-  const current = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0);
+  const current = canvasHasPixels(combinedCtx, combinedCanvas);
   state.maskStatus.set(state.currentId, current);
   if (renderGalleryAfter && previous !== current) renderCatalogViews();
   else updateActionButtons();

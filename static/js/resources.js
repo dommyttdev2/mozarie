@@ -5,7 +5,6 @@ class WeightedLru {
   take(key) { const entry = this.items.get(key); if (!entry) return null; this.items.delete(key); this.weight -= entry.weight; return entry.value; }
   set(key, value, weight) { if (weight > this.limit && !this.isPinned(key, value)) return value; const old = this.items.get(key); if (old) { this.items.delete(key); this.weight -= old.weight; if (old.value !== value) this.release(old.value); } this.items.set(key, { value, weight }); this.weight += weight; this.trim(); return value; }
   delete(key) { const entry = this.items.get(key); if (!entry) return; this.items.delete(key); this.weight -= entry.weight; this.release(entry.value); }
-  clear() { for (const entry of this.items.values()) this.release(entry.value); this.items.clear(); this.weight = 0; }
   trim() { for (const [key, entry] of this.items) { if (this.weight <= this.limit) break; if (this.isPinned(key, entry.value)) continue; this.items.delete(key); this.weight -= entry.weight; this.release(entry.value); } }
 }
 function decodedImageWeight(image) { return Math.max(1, Number(image?.width || 0) * Number(image?.height || 0) * 4); }

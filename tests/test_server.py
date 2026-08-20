@@ -566,10 +566,13 @@ class MozarieTests(unittest.TestCase):
             original = path.read_bytes()
             state = self.new_state()
             state.set_root(directory)
+            image_id = state.order[0]
+            state.image_io_lock(image_id)
 
             state.clear_catalog()
 
             self.assertEqual(state.list_images(), [])
+            self.assertEqual(state._image_io_locks, {})
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(state.root, Path(directory).resolve())
 
@@ -878,6 +881,29 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.completed, 2)
             self.assertEqual(set(state.job.completed_image_ids), {record.image_id for record in records})
             self.assertTrue(all(state._candidate_revision(record.image_id) == 1 for record in records))
+
+    def test_detection_cancel_stops_loading_additional_model_slots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first.png", "second.png", "third.png"):
+                Image.new("RGB", (16, 16), "white").save(root / name)
+            state = self.new_state()
+            records = [state.image_for_id(item["id"]) for item in state.set_root(str(root))]
+            control = server_module.JobControl()
+            state.job = server_module.Job(kind="detect", state="running", total=3, image_ids=tuple(record.image_id for record in records))
+
+            def load_first_slot():
+                control.cancel_requested.set()
+                return object()
+
+            with patch.object(state, "_ensure_models", side_effect=load_first_slot), \
+                 patch.object(state, "_load_detection_models") as load_more, \
+                 patch.object(state, "_detect_image") as detect_image:
+                state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, 3, control=control)
+
+            load_more.assert_not_called()
+            detect_image.assert_not_called()
+            self.assertEqual(state.job.state, "cancelled")
 
     def test_parallel_detection_progress_never_moves_backward(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2823,31 +2849,82 @@ class MozarieTests(unittest.TestCase):
                 httpd.server_close()
                 server_module.STATE = previous_state; http_module.STATE = previous_state
 
-    def test_missing_enabled_mask_aborts_apply_before_any_file_or_candidate_changes(self):
+    def test_missing_enabled_mask_fails_in_the_apply_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "#6688aa").save(source)
+            original = source.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            missing = state.cache_dir / image_id / "missing.png"
+            state.candidates[image_id] = [Candidate("missing", "penis", 0.9, missing)]
+
+            self.assertTrue(state.start_apply([image_id], 100, {}))
+            assert state.worker_thread is not None
+            state.worker_thread.join(2)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(len(state.candidates[image_id]), 1)
+
+    def test_apply_skips_empty_masks_and_keeps_success_output_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = root / "first.png"
             second = root / "second.png"
             Image.new("RGB", (16, 16), "#6688aa").save(first)
             Image.new("RGB", (16, 16), "#aa8866").save(second)
-            originals = {path: path.read_bytes() for path in (first, second)}
+            original_second = second.read_bytes()
             state = self.new_state()
-            listed = state.set_root(str(root))
-            first_id, second_id = (image["id"] for image in listed)
-            valid = state.cache_dir / first_id / "valid.png"
-            valid.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16)).save(valid)
-            missing = state.cache_dir / second_id / "missing.png"
-            state.candidates[first_id] = [Candidate("valid", "penis", 0.9, valid)]
-            state.candidates[second_id] = [Candidate("missing", "penis", 0.9, missing)]
+            first_id, second_id = (item["id"] for item in state.set_root(str(root)))
+            first_record = state.image_for_id(first_id)
+            second_record = state.image_for_id(second_id)
+            mask_path = state.cache_dir / first_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[first_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
 
-            with self.assertRaisesRegex(ClientError, "自動検出をやり直してください"):
-                state.start_apply([first_id, second_id], 100, {})
+            state._apply_worker([first_record, second_record], 100, {})
 
-            self.assertEqual({path: path.read_bytes() for path in (first, second)}, originals)
-            self.assertTrue(valid.exists())
-            self.assertEqual(len(state.candidates[first_id]), 1)
-            self.assertEqual(len(state.candidates[second_id]), 1)
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.image_ids, (first_id,))
+            self.assertEqual(state.job.outputs, [str(first)])
+            self.assertEqual(state.candidates[first_id], [])
+            self.assertEqual(second.read_bytes(), original_second)
+
+    def test_apply_all_empty_masks_reports_a_job_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original = source.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            state._apply_worker([record], 100, {})
+
+            self.assertEqual(state.job.state, "error")
+            self.assertIn("保存するモザイク範囲", state.job.error)
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_removed_image_lock_is_pruned_and_unknown_images_do_not_allocate_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            state.image_io_lock(image_id)
+            self.assertIn(image_id, state._image_io_locks)
+
+            state.remove_image_from_catalog(image_id)
+
+            self.assertNotIn(image_id, state._image_io_locks)
+            with self.assertRaises(ClientError):
+                state.image_io_lock("missing")
+            self.assertNotIn("missing", state._image_io_locks)
 
     def test_catalog_reload_is_rejected_while_worker_is_alive_and_stale_worker_cannot_commit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3762,6 +3839,7 @@ class MozarieTests(unittest.TestCase):
         Image.fromarray(self._mask(16, 16)).save(mask_path)
         state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
         revision = state._touch_candidates(image_id)
+        state.image_io_lock(image_id)
 
         _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
         rendered_path = state.browser_save_tokens[token].rendered_path
@@ -3795,6 +3873,7 @@ class MozarieTests(unittest.TestCase):
 
         self.assertTrue(committed["deleted"])
         self.assertNotIn(image_id, state.images)
+        self.assertNotIn(image_id, state._image_io_locks)
         self.assertFalse(record.path.exists())
         self.assertFalse(rendered_path.exists())
 
