@@ -4446,7 +4446,7 @@ class MozarieTests(unittest.TestCase):
     def test_older_browser_overwrite_token_cannot_replace_a_newer_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
-            Image.fromarray(np.tile(np.arange(16, dtype=np.uint8), (16, 1)), mode="L").convert("RGB").save(source)
+            Image.fromarray(np.tile(np.arange(16, dtype=np.uint8), (16, 1))).convert("RGB").save(source)
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
