@@ -241,17 +241,24 @@ class InferenceGate:
     """Re-entrant inference gate with the Lock inspection used by tests/UI guards."""
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
+        self._depth = threading.local()
 
     def __enter__(self) -> "InferenceGate":
-        self._lock.acquire()
+        depth = getattr(self._depth, "value", 0)
+        if depth == 0:
+            self._lock.acquire()
+        self._depth.value = depth + 1
         return self
 
     def __exit__(self, *_args: Any) -> None:
-        self._lock.release()
+        depth = self._depth.value - 1
+        self._depth.value = depth
+        if depth == 0:
+            self._lock.release()
 
     def locked(self) -> bool:
-        return self._lock._is_owned()
+        return self._lock.locked()
 
 
 def detection_tiles(width: int, height: int) -> list[tuple[int, int, int, int]]:

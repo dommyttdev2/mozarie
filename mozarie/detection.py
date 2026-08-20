@@ -368,7 +368,7 @@ class DetectionMixin:
             roi, point = read_boundary_request(payload, record.width, record.height)
         with self.inference_lock:
             with self.lock:
-                if self.job.state == "running" or self._has_active_worker():
+                if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。")
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record)
@@ -404,7 +404,7 @@ class DetectionMixin:
         # that started while image bytes were being decoded is rejected here.
         with self.inference_lock:
             with self.lock:
-                if self.job.state == "running" or self._has_active_worker():
+                if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。")
             refined_boundary = self._refine_detected_segments(
                 self._ensure_models(), record, rgb, [boundary_segment]

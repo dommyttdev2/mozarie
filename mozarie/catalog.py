@@ -27,7 +27,7 @@ class CatalogMixin:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
+        if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -227,7 +227,7 @@ class CatalogMixin:
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
         with self.lock:
-            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中はモザイク候補をクリアできません。")
             self._clear_masks_unchecked(records)
         return len(records)
@@ -294,7 +294,7 @@ class CatalogMixin:
         with self.lock:
             root = self.root
             catalog_generation = self.catalog_generation
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は画像を追加できません。")
             destination_dir = self._ensure_session()
             self.importing_count += 1
@@ -332,7 +332,7 @@ class CatalogMixin:
                 if (
                     self.root != root
                     or self.catalog_generation != catalog_generation
-                    or self.job.state in {"running", "paused"}
+                    or self.job.state in {"running", "pausing", "paused"}
                     or self._has_active_worker()
                 ):
                     raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")

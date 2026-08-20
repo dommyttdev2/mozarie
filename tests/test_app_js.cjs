@@ -948,6 +948,11 @@ const completionWatchdog = setTimeout(() => {
   updateActionButtons();
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
 
+  state.job = { state: "pausing" };
+  assert.equal(isBusy(), true);
+  updateProgress({ kind: "detect", state: "pausing", total: 3, completed: 1 });
+  assert.equal(elements.get("#processingPauseButton").disabled, true);
+
   state.applyRunning = false;
   state.job = { kind: "detect", state: "running", total: 80, completed: 0 };
   updateProgress(state.job);

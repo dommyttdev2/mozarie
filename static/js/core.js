@@ -145,6 +145,7 @@ function showProcessing(processing) {
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
   $("#processingProgressText").textContent = t("status.progressCount", { completed: current.completed || 0, total: current.total || 0 });
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
+  $("#processingPauseButton").disabled = current.state === "pausing";
   if (!modal.open) modal.showModal();
 }
 
@@ -185,14 +186,14 @@ function setDetectionConfidence(value) {
   $("#detectConfidenceRange").value = confidence.toFixed(2);
   $("#detectConfidenceNumber").value = confidence.toFixed(2);
 }
-function activeDetection() { return state.job?.kind === "detect" && ["running", "paused"].includes(state.job?.state); }
+function activeDetection() { return state.job?.kind === "detect" && ["running", "pausing", "paused"].includes(state.job?.state); }
 function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
   return image ? Math.max(4, Math.ceil(Math.max(image.width, image.height) / divisor)) : 0;
 }
 function isBusy() {
-  return ["running", "paused"].includes(state.job?.state)
+  return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.catalogMutation || state.boundaryPending;
 }
@@ -468,7 +469,7 @@ function discardCatalogNodes(nodes, container) {
 }
 
 function updateProgress(job) {
-  if (job?.kind !== "apply" && ["running", "paused"].includes(job?.state)) showProcessing(job);
+  if (job?.kind !== "apply" && ["running", "pausing", "paused"].includes(job?.state)) showProcessing(job);
   updateActionButtons();
 }
 

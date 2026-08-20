@@ -664,7 +664,7 @@ async function finishApplyJob(job) {
 
 function isTerminalDetection(job, previous) {
   if (job.kind !== "detect" || !["complete", "cancelled"].includes(job.state) || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
-  const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "paused"].includes(previous.state);
+  const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "pausing", "paused"].includes(previous.state);
   return observedRunning || Number(job.startedAt) >= state.pageLoadedAt;
 }
 
@@ -704,13 +704,14 @@ async function pollJob() {
       else if (job.state === "cancelled") setStatusKey("status.applyCancelled");
       else if (job.error) setStatus(job.error, "error");
       else setStatusKey("error.background", {}, "error");
-    } else if (job.kind === "apply" && ["running", "paused"].includes(job.state)) {
+    } else if (job.kind === "apply" && ["running", "pausing", "paused"].includes(job.state)) {
       if (!state.applyRunning) showRunningApply(job);
       $("#applyProgress").max = Math.max(1, Number(job.total) || 1);
       $("#applyProgress").value = Math.min(Number(job.total) || 1, Number(job.completed) || 0);
       $("#applyCurrentName").textContent = job.current || "";
       $("#applyProgressText").textContent = t("apply.progress", { completed: job.completed, total: job.total });
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
+      $("#applyPauseButton").disabled = job.state === "pausing";
       if (job.state === "running") setStatusKey("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }, "running");
     } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
       state.detectCancelRequested = false;

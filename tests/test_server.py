@@ -655,8 +655,7 @@ class MozarieTests(unittest.TestCase):
 
         state.request_pause()
         self.assertTrue(state.job_control.pause_requested.is_set())
-
-        state.job.state = "paused"
+        self.assertEqual(state.job.state, "paused")
         state.resume_job()
         self.assertEqual(state.job.state, "running")
         self.assertFalse(state.job_control.pause_requested.is_set())
@@ -676,7 +675,7 @@ class MozarieTests(unittest.TestCase):
 
         state.request_pause()
         self.assertTrue(state.job_control.pause_requested.is_set())
-        state.job.state = "paused"
+        self.assertEqual(state.job.state, "paused")
         state.resume_job()
 
         self.assertEqual(state.job.state, "running")
@@ -1051,6 +1050,96 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(set(claimed), {0, 1})
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (image_ids[1],))
+
+    def test_pause_waits_for_all_claimed_records_before_becoming_paused(self):
+        state = self.new_state()
+        records = [ImageRecord(str(index), Path(f"image-{index}.png"), f"image-{index}.png", 1, 1, 0) for index in range(3)]
+        control = server_module.JobControl()
+        state.job = server_module.Job(kind="apply", state="running", total=3, image_ids=tuple(record.image_id for record in records))
+        state.job_control = control
+        claimed: list[int] = []
+        claimed_lock = threading.Lock()
+        started = threading.Barrier(3)
+        release_first = threading.Event()
+        release_second = threading.Event()
+        release_third = threading.Event()
+        first_settled = threading.Event()
+        paused = threading.Event()
+        third_started = threading.Event()
+        original_finish = state._finish_claimed_task
+
+        def finish_claimed(*args):
+            active_count = original_finish(*args)
+            if active_count == 1:
+                first_settled.set()
+            if state.job.state == "paused":
+                paused.set()
+            return active_count
+
+        def process(index, _record):
+            with claimed_lock:
+                claimed.append(index)
+            if index < 2:
+                started.wait(timeout=2)
+                release = release_first if index == 0 else release_second
+                if not release.wait(2):
+                    raise RuntimeError("test did not release an in-flight record")
+            else:
+                third_started.set()
+                if not release_third.wait(2):
+                    raise RuntimeError("test did not release the resumed record")
+
+        thread = threading.Thread(
+            target=state._run_fixed_workers,
+            args=(records, 2, process, control, None, None),
+        )
+        with patch.object(state, "_finish_claimed_task", side_effect=finish_claimed):
+            thread.start()
+            started.wait(timeout=2)
+            self.assertEqual(state.job.active_count, 2)
+            state.request_pause()
+            self.assertEqual(state.job.state, "pausing")
+            self.assertEqual(set(claimed), {0, 1})
+
+            release_first.set()
+            self.assertTrue(first_settled.wait(2))
+            self.assertEqual(state.job.state, "pausing")
+            self.assertEqual(state.job.active_count, 1)
+            self.assertEqual(set(claimed), {0, 1})
+
+            release_second.set()
+            self.assertTrue(paused.wait(2))
+            self.assertEqual(state.job.active_count, 0)
+            self.assertEqual(set(claimed), {0, 1})
+
+            state.resume_job()
+            self.assertEqual(state.job.state, "running")
+            self.assertTrue(third_started.wait(2))
+            release_third.set()
+            thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(state.job.active_count, 0)
+
+    def test_inference_gate_reports_locks_held_by_another_thread(self):
+        gate = server_module.InferenceGate()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_gate():
+            with gate:
+                entered.set()
+                self.assertTrue(release.wait(2))
+
+        thread = threading.Thread(target=hold_gate)
+        thread.start()
+        self.assertTrue(entered.wait(2))
+        self.assertTrue(gate.locked())
+        release.set()
+        thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(gate.locked())
 
     def test_combined_mask_includes_draft_add_and_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
