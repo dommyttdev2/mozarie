@@ -116,6 +116,7 @@ class CatalogMixin:
                     removed_ids = [record.image_id for record in records]
                     mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
                     session_paths = [record.path for record in records if record.source_kind == "session"]
+                    session_imports_dir = self.session_imports_dir
                     for record in records:
                         self.images.pop(record.image_id, None)
                         self.candidates.pop(record.image_id, None)
@@ -132,6 +133,14 @@ class CatalogMixin:
                         thumbnail_path.unlink(missing_ok=True)
                 for path in session_paths:
                     path.unlink(missing_ok=True)
+                    if session_imports_dir is not None:
+                        parent = path.parent
+                        while parent != session_imports_dir and parent.is_relative_to(session_imports_dir):
+                            try:
+                                parent.rmdir()
+                            except OSError:
+                                break
+                            parent = parent.parent
         self.cleanup_expired_browser_save_tokens()
         for image_id in removed_ids:
             self.invalidate_sam_image(image_id)

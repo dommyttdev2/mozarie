@@ -630,6 +630,7 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(mask_path.exists())
         self.assertFalse(thumbnail.exists())
         self.assertFalse((state.cache_dir / image_id).exists())
+        self.assertFalse(record.path.parent.exists())
 
     def test_apply_is_overwrite_only_and_rejects_session_images(self):
         with tempfile.TemporaryDirectory() as directory:
