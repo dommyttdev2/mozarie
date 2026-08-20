@@ -92,7 +92,8 @@ class MozarieTests(unittest.TestCase):
     def _record(path: Path, width: int, height: int) -> ImageRecord:
         return ImageRecord(
             image_id="test", path=path, relative_path=path.name, width=width, height=height,
-            mtime_ns=path.stat().st_mtime_ns, content_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
+            mtime_ns=path.stat().st_mtime_ns, size_bytes=path.stat().st_size,
+            content_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
     @staticmethod
@@ -959,8 +960,9 @@ class MozarieTests(unittest.TestCase):
             original_save = saving_module.save_with_mask
 
             def save_then_cancel(*args, **kwargs):
-                original_save(*args, **kwargs)
+                result = original_save(*args, **kwargs)
                 control.cancel_requested.set()
+                return result
 
             with patch.object(saving_module, "save_with_mask", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
@@ -975,7 +977,7 @@ class MozarieTests(unittest.TestCase):
                 call_count += 1
                 if call_count == 2:
                     raise RuntimeError("second image failed")
-                original_save(*args, **kwargs)
+                return original_save(*args, **kwargs)
 
             with patch.object(saving_module, "save_with_mask", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
@@ -3479,7 +3481,7 @@ class MozarieTests(unittest.TestCase):
             version = state.list_images()[0]["assetVersion"]
             validated = threading.Event()
             response_statuses = []
-            original_assert = state._assert_record_fresh
+            original_assert = state._assert_record_stat_matches
             original_send_response = MosaicHandler.send_response
 
             def remove_after_preflight(record):
@@ -3492,7 +3494,7 @@ class MozarieTests(unittest.TestCase):
                 return original_send_response(handler, status, *args, **kwargs)
 
             with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
-                 patch.object(state, "_assert_record_fresh", side_effect=remove_after_preflight), \
+                 patch.object(state, "_assert_record_stat_matches", side_effect=remove_after_preflight), \
                  patch.object(MosaicHandler, "send_response", new=record_response):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
