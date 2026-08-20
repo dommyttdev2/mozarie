@@ -168,13 +168,19 @@ class SavingMixin:
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-                if token_details.catalog_generation != self.catalog_generation or record is None:
+                catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
+                if catalog_invalid:
                     rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
-                    raise ClientError("画像一覧が変更されました。保存をやり直してください。")
-                if self._has_active_worker():
+                elif self._has_active_worker():
                     raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
-                record_snapshot = replace(record)
-                catalog_generation = self.catalog_generation
+                else:
+                    record_snapshot = replace(record)
+                    catalog_generation = self.catalog_generation
+
+            if catalog_invalid:
+                assert rendered_path is not None
+                rendered_path.unlink(missing_ok=True)
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
 
             try:
                 if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:

@@ -3264,6 +3264,27 @@ class MozarieTests(unittest.TestCase):
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
                 state.commit_browser_save(image_id, rendered_revision, catalog_token, "keep")
 
+    def test_browser_save_catalog_mismatch_removes_rendered_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(source.parent))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16), mode="L").save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            rendered_path = state.browser_save_tokens[token].rendered_path
+            state.catalog_generation += 1
+
+            with self.assertRaisesRegex(ClientError, "画像一覧が変更"):
+                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+
+            self.assertFalse(rendered_path.exists())
+            self.assertNotIn(token, state.browser_save_tokens)
+
     def test_shutdown_discards_pending_browser_save_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
