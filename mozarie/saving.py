@@ -150,9 +150,11 @@ class SavingMixin:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。")
         if source_action not in {"keep", "overwrite", "deleted"}:
             raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
+        self.cleanup_expired_browser_save_tokens()
         rendered_path: Path | None = None
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
+        thumbnail_paths: list[Path] = []
         image_lock = self.image_io_lock(image_id)
         with image_lock:
             with self.lock:
@@ -230,9 +232,17 @@ class SavingMixin:
                     self.candidates[image_id] = []
                     self._touch_candidates(image_id)
                 self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
-                rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+                current_token = self.browser_save_tokens.pop(save_token, None)
+                if current_token is not None:
+                    rendered_path = current_token.rendered_path
+                if deleted:
+                    self._discard_browser_save_tokens_for_image_unchecked(image_id)
+        if deleted:
+            thumbnail_paths = list((self.cache_dir / "thumbnails").glob(f"{image_id}-*.jpg"))
         if mask_paths:
             self._delete_mask_files(mask_paths, candidate_dirs)
+        for thumbnail_path in thumbnail_paths:
+            thumbnail_path.unlink(missing_ok=True)
         if rendered_path is not None:
             rendered_path.unlink(missing_ok=True)
         self.invalidate_sam_image(image_id)

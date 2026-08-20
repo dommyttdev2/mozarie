@@ -175,7 +175,7 @@ class CatalogMixin:
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
         if details is not None:
-            details.rendered_path.unlink(missing_ok=True)
+            self._pending_browser_save_cleanup.append(details.rendered_path)
         return details
 
     def _clear_browser_save_tokens_unchecked(self) -> None:
@@ -200,7 +200,9 @@ class CatalogMixin:
         """Cheap polling-path expiry: detach under lock, unlink afterwards."""
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
         with self.lock:
-            expired_paths = [
+            expired_paths = self._pending_browser_save_cleanup
+            self._pending_browser_save_cleanup = []
+            expired_paths += [
                 self.browser_save_tokens.pop(token).rendered_path
                 for token, details in tuple(self.browser_save_tokens.items())
                 if details.issued_at < cutoff
