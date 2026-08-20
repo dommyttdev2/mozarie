@@ -383,7 +383,8 @@ class DetectionMixin:
             # internal critical sections to re-enter it.
             with self.inference_lock:
                 return self.add_boundary_candidate(image_id, payload, _gate_held=True)
-        record = self.image_for_id(image_id)
+        with self.image_io_lock(image_id):
+            record = self.image_for_id(image_id)
         polygon_mask: np.ndarray | None = None
         if "points" in payload:
             roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
