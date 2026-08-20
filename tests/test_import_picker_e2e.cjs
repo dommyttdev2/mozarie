@@ -194,12 +194,21 @@ async function assertSettingsDialogLayout(page, width, height) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
   await page.locator("#settingsTabGeneral").click();
-  const aligned = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
+  const alignment = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
     const starts = rows.map((row) => row.lastElementChild.getBoundingClientRect().left);
     const gaps = rows.map((row) => row.lastElementChild.getBoundingClientRect().left - row.firstElementChild.getBoundingClientRect().right);
-    return starts.every((start) => Math.abs(start - starts[0]) <= 2) && gaps.every((gap) => gap >= 12 && gap <= 20);
+    return { starts, gaps };
   });
-  assert.equal(aligned, true, `settings labels and inputs keep one compact aligned column at ${width}x${height}`);
+  assert.equal(alignment.starts.every((start) => Math.abs(start - alignment.starts[0]) <= 2) && alignment.gaps.every((gap) => gap >= 12 && gap <= 20), true, `settings labels and inputs keep one compact aligned column at ${width}x${height}: ${JSON.stringify(alignment)}`);
+  assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
+    const rect = input.getBoundingClientRect();
+    return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === input;
+  }), true, `the startup-browser checkbox owns its hit target at ${width}x${height}`);
+  const openBrowser = page.locator("#settingsOpenBrowser");
+  const checked = await openBrowser.isChecked();
+  await openBrowser.click();
+  assert.equal(await openBrowser.isChecked(), !checked, `the startup-browser checkbox accepts a physical click at ${width}x${height}`);
+  await openBrowser.click();
   await page.locator("#settingsTabShortcuts").click();
   assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
     const children = [...row.children]; const rowRect = row.getBoundingClientRect(); return children.length === 3 && children.every((child) => { const rect = child.getBoundingClientRect(); return Math.abs((rect.y + rect.height / 2) - (rowRect.y + rowRect.height / 2)) <= 2; });
