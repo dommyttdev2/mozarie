@@ -16,11 +16,13 @@ class CatalogMixin:
             self.candidate_revisions = {record.image_id: 0 for record in records}
             self._clear_browser_save_tokens_unchecked()
             self.root = root
-            self._clear_cache()
             self._invalidate_sam_cache()
             self.job = Job()
             self.catalog_generation += 1
-            self._clear_session_unchecked()
+            session = self._detach_session_unchecked()
+        self._clear_cache()
+        self._release_detached_session(session)
+        self.cleanup_expired_browser_save_tokens()
         return self.list_images()
 
     def _has_active_worker(self) -> bool:
@@ -86,10 +88,12 @@ class CatalogMixin:
                 self.candidates = {}
                 self.candidate_revisions = {}
                 self._clear_browser_save_tokens_unchecked()
-                self._clear_cache()
                 self._invalidate_sam_cache()
                 self.catalog_generation += 1
-                self._clear_session_unchecked()
+                session = self._detach_session_unchecked()
+            self._clear_cache()
+            self._release_detached_session(session)
+        self.cleanup_expired_browser_save_tokens()
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
         """Remove one image's working state without deleting its source file."""
@@ -163,12 +167,16 @@ class CatalogMixin:
             return
         with self.import_lock:
             with self.lock:
-                self._clear_session_unchecked()
+                session = self._detach_session_unchecked()
                 self._clear_browser_save_tokens_unchecked()
+                cache_lock = self._cache_lock_handle if self._owns_process_cache else None
                 if self._owns_process_cache:
-                    self._release_directory_lock(self._cache_lock_handle)
                     self._cache_lock_handle = None
-                    shutil.rmtree(self.cache_dir, ignore_errors=True)
+            self._release_detached_session(session)
+            self._release_directory_lock(cache_lock)
+            if self._owns_process_cache:
+                shutil.rmtree(self.cache_dir, ignore_errors=True)
+        self.cleanup_expired_browser_save_tokens()
 
     def _touch_candidates(self, image_id: str) -> int:
         revision = self.candidate_revisions.get(image_id, 0) + 1
