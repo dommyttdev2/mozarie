@@ -63,7 +63,7 @@
   "detectDialog.target": "Detecting {count} image(s).",
   "detectDialog.title": "Automatic detection settings",
   "detection.confidence": "Detection threshold",
-  "detection.help": "Raise it to reduce false positives.",
+  "detection.help": "Higher values reduce false positives but can miss targets.",
   "detection.title": "Detection settings",
   "dialog.cancel": "Cancel",
   "dialog.cancelJob": "Cancel job",
