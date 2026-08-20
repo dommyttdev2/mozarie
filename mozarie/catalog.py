@@ -413,7 +413,6 @@ class CatalogMixin:
                 try:
                     staged_path = file_data.get("stagedPath")
                     if isinstance(staged_path, Path):
-                        width, height = inspect_import_image(staged_path, relative_path.suffix)
                         with staged_path.open("rb") as source, temporary.open("xb") as destination:
                             shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
                             destination.flush()
@@ -429,14 +428,11 @@ class CatalogMixin:
                                 raise ClientError("追加画像を読み込めません。") from exc
                         if not raw:
                             continue
-                        _verify_decodable_image(raw)
-                        with Image.open(io.BytesIO(raw)) as image:
-                            _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                            width, height = oriented_image_size(image)
                         with temporary.open("xb") as destination:
                             destination.write(raw)
                             destination.flush()
                             os.fsync(destination.fileno())
+                    width, height = inspect_import_image(temporary, relative_path.suffix)
                     pending.append((temporary, relative_path.as_posix(), width, height, client_key))
                 except Exception:
                     temporary.unlink(missing_ok=True)

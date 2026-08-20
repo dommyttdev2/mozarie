@@ -144,11 +144,15 @@ class DetectionMixin:
                             return
                         boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
                         stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
-                    for candidate in candidates:
-                        final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                        if candidate.mask_path.name.startswith(".mozarie-pending-"):
-                            os.replace(candidate.mask_path, final_path)
-                            candidate.mask_path = final_path
+                    try:
+                        for candidate in candidates:
+                            final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                            if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                                os.replace(candidate.mask_path, final_path)
+                                candidate.mask_path = final_path
+                    except Exception:
+                        self._discard_candidates(candidates)
+                        raise
                     with self.lock:
                         if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
                                 or not self._job_is_current(job_generation, catalog_generation)

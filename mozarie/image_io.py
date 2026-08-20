@@ -208,15 +208,22 @@ def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
-    """Fully decode a staged upload without reading its full body into memory."""
+    """Validate an input image without decoding its complete pixel payload."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(path) as image:
-                image.load()
                 _assert_image_suffix_matches_format(expected_suffix, image.format)
-                return oriented_image_size(image)
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+                size = oriented_image_size(image)
+            with Image.open(path) as image:
+                image.verify()
+        if expected_suffix.lower() in {".jpg", ".jpeg"}:
+            with path.open("rb") as source:
+                source.seek(-2, os.SEEK_END)
+                if source.read() != b"\xff\xd9":
+                    raise OSError("truncated JPEG")
+        return size
+    except (OSError, RuntimeError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ClientError("追加画像を読み込めません。") from exc
 
 
