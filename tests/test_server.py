@@ -3220,6 +3220,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (32, 32), "white").save(source)
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
+            catalog_source = state.image_for_id(image_id).path
             version = state.list_images()[0]["assetVersion"]
             started = threading.Event()
             release = threading.Event()
@@ -3229,7 +3230,7 @@ class MozarieTests(unittest.TestCase):
 
             def delayed_open(path, *args, **kwargs):
                 nonlocal calls
-                if Path(path) == source:
+                if Path(path) == catalog_source:
                     with calls_lock:
                         calls += 1
                     started.set()
