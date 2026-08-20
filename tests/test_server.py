@@ -28,6 +28,10 @@ import server as server_module  # noqa: E402
 import mozarie.http as http_module  # noqa: E402
 import mozarie.image_io as image_io_module  # noqa: E402
 import mozarie.state as state_module  # noqa: E402
+import mozarie.catalog as catalog_module  # noqa: E402
+import mozarie.detection as detection_module  # noqa: E402
+import mozarie.jobs as jobs_module  # noqa: E402
+import mozarie.saving as saving_module  # noqa: E402
 from server import (  # noqa: E402
     Candidate,
     ClientError,
@@ -241,7 +245,7 @@ class MozarieTests(unittest.TestCase):
         try:
             raise RuntimeError("test failure")
         except RuntimeError as exc:
-            with self.assertLogs(server_module.LOGGER, "ERROR") as logs:
+            with self.assertLogs(jobs_module.LOGGER, "ERROR") as logs:
                 state._fail_job(exc)
         self.assertIn("バックグラウンド処理に失敗", "\n".join(logs.output))
 
@@ -251,7 +255,7 @@ class MozarieTests(unittest.TestCase):
               patch.object(server_module.STATE, "shutdown") as shutdown, \
               patch.object(server_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
-            with self.assertLogs(server_module.LOGGER, "ERROR") as logs:
+            with self.assertLogs(jobs_module.LOGGER, "ERROR") as logs:
                 with self.assertRaises(SystemExit) as raised:
                     server_module.main()
         self.assertEqual(raised.exception.code, 1)
@@ -892,13 +896,13 @@ class MozarieTests(unittest.TestCase):
             masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
             control = server_module.JobControl()
             state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
-            original_save = state_module.save_with_mask
+            original_save = saving_module.save_with_mask
 
             def save_then_cancel(*args, **kwargs):
                 original_save(*args, **kwargs)
                 control.cancel_requested.set()
 
-            with patch.object(state_module, "save_with_mask", side_effect=save_then_cancel):
+            with patch.object(saving_module, "save_with_mask", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -913,7 +917,7 @@ class MozarieTests(unittest.TestCase):
                     raise RuntimeError("second image failed")
                 original_save(*args, **kwargs)
 
-            with patch.object(state_module, "save_with_mask", side_effect=save_then_fail):
+            with patch.object(saving_module, "save_with_mask", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -1161,8 +1165,8 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         precise = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            state_module, "assert_onnx_cuda_available"
-        ), patch.object(state_module, "TargetSegmenter", return_value=precise) as segmenter:
+            detection_module, "assert_onnx_cuda_available"
+        ), patch.object(detection_module, "TargetSegmenter", return_value=precise) as segmenter:
             first = state._ensure_models()
             second = state._ensure_models()
         self.assertIs(first, second)
@@ -1200,8 +1204,8 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            state_module, "assert_onnx_cuda_available"
-        ), patch.object(state_module, "TargetSegmenter", return_value=Mock()) as segmenter:
+            detection_module, "assert_onnx_cuda_available"
+        ), patch.object(detection_module, "TargetSegmenter", return_value=Mock()) as segmenter:
             models = state._ensure_models()
         self.assertEqual(models.auxiliaries, [])
         self.assertEqual(segmenter.call_count, 1)
@@ -1211,9 +1215,9 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"].update({"ntd11_enabled": True, "sensitive_enabled": True})
         paths = iter((Path("target.onnx"), Path("ntd11.onnx"), Path("sensitive.onnx")))
         with patch.object(state, "_configured_model_path", side_effect=lambda *_args: next(paths)), patch.object(
-            state_module, "assert_onnx_cuda_available"
-        ), patch.object(state_module, "TargetSegmenter", return_value=Mock()), patch.object(
-            state_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
+            detection_module, "assert_onnx_cuda_available"
+        ), patch.object(detection_module, "TargetSegmenter", return_value=Mock()), patch.object(
+            detection_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
         ):
             models = state._load_detection_models()
         self.assertEqual([source for source, _model in models.auxiliaries], ["ntd11", "sensitive"])
@@ -1254,8 +1258,8 @@ class MozarieTests(unittest.TestCase):
         models = DetectionModels(Mock())
         hand = Mock()
         with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(
-            state_module, "assert_onnx_cuda_available"
-        ), patch.object(state_module, "HandDetector", return_value=hand) as detector:
+            detection_module, "assert_onnx_cuda_available"
+        ), patch.object(detection_module, "HandDetector", return_value=hand) as detector:
             first = state._ensure_hand_model(models)
             second = state._ensure_hand_model(models)
         self.assertIs(first, second)
@@ -1790,7 +1794,7 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             imported = threading.Event()
             errors: list[Exception] = []
-            original_verify = state_module._verify_decodable_image
+            original_verify = catalog_module._verify_decodable_image
 
             def blocked_verify(raw):
                 original_verify(raw)
@@ -1805,7 +1809,7 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     imported.set()
 
-            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -1868,7 +1872,7 @@ class MozarieTests(unittest.TestCase):
             active_lock = threading.Lock()
             overlap = threading.Event()
             release = threading.Event()
-            original_verify = state_module._verify_decodable_image
+            original_verify = catalog_module._verify_decodable_image
 
             def blocked_verify(data):
                 nonlocal active, peak
@@ -1891,7 +1895,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
                 first = threading.Thread(target=worker, args=("first.png",))
                 second = threading.Thread(target=worker, args=("second.png",))
                 first.start(); second.start()
@@ -2064,7 +2068,7 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             errors: list[Exception] = []
-            original_verify = state_module._verify_decodable_image
+            original_verify = catalog_module._verify_decodable_image
 
             def blocked_verify(raw):
                 original_verify(raw)
@@ -2077,7 +2081,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(state_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -2434,7 +2438,7 @@ class MozarieTests(unittest.TestCase):
         self.assertNotIn("batch.more", dictionary)
         self.assertIn('async function cancelDetection()', app)
         self.assertIn('"/api/job/cancel"', app)
-        self.assertIn('control.cancel_requested.is_set()', (root / "mozarie" / "state.py").read_text(encoding="utf-8"))
+        self.assertIn('control.cancel_requested.is_set()', (root / "mozarie" / "jobs.py").read_text(encoding="utf-8"))
         self.assertIn('settings.shortcuts', dictionary)
         self.assertIn('overview.searchPlaceholder', dictionary)
         self.assertIn('getAsFileSystemHandle', app)
@@ -3157,7 +3161,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     outcome["error"] = exc
 
-            with patch.object(state_module, "render_with_mask", side_effect=capture_snapshot):
+            with patch.object(saving_module, "render_with_mask", side_effect=capture_snapshot):
                 thread = threading.Thread(target=run_render)
                 thread.start()
                 self.assertTrue(render_started.wait(2))
