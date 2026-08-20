@@ -187,6 +187,15 @@ async function assertToolRailLayout(page, position) {
   await page.keyboard.press("Escape");
 }
 
+async function selectFixtureImage(page, pageErrors, consoleErrors) {
+  await page.locator('.gallery-item[data-id="sample"]').click();
+  try { await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
+  catch (error) {
+    const status = await page.locator("#status").textContent();
+    throw new Error(`image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
+  }
+}
+
 async function main() {
   let server;
   let browser;
@@ -219,13 +228,7 @@ async function main() {
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance hides when switching away from fill");
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
-    await page.locator('.gallery-item[data-id="sample"]').click();
-    try {
-      await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 });
-    } catch (error) {
-      const status = await page.locator("#status").textContent();
-      throw new Error(`early image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
-    }
+    await selectFixtureImage(page, pageErrors, consoleErrors);
     for (const viewport of [
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
     ]) {
@@ -287,13 +290,7 @@ async function main() {
     assert.equal(await page.locator("#removeAfterSave").isVisible(), true);
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
-    await page.locator('.gallery-item[data-id="sample"]').click();
-    try {
-      await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 });
-    } catch (error) {
-      const status = await page.locator("#status").textContent();
-      throw new Error(`image selection did not enable detection; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
-    }
+    await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
     assert.equal(await page.locator("#hideAndNextButton").isDisabled(), false, "hide and next enables after selecting an image");
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions stay disabled when the selected image has no candidates");

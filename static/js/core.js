@@ -494,7 +494,7 @@ function resetCatalog(images, root) {
 function discardCatalogNodes(nodes, container) {
   for (const item of nodes.values()) {
     const preview = item.querySelector?.("img");
-    if (preview) preview.src = "";
+    if (preview) forgetThumbnail(preview);
     item.remove?.();
   }
   nodes.clear();
