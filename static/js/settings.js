@@ -201,6 +201,7 @@ async function openSettings() {
   try {
     const data = await api("/api/settings");
     setSettingsForm(data.settings, data.status);
+    $("#settingsVersion").textContent = data.version;
     selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
   } catch (error) { setStatus(error.message, "error"); }
 }

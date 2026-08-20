@@ -64,7 +64,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "device": inference_device_name(),
                 })
             elif path == "/api/settings":
-                payload = {"settings": STATE.settings}
+                payload = {"settings": STATE.settings, "version": _local_version()}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     payload["status"] = STATE.settings_status()
                 self._json(payload)
@@ -153,7 +153,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "candidateRevision": revision})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
-                response = {"settings": settings}
+                response = {"settings": settings, "version": _local_version()}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     response["status"] = STATE.settings_status()
                 self._json(response)
@@ -497,9 +497,14 @@ def _read_bool(value: Any, field_name: str) -> bool:
     return value
 
 
+def _local_version() -> str:
+    from updater import display_version, read_local_version
+    return display_version(read_local_version())
+
+
 def _update_status() -> dict[str, Any]:
-    from updater import display_version, fetch_latest_release, parse_version, read_local_version
-    current = display_version(read_local_version())
+    from updater import display_version, fetch_latest_release, parse_version
+    current = _local_version()
     latest = display_version(fetch_latest_release()["tag_name"])
     return {"current": current, "latest": latest, "available": parse_version(latest) > parse_version(current)}
 
