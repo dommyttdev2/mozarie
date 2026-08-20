@@ -2431,7 +2431,10 @@ class MozarieTests(unittest.TestCase):
 
             snapshot = state.catalog_snapshot()
 
-            self.assertEqual(snapshot["root"], str(root))
+            self.assertEqual(
+                os.path.normcase(str(Path(snapshot["root"]).resolve())),
+                os.path.normcase(str(root.resolve())),
+            )
             self.assertEqual(snapshot["catalogGeneration"], state.catalog_generation)
             self.assertEqual(len(snapshot["images"]), 1)
 
