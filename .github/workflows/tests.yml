@@ -26,7 +26,6 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: requirements-test.txt
-      - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements-test.txt
       - run: python -m unittest discover -s tests
 
@@ -40,5 +39,5 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium --only-shell
       - run: npm test

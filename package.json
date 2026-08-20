@@ -6,6 +6,6 @@
   },
   "scripts": {
     "check": "node -e \"const fs=require('fs'); const cp=require('child_process'); for (const name of fs.readdirSync('static/js').filter(name => name.endsWith('.js'))) cp.execFileSync(process.execPath, ['--check', 'static/js/'+name], {stdio:'inherit'});\"",
-    "test": "npm run check && node tests/test_app_js.cjs && node tests/test_browser_save_contract.cjs && node tests/test_browser_save_runtime.cjs && node tests/test_import_picker_e2e.cjs"
+    "test": "npm run check && node --test --test-concurrency=4 tests/test_app_js.cjs tests/test_browser_save_contract.cjs tests/test_browser_save_runtime.cjs tests/test_import_picker_e2e.cjs"
   }
 }
