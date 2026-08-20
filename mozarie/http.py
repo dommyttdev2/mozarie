@@ -59,7 +59,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "device": inference_device_name(),
                 })
             elif path == "/api/settings":
-                self._json({"settings": STATE.settings, "status": STATE.settings_status()})
+                payload = {"settings": STATE.settings}
+                if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
+                    payload["status"] = STATE.settings_status()
+                self._json(payload)
             elif path == "/api/update/status":
                 self._json(_update_status())
             elif path == "/api/images":

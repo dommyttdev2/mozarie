@@ -692,7 +692,7 @@ async function finishDetectionJob(job) {
 }
 
 async function pollJob() {
-  if (state.browserSave) return;
+  if (state.browserSave) { scheduleJobPoll(); return; }
   if (state.pollInFlight) return state.pollInFlight;
   state.pollInFlight = (async () => {
   try {
@@ -729,5 +729,11 @@ async function pollJob() {
   }
   })();
   try { return await state.pollInFlight; }
-  finally { state.pollInFlight = null; }
+  finally { state.pollInFlight = null; scheduleJobPoll(); }
+}
+function scheduleJobPoll(immediate = false) {
+  clearTimeout(state.jobPollTimer);
+  const active = ["running", "pausing", "paused"].includes(state.job?.state);
+  const delay = immediate ? 0 : document.visibilityState === "hidden" ? 10000 : state.pollFailures ? Math.min(15000, 2500 * (2 ** Math.min(state.pollFailures, 3))) : active ? 600 : 2500;
+  state.jobPollTimer = setTimeout(() => { void pollJob(); }, delay);
 }

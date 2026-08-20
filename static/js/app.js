@@ -361,13 +361,14 @@ function bindEvents() {
 
 async function initialise() {
   try {
-    const settings = await api("/api/settings");
+    const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
   await restoreOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
-  new ResizeObserver(resizeRenderCanvas).observe(stage); setInterval(pollJob, 700);
+  new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
+  document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));
   setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
