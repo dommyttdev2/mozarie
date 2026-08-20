@@ -2920,7 +2920,10 @@ class MozarieTests(unittest.TestCase):
 
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(state.job.image_ids, (first_id,))
-            self.assertEqual(state.job.outputs, [str(first)])
+            self.assertEqual(
+                [os.path.normcase(str(Path(output).resolve())) for output in state.job.outputs],
+                [os.path.normcase(str(first.resolve()))],
+            )
             self.assertEqual(state.candidates[first_id], [])
             self.assertEqual(second.read_bytes(), original_second)
 
