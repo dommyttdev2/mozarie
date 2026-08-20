@@ -97,11 +97,10 @@ class CatalogMixin:
 
         # Folder discovery is intentionally fixed at two streaming workers:
         # do not create one Future per file in a large folder.
-        workers = [threading.Thread(target=inspect_path) for _ in range(min(2, len(paths)))]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            workers = [executor.submit(inspect_path) for _ in range(min(2, len(paths)))]
+            for worker in workers:
+                worker.result()
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         return self._replace_catalog(root, records)
 

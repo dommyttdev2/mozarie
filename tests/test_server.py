@@ -781,6 +781,46 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(old_mask_path.is_file())
             self.assertFalse(new_mask_path.exists())
 
+    def test_same_stat_change_during_detection_does_not_publish_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original_stat = source.stat()
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+            old_path = state.cache_dir / image_id / "old.png"
+            old_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(old_path)
+            old_candidate = Candidate("old", "boundary", 0.9, old_path, origin="boundary")
+            state.candidates[image_id] = [old_candidate]
+            entered = threading.Event()
+            release = threading.Event()
+
+            def detect_image(*_args):
+                pending = state.cache_dir / image_id / ".mozarie-pending-new.tmp"
+                Image.fromarray(self._mask(16, 16)).save(pending, format="PNG")
+                entered.set()
+                self.assertTrue(release.wait(2))
+                return [Candidate("new", "penis", 0.9, pending)]
+
+            worker = threading.Thread(target=lambda: state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1))
+            with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
+                worker.start()
+                self.assertTrue(entered.wait(2))
+                Image.new("RGB", (16, 16), "blue").save(source)
+                self.assertEqual(source.stat().st_size, original_stat.st_size)
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                release.set()
+                worker.join(3)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.candidates[image_id], [old_candidate])
+            self.assertTrue(old_path.is_file())
+            self.assertFalse((state.cache_dir / image_id / ".mozarie-pending-new.tmp").exists())
+
     def test_detect_job_can_be_cancelled_with_the_shared_control(self):
         state = self.new_state()
         state.job = server_module.Job(kind="detect", state="running", total=1)
@@ -2550,18 +2590,17 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            original_snapshot = state.candidate_snapshot
+            original_read = state.read_candidate_mask_png
             snapshotted = threading.Event()
             release = threading.Event()
 
-            def delayed_snapshot(requested_id):
-                snapshot = original_snapshot(requested_id)
+            def delayed_read(requested_id, candidate_id, *, expected_revision=None):
                 snapshotted.set()
                 self.assertTrue(release.wait(2))
-                return snapshot
+                return original_read(requested_id, candidate_id, expected_revision=expected_revision)
 
             with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
-                 patch.object(state, "candidate_snapshot", side_effect=delayed_snapshot):
+                 patch.object(state, "read_candidate_mask_png", side_effect=delayed_read):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
                 thread.start()
@@ -2588,6 +2627,47 @@ class MozarieTests(unittest.TestCase):
 
             self.assertEqual(result["status"], 404)
             self.assertNotEqual(result["body"], mask_path.read_bytes())
+
+    def test_candidate_mask_gets_do_not_rehash_the_source_after_metadata(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            calls = 0
+            original_hash = catalog_module.file_sha256
+
+            def tracked_hash(path):
+                nonlocal calls
+                calls += 1
+                return original_hash(path)
+
+            with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash), \
+                 patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state):
+                state.candidate_snapshot(image_id)
+                self.assertEqual(calls, 1)
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    for _ in range(4):
+                        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                        connection.request("GET", f"/api/mask/{image_id}/candidate?v={revision}-candidate")
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        response.read()
+                        connection.close()
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+            self.assertEqual(calls, 1)
 
     def test_candidate_compose_keeps_catalog_responsive_and_rejects_revision_race(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4162,6 +4242,30 @@ class MozarieTests(unittest.TestCase):
             with self.assertRaises(ClientError):
                 state.prepare_browser_save([image_id], 100, "_censored", False)
             self.assertEqual(len(state.candidates[image_id]), 1)
+
+    def test_browser_save_commit_rejects_same_stat_source_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original_stat = source.stat()
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            Image.new("RGB", (16, 16), "blue").save(source)
+            self.assertEqual(source.stat().st_size, original_stat.st_size)
+            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            self.assertEqual(raised.exception.error_code, "stale_asset")
+            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
     def test_exif_rotated_jpeg_uses_normalized_mask_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -101,10 +101,12 @@ function invalidateStaleAsset(imageId) {
   const gallery = state.galleryNodes.get(imageId)?.querySelector("img");
   const overview = state.overviewNodes.get(imageId)?.querySelector("img");
   forgetThumbnail(gallery); forgetThumbnail(overview);
-  if (state.currentId !== imageId) return;
-  bitmaps.add(state.currentImage);
-  for (const bitmap of state.candidateImages.values()) bitmaps.add(bitmap);
+  if (state.currentId === imageId) {
+    bitmaps.add(state.currentImage);
+    for (const bitmap of state.candidateImages.values()) bitmaps.add(bitmap);
+  }
   for (const bitmap of bitmaps) closeBitmap(bitmap);
+  if (state.currentId !== imageId) return;
   closeBoundaryModeMenu({ restoreFocus: true });
   state.currentId = null; state.currentImage = null; state.candidates = []; state.candidateImages = new Map();
   clearEditor(); updateGallerySelection();
