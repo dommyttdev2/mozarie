@@ -421,6 +421,8 @@ def _default_output_destination(record: ImageRecord, suffix: str = "_censored", 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
+    if hashlib.sha256(source).hexdigest() != record.content_digest:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -490,6 +492,8 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> st
     destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
+    if hashlib.sha256(source).hexdigest() != record.content_digest:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()

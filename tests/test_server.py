@@ -4498,5 +4498,35 @@ class MozarieTests(unittest.TestCase):
             write_copy.assert_not_called()
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
+    def test_capture_bytes_must_match_digest_even_if_source_is_restored_before_final_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            white = source.read_bytes()
+            blue_path = Path(directory) / "blue.png"
+            Image.new("RGB", (16, 16), "blue").save(blue_path)
+            blue = blue_path.read_bytes()
+            state = self.new_state()
+            image_id = next(image["id"] for image in state.set_root(directory) if image["relativePath"] == "source.png")
+            record = state.image_for_id(image_id)
+            original_read = Path.read_bytes
+
+            def swapped_capture(path):
+                if path != source:
+                    return original_read(path)
+                source.write_bytes(blue)
+                try:
+                    return original_read(source)
+                finally:
+                    source.write_bytes(white)
+
+            with patch.object(Path, "read_bytes", autospec=True, side_effect=swapped_capture):
+                with self.assertRaisesRegex(ClientError, "外部で変更"):
+                    server_module.render_with_mask(record, self._mask(16, 16), 4)
+            with patch.object(Path, "read_bytes", autospec=True, side_effect=swapped_capture):
+                with self.assertRaisesRegex(ClientError, "外部で変更"):
+                    save_with_mask(record, self._mask(16, 16), 4)
+            self.assertEqual(source.read_bytes(), white)
+
 if __name__ == "__main__":
     unittest.main()
