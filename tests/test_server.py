@@ -2992,6 +2992,52 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(state.job.state, "error")
 
+    def test_copy_save_advances_past_an_out_of_order_empty_mask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first.png", "empty.png", "third.png"):
+                Image.new("RGB", (16, 16), "white").save(root / name)
+            state = self.new_state()
+            image_ids = tuple(item["id"] for item in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in image_ids]
+            state.job = server_module.Job(kind="apply", state="running", total=3, image_ids=image_ids)
+            first_entered = threading.Event()
+            empty_done = threading.Event()
+            third_ready = threading.Event()
+            release_first = threading.Event()
+            output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
+
+            def compose(image_id, _draft):
+                if image_id == image_ids[0]:
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(2))
+                    return self._mask(16, 16)
+                if image_id == image_ids[1]:
+                    empty_done.set()
+                    return None
+                third_ready.set()
+                return self._mask(16, 16)
+
+            worker = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, {}),
+                kwargs={"copy_to_default": True, "saving_parallelism": 3},
+            )
+            with patch.object(state, "combined_candidate_mask", side_effect=compose), \
+                 patch.object(saving_module, "_default_output_destination", side_effect=lambda record, _suffix, _reserved: output_paths[record.image_id]), \
+                 patch.object(saving_module, "render_with_mask", return_value=b"rendered"), \
+                 patch.object(saving_module, "write_rendered_copy"):
+                worker.start()
+                self.assertTrue(first_entered.wait(2))
+                self.assertTrue(empty_done.wait(2))
+                self.assertTrue(third_ready.wait(2))
+                release_first.set()
+                worker.join(2)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.outputs, [str(output_paths[image_ids[0]]), str(output_paths[image_ids[2]])])
+
     def test_removed_image_lock_is_pruned_and_unknown_images_do_not_allocate_one(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"

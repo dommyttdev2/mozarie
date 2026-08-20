@@ -275,14 +275,18 @@ class SavingMixin:
             reserved: set[Path] = set()
             next_destination_index = 0
 
-            def skip_destination(index: int) -> None:
+            def advance_past_skipped_destinations() -> None:
                 nonlocal next_destination_index
+                while next_destination_index in skipped_destination_indices:
+                    skipped_destination_indices.remove(next_destination_index)
+                    next_destination_index += 1
+
+            def skip_destination(index: int) -> None:
                 if not copy_to_default:
                     return
                 with destination_condition:
                     skipped_destination_indices.add(index)
-                    while next_destination_index in skipped_destination_indices:
-                        next_destination_index += 1
+                    advance_past_skipped_destinations()
                     destination_condition.notify_all()
 
             def reserve_destination(index: int, record: ImageRecord) -> Path:
@@ -297,6 +301,7 @@ class SavingMixin:
                         return destination
                     finally:
                         next_destination_index += 1
+                        advance_past_skipped_destinations()
                         destination_condition.notify_all()
 
             def save_record(index: int, record: ImageRecord) -> None:
