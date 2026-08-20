@@ -2359,6 +2359,7 @@ class MozarieTests(unittest.TestCase):
             opened = threading.Event()
             release = threading.Event()
             cleared = threading.Event()
+            snapshot_done = threading.Event()
             original_open = server_module.Image.open
 
             def delayed_open(path, *args, **kwargs):
@@ -2374,10 +2375,14 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(opened.wait(2))
                 clearer.start()
                 self.assertFalse(cleared.wait(0.1))
+                snapshotter = threading.Thread(target=lambda: (state.catalog_snapshot(), snapshot_done.set()))
+                snapshotter.start()
+                self.assertTrue(snapshot_done.wait(2))
                 self.assertTrue(mask_path.exists())
                 release.set()
                 reader.join(2)
                 clearer.join(2)
+                snapshotter.join(2)
 
             self.assertTrue(cleared.is_set())
             self.assertFalse(mask_path.exists())

@@ -254,8 +254,32 @@ class CatalogMixin:
             with self.lock:
                 if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中はモザイク候補をクリアできません。")
-                self._clear_masks_unchecked(records)
+                mask_paths = [
+                    candidate.mask_path
+                    for record in records
+                    for candidate in self.candidates.get(record.image_id, [])
+                ]
+                for record in records:
+                    self.candidates[record.image_id] = []
+                    self._touch_candidates(record.image_id)
+            self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
+
+    @staticmethod
+    def _delete_mask_files(mask_paths: list[Path], candidate_dirs: list[Path]) -> None:
+        """Best-effort cleanup after the state transition has been published."""
+        for mask_path in mask_paths:
+            try:
+                mask_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not remove stale mask %s: %s", mask_path, exc)
+        for candidate_dir in candidate_dirs:
+            try:
+                if candidate_dir.exists():
+                    for mask_path in candidate_dir.glob("*.png"):
+                        mask_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
     def _clear_masks_unchecked(self, records: list[ImageRecord]) -> None:
         for record in records:
