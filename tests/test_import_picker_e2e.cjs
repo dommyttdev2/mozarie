@@ -16,16 +16,26 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 
 function startFixtureServer() {
   const detectRequests = [];
+  const settingsRequests = [];
+  const updateRequests = [];
+  let releaseFullSettings = null;
+  let deferFullSettings = false;
+  const settings = {
+    general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
+    display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
+    importing: { parallelism: 3 }, saving: { parallelism: 2 },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
+    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+  };
   const server = http.createServer(async (request, response) => {
-    const requestPath = new URL(request.url, "http://127.0.0.1").pathname;
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    const requestPath = requestUrl.pathname;
     if (requestPath === "/api/settings") {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ settings: {
-        general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
-        models: { target_segmentation: "", hand_detection: "", sam_checkpoint: "", provider: "gpu" },
-        display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
-        detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2 },
-      }, status: { models: {} } }));
+      settingsRequests.push(requestUrl.search);
+      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
+      if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
+      reply();
       return;
     }
     if (requestPath === "/api/images") {
@@ -42,6 +52,7 @@ function startFixtureServer() {
       return;
     }
     if (requestPath === "/api/update/status") {
+      updateRequests.push(requestUrl.search);
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
       return;
@@ -90,7 +101,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -137,10 +148,12 @@ async function assertDesktopLayout(page, width, height) {
   await assertVisibleButtons(page, `${width}x${height} edit`);
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
-    return { status: box("#status"), actions: box(".appbar-actions"), appbar: box(".appbar") };
+    const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
+    return { status: box("#status"), actions: box(".appbar-actions"), appbar: box(".appbar"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
   });
-  assert.ok(appbar.actions.right <= appbar.appbar.right, `appbar actions stay right-aligned at ${width}x${height}`);
+  assert.ok(appbar.appbar.right - appbar.actions.right <= 12, `appbar actions use only the right padding gap at ${width}x${height}`);
   assert.ok(appbar.status.right <= appbar.actions.left, `status keeps the central flex space at ${width}x${height}`);
+  assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
   if (width === 1280 && height === 720) {
     const heading = await page.evaluate(() => {
       const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
@@ -164,6 +177,24 @@ async function assertDesktopLayout(page, width, height) {
   await assertVisibleButtons(page, `${width}x${height} overview`);
   await page.locator("#closeOverviewButton").click();
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+}
+
+async function assertSettingsDialogLayout(page, width, height) {
+  await page.setViewportSize({ width, height });
+  await page.locator("#settingsButton").click();
+  await page.locator("#settingsTabGeneral").click();
+  const aligned = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
+    const rights = rows.map((row) => row.lastElementChild.getBoundingClientRect().right);
+    return rights.every((right) => Math.abs(right - rights[0]) <= 2);
+  });
+  assert.equal(aligned, true, `settings values align to the right at ${width}x${height}`);
+  await page.locator("#settingsTabShortcuts").click();
+  assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+    const children = [...row.children]; const rowRect = row.getBoundingClientRect(); return children.length === 3 && children.every((child) => { const rect = child.getBoundingClientRect(); return Math.abs((rect.y + rect.height / 2) - (rowRect.y + rowRect.height / 2)) <= 2; });
+  })), true, `shortcut bindings stay single-row at ${width}x${height}`);
+  await page.locator("#settingsTabModels").click();
+  assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
+  await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
 }
 
 async function assertToolRailLayout(page, position) {
@@ -207,8 +238,12 @@ async function main() {
   let browser;
   let fixtureUrl;
   let detectRequests;
+  let settingsRequests;
+  let updateRequests;
+  let deferFullSettings;
+  let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -226,11 +261,18 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
+    assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
     await page.locator("#settingsTabModels").click();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
+    deferFullSettings();
     await page.locator("#settingsStatusButton").click();
+    assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen + 1, "model confirmation starts exactly one full settings request");
+    assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
+    assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
+    releaseFullSettings();
     await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "unsaved.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
@@ -248,8 +290,12 @@ async function main() {
       return { sameRow: Math.abs((version.y + version.height / 2) - (button.y + button.height / 2)) < 2, buttonWidth: button.width };
     });
     assert.equal(versionRow.sameRow, true, "the update button shares the version row");
-    assert.ok(versionRow.buttonWidth > 0, "the update button remains compact and clickable");
+    assert.ok(versionRow.buttonWidth > 0 && versionRow.buttonWidth < 180, "the update button remains compact and clickable");
+    assert.equal(await page.locator("#checkUpdateButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the version update button owns its hit target");
+    const updatesBeforeClick = updateRequests.length;
     await page.locator("#checkUpdateButton").click();
+    assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
+    assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
     await page.waitForFunction(() => document.querySelector("#updateStatus").textContent.includes("最新"));
     await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");
@@ -273,6 +319,9 @@ async function main() {
     for (const viewport of [
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertDesktopLayout(page, viewport.width, viewport.height);
+    for (const viewport of [
+      { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
+    ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
     assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 700), true, "the canvas stage must keep at least 700px at 1024x768");
