@@ -303,7 +303,7 @@ class CatalogMixin:
         try:
             stat = record.path.stat()
         except OSError as exc:
-            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。") from exc
+            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
         if stat.st_mtime_ns != record.mtime_ns or (record.size_bytes > 0 and stat.st_size != record.size_bytes):
             raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         try:
