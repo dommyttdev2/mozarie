@@ -8,6 +8,7 @@ function canvasSizeForImage(image) {
 
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
+  cancelFillWork();
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true;
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = 1;
@@ -22,6 +23,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   if ((isBusy() || state.importing || isGestureActive()) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
+  cancelFillWork();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   closeBoundaryModeMenu();

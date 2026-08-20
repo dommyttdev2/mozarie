@@ -199,7 +199,7 @@ function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor())
 function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
-    || state.catalogMutation || state.boundaryPending;
+    || state.catalogMutation || state.boundaryPending || state.fillPending;
 }
 function beginCatalogEpoch() { state.catalogGeneration += 1; state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
@@ -476,7 +476,9 @@ function setMosaicPreviewEnabled(enabled) {
 
 function resetCatalog(images, root) {
   closeBoundaryModeMenu({ restoreFocus: true });
+  closeCatalogContextMenu();
   abortCatalogLoads();
+  cancelFillWork();
   releaseImageCaches();
   state.images = images;
   state.sourceAccess.clear();

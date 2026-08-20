@@ -318,6 +318,7 @@ function bindEvents() {
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.fillWorker) { event.preventDefault(); cancelFillWork(); return; }
     if (event.key === "Escape" && !$("#boundaryModeMenu").hidden) {
       event.preventDefault(); closeBoundaryModeMenu(); focusElement($("#boundaryTool")); return;
     }

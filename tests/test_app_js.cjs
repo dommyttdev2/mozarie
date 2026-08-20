@@ -210,8 +210,14 @@ const requests = [];
 const storage = new Map();
 let storageWrites = 0;
 const windowListeners = new Map();
+const workerInstances = [];
+class WorkerMock {
+  constructor(url) { this.url = url; this.terminated = false; workerInstances.push(this); }
+  postMessage(data) { this.message = data; }
+  terminate() { this.terminated = true; }
+}
 const context = {
-  console, document, Date, Math, Promise, Uint8Array, ArrayBuffer, structuredClone, AbortController, DOMException, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} }, createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
+  console, document, Date, Math, Promise, Uint8Array, Uint8ClampedArray, Int32Array, ArrayBuffer, structuredClone, AbortController, DOMException, Worker: WorkerMock, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} }, createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
   localStorage: {
     getItem(key) { return storage.get(key) || null; },
     setItem(key, value) { storageWrites += 1; storage.set(key, value); },
@@ -286,10 +292,10 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/aria-label="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-aria-label=/.test(tag), `Japanese ARIA label lacks a translation key: ${tag}`);
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, lruRemember, releaseImageResource, releaseCandidateBundle, invalidateCandidateBundles, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
   for (const [position, orientation] of [["left", "vertical"], ["right", "vertical"], ["top", "horizontal"], ["bottom", "horizontal"]]) {
@@ -1267,9 +1273,11 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(excludedDraft.manualVisible, true);
   assert.deepEqual([...combinedMask._alpha], [0, 0]);
   state.manualEnabled = true;
+  state.maskDirty = true;
   buildCombinedMask();
   assert.deepEqual([...combinedMask._alpha], [0, 1]);
   state.manualEnabled = false;
+  state.maskDirty = true;
   buildCombinedMask();
   assert.deepEqual([...combinedMask._alpha], [0, 0]);
   await new Promise((resolve) => setImmediate(resolve));
@@ -1368,7 +1376,7 @@ const completionWatchdog = setTimeout(() => {
   manualRow.children[0].dispatch("change");
   combinedContext.drawImageCalls = [];
   buildCombinedMask();
-  assert.equal(combinedContext.drawImageCalls.some(([image]) => image === createdCanvases[0]), true);
+  assert.equal(state.maskDirty, false, "manual-toggle composition is already current before serialization");
 
   // Undo/Redo is deliberately limited to brush/eraser stroke completion. A
   // manual-toggle or clear starts a fresh baseline and cannot restore it.
@@ -2220,6 +2228,21 @@ const completionWatchdog = setTimeout(() => {
   await languageSwitchSave;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
+
+  // Flood-fill responses are token-bound: a switch discards stale spans and
+  // releases the busy state without touching history.
+  state.images = [{ id: "fill", relativePath: "fill.png", width: 2, height: 2, assetVersion: "fill-v", candidateRevision: 0 }];
+  state.currentId = "fill"; state.currentImage = { width: 2, height: 2 }; state.imageGeneration = 910; state.catalogEpoch = 910; state.history = []; state.historyIndex = 0;
+  originalCanvas.width = 2; originalCanvas.height = 2;
+  originalCtx.getImageData = () => ({ data: new Uint8ClampedArray(16) });
+  fillAt({ x: 0, y: 0 });
+  const staleFillWorker = workerInstances.at(-1);
+  assert.equal(staleFillWorker.url, "/js/flood-fill-worker.js"); assert.equal(state.fillPending, true); assert.equal(isBusy(), true);
+  const staleToken = staleFillWorker.message.requestId; state.imageGeneration += 1;
+  staleFillWorker.onmessage({ data: { requestId: staleToken, spans: new Int32Array([0, 0, 2]) } });
+  assert.equal(state.fillPending, false); assert.equal(state.history.length, 0, "stale worker result does not mutate history");
+  fillAt({ x: 0, y: 0 }); const cancelledFillWorker = workerInstances.at(-1); cancelFillWork();
+  assert.equal(cancelledFillWorker.terminated, true); assert.equal(state.fillPending, false);
 
   for (const pending of [...pendingFetches]) if (pending.path.startsWith("/api/image/")) settlePendingFetch(pending, { ok: true, blob: async () => ({}) });
   await new Promise((resolve) => setImmediate(resolve));
