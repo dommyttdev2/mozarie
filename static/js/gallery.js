@@ -33,7 +33,7 @@ function renderGallery(force = false) {
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.onclick = (event) => selectCatalogImage(image.id, event);
-    item.onmouseenter = () => { void cachedImage(image).catch(() => {}); void loadCandidateBundle(image.id, state.imageGeneration).catch(() => {}); prefetchNeighbors(image); };
+    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");

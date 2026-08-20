@@ -54,6 +54,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     state.currentImage = image;
     state.candidates = candidateBundle.candidates;
     state.candidateImages = candidateBundle.candidateImages;
+    state.imageCache.trim(); state.candidateBundleCache.trim();
     canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
@@ -74,47 +75,28 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
 
 function loadImage(source) {
   return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error(t("error.imageLoad")));
-    image.src = source;
+    const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(t("error.imageLoad"))); image.src = source;
   });
 }
 
-function releaseImageResource(image) {
-  if (image && image !== state.currentImage) image.src = "";
-}
-
-function releaseCandidateBundle(bundle) {
-  for (const image of bundle?.candidateImages?.values?.() || []) releaseImageResource(image);
-}
-
-function lruRemember(cache, key, value, limit, release = null) {
-  if (cache.has(key)) cache.delete(key);
-  cache.set(key, value);
-  while (cache.size > limit) {
-    const oldest = cache.keys().next().value;
-    const evicted = cache.get(oldest);
-    cache.delete(oldest);
-    release?.(evicted);
-  }
-  return value;
-}
-
-function imageAssetVersion(record) { return typeof record.assetVersion === "string" ? record.assetVersion : ""; }
+function imageAssetVersion(record) { return typeof record?.assetVersion === "string" ? record.assetVersion : ""; }
 function imageCacheKey(record) { return `${record.id}:${imageAssetVersion(record)}`; }
 function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }
 
 async function cachedImage(record) {
   const key = imageCacheKey(record);
+  const epoch = state.catalogEpoch; const version = imageAssetVersion(record);
   const cached = state.imageCache.get(key);
-  if (cached) return lruRemember(state.imageCache, key, cached, 6, releaseImageResource);
+  if (cached) return cached;
   const pending = state.imageInflight.get(key);
   if (pending) return pending;
-  const version = imageAssetVersion(record);
-  const request = loadImage(`/api/image/${encodeURIComponent(record.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`)
-    .then((image) => lruRemember(state.imageCache, key, image, 6, releaseImageResource))
-    .finally(() => state.imageInflight.delete(key));
+  const controller = new AbortController(); state.catalogLoadControllers.add(controller);
+  let request;
+  request = fetchBitmap(imageUrl(record), controller.signal).then((image) => {
+    if (!catalogRecordMatches(record, epoch, { version })) { image.close?.(); throw new DOMException("stale catalog", "AbortError"); }
+    return state.imageCache.set(key, image, decodedImageWeight(image));
+  }).finally(() => { if (state.imageInflight.get(key) === request) state.imageInflight.delete(key); });
+  request.finally(() => state.catalogLoadControllers.delete(controller)).catch(() => {});
   state.imageInflight.set(key, request);
   return request;
 }
@@ -123,21 +105,18 @@ function prefetchNeighbors(record) {
   const index = state.images.findIndex((item) => item.id === record.id);
   for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
     if (!neighbor) continue;
-    void cachedImage(neighbor).catch(() => {});
-    void loadCandidateBundle(neighbor.id, state.imageGeneration).catch(() => {});
+    schedulePrefetch(neighbor, 1);
   }
 }
 
 function releaseImageCaches(imageId = null) {
   const matches = (key) => !imageId || key.startsWith(`${imageId}:`);
-  for (const [key, image] of state.imageCache) {
+  for (const [key] of state.imageCache.items) {
     if (!matches(key)) continue;
-    image.src = "";
     state.imageCache.delete(key);
   }
-  for (const [key, bundle] of state.candidateBundleCache) {
+  for (const [key] of state.candidateBundleCache.items) {
     if (!matches(key)) continue;
-    releaseCandidateBundle(bundle);
     state.candidateBundleCache.delete(key);
   }
   for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
@@ -145,9 +124,10 @@ function releaseImageCaches(imageId = null) {
 }
 
 function invalidateCandidateBundles(imageId) {
-  for (const [key, bundle] of state.candidateBundleCache) {
+  for (const [key, entry] of state.candidateBundleCache.items) {
+    const bundle = entry.value;
     if (!key.startsWith(`${imageId}:`)) continue;
-    if (bundle.candidateImages !== state.candidateImages) releaseCandidateBundle(bundle);
+    if (bundle.candidateImages === state.candidateImages) continue;
     state.candidateBundleCache.delete(key);
   }
 }
@@ -155,63 +135,68 @@ function invalidateCandidateBundles(imageId) {
 function retainCurrentCandidateBundle(imageId, revision) {
   const record = state.images.find((image) => image.id === imageId);
   if (!record) return;
-  const currentImages = state.currentId === imageId ? state.candidateImages : null;
-  let reusable = null;
-  for (const [key, bundle] of state.candidateBundleCache) {
-    if (!key.startsWith(`${imageId}:`) || (currentImages && bundle.candidateImages !== currentImages)) continue;
-    reusable = bundle;
-    state.candidateBundleCache.delete(key);
-    break;
-  }
+  if (state.currentId !== imageId) { record.candidateRevision = Number(revision || 0); return; }
+  const oldKey = candidateCacheKey(imageId, Number(record.candidateRevision || 0));
+  const reusable = state.candidateBundleCache.take(oldKey);
   record.candidateRevision = Number(revision || 0);
-  if (!reusable || !currentImages) return;
+  if (!reusable) return;
   reusable.candidates = state.candidates;
-  reusable.candidateImages = currentImages;
+  reusable.candidateImages = state.candidateImages;
   reusable.candidateRevision = record.candidateRevision;
-  lruRemember(state.candidateBundleCache, candidateCacheKey(imageId, record.candidateRevision), reusable, 12, releaseCandidateBundle);
+  state.candidateBundleCache.set(candidateCacheKey(imageId, record.candidateRevision), reusable, [...reusable.candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0));
 }
 
-async function loadCandidateMask(source) {
-  const response = await fetch(source, {
-    headers: { "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
-  });
-  if (!response.ok) {
-    const error = new Error(t("error.imageLoad"));
-    error.status = response.status;
-    throw error;
-  }
-  const objectUrl = URL.createObjectURL(await response.blob());
-  try { return await loadImage(objectUrl); }
-  finally { URL.revokeObjectURL(objectUrl); }
-}
+async function loadCandidateMask(source, signal) { return fetchBitmap(source, signal); }
 
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const record = state.images.find((image) => image.id === imageId);
+  const epoch = state.catalogEpoch;
+  const version = imageAssetVersion(record);
   const knownRevision = Number(record?.candidateRevision || 0);
   const knownKey = candidateCacheKey(imageId, knownRevision);
   const known = state.candidateBundleCache.get(knownKey);
-  if (known) return lruRemember(state.candidateBundleCache, knownKey, known, 12, releaseCandidateBundle);
+  if (known) return known;
   const pending = state.candidateInflight.get(knownKey);
   if (pending) return pending;
-  const request = (async () => {
-    const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`);
-    const cacheKey = candidateCacheKey(imageId, candidateData.candidateRevision || 0);
-    const cached = state.candidateBundleCache.get(cacheKey);
-    if (cached) return lruRemember(state.candidateBundleCache, cacheKey, cached, 12, releaseCandidateBundle);
-  try {
-    const candidateImages = new Map();
-    await Promise.all(candidateData.candidates.map(async (candidate) => {
-      candidateImages.set(candidate.id, await loadCandidateMask(`/api/mask/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}?v=${encodeURIComponent(`${candidateData.candidateRevision || 0}-${candidate.id}`)}`));
-    }));
-    return lruRemember(state.candidateBundleCache, cacheKey, { candidates: candidateData.candidates, candidateImages, candidateRevision: Number(candidateData.candidateRevision || 0) }, 12, releaseCandidateBundle);
-  } catch (error) {
-    if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
-      state.candidateInflight.delete(knownKey);
-      return loadCandidateBundle(imageId, generation, true);
-    }
-    throw error;
-  }
-  })().finally(() => state.candidateInflight.delete(knownKey));
+  let request;
+  request = (async () => {
+    const controller = new AbortController(); state.catalogLoadControllers.add(controller);
+    let candidateImages;
+    try {
+      const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
+      if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string") || !Number.isInteger(candidateData.candidateRevision)
+        || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+      const revision = Number(candidateData.candidateRevision);
+      const cacheKey = candidateCacheKey(imageId, revision);
+      const cached = state.candidateBundleCache.get(cacheKey);
+      if (cached) return cached;
+      candidateImages = new Map();
+      const pendingCandidates = [...candidateData.candidates];
+      const workers = Array.from({ length: Math.min(4, pendingCandidates.length) }, async () => {
+        while (pendingCandidates.length) {
+          const candidate = pendingCandidates.shift();
+          try { candidateImages.set(candidate.id, await loadCandidateMask(maskUrl(imageId, candidate.id, revision), controller.signal)); }
+          catch (error) { controller.abort(); throw error; }
+        }
+      });
+      const settled = await Promise.allSettled(workers);
+      const failed = settled.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
+      if (!catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+      record.candidateRevision = revision;
+      const bundle = { candidates: candidateData.candidates, candidateImages, candidateRevision: revision };
+      const weight = [...candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0);
+      candidateImages = null;
+      return state.candidateBundleCache.set(cacheKey, bundle, weight);
+    } catch (error) {
+      if (candidateImages) releaseCandidateBitmapBundle({ candidateImages });
+      if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
+        state.candidateInflight.delete(knownKey);
+        return loadCandidateBundle(imageId, generation, true);
+      }
+      throw error;
+    } finally { state.catalogLoadControllers.delete(controller); }
+  })().finally(() => { if (state.candidateInflight.get(knownKey) === request) state.candidateInflight.delete(knownKey); });
   state.candidateInflight.set(knownKey, request);
   return request;
 }
@@ -227,6 +212,7 @@ async function reconcileCurrentCandidates(imageId, generation) {
     record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
     record.candidateRevision = bundle.candidateRevision;
   }
+  invalidateCandidateBundles(imageId);
   refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
   return true;
 }
@@ -275,6 +261,7 @@ function updateCandidateStatus() {
 
 function saveDraft() {
   if (!state.currentId || !state.currentImage) return;
+  flushMaskComposition();
   const hasAdd = canvasHasPixels(addCtx, addCanvas);
   const hasExclusion = canvasHasPixels(exclusionCtx, exclusionCanvas);
   if (!hasAdd && !hasExclusion) {
@@ -382,7 +369,7 @@ function captureCurrentMaskVisibility() {
     })
     .map((candidate) => candidate.id);
   const manual = state.manualMaskPresent && sourceVisibleAfterExclusion(addCanvas);
-  composeCurrentMask();
+  markMaskDirty(); flushMaskComposition();
   return { candidateIds, manual };
 }
 
@@ -399,7 +386,7 @@ function maskStatusWithoutCandidate(candidateId) {
   if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
   const hasMask = canvasHasPixels(combinedCtx, combinedCanvas);
-  composeCurrentMask();
+  markMaskDirty(); flushMaskComposition();
   return hasMask;
 }
 
@@ -407,7 +394,7 @@ function refreshMaskStatus(renderGalleryAfter = false) {
   if (!state.currentId || !state.currentImage) return;
   const record = currentRecord();
   const previous = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : Boolean(record && Number(record.enabledCandidateCount || 0) > 0);
-  composeCurrentMask();
+  markMaskDirty(); flushMaskComposition();
   const current = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data.some((value) => value > 0);
   state.maskStatus.set(state.currentId, current);
   if (renderGalleryAfter && previous !== current) renderCatalogViews();
@@ -717,4 +704,12 @@ function render() {
   drawPolygonBoundary();
   drawBrushCursor();
   updateBoundaryActions();
+}
+function render() {
+  if (state.renderFrame) return;
+  state.renderFrame = requestAnimationFrame(() => { state.renderFrame = 0; flushMaskComposition(); renderNow(); });
+}
+function flushRender() {
+  if (state.renderFrame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(state.renderFrame);
+  state.renderFrame = 0; flushMaskComposition(); renderNow();
 }

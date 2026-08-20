@@ -12,6 +12,7 @@ const contentTypes = {
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
+const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
 
 function startFixtureServer() {
   const detectRequests = [];
@@ -58,7 +59,12 @@ function startFixtureServer() {
       response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
       return;
     }
-    if (requestPath.startsWith("/api/thumbnail/") || requestPath.startsWith("/api/image/")) {
+    if (requestPath.startsWith("/api/image/")) {
+      response.writeHead(200, { "Content-Type": "image/png", "Content-Length": onePixelPng.length });
+      response.end(onePixelPng);
+      return;
+    }
+    if (requestPath.startsWith("/api/thumbnail/")) {
       response.writeHead(200, { "Content-Type": "image/svg+xml" });
       response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
       return;
@@ -213,6 +219,13 @@ async function main() {
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance hides when switching away from fill");
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    try {
+      await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 });
+    } catch (error) {
+      const status = await page.locator("#status").textContent();
+      throw new Error(`early image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
+    }
     for (const viewport of [
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
     ]) {
@@ -275,7 +288,12 @@ async function main() {
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
     await page.locator('.gallery-item[data-id="sample"]').click();
-    await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);
+    try {
+      await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 });
+    } catch (error) {
+      const status = await page.locator("#status").textContent();
+      throw new Error(`image selection did not enable detection; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
+    }
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
     assert.equal(await page.locator("#hideAndNextButton").isDisabled(), false, "hide and next enables after selecting an image");
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions stay disabled when the selected image has no candidates");

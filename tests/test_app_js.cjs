@@ -211,7 +211,7 @@ const storage = new Map();
 let storageWrites = 0;
 const windowListeners = new Map();
 const context = {
-  console, document, Date, Math, Promise, Uint8Array, ArrayBuffer, structuredClone, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} },
+  console, document, Date, Math, Promise, Uint8Array, ArrayBuffer, structuredClone, AbortController, DOMException, crypto: { randomUUID: () => "test-client-key" }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, window: { devicePixelRatio: 1, addEventListener(type, listener) { windowListeners.set(type, listener); } }, setInterval() {}, setTimeout(callback) { callback(); return 1; }, clearTimeout() {}, requestAnimationFrame(callback) { callback(); }, ResizeObserver: class { observe() {} }, createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
   localStorage: {
     getItem(key) { return storage.get(key) || null; },
     setItem(key, value) { storageWrites += 1; storage.set(key, value); },
@@ -229,6 +229,7 @@ const context = {
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   fetch: (path, options) => {
     fetchCalls += 1; requests.push({ path, options });
+    if (String(path).startsWith("/api/image/")) return Promise.resolve({ ok: true, blob: async () => ({}) });
     return new Promise((resolve) => {
       const pending = { path: `${path}#${fetchCalls}`, resolve };
       pendingFetches.push(pending);
@@ -242,7 +243,7 @@ const context = {
 const staticRoot = path.join(__dirname, "..", "static");
 const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
 const scriptOrder = [...manifest.matchAll(/"([a-z-]+\.js)"/g)].map((match) => match[1]);
-assert.deepEqual(scriptOrder, ["core.js", "gallery.js", "editor-canvas.js", "editor-masks.js", "detection.js", "save.js", "interaction.js", "settings.js", "app.js"]);
+assert.deepEqual(scriptOrder, ["core.js", "resources.js", "gallery.js", "editor-canvas.js", "editor-masks.js", "detection.js", "save.js", "interaction.js", "settings.js", "app.js"]);
 let source = scriptOrder.map((name) => fs.readFileSync(path.join(staticRoot, "js", name), "utf8")).join("\n");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
 const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
@@ -2220,6 +2221,8 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
 
+  for (const pending of [...pendingFetches]) if (pending.path.startsWith("/api/image/")) settlePendingFetch(pending, { ok: true, blob: async () => ({}) });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(pendingFetches.length, 0, `every mocked fetch must be resolved before this test completes: ${pendingFetches.map((item) => item.path).join(", ")}`);
   testReachedEnd = true;
   clearTimeout(completionWatchdog);
