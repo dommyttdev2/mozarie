@@ -36,7 +36,7 @@ import time
 import uuid
 import webbrowser
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -233,6 +233,32 @@ class Job:
 class JobControl:
     pause_requested: threading.Event = field(default_factory=threading.Event)
     cancel_requested: threading.Event = field(default_factory=threading.Event)
+    claim_lock: threading.Lock = field(default_factory=threading.Lock)
+    failed: threading.Event = field(default_factory=threading.Event)
+
+
+class InferenceGate:
+    """Re-entrant inference gate with the Lock inspection used by tests/UI guards."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._depth = threading.local()
+
+    def __enter__(self) -> "InferenceGate":
+        depth = getattr(self._depth, "value", 0)
+        if depth == 0:
+            self._lock.acquire()
+        self._depth.value = depth + 1
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        depth = self._depth.value - 1
+        self._depth.value = depth
+        if depth == 0:
+            self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
 
 
 def detection_tiles(width: int, height: int) -> list[tuple[int, int, int, int]]:

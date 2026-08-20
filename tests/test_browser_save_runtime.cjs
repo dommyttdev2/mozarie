@@ -114,6 +114,7 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
     },
   });
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
+  let catalogImages = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   const elements = new Map();
   const getElement = (selector) => {
     if (!elements.has(selector)) elements.set(selector, element());
@@ -137,6 +138,7 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
   elements.set("#galleryItemTemplate", { content: { firstElementChild: { cloneNode: galleryItem } } });
 
   const requests = [];
+  let imageFetches = 0;
   const lockRequests = [];
   const document = {
     querySelector(selector) {
@@ -182,13 +184,22 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
       },
     },
     fetch: async (requestPath, options = {}) => {
+      if (requestPath === "/api/images") {
+        imageFetches += 1;
+        return jsonResponse({ images: catalogImages });
+      }
       requests.push({ path: requestPath, options });
       if (requestPath === "/api/save/prepare") {
         return jsonResponse({ entries: preparedEntries });
       }
       if (requestPath === "/api/save/render") return binaryResponse([4, 5, 6], renderToken);
       if (requestPath === "/api/save/copy") return (copy || (() => jsonResponse({ output: "G:/output/source_censored.png" })))({ options, requests });
-      if (requestPath === "/api/save/commit") return commit({ options, requests });
+      if (requestPath === "/api/save/commit") {
+        const response = await commit({ options, requests });
+        const body = await response.json();
+        if (Array.isArray(body.images)) catalogImages = body.images;
+        return response;
+      }
       if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
       throw new Error(`Unexpected request: ${requestPath}`);
     },
@@ -206,7 +217,7 @@ function createRuntime({ commit, copy = null, directory, deleteOriginal = false,
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { directory: outputDirectory, elements, ensureSaveSources, lockRequests, requests, runBrowserSave: (target, ...args) => runBrowserSave(target instanceof FakeDirectoryHandle ? target : outputDirectory, ...args), saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
+  return { directory: outputDirectory, elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave: (target, ...args) => runBrowserSave(target instanceof FakeDirectoryHandle ? target : outputDirectory, ...args), saveTargets, outputDirectoryForSave, chooseOutputDirectory, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
@@ -229,6 +240,7 @@ async function runSuccessCase() {
   const commitPayload = JSON.parse(runtime.requests.at(-1).options.body);
   assert.equal(commitPayload.saveToken, "runtime-render-token");
   assert.equal(commitPayload.deleteOriginal, false);
+  assert.equal(runtime.imageFetches(), 1, "one final catalog reconciliation runs after the batch");
   assert.equal(runtime.elements.get("#applyResult").textContent, "complete 1");
 }
 
@@ -333,6 +345,7 @@ async function runCommitFailureCase() {
   const paths = runtime.requests.map((request) => request.path);
   assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
   assert.equal(paths.filter((path) => path === "/api/save/commit").length, 12);
+  assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
 }
 
 async function runCancelCase() {
@@ -432,6 +445,56 @@ async function runForeignCollisionCase() {
   assert.ok(nested.files.has("source_censored.png"));
 }
 
+async function runBatchReservationAndCleanupCase() {
+  const first = { imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 1 };
+  const second = { imageId: "image-2", relativePath: "nested/source.png", candidateRevision: 1 };
+  const runtime = createRuntime({
+    directory: new FakeDirectoryHandle(), entries: [first, second],
+    initialImages: [
+      { id: first.imageId, relativePath: first.relativePath, width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 },
+      { id: second.imageId, relativePath: second.relativePath, width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 },
+    ],
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+  });
+  runtime.state.settings = { saving: { parallelism: 2 } };
+  await runtime.runBrowserSave(runtime.directory, [first.imageId, second.imageId], "_censored", false);
+  const nested = runtime.directory.directories.get("nested");
+  assert.deepEqual([...nested.files.keys()].sort(), ["source_censored.png", "source_censored_2.png"], "batch reservations are ordered and unique");
+
+  let cancelled;
+  const cleanupDirectory = new FakeDirectoryHandle({ closed: async () => { cancelled.state.browserSave.cancelled = true; } });
+  cancelled = createRuntime({
+    directory: cleanupDirectory, entries: [first, { ...second, relativePath: "nested/other.png" }],
+    initialImages: runtime.state.images,
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+  });
+  cancelled.state.settings = { saving: { parallelism: 1 } };
+  await cancelled.runBrowserSave(cleanupDirectory, [first.imageId, second.imageId], "_censored", false);
+  const cleanupNested = cleanupDirectory.directories.get("nested");
+  assert.ok(cleanupNested.removed.includes("other_censored.png"), "unstarted reservations are removed after cancellation");
+  assert.equal(cancelled.imageFetches(), 1, "cancelled batches reconcile once after started work settles");
+}
+
+async function runCatalogEpochGuardCase() {
+  const original = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const local = { id: "local-change", relativePath: "local.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
+  let runtime;
+  let removals = 0;
+  runtime = createRuntime({
+    directory: new FakeDirectoryHandle(), initialImages: [original],
+    commit: () => {
+      runtime.state.catalogEpoch += 1;
+      runtime.state.images = [local];
+      return jsonResponse({ cleared: true, stale: false, images: [] });
+    },
+    removeCatalog: () => { removals += 1; return jsonResponse({ images: [] }); },
+  });
+  await runtime.runBrowserSave(runtime.directory, [original.id], "_censored", false, "copy", true);
+  assert.deepEqual(runtime.state.images, [local], "a newer catalog epoch rejects the final save snapshot");
+  assert.equal(removals, 0, "a superseded save does not remove entries from the newer catalog");
+  assert.equal(runtime.imageFetches(), 1);
+}
+
 async function runPartialCommitFailureReconcileCase() {
   const first = { id: "image-1", relativePath: "nested/first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   const second = { id: "image-2", relativePath: "nested/second.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
@@ -526,6 +589,8 @@ async function runRemoveAfterSaveCases() {
   await runRepeatedHandleOverwriteCase();
   await runHandleDeleteAfterCopyCase();
   await runForeignCollisionCase();
+  await runBatchReservationAndCleanupCase();
+  await runCatalogEpochGuardCase();
   await runPartialCommitFailureReconcileCase();
   await runOutputDirectoryReuseCase();
   await runRemoveAfterSaveCases();

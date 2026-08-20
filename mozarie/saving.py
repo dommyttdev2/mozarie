@@ -50,16 +50,19 @@ class SavingMixin:
         records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
         _read_mosaic_divisor(divisor)
         _read_save_suffix(suffix)
-        return [
-            {
-                "imageId": record.image_id,
-                "relativePath": record.relative_path,
-                "sourceKind": record.source_kind,
-                "candidateRevision": self._candidate_revision(record.image_id),
-                "sourceAction": "deleted" if delete_original and record.source_kind == "filesystem" else "keep",
-            }
-            for record in records
-        ]
+        with self.lock:
+            if any(self.images.get(record.image_id) is not record for record in records):
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+            return [
+                {
+                    "imageId": record.image_id,
+                    "relativePath": record.relative_path,
+                    "sourceKind": record.source_kind,
+                    "candidateRevision": self._candidate_revision(record.image_id),
+                    "sourceAction": "deleted" if delete_original and record.source_kind == "filesystem" else "keep",
+                }
+                for record in records
+            ]
 
     def render_browser_save(
         self,
@@ -215,92 +218,55 @@ class SavingMixin:
         catalog_generation: int | None = None,
     ) -> None:
         try:
-            if len(records) > 1 and saving_parallelism > 1:
-                def save_record(record: ImageRecord) -> bool:
-                    if not self._job_is_current(job_generation, catalog_generation):
-                        return False
-                    self._wait_while_paused(control, job_generation, catalog_generation)
-                    if control is not None and control.cancel_requested.is_set():
-                        return False
-                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    self._assert_record_fresh(record)
-                    draft_or_mask = drafts_or_masks.get(record.image_id)
-                    mask = draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
-                        record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
-                    )
-                    if mask is None or not np.any(mask):
-                        raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                    if copy_to_default:
-                        destination = _default_output_destination(record, suffix)
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
-                    else:
-                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                        output_stat = record.path.stat()
-                        record.mtime_ns = output_stat.st_mtime_ns
-                        record.size_bytes = output_stat.st_size
-                        record.content_version += 1
-                    with self.lock:
-                        self.job.outputs.append(str(destination if copy_to_default else record.path))
-                        self._clear_masks_unchecked([record])
-                    self.invalidate_sam_image(record.image_id)
-                    self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                    return True
+            # Reserve every fallback path before any worker starts.  This makes
+            # duplicate names deterministic even when rendering completes out of order.
+            destinations: dict[int, Path] = {}
+            if copy_to_default:
+                reserved: set[Path] = set()
+                for index, record in enumerate(records):
+                    destination = _default_output_destination(record, suffix, reserved)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destinations[index] = destination
+                    reserved.add(destination)
 
-                with ThreadPoolExecutor(max_workers=min(8, saving_parallelism, len(records))) as executor:
-                    results = [future.result() for future in (executor.submit(save_record, record) for record in records)]
-                if control is not None and control.cancel_requested.is_set() or not all(results):
-                    self._cancel_job(job_generation, catalog_generation)
-                else:
-                    self._finish_job(job_generation, catalog_generation)
-                return
-            for record in records:
-                if not self._job_is_current(job_generation, catalog_generation):
-                    return
-                if control is not None and control.cancel_requested.is_set():
-                    self._cancel_job(job_generation, catalog_generation)
-                    return
-                self._wait_while_paused(control, job_generation, catalog_generation)
-                if control is not None and control.cancel_requested.is_set():
-                    self._cancel_job(job_generation, catalog_generation)
-                    return
+            def save_record(index: int, record: ImageRecord) -> None:
                 self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 self._assert_record_fresh(record)
                 draft_or_mask = drafts_or_masks.get(record.image_id)
-                if isinstance(draft_or_mask, np.ndarray):
-                    mask = draft_or_mask
-                else:
-                    draft_masks = decode_draft_masks(draft_or_mask, record.width, record.height)
-                    mask = self.combined_candidate_mask(record.image_id, draft_masks)
+                mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
+                    record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
+                ))
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
+                output_path = destinations.get(index, record.path)
                 if copy_to_default:
-                    destination = _default_output_destination(record, suffix)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                    write_rendered_copy(output_path, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
                 else:
                     save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                     output_stat = record.path.stat()
-                    record.mtime_ns = output_stat.st_mtime_ns
-                    record.size_bytes = output_stat.st_size
-                    record.content_version += 1
+                # Files are fully written before the state mutation.  A failed
+                # record therefore keeps its masks, while successful records clear once.
                 with self.lock:
-                    self.job.outputs.append(str(destination if copy_to_default else record.path))
-                self.invalidate_sam_image(record.image_id)
-                with self.lock:
-                    self._clear_masks_unchecked([record])
-                self._mark_image_completed(record.image_id, job_generation, catalog_generation)
-                self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                if control is not None and control.pause_requested.is_set():
-                    with self.lock:
-                        if self._job_is_current(job_generation, catalog_generation):
-                            self.job.state = "paused"
-                            self.job.current = ""
-                    while control.pause_requested.is_set() and not control.cancel_requested.is_set():
-                        time.sleep(0.1)
-                    if control.cancel_requested.is_set():
-                        self._cancel_job(job_generation, catalog_generation)
+                    if not self._job_is_current(job_generation, catalog_generation):
                         return
-            self._finish_job(job_generation, catalog_generation)
+                    if not copy_to_default:
+                        record.mtime_ns = output_stat.st_mtime_ns
+                        record.size_bytes = output_stat.st_size
+                        record.content_version += 1
+                    self._clear_masks_unchecked([record])
+                    self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
+                self.invalidate_sam_image(record.image_id)
+                self._set_job_current(record.relative_path, job_generation, catalog_generation)
+
+            failures = self._run_fixed_workers(
+                records, min(8, max(1, saving_parallelism)), save_record,
+                control, job_generation, catalog_generation,
+            )
+            if failures:
+                self._fail_job(failures[0][1], job_generation, catalog_generation)
+            elif control is not None and control.cancel_requested.is_set():
+                self._cancel_job(job_generation, catalog_generation)
+            else:
+                self._finish_job(job_generation, catalog_generation)
         except Exception as exc:
             self._fail_job(exc, job_generation, catalog_generation)

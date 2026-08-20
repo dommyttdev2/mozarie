@@ -47,15 +47,14 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
-        self.inference_lock = threading.Lock()
-        self._detection_target_classes: dict[int, set[str]] = {}
+        self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
 
     def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
         """Persist user-selected options and release only model objects that changed."""
         if not isinstance(update, dict):
             raise ClientError("設定の形式が正しくありません。", "invalid_settings")
-        with self.lock:
+        with self.inference_lock, self.lock:
             if self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
@@ -77,7 +76,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             return self.settings
 
     def reset_settings(self) -> dict[str, Any]:
-        with self.lock:
+        with self.inference_lock, self.lock:
             if self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             self.settings = self.settings_store.reset()

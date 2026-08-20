@@ -27,7 +27,7 @@ class CatalogMixin:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
+        if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -227,7 +227,7 @@ class CatalogMixin:
     def clear_masks(self, image_ids: list[str]) -> int:
         records = self._records_for_ids(image_ids)
         with self.lock:
-            if self.importing_count or self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中はモザイク候補をクリアできません。")
             self._clear_masks_unchecked(records)
         return len(records)
@@ -294,7 +294,7 @@ class CatalogMixin:
         with self.lock:
             root = self.root
             catalog_generation = self.catalog_generation
-            if self.job.state in {"running", "paused"} or self._has_active_worker():
+            if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は画像を追加できません。")
             destination_dir = self._ensure_session()
             self.importing_count += 1
@@ -332,7 +332,7 @@ class CatalogMixin:
                 if (
                     self.root != root
                     or self.catalog_generation != catalog_generation
-                    or self.job.state in {"running", "paused"}
+                    or self.job.state in {"running", "pausing", "paused"}
                     or self._has_active_worker()
                 ):
                     raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
@@ -469,6 +469,10 @@ class CatalogMixin:
         return record
 
     def list_images(self) -> list[dict[str, Any]]:
+        return self.catalog_snapshot()["images"]
+
+    def catalog_snapshot(self) -> dict[str, Any]:
+        """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
             output = []
             for image_id in self.order:
@@ -490,23 +494,43 @@ class CatalogMixin:
                         "candidateRevision": self._candidate_revision(image_id),
                     }
                 )
-            return output
+            return {
+                "root": str(self.root) if self.root else "",
+                "images": output,
+                "catalogGeneration": self.catalog_generation,
+            }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
-        self.image_for_id(image_id)
+        return self.candidate_snapshot(image_id)["candidates"]
+
+    def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
+        """Return candidates and their revision from one state-lock epoch."""
         with self.lock:
+            if image_id not in self.images:
+                raise ClientError("画像が見つかりません。")
             stored_candidates = self.candidates.get(image_id, [])
             candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file()]
             if len(candidates) != len(stored_candidates):
                 self._touch_candidates(image_id)
             self.candidates[image_id] = candidates
-        return [
-            candidate.as_api_dict(
-                SOURCE_LABELS.get(candidate.source, candidate.source),
-                REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-            )
-            for candidate in candidates
-        ]
+            return {
+                "candidates": [
+                    candidate.as_api_dict(
+                        SOURCE_LABELS.get(candidate.source, candidate.source),
+                        REFINEMENT_LABELS.get(candidate.refinement or "", ""),
+                    )
+                    for candidate in candidates
+                ],
+                "candidateRevision": self._candidate_revision(image_id),
+            }
+
+    def image_snapshot(self, image_id: str) -> ImageRecord:
+        """Capture a checked catalogue record before image I/O begins."""
+        with self.lock:
+            record = self.images.get(image_id)
+            if record is None:
+                raise ClientError("画像が見つかりません。")
+            return replace(record)
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])
