@@ -241,6 +241,8 @@ class SavingMixin:
             thumbnail_paths = list((self.cache_dir / "thumbnails").glob(f"{image_id}-*.jpg"))
         if mask_paths:
             self._delete_mask_files(mask_paths, candidate_dirs)
+        if deleted:
+            self.cleanup_expired_browser_save_tokens()
         for thumbnail_path in thumbnail_paths:
             thumbnail_path.unlink(missing_ok=True)
         if rendered_path is not None:

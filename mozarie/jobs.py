@@ -171,10 +171,13 @@ class JobsMixin:
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
     ) -> np.ndarray | None:
-        record = self.image_for_id(image_id)
+        record = self.image_snapshot(image_id)
+        self._assert_record_fresh(record)
         add_mask, exclusion_mask = draft or (None, None)
-        with self.lock:
-            candidates = [candidate for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+        with self.image_io_lock(image_id):
+            with self.lock:
+                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+                revision = self._candidate_revision(image_id)
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
             if not apply_candidates and add_mask is None:
                 return None
@@ -189,7 +192,11 @@ class JobsMixin:
                 if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                 (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
-        return compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+            result = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+            with self.lock:
+                if self.images.get(image_id) is None or self._candidate_revision(image_id) != revision:
+                    raise ClientError("候補が変更されました。もう一度実行してください。")
+            return result
 
     def _set_job_current(
         self,

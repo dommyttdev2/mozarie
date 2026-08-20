@@ -3052,6 +3052,117 @@ class MozarieTests(unittest.TestCase):
             handler._read_binary_body_to_file()
         self.assertEqual(list((state.cache_dir / "import-staging").glob("*")), [])
 
+    def test_thumbnail_requests_singleflight_the_same_image(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (32, 32), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            version = state.list_images()[0]["assetVersion"]
+            started = threading.Event()
+            release = threading.Event()
+            calls = 0
+            calls_lock = threading.Lock()
+            original_open = http_module.Image.open
+
+            def delayed_open(path, *args, **kwargs):
+                nonlocal calls
+                if Path(path) == source:
+                    with calls_lock:
+                        calls += 1
+                    started.set()
+                    self.assertTrue(release.wait(2))
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(http_module.Image, "open", side_effect=delayed_open):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                results = []
+
+                def request_thumbnail():
+                    connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        connection.request("GET", f"/api/thumbnail/{image_id}?v={version}")
+                        response = connection.getresponse()
+                        results.append((response.status, response.read()))
+                    finally:
+                        connection.close()
+
+                workers = [threading.Thread(target=request_thumbnail) for _ in range(8)]
+                for worker in workers:
+                    worker.start()
+                self.assertTrue(started.wait(2))
+                with calls_lock:
+                    self.assertEqual(calls, 1)
+                release.set()
+                for worker in workers:
+                    worker.join(3)
+                httpd.shutdown()
+                httpd.server_close()
+            self.assertEqual(calls, 1)
+            self.assertEqual([status for status, _body in results], [200] * 8)
+
+    def test_thumbnail_generation_limits_distinct_images_to_four(self):
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(5):
+                Image.new("RGB", (32, 32), "white").save(root / f"{index}.png")
+            state = self.new_state()
+            images = state.set_root(directory)
+            versions = {item["id"]: item["assetVersion"] for item in state.list_images()}
+            source_paths = {record.path for record in state.images.values()}
+            first_four = threading.Event()
+            release = threading.Event()
+            entered: set[Path] = set()
+            entered_lock = threading.Lock()
+            original_open = http_module.Image.open
+
+            def delayed_open(path, *args, **kwargs):
+                path = Path(path)
+                if path in source_paths:
+                    with entered_lock:
+                        entered.add(path)
+                        if len(entered) == 4:
+                            first_four.set()
+                    self.assertTrue(release.wait(2))
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(server_module, "STATE", state), patch.object(http_module, "STATE", state), \
+                 patch.object(http_module.Image, "open", side_effect=delayed_open):
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+                server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                server_thread.start()
+                statuses = []
+
+                def request_thumbnail(image):
+                    connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        connection.request("GET", f"/api/thumbnail/{image['id']}?v={versions[image['id']]}")
+                        response = connection.getresponse()
+                        statuses.append(response.status)
+                        response.read()
+                    finally:
+                        connection.close()
+
+                workers = [threading.Thread(target=request_thumbnail, args=(image,)) for image in images]
+                for worker in workers:
+                    worker.start()
+                self.assertTrue(first_four.wait(2))
+                with entered_lock:
+                    self.assertEqual(len(entered), 4)
+                release.set()
+                for worker in workers:
+                    worker.join(3)
+                httpd.shutdown()
+                httpd.server_close()
+            self.assertEqual(sorted(statuses), [200] * 5)
+
     def test_browser_save_overwrite_updates_state_when_timestamp_restore_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
