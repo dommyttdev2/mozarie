@@ -159,7 +159,7 @@ function canvasElement() {
     },
     setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, rect() {}, closePath() {}, fill() {}, clip() {}, stroke() { this.strokeCalls += 1; },
     getImageData() {
-      if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) };
+      if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [0, 0, 0, 255] : [0, 0, 0, 0]) };
       return { data: new Uint8ClampedArray([...target._alpha].flatMap((alpha) => [0, 0, 0, alpha ? 255 : 0])) };
     },
   };

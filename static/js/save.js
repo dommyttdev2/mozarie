@@ -211,10 +211,11 @@ function reconcileStoredMaskStatuses() {
 function reconcileBrowserSaveState() {
   reconcileStoredMaskStatuses();
   if (state.currentId && !state.images.some((image) => image.id === state.currentId)) {
+    const removedCurrentId = state.currentId;
     state.currentId = null;
     state.currentImage = null;
+    releaseCandidateBundles(removedCurrentId);
     state.candidates = [];
-    state.candidateImages.clear();
     clearEditor();
   } else if (state.currentId) {
     refreshMaskStatus();
@@ -286,6 +287,7 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   if (!removedIds.size) return;
 
   for (const imageId of removedIds) {
+    releaseImageCaches(imageId);
     state.sourceAccess.delete(imageId);
     state.drafts.delete(imageId);
     state.maskStatus.delete(imageId);
@@ -297,11 +299,11 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   }
 
   if (currentId && removedIds.has(currentId)) {
+    releaseCandidateBundles(currentId);
     state.currentId = null;
     state.currentImage = null;
     state.pendingImageId = null;
     state.candidates = [];
-    state.candidateImages.clear();
     clearEditor();
   }
   pruneSourceAccess();
@@ -427,8 +429,8 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
         if (committed.cleared) {
           state.drafts.delete(entry.imageId);
           if (state.currentId === entry.imageId) {
+            releaseCandidateBundles(entry.imageId);
             state.candidates = [];
-            state.candidateImages.clear();
             state.manualMaskPresent = false;
             state.manualEnabled = true;
             resetCurrentDraft();
@@ -462,34 +464,37 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
       ? t("apply.cancelled", { completed: save.completed })
       : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed })));
   } finally {
-    state.saving = false;
-    state.applyRunning = false;
-    state.browserSave = null;
-    state.job = { kind: "idle", state: "idle" };
-    $("#applyPauseButton").hidden = true;
-    $("#applyCancelButton").hidden = true;
-    $("#applyCloseButton").hidden = false;
-    if (mode === "copy") await releaseUnusedCopyOutputs(save.entries);
-    let catalogCurrent = false;
     try {
-      // Commits may resolve out of order; apply one authoritative catalogue
-      // snapshot only after every started entry has settled.
-      const latest = await api("/api/images");
-      catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
-      if (catalogCurrent) state.images = latest.images;
-    } catch (error) {
-      setApplyResult(error.message, true);
-    }
-    if (catalogCurrent) {
+      if (mode === "copy") await releaseUnusedCopyOutputs(save.entries);
+      let catalogCurrent = false;
       try {
-        await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+        // Commits may resolve out of order; apply one authoritative catalogue
+        // snapshot only after every started entry has settled.
+        const latest = await api("/api/images");
+        catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
+        if (catalogCurrent) state.images = latest.images;
       } catch (error) {
         setApplyResult(error.message, true);
       }
-      reconcileBrowserSaveState();
-      if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
-        await selectImage(state.currentId, true, { saveCurrentDraft: false });
+      if (catalogCurrent) {
+        try {
+          await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+        } catch (error) {
+          setApplyResult(error.message, true);
+        }
+        reconcileBrowserSaveState();
+        if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
+          await selectImage(state.currentId, true, { saveCurrentDraft: false });
+        }
       }
+    } finally {
+      state.saving = false;
+      state.applyRunning = false;
+      state.browserSave = null;
+      state.job = { kind: "idle", state: "idle" };
+      $("#applyPauseButton").hidden = true;
+      $("#applyCancelButton").hidden = true;
+      $("#applyCloseButton").hidden = false;
       updateActionButtons();
     }
   }
@@ -604,6 +609,7 @@ async function finishApplyJob(job) {
   state.applyFinishing = true;
   let reconciled = false;
   const generation = ++state.imageGeneration;
+  const catalogEpoch = state.catalogEpoch;
   try {
     const keepCurrent = state.currentId;
     const previousOrder = state.images.map((image) => image.id);
@@ -614,7 +620,7 @@ async function finishApplyJob(job) {
       : (job.state === "complete" ? requestedImageIds : []);
     const reloadCurrent = Boolean(keepCurrent && completedImageIds.includes(keepCurrent));
     const data = await api("/api/images");
-    if (!isCurrentGeneration(generation)) return;
+    if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     state.images = data.images;
     pruneSourceAccess();
     const reloadedImagesById = new Map(state.images.map((image) => [image.id, image]));
@@ -628,13 +634,14 @@ async function finishApplyJob(job) {
     state.applyTargetIds = requestedImageIds;
     if (job.removeAfterSave && completedImageIds.length) {
       await removeCompletedImagesFromCatalog(completedImageIds, previousOrder, previousImagesById);
+      if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     }
     const removedAfterSave = Boolean(job.removeAfterSave && completedImageIds.length);
     if (removedAfterSave) {
       // removeCompletedImagesFromCatalog already selects the next surviving image.
     } else if (reloadCurrent) {
+      releaseCandidateBundles(keepCurrent);
       state.candidates = [];
-      state.candidateImages.clear();
     }
     const reloadedCurrent = reloadCurrent && state.images.some((image) => image.id === keepCurrent);
     if (removedAfterSave) {
@@ -670,13 +677,14 @@ function isTerminalDetection(job, previous) {
 
 async function finishDetectionJob(job) {
   const generation = ++state.imageGeneration;
+  const catalogEpoch = state.catalogEpoch;
   const keepCurrent = state.currentId;
   const requestedIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
   const targetIds = Array.isArray(job.completedImageIds) && job.completedImageIds.length
     ? job.completedImageIds
     : (job.state === "complete" ? requestedIds : []);
   const data = await api("/api/images");
-  if (!isCurrentGeneration(generation)) return;
+  if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
   state.images = data.images;
   pruneSourceAccess();
   state.maskStatus.clear();

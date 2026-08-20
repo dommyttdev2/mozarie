@@ -26,6 +26,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
   cancelFillWork();
+  abortCatalogLoads();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   closeBoundaryModeMenu();
@@ -33,10 +34,12 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   updateActionButtons();
   const record = state.images.find((image) => image.id === imageId);
   if (!record) {
-    state.pendingImageId = null;
+    state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
     updateActionButtons();
     return;
   }
+  state.pendingImageKey = imageCacheKey(record);
+  state.pendingCandidateKey = candidateCacheKey(imageId, Number(record.candidateRevision || 0));
   const imageCached = state.imageCache.has(imageCacheKey(record));
   const candidatesCached = state.candidateBundleCache.has(candidateCacheKey(imageId, Number(record.candidateRevision || 0)));
   if (!imageCached || !candidatesCached) {
@@ -54,7 +57,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     syncCandidateRecord(imageId, candidateBundle.candidates);
     if (!isCurrentGeneration(generation)) return;
     state.currentId = imageId;
-    state.pendingImageId = null;
+    state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
     state.currentImage = image;
     state.candidates = candidateBundle.candidates;
     state.candidateImages = candidateBundle.candidateImages;
@@ -71,7 +74,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   } catch (error) {
     if (isCurrentGeneration(generation)) {
       clearTimeout(state.loadingDelay); state.loadingDelay = null;
-      state.pendingImageId = null;
+      state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
       setStatus(error.message, "error");
     }
   }
@@ -97,7 +100,7 @@ async function cachedImage(record) {
   const controller = new AbortController(); state.catalogLoadControllers.add(controller);
   let request;
   request = fetchBitmap(imageUrl(record), controller.signal).then((image) => {
-    if (!catalogRecordMatches(record, epoch, { version })) { image.close?.(); throw new DOMException("stale catalog", "AbortError"); }
+    if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) { image.close?.(); throw new DOMException("stale catalog", "AbortError"); }
     return state.imageCache.set(key, image, decodedImageWeight(image));
   }).finally(() => { if (state.imageInflight.get(key) === request) state.imageInflight.delete(key); });
   request.finally(() => state.catalogLoadControllers.delete(controller)).catch(() => {});
@@ -125,6 +128,17 @@ function releaseImageCaches(imageId = null) {
   }
   for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
   for (const key of state.candidateInflight.keys()) if (matches(key)) state.candidateInflight.delete(key);
+}
+
+function releaseCandidateBundles(imageId) {
+  for (const [key] of state.candidateBundleCache.items) if (key.startsWith(`${imageId}:`)) state.candidateBundleCache.delete(key);
+  if (state.currentId === imageId) state.candidateImages = new Map();
+}
+
+function releaseCandidateBitmap(candidateId) {
+  const image = state.candidateImages.get(candidateId);
+  if (image) closeBitmap(image);
+  state.candidateImages.delete(candidateId);
 }
 
 function invalidateCandidateBundles(imageId) {
@@ -169,9 +183,10 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     try {
       const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
       if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string") || !Number.isInteger(candidateData.candidateRevision)
-        || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+        || controller.signal.aborted || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
       const revision = Number(candidateData.candidateRevision);
       const cacheKey = candidateCacheKey(imageId, revision);
+      if (state.pendingImageId === imageId) state.pendingCandidateKey = cacheKey;
       const cached = state.candidateBundleCache.get(cacheKey);
       if (cached) return cached;
       candidateImages = new Map();
@@ -186,7 +201,7 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       const settled = await Promise.allSettled(workers);
       const failed = settled.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
-      if (!catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
+      if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version, revision: knownRevision })) throw new DOMException("stale catalog", "AbortError");
       record.candidateRevision = revision;
       const bundle = { candidates: candidateData.candidates, candidateImages, candidateRevision: revision };
       const weight = [...candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0);
@@ -223,7 +238,9 @@ async function reconcileCurrentCandidates(imageId, generation) {
 
 
 function canvasHasPixels(context, target) {
-  return context.getImageData(0, 0, target.width, target.height).data.some((value) => value > 0);
+  const pixels = context.getImageData(0, 0, target.width, target.height).data;
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index]) return true;
+  return false;
 }
 
 function syncCandidateRecord(imageId, candidates) {
