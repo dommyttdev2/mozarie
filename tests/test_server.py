@@ -103,6 +103,20 @@ class MozarieTests(unittest.TestCase):
         return mask
 
     @staticmethod
+    def _write_same_size_png_pair(path: Path) -> bytes:
+        source = np.full((16, 16, 3), 255, dtype=np.uint8)
+        replacement = np.zeros((16, 16, 3), dtype=np.uint8)
+        replacement[..., 2] = 255
+        encoded: list[bytes] = []
+        for pixels in (source, replacement):
+            output = io.BytesIO()
+            Image.fromarray(pixels).save(output, format="PNG", compress_level=0)
+            encoded.append(output.getvalue())
+        assert len(encoded[0]) == len(encoded[1])
+        path.write_bytes(encoded[0])
+        return encoded[1]
+
+    @staticmethod
     def _jpeg_segment(marker: int, payload: bytes) -> bytes:
         return b"\xff" + bytes([marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
 
@@ -786,7 +800,7 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
-            Image.new("RGB", (16, 16), "white").save(source)
+            replacement = self._write_same_size_png_pair(source)
             original_stat = source.stat()
             state = self.new_state()
             image_id = state.set_root(str(root))[0]["id"]
@@ -811,7 +825,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
                 worker.start()
                 self.assertTrue(entered.wait(2))
-                Image.new("RGB", (16, 16), "blue").save(source)
+                source.write_bytes(replacement)
                 self.assertEqual(source.stat().st_size, original_stat.st_size)
                 os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
                 release.set()
@@ -4249,7 +4263,7 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
-            Image.new("RGB", (16, 16), "white").save(source)
+            replacement = self._write_same_size_png_pair(source)
             original_stat = source.stat()
             state = self.new_state()
             image_id = state.set_root(str(root))[0]["id"]
@@ -4259,7 +4273,7 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
-            Image.new("RGB", (16, 16), "blue").save(source)
+            source.write_bytes(replacement)
             self.assertEqual(source.stat().st_size, original_stat.st_size)
             os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
@@ -4358,7 +4372,7 @@ class MozarieTests(unittest.TestCase):
     def test_same_stat_replacement_is_digest_gated_without_losing_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
-            Image.new("RGB", (16, 16), "white").save(source)
+            replacement = self._write_same_size_png_pair(source)
             original_stat = source.stat()
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
@@ -4366,7 +4380,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            Image.new("RGB", (16, 16), "blue").save(source)
+            source.write_bytes(replacement)
             self.assertEqual(source.stat().st_size, original_stat.st_size)
             os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
@@ -4534,10 +4548,12 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             image_id = next(image["id"] for image in state.set_root(directory) if image["relativePath"] == "source.png")
             record = state.image_for_id(image_id)
-            original_read = Path.read_bytes
+            concrete_path_type = type(source)
+            original_read = concrete_path_type.read_bytes
+            source_resolved = source.resolve()
 
             def swapped_capture(path):
-                if path != source:
+                if path.resolve() != source_resolved:
                     return original_read(path)
                 source.write_bytes(blue)
                 try:
@@ -4545,10 +4561,10 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     source.write_bytes(white)
 
-            with patch.object(Path, "read_bytes", autospec=True, side_effect=swapped_capture):
+            with patch.object(concrete_path_type, "read_bytes", autospec=True, side_effect=swapped_capture):
                 with self.assertRaisesRegex(ClientError, "外部で変更"):
                     server_module.render_with_mask(record, self._mask(16, 16), 4)
-            with patch.object(Path, "read_bytes", autospec=True, side_effect=swapped_capture):
+            with patch.object(concrete_path_type, "read_bytes", autospec=True, side_effect=swapped_capture):
                 with self.assertRaisesRegex(ClientError, "外部で変更"):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(source.read_bytes(), white)
