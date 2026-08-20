@@ -4420,7 +4420,7 @@ class MozarieTests(unittest.TestCase):
             )
         self.assertEqual(state.image_for_id(imported[0]["imageId"]).content_digest, expected)
 
-    def test_browser_render_hashes_only_before_and_after_render(self):
+    def test_browser_render_reads_source_then_hashes_once_after_render(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
@@ -4441,7 +4441,30 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
                 state.render_browser_save(image_id, revision, 100, None)
-            self.assertEqual(calls, 2)
+            self.assertEqual(calls, 1)
+
+    def test_older_browser_overwrite_token_cannot_replace_a_newer_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.fromarray(np.tile(np.arange(16, dtype=np.uint8), (16, 1)), mode="L").convert("RGB").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            output_a, _record, revision_a, token_a = state.render_browser_save(image_id, revision, 100, None)
+            output_b, _record, revision_b, token_b = state.render_browser_save(image_id, revision, 1, None)
+            self.assertNotEqual(output_a, output_b)
+            state.commit_browser_save(image_id, revision_b, token_b, "overwrite")
+            digest_b = state.image_for_id(image_id).content_digest
+
+            with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                state.commit_browser_save(image_id, revision_a, token_a, "overwrite")
+            self.assertEqual(raised.exception.error_code, "stale_asset")
+            self.assertEqual(source.read_bytes(), output_b)
+            self.assertEqual(state.image_for_id(image_id).content_digest, digest_b)
 
     def test_candidate_state_changes_do_not_hash_the_source(self):
         with tempfile.TemporaryDirectory() as directory:

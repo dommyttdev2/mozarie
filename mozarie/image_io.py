@@ -438,7 +438,7 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     raise ClientError("この画像形式は保存に対応していません。")
 
 
-def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> None:
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_digest: str) -> None:
     """Atomically replace a catalogued source with a previously verified render."""
     original_stat = record.path.stat()
     temporary_path: Path | None = None
@@ -453,7 +453,7 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
             handle.flush()
             os.fsync(handle.fileno())
         _verify_decodable_image(temporary_path.read_bytes())
-        if file_sha256(record.path) != record.content_digest:
+        if file_sha256(record.path) != expected_digest:
             raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         os.replace(temporary_path, record.path)
         temporary_path = None

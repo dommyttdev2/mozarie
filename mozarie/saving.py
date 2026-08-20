@@ -118,7 +118,7 @@ class SavingMixin:
                 mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
-                source_fingerprint = self._source_fingerprint(record)
+                source_fingerprint = (record.mtime_ns, record.size_bytes, record.content_digest)
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                 if self._source_fingerprint(record) != source_fingerprint:
                     raise ClientError("元画像が変更されました。保存をやり直してください。")
@@ -197,7 +197,7 @@ class SavingMixin:
 
                 try:
                     if source_action == "overwrite":
-                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path)
+                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint[2])
                     else:
                         if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
                             raise ClientError("元画像が変更されました。保存をやり直してください。", "stale_asset")
@@ -281,7 +281,6 @@ class SavingMixin:
             def save_record(index: int, record: ImageRecord) -> None:
                 with self.image_io_lock(record.image_id):
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    self._assert_record_fresh(record)
                     draft_or_mask = drafts_or_masks.get(record.image_id)
                     mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
                         record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
