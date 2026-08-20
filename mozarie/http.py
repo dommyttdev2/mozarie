@@ -404,5 +404,3 @@ def _start_update_after_response(http_server: ThreadingHTTPServer) -> None:
     http_server.shutdown()
     STATE.shutdown()
     subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-
-

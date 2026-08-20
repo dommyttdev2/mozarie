@@ -716,4 +716,3 @@ function render() {
   drawBrushCursor();
   updateBoundaryActions();
 }
-

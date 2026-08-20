@@ -593,4 +593,3 @@ class CatalogMixin:
             self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
             self._touch_candidates(image_id)
             return True
-

@@ -501,5 +501,3 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-
-

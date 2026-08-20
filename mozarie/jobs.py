@@ -221,5 +221,3 @@ class JobsMixin:
             self.job.current = ""
             self.job.active_count = 0
         LOGGER.exception("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind))
-
-

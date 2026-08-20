@@ -570,5 +570,3 @@ def _read_target_classes(value: Any) -> set[str]:
     if not targets or not targets <= TARGET_CLASSES:
         raise ClientError("検出対象は penis または pussy を選択してください。")
     return targets
-
-

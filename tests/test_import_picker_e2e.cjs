@@ -138,6 +138,14 @@ async function assertDesktopLayout(page, width, height) {
     assert.ok(heading.count.top <= heading.actions.bottom && heading.actions.top <= heading.count.bottom, "image count remains on the all-image action row");
     assert.ok(heading.actions.right <= heading.pane.right, "all-image actions fit inside the gallery pane");
     assert.ok(heading.batch.top >= heading.title.bottom, "batch edit moves to its own row");
+    const batchTarget = await page.locator("#batchModeButton").evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id;
+    });
+    assert.equal(batchTarget, "batchModeButton", "the gallery filter must not cover batch edit");
+    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit must accept a physical click");
+    await page.locator("#batchModeButton").click();
   }
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);

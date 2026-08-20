@@ -443,4 +443,3 @@ class DetectionMixin:
             ],
             "candidateRevision": revision,
         }
-

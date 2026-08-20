@@ -304,4 +304,3 @@ class SavingMixin:
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:
             self._fail_job(exc, job_generation, catalog_generation)
-

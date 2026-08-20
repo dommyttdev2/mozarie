@@ -91,4 +91,3 @@ async function saveAll() {
   const imageIds = saveTargets();
   if (imageIds.length) await openApplyDialog(imageIds);
 }
-

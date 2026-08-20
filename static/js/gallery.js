@@ -203,4 +203,3 @@ function updateNavigationControls() {
   status.textContent = record ? t(reviewed ? "review.reviewed" : "review.unreviewed") : "-";
   status.classList.toggle("reviewed", Boolean(record) && reviewed);
 }
-

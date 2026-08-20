@@ -251,7 +251,7 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .gallery-pane > .pane-rail { top: auto; right: 6px; bottom: 6px; }
 .candidate-pane > .pane-rail { left: 6px; }
 .pane-rail:hover { background: #2c333b; }
-.gallery-heading { padding-right: 10px; }
+.gallery-heading { min-height: 80px; padding-right: 10px; }
 .inspector-heading { padding-left: 42px; }
 .pane-content { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
 .studio-grid.gallery-collapsed { grid-template-columns: 40px minmax(0, 1fr) 240px; }

@@ -459,4 +459,3 @@ function buildCombinedMask() {
   composeCurrentMask();
   return combinedCanvas.toDataURL("image/png");
 }
-

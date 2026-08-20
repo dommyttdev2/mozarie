@@ -488,5 +488,3 @@ async function loadFolder() {
     setStatusKey("status.imagesLoaded", { count: state.images.length });
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
 }
-
-

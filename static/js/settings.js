@@ -254,4 +254,3 @@ async function startUpdate() {
   if (!await confirmAction(t("update.title"), t("update.message"))) return;
   try { await api("/api/update/start", { method: "POST", body: JSON.stringify({}) }); } catch (error) { $("#settingsResult").textContent = error.message; }
 }
-

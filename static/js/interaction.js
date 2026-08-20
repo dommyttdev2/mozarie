@@ -499,4 +499,3 @@ function handleWindowKeydown(event) {
   if (handleEditorKeydown(event)) return;
   handleNavigationKeydown(event);
 }
-
