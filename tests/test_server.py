@@ -2965,6 +2965,30 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.outputs, [str(output)])
             self.assertEqual(written, [output])
 
+    def test_copy_save_mask_failure_releases_later_destination_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "broken.png")
+            Image.new("RGB", (16, 16), "black").save(root / "masked.png")
+            state = self.new_state()
+            first_id, second_id = (item["id"] for item in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in (first_id, second_id)]
+            state.candidates[first_id] = [Candidate("missing", "penis", 0.9, state.cache_dir / first_id / "missing.png")]
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            worker = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, {second_id: self._mask(16, 16)}),
+                kwargs={"copy_to_default": True, "saving_parallelism": 2},
+            )
+
+            with patch.object(saving_module, "_default_output_destination", return_value=root / "output.png"), \
+                 patch.object(saving_module, "write_rendered_copy"):
+                worker.start()
+                worker.join(2)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.job.state, "error")
+
     def test_removed_image_lock_is_pruned_and_unknown_images_do_not_allocate_one(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"

@@ -259,17 +259,18 @@ class SavingMixin:
     ) -> None:
         try:
             empty_indices: set[int] = set()
+            skipped_destination_indices: set[int] = set()
             destination_condition = threading.Condition()
             reserved: set[Path] = set()
             next_destination_index = 0
 
-            def advance_empty_destination(index: int) -> None:
+            def skip_destination(index: int) -> None:
                 nonlocal next_destination_index
                 if not copy_to_default:
                     return
                 with destination_condition:
-                    empty_indices.add(index)
-                    while next_destination_index in empty_indices:
+                    skipped_destination_indices.add(index)
+                    while next_destination_index in skipped_destination_indices:
                         next_destination_index += 1
                     destination_condition.notify_all()
 
@@ -291,13 +292,17 @@ class SavingMixin:
                 with self.image_io_lock(record.image_id):
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                     draft_or_mask = drafts_or_masks.get(record.image_id)
-                    mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
-                        record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
-                    ))
+                    try:
+                        mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
+                            record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
+                        ))
+                    except Exception:
+                        skip_destination(index)
+                        raise
                     if mask is None or not np.any(mask):
                         with destination_condition:
                             empty_indices.add(index)
-                        advance_empty_destination(index)
+                        skip_destination(index)
                         return
                     output_path = reserve_destination(index, record) if copy_to_default else record.path
                     if copy_to_default:
