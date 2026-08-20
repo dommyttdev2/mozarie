@@ -251,21 +251,27 @@ function clearStoredCatalogState(root = state.reviewRoot) {
   state.reviewedPaths.clear(); state.hiddenPaths.clear();
 }
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
+function clearBatchSelection() { state.selectedImageIds.clear(); state.selectionAnchorId = null; }
 function updateSelectionActionBar() {
-  const count = state.selectedImageIds.size; const bar = $("#selectionActionBar");
-  bar.hidden = !count || (!state.batchMode && count < 2); $("#selectionCount").textContent = t("selection.count", { count });
-  $("#batchModeButton").classList.toggle("active", state.batchMode); $("#batchModeButton").setAttribute("aria-pressed", String(state.batchMode));
+  const count = state.selectedImageIds.size;
+  $("#batchModeButton").hidden = state.batchMode;
+  $("#batchModeButton").setAttribute("aria-pressed", String(state.batchMode));
+  $("#batchSelectionControls").hidden = !state.batchMode;
+  $("#selectionCount").textContent = t("selection.count", { count });
+  $("#selectionActionsButton").disabled = count === 0;
 }
 function selectCatalogImage(imageId, event = null) {
   const index = state.images.findIndex((image) => image.id === imageId); if (index < 0) return;
-  if (event?.shiftKey && state.selectionAnchorId) {
+  if (!state.batchMode) {
+    clearBatchSelection();
+  } else if (event?.shiftKey && state.selectionAnchorId) {
     const anchor = state.images.findIndex((image) => image.id === state.selectionAnchorId);
     const range = state.images.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
     if (event.ctrlKey || event.metaKey) range.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(range);
-  } else if (event?.ctrlKey || event?.metaKey || state.batchMode) {
+  } else {
     if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
     state.selectionAnchorId = imageId;
-  } else { state.selectedImageIds = new Set([imageId]); state.selectionAnchorId = imageId; }
+  }
   updateSelectionActionBar(); renderCatalogViews(); void selectImage(imageId);
 }
 function refreshReviewViews() {

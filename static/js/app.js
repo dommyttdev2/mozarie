@@ -70,7 +70,7 @@ function bindEvents() {
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
   $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
-  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"]]) {
+  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"], ["#selectionActionsMenu", "#selectionActionsButton"]]) {
     $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
   }
   $("#galleryFilter").addEventListener("change", (event) => { if (isBusy() || state.importing) return; state.galleryFilter = event.currentTarget.value; renderGallery(); });
@@ -83,8 +83,8 @@ function bindEvents() {
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
   document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
-  $("#selectionClearButton").addEventListener("click", () => { state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; renderCatalogViews(); updateSelectionActionBar(); });
-  $("#batchModeButton").addEventListener("click", () => { state.batchMode = !state.batchMode; if (!state.batchMode && state.selectedImageIds.size < 2) state.selectedImageIds.clear(); renderCatalogViews(); updateSelectionActionBar(); });
+  $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
+  $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
   $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {

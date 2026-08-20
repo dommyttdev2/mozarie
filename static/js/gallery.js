@@ -39,7 +39,8 @@ function renderGallery(force = false) {
       state.galleryNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
+    item.classList.toggle("current", image.id === state.currentId);
+    item.classList.toggle("batch-selected", state.batchMode && state.selectedImageIds.has(image.id));
     item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
@@ -76,7 +77,10 @@ function imageMatchesGalleryFilter(image) {
 }
 
 function updateGallerySelection() {
-  for (const item of $("#gallery").children) item.classList.toggle("selected", item.dataset.id === state.currentId);
+  for (const item of $("#gallery").children) {
+    item.classList.toggle("current", item.dataset.id === state.currentId);
+    item.classList.toggle("batch-selected", state.batchMode && state.selectedImageIds.has(item.dataset.id));
+  }
   updateActionButtons();
 }
 
@@ -138,7 +142,7 @@ function renderOverview(force = false) {
       state.overviewNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("selected", state.selectedImageIds.has(image.id) || image.id === state.currentId);
+    item.classList.toggle("current", image.id === state.currentId);
     const preview = item.querySelector("img");
     observeThumbnail(preview, image, "overview");
     preview.alt = image.relativePath;

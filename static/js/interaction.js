@@ -208,6 +208,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
 
 async function runSelectionAction(action) {
   const images = selectedImages(); if (!images.length || isBusy() || state.importing) return;
+  closeBatchMoreMenus();
   const ids = images.map((image) => image.id);
   if (action === "hide" || action === "show") { images.forEach((image) => setHidden(image, action === "hide")); return; }
   if (action === "reviewed" || action === "unreviewed") { images.forEach((image) => setReviewed(image, action === "reviewed")); renderCatalogViews(); return; }
@@ -215,7 +216,7 @@ async function runSelectionAction(action) {
   if (action === "clear") return clearMasks(ids, "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
   if (action === "remove") {
     for (const image of [...images]) await removeImageFromCatalog(image.id);
-    state.selectedImageIds.clear(); updateSelectionActionBar();
+    clearBatchSelection(); updateSelectionActionBar();
   }
 }
 

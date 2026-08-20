@@ -41,7 +41,10 @@ function startFixtureServer() {
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        images: [{ id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 }],
+        images: [
+          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+        ],
         root: "G:/fixture",
       }));
       return;
@@ -65,7 +68,7 @@ function startFixtureServer() {
       response.end(JSON.stringify({ ok: true }));
       return;
     }
-    if (requestPath === "/api/candidates/sample") {
+    if (requestPath.startsWith("/api/candidates/")) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
       return;
@@ -149,10 +152,10 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { status: box("#status"), actions: box(".appbar-actions"), appbar: box(".appbar"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
   });
-  assert.ok(appbar.appbar.right - appbar.actions.right <= 12, `appbar actions use only the right padding gap at ${width}x${height}`);
-  assert.ok(appbar.status.right <= appbar.actions.left, `status keeps the central flex space at ${width}x${height}`);
+  assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
+  assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
@@ -177,8 +180,8 @@ async function assertDesktopLayout(page, width, height) {
     });
     assert.equal(batchTarget, "batchModeButton", "the gallery filter must not cover batch edit");
     await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit must accept a physical click");
-    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch edit opens its gallery work row");
+    await page.locator("#selectionClearButton").click();
   }
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
@@ -192,10 +195,11 @@ async function assertSettingsDialogLayout(page, width, height) {
   await page.locator("#settingsButton").click();
   await page.locator("#settingsTabGeneral").click();
   const aligned = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
-    const rights = rows.map((row) => row.lastElementChild.getBoundingClientRect().right);
-    return rights.every((right) => Math.abs(right - rights[0]) <= 2);
+    const starts = rows.map((row) => row.lastElementChild.getBoundingClientRect().left);
+    const gaps = rows.map((row) => row.lastElementChild.getBoundingClientRect().left - row.firstElementChild.getBoundingClientRect().right);
+    return starts.every((start) => Math.abs(start - starts[0]) <= 2) && gaps.every((gap) => gap >= 12 && gap <= 20);
   });
-  assert.equal(aligned, true, `settings values align to the right at ${width}x${height}`);
+  assert.equal(aligned, true, `settings labels and inputs keep one compact aligned column at ${width}x${height}`);
   await page.locator("#settingsTabShortcuts").click();
   assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
     const children = [...row.children]; const rowRect = row.getBoundingClientRect(); return children.length === 3 && children.every((child) => { const rect = child.getBoundingClientRect(); return Math.abs((rect.y + rect.height / 2) - (rowRect.y + rowRect.height / 2)) <= 2; });
@@ -332,7 +336,7 @@ async function main() {
     ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
-    assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 700), true, "the canvas stage must keep at least 700px at 1024x768");
+    assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 690), true, "the canvas stage keeps a full editing surface beneath the compact status line at 1024x768");
     for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
@@ -448,8 +452,8 @@ async function main() {
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
-    assert.equal(await page.locator("#batchModeButton").evaluate((button) => getComputedStyle(button).backgroundColor), "rgb(51, 93, 85)", "batch edit uses the selected visual state");
-    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch controls replace the entry in the image list");
+    await page.locator("#selectionClearButton").click();
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
@@ -483,6 +487,27 @@ async function main() {
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
+
+    await page.locator("#batchModeButton").click();
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.locator('.gallery-item[data-id="sample-two"]').click();
+    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
+    assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
+    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("current")), true, "the current image state remains separate from batch selection");
+    const batchDetectBefore = detectRequests.length;
+    await page.locator("#selectionActionsButton").click();
+    await page.locator('[data-selection-action="detect"]').click();
+    await page.locator("#detectStartButton").click();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(detectRequests.length, batchDetectBefore + 1, "batch auto detect sends exactly one request");
+    assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
+    await page.locator("#selectionClearButton").click();
+    assert.equal(await page.locator('.gallery-item.batch-selected').count(), 0, "exiting batch edit clears every green selection");
+    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#selectionCount").textContent(), "0件を選択中", "re-entering batch edit starts with no stale selection");
+    await page.locator("#selectionClearButton").click();
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

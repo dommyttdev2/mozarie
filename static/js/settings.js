@@ -1,5 +1,5 @@
 function closeBatchMoreMenus() {
-  for (const id of ["#batchMoreMenu"]) {
+  for (const id of ["#batchMoreMenu", "#selectionActionsMenu"]) {
     const menu = $(id);
     if (menu.matches(":popover-open")) menu.hidePopover();
   }
@@ -136,11 +136,11 @@ function setSettingsForm(settings, status = null) {
   renderSettingsStatus(status);
 }
 
-const SHORTCUT_LABELS = { previous: "←", next: "→", previousVisible: "↑", nextVisible: "↓", first: "Home", last: "End", nextUnreviewed: "次へ", reviewAndNext: "確認済にして次へ", toggleOverview: "一覧切替", undo: "Undo", redo: "Redo" };
+const SHORTCUT_LABELS = { previous: "settings.shortcut.previous", next: "settings.shortcut.next", previousVisible: "settings.shortcut.previousVisible", nextVisible: "settings.shortcut.nextVisible", first: "settings.shortcut.first", last: "settings.shortcut.last", nextUnreviewed: "settings.shortcut.nextUnreviewed", reviewAndNext: "settings.shortcut.reviewAndNext", toggleOverview: "settings.shortcut.toggleOverview", undo: "settings.shortcut.undo", redo: "settings.shortcut.redo" };
 function renderShortcutBindings(bindings, actions) {
   const root = $("#shortcutBindings"); root.textContent = "";
-  for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
-    const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = label;
+  for (const [action, labelKey] of Object.entries(SHORTCUT_LABELS)) {
+    const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = t(labelKey);
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false;
     const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off";
     input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, enabled, input); root.append(row);
