@@ -162,10 +162,11 @@ function closeProcessing() {
 
 function renderStatus() {
   const status = state.status;
-  if (!status) return;
   const element = $("#status");
-  element.textContent = status.key ? t(status.key, status.params) : status.message;
-  element.className = `status ${status.kind}`;
+  const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
+  element.textContent = message;
+  element.className = `status ${status?.kind || ""}`;
+  $("#statusLine").hidden = !message;
 }
 
 function renderLocalizedDynamicState() {

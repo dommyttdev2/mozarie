@@ -152,10 +152,10 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
-  assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
+  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
@@ -257,6 +257,25 @@ async function main() {
   try {
     ({ server, url: fixtureUrl, detectRequests, settingsRequests, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
+    const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    await initialPage.addInitScript(() => {
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => {
+        const url = String(args[0]?.url || args[0]);
+        if (url.includes("/api/images")) return new Promise((resolve) => { window.__releaseInitialImages = () => fetchOriginal(...args).then(resolve); });
+        return fetchOriginal(...args);
+      };
+    });
+    await initialPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await initialPage.waitForFunction(() => typeof window.__releaseInitialImages === "function");
+    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "the initial empty catalog has no blank status line");
+    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the hidden status line leaves no 24px gap at 1280x720");
+    assert.equal(await initialPage.evaluate(() => typeof setStatus), "function");
+    await initialPage.evaluate(() => setStatus("Test notification"));
+    assert.equal(await initialPage.locator("#statusLine").isVisible(), true, "setStatus shows the notification line");
+    await initialPage.evaluate(() => clearStatus());
+    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "clearStatus hides the notification line again");
+    await initialPage.close();
     const page = await browser.newPage();
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };

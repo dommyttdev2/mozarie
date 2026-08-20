@@ -20,9 +20,11 @@ input[type="range"] { accent-color: #4bb99d; }
 .picker-menu:popover-open, .batch-more-menu:popover-open { display: grid; }
 .picker-menu button, .batch-more-menu button { text-align: left; }
 .status-line { height: 24px; display: flex; align-items: center; padding: 0 10px; border-bottom: 1px solid #303740; background: #1b1f24; }
+.status-line[hidden] { display: none; }
 .status { min-width: 0; overflow: hidden; color: #b8c4ce; text-overflow: ellipsis; white-space: nowrap; }
 .status.error { color: #ff9d92; } .status.running { color: #f0cd73; }
-.studio-grid { height: calc(100vh - 64px); display: grid; grid-template-columns: 160px minmax(0, 1fr) 190px; grid-template-rows: auto minmax(0, 1fr); background: #171a1d; }
+.studio-grid { height: calc(100vh - 48px); display: grid; grid-template-columns: 160px minmax(0, 1fr) 190px; grid-template-rows: auto minmax(0, 1fr); background: #171a1d; }
+.status-line:not([hidden]) + .studio-grid { height: calc(100vh - 72px); }
 .gallery-pane, .candidate-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #20252a; }
 .gallery-pane, .editor-pane, .candidate-pane { grid-row: 2; }
 .gallery-pane { position: relative; border-right: 1px solid #3b424a; } .candidate-pane { border-left: 1px solid #3b424a; }
@@ -180,7 +182,8 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .picker-anchor { display: contents; }
 .picker-actions { display: flex; gap: 7px; align-items: center; }
 .picker-actions button { flex: 1 1 0; }
-.studio-grid { height: calc(100vh - 72px); grid-template-columns: 168px minmax(0, 1fr) 240px; grid-template-rows: minmax(0, 1fr); }
+.studio-grid { height: calc(100vh - 48px); grid-template-columns: 168px minmax(0, 1fr) 240px; grid-template-rows: minmax(0, 1fr); }
+.status-line:not([hidden]) + .studio-grid { height: calc(100vh - 72px); }
 .gallery-pane, .editor-pane, .candidate-pane { grid-row: 1; }
 .gallery-pane { grid-column: 1; }
 .editor-pane { grid-column: 2; display: block; position: relative; overflow: hidden; }
