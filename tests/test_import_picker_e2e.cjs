@@ -40,6 +40,11 @@ function startFixtureServer() {
       response.end(JSON.stringify({ state: "idle" }));
       return;
     }
+    if (requestPath === "/api/update/status") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      return;
+    }
     if (requestPath === "/api/detect" && request.method === "POST") {
       let body = "";
       for await (const chunk of request) body += chunk;
@@ -124,6 +129,16 @@ async function assertDesktopLayout(page, width, height) {
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
   await assertVisibleButtons(page, `${width}x${height} edit`);
+  if (width === 1280 && height === 720) {
+    const heading = await page.evaluate(() => {
+      const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
+      return { pane: box("#galleryPane"), title: box(".gallery-title"), count: box(".gallery-local-count"), actions: box("#batchMoreButton"), batch: box("#batchModeButton") };
+    });
+    assert.ok(heading.title.top <= heading.actions.bottom && heading.actions.top <= heading.title.bottom, "image count and all-image actions share the gallery heading row");
+    assert.ok(heading.count.top <= heading.actions.bottom && heading.actions.top <= heading.count.bottom, "image count remains on the all-image action row");
+    assert.ok(heading.actions.right <= heading.pane.right, "all-image actions fit inside the gallery pane");
+    assert.ok(heading.batch.top >= heading.title.bottom, "batch edit moves to its own row");
+  }
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
   await assertVisibleButtons(page, `${width}x${height} overview`);
@@ -182,6 +197,14 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");
+    await page.locator("#boundaryTool").click();
+    await page.locator("#bucketTool").click();
+    assert.equal(await page.locator("#bucketToleranceControl").isVisible(), true, "bucket tolerance appears for the fill tool");
+    await page.locator("#brushTool").click();
+    assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance hides when switching away from fill");
+    for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
+    assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     for (const viewport of [
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 },
     ]) {
@@ -245,6 +268,9 @@ async function main() {
 
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled);
+    assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
+    assert.equal(await page.locator("#hideAndNextButton").isDisabled(), false, "hide and next enables after selecting an image");
+    assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions stay disabled when the selected image has no candidates");
     await page.locator("#confidence").evaluate((input) => {
       input.value = "1.00";
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -306,8 +332,13 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector("#batchMoreMenu").matches(":popover-open"));
     await page.waitForFunction(() => document.querySelector("#batchMoreButton").getAttribute("aria-expanded") === "false");
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
+    assert.equal(await page.locator(".appbar-commands #batchMoreButton").count(), 0, "batch menu belongs beside the image count, not in the appbar");
+    assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
+    await page.locator("#batchModeButton").click();
+    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
+    await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
-    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "確認済み", "未確認"]);
+    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
     assert.equal(await page.locator("#galleryFilteredEmptyState").count(), 1, "the gallery needs a filtered-empty state");
     assert.equal(await page.locator("#overviewEmptyState").count(), 1, "the overview needs an empty state");

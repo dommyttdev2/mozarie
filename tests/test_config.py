@@ -65,3 +65,15 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(SettingsError): validate_settings(invalid_tool_position)
         with self.assertRaises(SettingsError): validate_settings(invalid_fluid_exclusion)
         with self.assertRaises(SettingsError): validate_settings(invalid_import_parallelism)
+
+    def test_legacy_shortcuts_gain_per_action_defaults(self):
+        legacy = {
+            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
+            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
+        }
+        settings = validate_settings(legacy)
+        self.assertTrue(settings["shortcuts"]["actions"]["previousVisible"])
+        self.assertEqual(settings["shortcuts"]["bindings"]["nextVisible"], "ArrowDown")
+        self.assertTrue(settings["confirmations"]["candidateDelete"])

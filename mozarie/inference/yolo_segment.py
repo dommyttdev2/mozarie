@@ -14,8 +14,8 @@ CLASS_NAMES = ("anus", "nipple", "penis", "vagina", "female face", "male face", 
 
 
 class TargetSegmenter(BaseOnnxModel):
-    def __init__(self, path: Path, *, device: str = "gpu", input_size: int = 1280) -> None:
-        super().__init__(path, device=device)
+    def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0, input_size: int = 1280) -> None:
+        super().__init__(path, device=device, gpu_device=gpu_device)
         self.input_size = input_size
 
     @staticmethod
@@ -53,7 +53,8 @@ class TargetSegmenter(BaseOnnxModel):
         constrained[top:bottom, left:right] = (restored[top:bottom, left:right] >= 0.5).astype(np.uint8) * 255
         return constrained
 
-    def detect(self, rgb: np.ndarray, confidence: float) -> list[dict[str, object]]:
+    def detect(self, rgb: np.ndarray, confidence: float, targets: set[str] | None = None) -> list[dict[str, object]]:
+        targets = targets or {"penis", "pussy"}
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         prediction, prototype = self._outputs(self.run(tensor))
         rows = self._prediction_rows(prediction)
@@ -66,7 +67,8 @@ class TargetSegmenter(BaseOnnxModel):
                 continue
             class_id = int(np.argmax(row[4:4 + len(CLASS_NAMES)]))
             score = float(row[4 + class_id])
-            if class_id not in {2, 3} or score < confidence:
+            class_name = "penis" if class_id == 2 else "pussy" if class_id == 3 else None
+            if class_name not in targets or score < confidence:
                 continue
             box = restore_box(row[:4], transform, xywh=True)
             if box is None:

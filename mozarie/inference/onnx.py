@@ -22,7 +22,7 @@ class Letterbox:
     source_height: int
 
 
-def available_providers(device: str) -> list[str]:
+def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if device.lower() != "cpu":
         preload_dlls = getattr(ort, "preload_dlls", None)
         if preload_dlls is not None:
@@ -32,15 +32,15 @@ def available_providers(device: str) -> list[str]:
         return ["CPUExecutionProvider"]
     if "CUDAExecutionProvider" not in available:
         raise RuntimeError("CUDAExecutionProvider is unavailable. Select CPU or install ONNX Runtime GPU.")
-    return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return [("CUDAExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
 
 
-def create_session(path: Path, device: str = "gpu") -> ort.InferenceSession:
+def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.InferenceSession:
     if not path.is_file():
         raise FileNotFoundError(path)
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device))
+    session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device, gpu_device))
     if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
         raise RuntimeError("CUDAExecutionProvider could not create the ONNX inference session.")
     return session
@@ -114,10 +114,10 @@ def sigmoid(values: np.ndarray) -> np.ndarray:
 
 
 class BaseOnnxModel:
-    def __init__(self, path: Path, *, device: str = "gpu") -> None:
+    def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0) -> None:
         self.path = path
         self.device = device
-        self.session = create_session(path, device)
+        self.session = create_session(path, device, gpu_device)
         self.input_name = self.session.get_inputs()[0].name
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:

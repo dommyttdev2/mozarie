@@ -10,8 +10,8 @@ from .onnx import BaseOnnxModel, letterbox_bgr, nms_indices, restore_box
 
 
 class HandDetector(BaseOnnxModel):
-    def __init__(self, path: Path, *, device: str = "gpu", input_size: int = 640) -> None:
-        super().__init__(path, device=device)
+    def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0, input_size: int = 640) -> None:
+        super().__init__(path, device=device, gpu_device=gpu_device)
         self.input_size = input_size
 
     @staticmethod

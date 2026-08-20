@@ -15,7 +15,8 @@
     "hand_detection_enabled": false,
     "sam_checkpoint": "",
     "sam_model_type": "vit_b",
-    "provider": "gpu"
+    "provider": "gpu",
+    "gpu_device": 0
   },
   "display": {
     "apply_color": "#ff3d4d",
@@ -31,6 +32,36 @@
     "mode": "standard",
     "fluid_exclusion_enabled": true,
     "threshold": 0.5,
+    "parallelism": 2,
+    "targets": ["penis", "pussy"]
+  },
+  "saving": {
     "parallelism": 2
+  },
+  "shortcuts": {
+    "enabled": true,
+    "bindings": {
+      "previous": "ArrowLeft",
+      "next": "ArrowRight",
+      "previousVisible": "ArrowUp",
+      "nextVisible": "ArrowDown",
+      "first": "Home",
+      "last": "End",
+      "nextUnreviewed": "Shift+ArrowRight",
+      "reviewAndNext": "Enter",
+      "toggleOverview": "G",
+      "undo": "Ctrl+Z",
+      "redo": "Ctrl+Shift+Z"
+    },
+    "actions": {"previous": true, "next": true, "previousVisible": true, "nextVisible": true, "first": true, "last": true, "nextUnreviewed": true, "reviewAndNext": true, "toggleOverview": true, "undo": true, "redo": true}
+  },
+  "confirmations": {
+    "clearMasks": true,
+    "clearCatalog": true,
+    "removeImage": true,
+    "candidateDelete": true,
+    "candidateRoleDelete": true,
+    "overwriteSource": true,
+    "deleteSourceAfterCopy": true
   }
 }

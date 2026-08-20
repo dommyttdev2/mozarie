@@ -29,6 +29,7 @@ import msvcrt
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -573,6 +574,7 @@ class StudioState:
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
         self.inference_lock = threading.Lock()
+        self._detection_target_classes: dict[int, set[str]] = {}
         self._cleanup_stale_sessions()
 
     def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
@@ -590,9 +592,9 @@ class StudioState:
             self.settings = settings
             detection_keys = {
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
-                "hand_detection", "hand_detection_enabled", "provider",
+                "hand_detection", "hand_detection_enabled", "provider", "gpu_device",
             }
-            sam_keys = {"sam_checkpoint", "sam_model_type", "provider"}
+            sam_keys = {"sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
                 self.models = None
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
@@ -663,7 +665,17 @@ class StudioState:
         add_status("sensitive", required=False, enabled=bool(models["sensitive_enabled"]), required_suffix=".onnx")
         add_status("hand_detection", required=False, enabled=bool(models["hand_detection_enabled"]), required_suffix=".onnx")
         add_status("sam_checkpoint", required=True, enabled=True)
-        return {"models": result, "provider": models["provider"], "samModelType": models["sam_model_type"]}
+        gpus = []
+        if torch.cuda.is_available():
+            for index in range(torch.cuda.device_count()):
+                gpus.append({"id": index, "name": torch.cuda.get_device_name(index)})
+        return {
+            "models": result,
+            "provider": models["provider"],
+            "samModelType": models["sam_model_type"],
+            "gpus": gpus,
+            "gpuDevice": models.get("gpu_device", 0),
+        }
 
     @staticmethod
     def _lock_directory(directory: Path) -> Any:
@@ -1037,7 +1049,10 @@ class StudioState:
             thumbnail_path.unlink(missing_ok=True)
         self._discard_browser_save_tokens_for_image_unchecked(record.image_id)
         if remove_session_source and record.source_kind == "session":
-            record.path.unlink(missing_ok=True)
+            try:
+                record.path.unlink(missing_ok=True)
+            except PermissionError as exc:
+                LOGGER.warning("Session source will be cleaned up at shutdown: %s", exc)
             imports_dir = self.session_imports_dir
             if imports_dir is not None:
                 parent = record.path.parent
@@ -1202,7 +1217,8 @@ class StudioState:
                 if provider == "gpu" and not torch.cuda.is_available():
                     raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
                 model = sam_model_registry[model_type](checkpoint=str(sam_path))
-                model.to(device="cuda" if provider == "gpu" else "cpu")
+                device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
+                model.to(device=device)
                 self.sam_predictor = SamPredictor(model)
 
             if self.sam_image_id != record.image_id:
@@ -1331,6 +1347,29 @@ class StudioState:
             self._touch_candidates(image_id)
             return self._candidate_revision(image_id)
 
+    def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
+        """Apply one simple bulk operation and advance the revision once."""
+        self.image_for_id(image_id)
+        role = payload.get("role")
+        operation = payload.get("operation")
+        if role not in {"apply", "exclude"} or operation not in {"enable", "disable", "delete"}:
+            raise ClientError("候補の一括操作が正しくありません。")
+        with self.lock:
+            if self._has_active_worker():
+                raise ClientError("バックグラウンド処理中は候補を変更できません。")
+            selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
+            if operation == "delete":
+                for item in selected:
+                    try:
+                        item.mask_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
+            else:
+                for item in selected:
+                    item.enabled = operation == "enable"
+            return self._touch_candidates(image_id)
+
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
         with self.lock:
@@ -1350,12 +1389,14 @@ class StudioState:
         image_ids: list[str],
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
+        target_classes: set[str] | None = None,
     ) -> None:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        self._start_job(
-            "detect", records, self._detect_worker, confidence, _read_detection_parallelism(parallelism),
-            expected_catalog_generation=catalog_generation,
-        )
+        targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
+        args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
+        if targets != TARGET_CLASSES:
+            args = (*args, targets)
+        self._start_job("detect", records, self._detect_worker, *args, expected_catalog_generation=catalog_generation)
 
     def start_apply(
         self,
@@ -1363,9 +1404,11 @@ class StudioState:
         divisor: int,
         drafts: dict[str, dict[str, Any]],
         remove_after_save: bool = False,
+        copy_to_default: bool = False,
+        suffix: str = "_censored",
     ) -> bool:
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-        if any(record.source_kind != "filesystem" for record in records):
+        if not copy_to_default and any(record.source_kind != "filesystem" for record in records):
             raise ClientError("一時画像はコピー保存を選んでください。")
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
@@ -1379,8 +1422,10 @@ class StudioState:
         records = eligible_records
         if not records:
             raise ClientError("保存するモザイク範囲がありません。")
+        suffix = _read_save_suffix(suffix)
         self._start_job(
-            "apply", records, self._apply_worker, divisor, drafts,
+            "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
+            int(self.settings.get("saving", {}).get("parallelism", 2)),
             expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
         )
         return True
@@ -1394,8 +1439,7 @@ class StudioState:
     ) -> list[dict[str, Any]]:
         records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
         _read_mosaic_divisor(divisor)
-        if not isinstance(suffix, str) or not suffix or Path(suffix).name != suffix:
-            raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+        _read_save_suffix(suffix)
         return [
             {
                 "imageId": record.image_id,
@@ -1679,14 +1723,15 @@ class StudioState:
     def _load_detection_models(self) -> DetectionModels:
         model_path = self._configured_model_path("target_segmentation", "対象セグメンテーション")
         provider = str(self.settings["models"].get("provider", "gpu"))
+        gpu_device = int(self.settings["models"].get("gpu_device", 0))
         if provider == "gpu":
             assert_onnx_cuda_available()
-        target = TargetSegmenter(model_path, device=provider)
+        target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
         auxiliaries: list[tuple[str, GenericYoloSegmenter]] = []
         for key, label in (("ntd11", "NTD11補助モデル"), ("sensitive", "Sensitive補助モデル")):
             if not self.settings["models"][f"{key}_enabled"]:
                 continue
-            auxiliaries.append((key, GenericYoloSegmenter(self._configured_model_path(key, label), device=provider)))
+            auxiliaries.append((key, GenericYoloSegmenter(self._configured_model_path(key, label), device=provider, gpu_device=gpu_device)))
         return DetectionModels(target=target, auxiliaries=auxiliaries)
 
     def _configured_model_path(self, key: str, label: str) -> Path:
@@ -1736,7 +1781,7 @@ class StudioState:
         provider = str(self.settings["models"].get("provider", "gpu"))
         if provider == "gpu":
             assert_onnx_cuda_available()
-        models.hand = HandDetector(model_path, device=provider)
+        models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
         return models.hand
 
     def _detect_worker(
@@ -1744,6 +1789,7 @@ class StudioState:
         records: list[ImageRecord],
         confidence: float,
         parallelism: int = 2,
+        target_classes: set[str] | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
@@ -1769,6 +1815,7 @@ class StudioState:
                         return
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                     try:
+                        self._detection_target_classes[id(models)] = target_classes or TARGET_CLASSES
                         candidates = self._detect_image(models, record, confidence, mode)
                     except RuntimeError as exc:
                         if "out of memory" in str(exc).lower():
@@ -1812,16 +1859,22 @@ class StudioState:
             candidate.mask_path.unlink(missing_ok=True)
 
     def _detect_arbitrated_segments(
-        self, models: DetectionModels, rgb: Image.Image, confidence: float
+        self, models: DetectionModels, rgb: Image.Image, confidence: float, target_classes: set[str] | None = None
     ) -> list[dict[str, Any]]:
         width, height = rgb.size
-        segments = models.target.detect(np.asarray(rgb), confidence)
+        targets = target_classes or TARGET_CLASSES
+        segments = (models.target.detect(np.asarray(rgb), confidence) if targets == TARGET_CLASSES
+                    else models.target.detect(np.asarray(rgb), confidence, targets))
         collected = [segment for segment in segments if segment["mask"].shape == (height, width)]
         for source, model in models.auxiliaries:
             tiled_segments: list[dict[str, Any]] = []
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
                 tile = np.asarray(rgb.crop((x_offset, y_offset, x_offset + tile_width, y_offset + tile_height)))
-                for segment in model.detect(tile, confidence_for_source(source, confidence), source):
+                if targets == TARGET_CLASSES:
+                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source)
+                else:
+                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, targets)
+                for segment in detected_segments:
                     local_mask = np.asarray(segment["mask"], dtype=np.uint8)
                     if local_mask.shape != (tile_height, tile_width):
                         continue
@@ -1945,12 +1998,13 @@ class StudioState:
         return segments
 
     def _detect_image(
-        self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None
+        self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
+        target_classes: set[str] | None = None,
     ) -> list[Candidate]:
         self._assert_record_fresh(record)
         with Image.open(record.path) as image:
             rgb = ImageOps.exif_transpose(image).convert("RGB")
-        segments = self._detect_arbitrated_segments(models, rgb, confidence)
+        segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or self._detection_target_classes.get(id(models), TARGET_CLASSES))
         if mode == "high_precision":
             segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
@@ -2091,12 +2145,54 @@ class StudioState:
         records: list[ImageRecord],
         divisor: int,
         drafts_or_masks: dict[str, Any],
+        copy_to_default: bool = False,
+        suffix: str = "_censored",
+        saving_parallelism: int = 1,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         try:
+            if len(records) > 1 and saving_parallelism > 1:
+                def save_record(record: ImageRecord) -> bool:
+                    if not self._job_is_current(job_generation, catalog_generation):
+                        return False
+                    self._wait_while_paused(control, job_generation, catalog_generation)
+                    if control is not None and control.cancel_requested.is_set():
+                        return False
+                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                    self._assert_record_fresh(record)
+                    draft_or_mask = drafts_or_masks.get(record.image_id)
+                    mask = draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
+                        record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
+                    )
+                    if mask is None or not np.any(mask):
+                        raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
+                    if copy_to_default:
+                        destination = _default_output_destination(record, suffix)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                    else:
+                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        output_stat = record.path.stat()
+                        record.mtime_ns = output_stat.st_mtime_ns
+                        record.size_bytes = output_stat.st_size
+                        record.content_version += 1
+                    with self.lock:
+                        self.job.outputs.append(str(destination if copy_to_default else record.path))
+                        self._clear_masks_unchecked([record])
+                    self.invalidate_sam_image(record.image_id)
+                    self._mark_image_completed(record.image_id, job_generation, catalog_generation)
+                    return True
+
+                with ThreadPoolExecutor(max_workers=min(8, saving_parallelism, len(records))) as executor:
+                    results = [future.result() for future in (executor.submit(save_record, record) for record in records)]
+                if control is not None and control.cancel_requested.is_set() or not all(results):
+                    self._cancel_job(job_generation, catalog_generation)
+                else:
+                    self._finish_job(job_generation, catalog_generation)
+                return
             for record in records:
                 if not self._job_is_current(job_generation, catalog_generation):
                     return
@@ -2117,13 +2213,18 @@ class StudioState:
                     mask = self.combined_candidate_mask(record.image_id, draft_masks)
                 if mask is None or not np.any(mask):
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
-                save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                output_stat = record.path.stat()
-                record.mtime_ns = output_stat.st_mtime_ns
-                record.size_bytes = output_stat.st_size
-                record.content_version += 1
+                if copy_to_default:
+                    destination = _default_output_destination(record, suffix)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    write_rendered_copy(destination, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                else:
+                    save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                    output_stat = record.path.stat()
+                    record.mtime_ns = output_stat.st_mtime_ns
+                    record.size_bytes = output_stat.st_size
+                    record.content_version += 1
                 with self.lock:
-                    self.job.outputs.append(str(record.path))
+                    self.job.outputs.append(str(destination if copy_to_default else record.path))
                 self.invalidate_sam_image(record.image_id)
                 with self.lock:
                     self._clear_masks_unchecked([record])
@@ -2613,6 +2714,12 @@ def unique_session_import_destination(path: Path) -> Path:
     raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
 
 
+def _default_output_destination(record: ImageRecord, suffix: str = "_censored") -> Path:
+    relative = safe_import_relative_path(record.relative_path)
+    target = APP_DIR / "output" / relative
+    return unique_session_import_destination(target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"))
+
+
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
@@ -2654,6 +2761,23 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
         record.mtime_ns = stat.st_mtime_ns
         record.size_bytes = stat.st_size
         record.content_version += 1
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def write_rendered_copy(destination: Path, output: bytes) -> None:
+    """Write a default-output copy without exposing a partial image."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_decodable_image(temporary_path.read_bytes())
+        os.replace(temporary_path, destination)
+        temporary_path = None
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -2765,6 +2889,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 })
             elif path == "/api/settings":
                 self._json({"settings": STATE.settings, "status": STATE.settings_status()})
+            elif path == "/api/update/status":
+                self._json(_update_status())
             elif path == "/api/images":
                 self._json({"root": str(STATE.root) if STATE.root else "", "images": STATE.list_images()})
             elif path == "/api/job":
@@ -2832,14 +2958,24 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
-                STATE.start_detection(*detect_args)
+                if "targetClasses" in payload:
+                    STATE.start_detection(*detect_args, _read_target_classes(payload["targetClasses"]))
+                else:
+                    STATE.start_detection(*detect_args)
                 self._json({"ok": True})
+            elif path == "/api/candidates/batch":
+                image_id = str(payload.get("imageId", ""))
+                revision = STATE.batch_update_candidates(image_id, payload)
+                self._json({"ok": True, "candidateRevision": revision})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
                 self._json({"settings": settings, "status": STATE.settings_status()})
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 self._json({"settings": settings, "status": STATE.settings_status()})
+            elif path == "/api/update/start":
+                self._json({"ok": True})
+                threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
                 self._json(STATE.add_boundary_candidate(image_id, payload))
@@ -2864,8 +3000,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     headers={
                         "X-Mozarie-Revision": str(revision),
                         "X-Mozarie-Save-Token": save_token,
-                        "X-Mozarie-Relative-Path": record.relative_path,
-                        "X-Mozarie-Source-Kind": record.source_kind,
                     },
                 )
             elif path == "/api/save/commit":
@@ -2880,6 +3014,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 started = STATE.start_apply(
                     payload.get("imageIds", []), divisor, payload.get("drafts", {}),
                     _read_bool(payload.get("removeAfterSave", False), "完了後、一覧から削除"),
+                    _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー"),
+                    _read_save_suffix(payload.get("suffix", "_censored")),
                 )
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
@@ -3065,10 +3201,39 @@ def _read_detection_parallelism(value: Any) -> int:
     return value
 
 
+def _read_save_suffix(value: Any) -> str:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+    return value
+
+
+def _read_target_classes(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        raise ClientError("検出対象の形式が正しくありません。")
+    targets = {str(item) for item in value}
+    if not targets or not targets <= TARGET_CLASSES:
+        raise ClientError("検出対象は penis または pussy を選択してください。")
+    return targets
+
+
 def _read_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ClientError(f"{field_name}はONまたはOFFで指定してください。")
     return value
+
+
+def _update_status() -> dict[str, Any]:
+    from updater import display_version, fetch_latest_release, parse_version, read_local_version
+    current = display_version(read_local_version())
+    latest = display_version(fetch_latest_release()["tag_name"])
+    return {"current": current, "latest": latest, "available": parse_version(latest) > parse_version(current)}
+
+
+def _start_update_after_response(http_server: ThreadingHTTPServer) -> None:
+    time.sleep(0.2)
+    http_server.shutdown()
+    STATE.shutdown()
+    subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
 
 
 def _open_browser(url: str) -> None:
