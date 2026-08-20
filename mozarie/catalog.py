@@ -627,7 +627,7 @@ class CatalogMixin:
             raise ClientError("許可されていない画像パスです。") from exc
         if not record.path.is_file():
             raise ClientError("画像ファイルが見つかりません。")
-        self._assert_record_fresh(record)
+        self._assert_record_stat_matches(record)
         return record
 
     def list_images(self) -> list[dict[str, Any]]:

@@ -421,8 +421,6 @@ def _default_output_destination(record: ImageRecord, suffix: str = "_censored", 
 def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
-    if hashlib.sha256(source).hexdigest() != record.content_digest:
-        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -438,10 +436,8 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     raise ClientError("この画像形式は保存に対応していません。")
 
 
-def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> str:
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path) -> None:
     """Atomically replace a catalogued source with a previously verified render."""
-    if file_sha256(record.path) != record.content_digest:
-        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     original_stat = record.path.stat()
     temporary_path: Path | None = None
     try:
@@ -455,6 +451,8 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
             handle.flush()
             os.fsync(handle.fileno())
         _verify_decodable_image(temporary_path.read_bytes())
+        if file_sha256(record.path) != record.content_digest:
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         os.replace(temporary_path, record.path)
         temporary_path = None
         if record.source_kind == "filesystem":
@@ -466,7 +464,6 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
         record.mtime_ns = stat.st_mtime_ns
         record.size_bytes = stat.st_size
         record.content_digest = digest.hexdigest()
-        return record.content_digest
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -493,8 +490,6 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> st
     destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
-    if hashlib.sha256(source).hexdigest() != record.content_digest:
-        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -526,6 +521,8 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> st
         if suffix == ".webp" and webp_metadata_manifest(source, exclude={b"EXIF"} if normalize_orientation else set()) != webp_metadata_manifest(temporary_bytes, exclude={b"EXIF"} if normalize_orientation else set()):
             raise ClientError("WebPメタデータ検証に失敗したため置換しませんでした。")
         _verify_decodable_image(temporary_bytes)
+        if file_sha256(destination) != record.content_digest:
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         os.replace(temporary_path, destination)
         temporary_path = None
         try:

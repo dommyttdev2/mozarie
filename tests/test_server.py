@@ -4420,5 +4420,83 @@ class MozarieTests(unittest.TestCase):
             )
         self.assertEqual(state.image_for_id(imported[0]["imageId"]).content_digest, expected)
 
+    def test_browser_render_hashes_only_before_and_after_render(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            calls = 0
+            original_hash = catalog_module.file_sha256
+
+            def tracked_hash(path):
+                nonlocal calls
+                calls += 1
+                return original_hash(path)
+
+            with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
+                state.render_browser_save(image_id, revision, 100, None)
+            self.assertEqual(calls, 2)
+
+    def test_candidate_state_changes_do_not_hash_the_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            with patch.object(catalog_module, "file_sha256", side_effect=AssertionError("unexpected hash")):
+                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+
+    def test_filesystem_save_rechecks_after_staging_before_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original_stat = source.stat()
+            state = self.new_state()
+            record = state.image_for_id(state.set_root(directory)[0]["id"])
+            original_verify = image_io_module._verify_decodable_image
+
+            def mutate_after_staging(raw, **kwargs):
+                result = original_verify(raw, **kwargs)
+                Image.new("RGB", (16, 16), "blue").save(source)
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                return result
+
+            with patch.object(image_io_module, "_verify_decodable_image", side_effect=mutate_after_staging):
+                with self.assertRaisesRegex(ClientError, "外部で変更"):
+                    save_with_mask(record, self._mask(16, 16), 4)
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+            self.assertNotEqual(record.content_digest, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_copy_save_rechecks_after_render_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original_stat = source.stat()
+            state = self.new_state()
+            record = state.image_for_id(state.set_root(directory)[0]["id"])
+            original_render = saving_module.render_with_mask
+
+            def render_then_mutate(*args):
+                output = original_render(*args)
+                Image.new("RGB", (16, 16), "blue").save(source)
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                return output
+
+            with patch.object(saving_module, "render_with_mask", side_effect=render_then_mutate), \
+                 patch.object(saving_module, "write_rendered_copy") as write_copy:
+                state._apply_worker([record], 100, {record.image_id: self._mask(16, 16)}, copy_to_default=True)
+            write_copy.assert_not_called()
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+
 if __name__ == "__main__":
     unittest.main()

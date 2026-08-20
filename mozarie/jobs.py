@@ -90,7 +90,7 @@ class JobsMixin:
             if not record.path.is_file():
                 raise ClientError("画像ファイルが見つかりません。")
         for record in verified_records:
-            self._assert_record_fresh(record)
+            self._assert_record_stat_matches(record)
         return verified_records, catalog_generation
 
     def _start_job(
@@ -188,7 +188,6 @@ class JobsMixin:
                 candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
                 revision = self._candidate_revision(image_id)
                 catalog_generation = self.catalog_generation
-            self._assert_record_fresh(record)
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
             if not apply_candidates and add_mask is None:
                 return None

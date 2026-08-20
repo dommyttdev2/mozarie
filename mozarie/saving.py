@@ -72,7 +72,6 @@ class SavingMixin:
         draft: Any,
     ) -> tuple[bytes, ImageRecord, int, str]:
         record = self.image_snapshot(image_id)
-        self._assert_record_fresh(record)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
@@ -197,11 +196,12 @@ class SavingMixin:
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。")
 
                 try:
-                    if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
-                        raise ClientError("元画像が変更されました。保存をやり直してください。")
                     if source_action == "overwrite":
                         _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path)
-                    elif source_action == "deleted":
+                    else:
+                        if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
+                            raise ClientError("元画像が変更されました。保存をやり直してください。", "stale_asset")
+                    if source_action == "deleted":
                         record_snapshot.path.unlink()
                 except ClientError:
                     rendered_path = token_details.rendered_path
@@ -290,7 +290,9 @@ class SavingMixin:
                         raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。")
                     output_path = destinations.get(index, record.path)
                     if copy_to_default:
-                        write_rendered_copy(output_path, render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor)))
+                        output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        self._assert_record_fresh(record)
+                        write_rendered_copy(output_path, output)
                     else:
                         output_digest = save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
