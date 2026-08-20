@@ -56,6 +56,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     clearTimeout(state.loadingDelay); state.loadingDelay = null;
     syncCandidateRecord(imageId, candidateBundle.candidates);
     if (!isCurrentGeneration(generation)) return;
+    releaseStaleImageVersions(imageId, imageCacheKey(record), candidateCacheKey(imageId, candidateBundle.candidateRevision));
     state.currentId = imageId;
     state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
     state.currentImage = image;
@@ -128,6 +129,11 @@ function releaseImageCaches(imageId = null) {
   }
   for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
   for (const key of state.candidateInflight.keys()) if (matches(key)) state.candidateInflight.delete(key);
+}
+
+function releaseStaleImageVersions(imageId, imageKey, candidateKey) {
+  for (const [key] of state.imageCache.items) if (key.startsWith(`${imageId}:`) && key !== imageKey) state.imageCache.delete(key);
+  for (const [key] of state.candidateBundleCache.items) if (key.startsWith(`${imageId}:`) && key !== candidateKey) state.candidateBundleCache.delete(key);
 }
 
 function releaseCandidateBundles(imageId) {
@@ -215,7 +221,10 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       }
       throw error;
     } finally { state.catalogLoadControllers.delete(controller); }
-  })().finally(() => { if (state.candidateInflight.get(knownKey) === request) state.candidateInflight.delete(knownKey); });
+  })().finally(() => {
+    if (state.candidateInflight.get(knownKey) === request) state.candidateInflight.delete(knownKey);
+    state.imageCache.trim(); state.candidateBundleCache.trim();
+  });
   state.candidateInflight.set(knownKey, request);
   return request;
 }
