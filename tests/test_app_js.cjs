@@ -239,7 +239,11 @@ const context = {
   },
 };
 
-let source = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
+const staticRoot = path.join(__dirname, "..", "static");
+const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
+const scriptOrder = [...manifest.matchAll(/"([a-z-]+\.js)"/g)].map((match) => match[1]);
+assert.deepEqual(scriptOrder, ["core.js", "gallery.js", "editor-canvas.js", "editor-masks.js", "detection.js", "save.js", "interaction.js", "settings.js", "app.js"]);
+let source = scriptOrder.map((name) => fs.readFileSync(path.join(staticRoot, "js", name), "utf8")).join("\n");
 assert.doesNotMatch(source, /setInterval\(\s*render\s*,/);
 const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
 const styles = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");

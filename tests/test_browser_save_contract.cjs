@@ -3,7 +3,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
-const app = fs.readFileSync(path.join(root, "static", "app.js"), "utf8");
+const staticRoot = path.join(root, "static");
+const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
+const app = [...manifest.matchAll(/"([a-z-]+\.js)"/g)]
+  .map((match) => fs.readFileSync(path.join(staticRoot, "js", match[1]), "utf8"))
+  .join("\n");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
 assert.match(app, /window\.showDirectoryPicker\(\{ mode: "readwrite", id: "mozarie-output" \}\)/);

@@ -72,7 +72,9 @@ class TranslationContractTests(unittest.TestCase):
 
     def test_parameterized_translations_match_caller_values_exactly_in_both_languages(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "static" / "app.js").read_text(encoding="utf-8")
+        manifest = (root / "static" / "js" / "manifest.js").read_text(encoding="utf-8")
+        names = re.findall(r'"([a-z-]+\.js)"', manifest)
+        source = "\\n".join((root / "static" / "js" / name).read_text(encoding="utf-8") for name in names)
         dictionaries = {
             language: json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
             for language in ("ja", "en")
