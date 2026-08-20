@@ -7,7 +7,7 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, "..", "static", "js", "r
 (async () => {
   let decodes = 0; apiResult = { candidates: [{ id: "stale" }], candidateRevision: 5 }; bitmapLoader = async () => { decodes += 1; return { close() {} }; };
   record.candidateRevision = 4; const changed = context.loadCandidateBundle("image", 1); record.candidateRevision = 5;
-  await changed; assert.equal(decodes, 1, "metadata is authoritative when candidate revision changes"); assert.equal(state.catalogLoadControllers.size, 0, "request unregisters its controller"); state.candidateBundleCache.clear();
+  await changed; assert.equal(decodes, 1, "metadata is authoritative when candidate revision changes"); assert.equal(state.catalogLoadControllers.size, 0, "request unregisters its controller"); for (const [key] of state.candidateBundleCache.items) state.candidateBundleCache.delete(key);
   let closed = 0; record.candidateRevision = 4; apiResult = { candidates: [{ id: "kept" }, { id: "broken" }], candidateRevision: 5 };
   bitmapLoader = async (source) => { if (source.includes("broken")) throw new Error("decode failed"); return { width: 1, height: 1, close() { closed += 1; } }; };
   await assert.rejects(context.loadCandidateBundle("image", 1), /decode failed/); assert.equal(closed, 1, "a failed mask decode closes accumulated decoded masks exactly once"); assert.equal(state.catalogLoadControllers.size, 0, "failed request unregisters its controller"); console.log("test_candidate_bundle: passed");
