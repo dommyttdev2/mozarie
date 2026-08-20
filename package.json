@@ -1,0 +1,11 @@
+{
+  "name": "mozarie",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.55.0"
+  },
+  "scripts": {
+    "check": "node -e \"const fs=require('fs'); const cp=require('child_process'); for (const name of fs.readdirSync('static/js').filter(name => name.endsWith('.js'))) cp.execFileSync(process.execPath, ['--check', 'static/js/'+name], {stdio:'inherit'});\"",
+    "test": "npm run check && node tests/test_app_js.cjs && node tests/test_browser_save_contract.cjs && node tests/test_browser_save_runtime.cjs && node tests/test_import_picker_e2e.cjs"
+  }
+}
