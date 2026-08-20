@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +38,18 @@ class SettingsStore:
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
         settings = validate_settings(_merge(self.load(), update))
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
-        self.local_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.local_path.parent, prefix=f".{self.local_path.name}.", suffix=".tmp", delete=False) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.local_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         return settings
 
     def reset(self) -> dict[str, Any]:

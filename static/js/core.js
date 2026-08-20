@@ -12,7 +12,7 @@ const state = {
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(),
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
-  catalogMutation: false, imageGeneration: 0, catalogGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
@@ -22,7 +22,7 @@ const state = {
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
   // The save folder handle is browser-local and never sent to the server.
-  outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null,
+  outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null, jobPollTimer: null,
   imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(),
@@ -201,7 +201,7 @@ function isBusy() {
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.catalogMutation || state.boundaryPending || state.fillPending;
 }
-function beginCatalogEpoch() { state.catalogGeneration += 1; state.catalogEpoch += 1; return state.catalogEpoch; }
+function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
 function catalogRecordMatches(record, epoch, { version = imageAssetVersion(record), revision = null } = {}) {
   const current = state.images.find((image) => image.id === record?.id);
@@ -356,8 +356,8 @@ async function persistNavigationShortcuts(enabled) {
     const payload = structuredClone(state.settings);
     payload.general.shortcuts_enabled = Boolean(enabled);
     payload.shortcuts = { ...(payload.shortcuts || {}), enabled: Boolean(enabled) };
-    const data = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
-    setSettingsForm(data.settings, data.status);
+    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(payload) });
+    setSettingsForm(data.settings, state.settingsStatus);
     setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
   } catch (error) { setStatus(error.message, "error"); }
 }
@@ -485,8 +485,8 @@ function resetCatalog(images, root) {
   state.reviewRoot = normaliseReviewRoot(root);
   state.overviewFolder = "";
   loadReviewedPaths();
-  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.maskStatus.clear();
-  state.candidates = []; state.candidateImages.clear(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; state.blinkCandidateIds.clear(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
+  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null; state.maskStatus.clear();
+  state.candidates = []; state.candidateImages = new Map(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; state.blinkCandidateIds.clear(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
   state.candidateUpdateVersions.clear(); state.candidateDeleting.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));

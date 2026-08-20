@@ -53,7 +53,9 @@ function confirmAction(title, message, key = null) {
       const accepted = dialog.returnValue === "confirm";
       if (accepted && key && $("#confirmNeverShow").checked && state.settings) {
         state.settings.confirmations = { ...state.settings.confirmations, [key]: false };
-        void api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }).catch(() => {});
+        void api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }).then((data) => {
+          state.settings = data.settings;
+        }).catch(() => {});
       }
       $("#confirmNeverShow").checked = false; resolve(accepted);
     };
@@ -85,10 +87,14 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     await api("/api/masks/clear", { method: "POST", body: JSON.stringify({ imageIds }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     for (const imageId of imageIds) state.drafts.delete(imageId);
+    for (const imageId of imageIds) releaseCandidateBundles(imageId);
     if (imageIds.includes(state.currentId)) {
-      state.candidates = []; state.candidateImages.clear(); resetCurrentDraft();
+      state.candidates = []; resetCurrentDraft();
       $("#candidateStatus").textContent = t("candidates.none"); renderCandidates();
     }
+    const refreshed = await api("/api/images");
+    if (!isCurrentCatalogEpoch(catalogEpoch)) return;
+    state.images = refreshed.images;
     state.images.forEach((image) => {
       if (imageIds.includes(image.id)) {
         image.candidateCount = 0;
@@ -185,8 +191,8 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
     state.maskStatus.delete(imageId);
     clearReviewForRemovedImage(image);
     if (removingCurrent) {
-      state.currentId = null; state.currentImage = null; state.pendingImageId = null;
-      state.candidates = []; state.candidateImages.clear(); clearEditor();
+      state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
+      state.candidates = []; state.candidateImages = new Map(); clearEditor();
     }
     renderCatalogViews();
     if (removingCurrent && nextImageId && state.images.some((item) => item.id === nextImageId)) {

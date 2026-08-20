@@ -59,7 +59,7 @@ async function startDetectionFromDialog(event) {
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
     state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
-    try { await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }); }
+    try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);

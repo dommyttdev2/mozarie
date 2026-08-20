@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -77,3 +78,21 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings["shortcuts"]["actions"]["previousVisible"])
         self.assertEqual(settings["shortcuts"]["bindings"]["nextVisible"], "ArrowDown")
         self.assertTrue(settings["confirmations"]["candidateDelete"])
+
+    def test_failed_atomic_replace_keeps_the_previous_local_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = root / "config"; config.mkdir()
+            defaults = {
+                "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
+                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+                "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+                "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
+            }
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            local = config / "local.json"; local.write_text('{"keep": true}', encoding="utf-8")
+            store = SettingsStore(root)
+            with mock.patch("mozarie.config.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    store.save({"general": {"language": "en"}})
+            self.assertEqual(local.read_text(encoding="utf-8"), '{"keep": true}')
+            self.assertEqual(list(config.glob(".local.json.*.tmp")), [])

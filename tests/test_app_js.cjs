@@ -159,7 +159,7 @@ function canvasElement() {
     },
     setTransform() {}, save() {}, restore() {}, translate() {}, scale() {}, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, rect() {}, closePath() {}, fill() {}, clip() {}, stroke() { this.strokeCalls += 1; },
     getImageData() {
-      if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [255] : [0]) };
+      if (!target._usePixelAlpha) return { data: new Uint8ClampedArray(combinedMaskPresent ? [0, 0, 0, 255] : [0, 0, 0, 0]) };
       return { data: new Uint8ClampedArray([...target._alpha].flatMap((alpha) => [0, 0, 0, alpha ? 255 : 0])) };
     },
   };
@@ -391,11 +391,11 @@ const completionWatchdog = setTimeout(() => {
     confirmations: { candidateDelete: false, candidateRoleDelete: false, overwriteSource: false, deleteSourceAfterCopy: false },
   };
   const persistShortcuts = persistNavigationShortcuts(false);
-  resolveFetch({ ok: true, json: async () => ({ settings: state.settings, status: { models: {} } }) });
+  resolveFetch({ ok: true, json: async () => ({ settings: state.settings }) });
   await persistShortcuts;
   assert.equal(elements.get("#settingsShortcutsEnabled").checked, false);
   assert.equal(state.settings.general.shortcuts_enabled, false);
-  assert.equal(requests.at(-1).path, "/api/settings");
+  assert.equal(requests.at(-1).path, "/api/settings?status=0");
   assert.equal(state.reviewRoot, "g:\\images\\initial");
   assert.notEqual(elements.get("#status").className, "status error");
 

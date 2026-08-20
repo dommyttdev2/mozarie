@@ -148,7 +148,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "candidateRevision": revision})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
-                self._json({"settings": settings, "status": STATE.settings_status()})
+                response = {"settings": settings}
+                if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
+                    response["status"] = STATE.settings_status()
+                self._json(response)
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 self._json({"settings": settings, "status": STATE.settings_status()})

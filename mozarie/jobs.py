@@ -40,12 +40,19 @@ class JobsMixin:
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
                 raise ClientError("キャンセルできる処理はありません。")
             assert self.job_control is not None
-            self.job_control.cancel_requested.set()
-            self.job_control.pause_requested.clear()
-            if self.job.state == "paused":
-                self.job.state = "cancelled"
-                self.job.current = ""
-            return self.job
+            control = self.job_control
+        # Use the same lock order as claim(), so a successful cancel cannot be
+        # followed by another claim.
+        with control.claim_lock:
+            with self.lock:
+                if self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}:
+                    raise ClientError("キャンセルできる処理はありません。")
+                control.cancel_requested.set()
+                control.pause_requested.clear()
+                if self.job.state == "paused":
+                    self.job.state = "cancelled"
+                    self.job.current = ""
+                return self.job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
         if not isinstance(image_ids, list):

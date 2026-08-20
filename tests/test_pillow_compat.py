@@ -48,7 +48,7 @@ class PillowFromarrayCompatibilityTests(unittest.TestCase):
         tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         calls = [node for node in ast.walk(tree) if self._is_fromarray_call(node)]
 
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 3)
         for node in calls:
             self.assertTrue(self._is_uint8_asarray(node.args[0]), ast.unparse(node))
 

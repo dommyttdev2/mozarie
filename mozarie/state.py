@@ -282,10 +282,5 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if session_dir is not None:
             shutil.rmtree(session_dir, ignore_errors=True)
 
-    def _clear_session_unchecked(self) -> None:
-        self._release_detached_session(self._detach_session_unchecked())
-
-
-
 STATE = StudioState()
 atexit.register(STATE.shutdown)

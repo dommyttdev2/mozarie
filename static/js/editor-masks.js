@@ -175,7 +175,7 @@ async function deleteCandidate(candidate) {
       state.maskStatus.set(imageId, remainingMaskStatus);
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         state.candidates = remainingCandidates;
-        state.candidateImages.delete(candidate.id);
+        releaseCandidateBitmap(candidate.id);
         retainCurrentCandidateBundle(imageId, result.candidateRevision);
         updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
       } else {
@@ -238,7 +238,7 @@ async function batchCandidateOperation(spec) {
   try {
     const result = await api("/api/candidates/batch", { method: "POST", body: JSON.stringify({ imageId: state.currentId, role, operation }) });
     if (operation === "delete") {
-      changed.forEach((item) => state.candidateImages.delete(item.id));
+      changed.forEach((item) => releaseCandidateBitmap(item.id));
       state.candidates = state.candidates.filter((item) => item.role !== role);
     } else changed.forEach((item) => { item.enabled = operation === "enable"; });
     retainCurrentCandidateBundle(state.currentId, result.candidateRevision);

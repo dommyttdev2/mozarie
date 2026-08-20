@@ -64,9 +64,7 @@ class CatalogMixin:
             try:
                 resolved = path.resolve()
                 resolved.relative_to(root)
-                with Image.open(resolved) as image:
-                    _assert_image_suffix_matches_format(resolved.suffix, image.format)
-                    width, height = oriented_image_size(image)
+                width, height = inspect_import_image(resolved, resolved.suffix)
                 stat = resolved.stat()
             except (OSError, UnidentifiedImageError, ValueError):
                 continue
@@ -412,33 +410,33 @@ class CatalogMixin:
                 if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
                 temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
-                staged_path = file_data.get("stagedPath")
-                if isinstance(staged_path, Path):
-                    width, height = inspect_import_image(staged_path, relative_path.suffix)
-                    with staged_path.open("rb") as source, temporary.open("xb") as destination:
-                        shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
-                        destination.flush()
-                        os.fsync(destination.fileno())
-                else:
-                    raw_value = file_data.get("raw")
-                    if isinstance(raw_value, bytes):
-                        raw = raw_value
+                try:
+                    staged_path = file_data.get("stagedPath")
+                    if isinstance(staged_path, Path):
+                        with staged_path.open("rb") as source, temporary.open("xb") as destination:
+                            shutil.copyfileobj(source, destination, IO_CHUNK_BYTES)
+                            destination.flush()
+                            os.fsync(destination.fileno())
                     else:
-                        try:
-                            raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                        except (binascii.Error, ValueError) as exc:
-                            raise ClientError("追加画像を読み込めません。") from exc
-                    if not raw:
-                        continue
-                    _verify_decodable_image(raw)
-                    with Image.open(io.BytesIO(raw)) as image:
-                        _assert_image_suffix_matches_format(relative_path.suffix, image.format)
-                        width, height = oriented_image_size(image)
-                    with temporary.open("xb") as destination:
-                        destination.write(raw)
-                        destination.flush()
-                        os.fsync(destination.fileno())
-                pending.append((temporary, relative_path.as_posix(), width, height, client_key))
+                        raw_value = file_data.get("raw")
+                        if isinstance(raw_value, bytes):
+                            raw = raw_value
+                        else:
+                            try:
+                                raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
+                            except (binascii.Error, ValueError) as exc:
+                                raise ClientError("追加画像を読み込めません。") from exc
+                        if not raw:
+                            continue
+                        with temporary.open("xb") as destination:
+                            destination.write(raw)
+                            destination.flush()
+                            os.fsync(destination.fileno())
+                    width, height = inspect_import_image(temporary, relative_path.suffix)
+                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
+                except Exception:
+                    temporary.unlink(missing_ok=True)
+                    raise
 
             with self.import_lock, self.lock:
                 if (
@@ -682,7 +680,7 @@ class CatalogMixin:
         self.candidates[image_id] = [candidate for candidate in candidates if candidate.candidate_id != candidate_id]
 
     def read_candidate_mask_png(self, image_id: str, candidate_id: str, *, expected_revision: int | None = None) -> bytes:
-        """Convert one mask without holding the catalogue lock during PNG I/O."""
+        """Read one stable mask, then encode outside its per-image lock."""
         with self.image_io_lock(image_id):
             with self.lock:
                 candidate = next(
@@ -696,18 +694,20 @@ class CatalogMixin:
                 if expected_revision is not None and revision != expected_revision:
                     raise StaleMaskError("検出候補は既に更新されています。")
             try:
-                with Image.open(candidate.mask_path) as mask_image:
-                    alpha = mask_image.convert("L")
-                    rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
-                    rgba.putalpha(alpha)
-                    output = io.BytesIO()
-                    rgba.save(output, format="PNG")
+                raw_mask = candidate.mask_path.read_bytes()
             except FileNotFoundError as exc:
                 with self.lock:
                     if self._candidate_revision(image_id) == revision:
                         self._remove_candidate_unchecked(image_id, candidate_id)
                         self._touch_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
+        with Image.open(io.BytesIO(raw_mask)) as mask_image:
+            alpha = mask_image.convert("L")
+            rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+            rgba.putalpha(alpha)
+            output = io.BytesIO()
+            rgba.save(output, format="PNG")
+        with self.image_io_lock(image_id):
             with self.lock:
                 current = next(
                     (item for item in self.candidates.get(image_id, []) if item.candidate_id == candidate_id),

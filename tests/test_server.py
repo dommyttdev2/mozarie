@@ -669,6 +669,21 @@ class MozarieTests(unittest.TestCase):
         state.request_cancel()
         self.assertEqual(state.job.state, "cancelled")
 
+    def test_cancel_before_claim_never_starts_another_record(self):
+        state = self.new_state()
+        control = server_module.JobControl()
+        state.job = server_module.Job(kind="detect", state="running", total=1)
+        state.job_control = control
+        processed = []
+
+        state.request_cancel()
+        state._run_fixed_workers(
+            [ImageRecord("record", Path(__file__), "record.png", 1, 1, 0)], 1,
+            lambda _index, record: processed.append(record.image_id), control, None, None,
+        )
+
+        self.assertEqual(processed, [])
+
     def test_detection_can_pause_and_resume(self):
         state = self.new_state()
         state.job = server_module.Job(kind="detect", state="running", total=2)
@@ -1761,6 +1776,38 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(np.any(combined[:3]))
             self.assertFalse(np.any(combined[:, :3]))
 
+    def test_boundary_second_mask_failure_leaves_no_partial_candidate(self):
+        class FakePredictor:
+            def predict(self, **_kwargs):
+                masks = np.zeros((1, 12, 12), dtype=bool)
+                masks[0, 2:10, 2:10] = True
+                return masks, np.asarray([0.9]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "image.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            exclusion = np.zeros((12, 12), dtype=np.uint8); exclusion[3:9, 3:9] = 255
+            original_fromarray = detection_module.Image.fromarray
+            calls = 0
+
+            def fail_second_mask(mask, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("second mask failed")
+                return original_fromarray(mask, *args, **kwargs)
+
+            with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
+                 patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                 patch.object(state, "_refine_detected_segments", return_value=[{"exclusions": {"hand": exclusion}}]), \
+                 patch.object(detection_module.Image, "fromarray", side_effect=fail_second_mask):
+                with self.assertRaisesRegex(OSError, "second mask"):
+                    state.add_boundary_candidate(image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
+
+            self.assertEqual(state.candidates.get(image_id, []), [])
+            self.assertEqual(list((state.cache_dir / image_id).glob("*.png")), [])
+            self.assertEqual(list((state.cache_dir / image_id).glob("*.tmp")), [])
+
     def test_boundary_candidate_keeps_hand_fluid_as_an_independent_exclusion(self):
         class FakePredictor:
             def predict(self, **_kwargs):
@@ -2084,12 +2131,13 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             imported = threading.Event()
             errors: list[Exception] = []
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(raw):
-                original_verify(raw)
+            def blocked_inspect(path, suffix):
+                result = original_inspect(path, suffix)
                 entered.set()
                 self.assertTrue(release.wait(2))
+                return result
 
             def import_worker():
                 try:
@@ -2099,7 +2147,7 @@ class MozarieTests(unittest.TestCase):
                 finally:
                     imported.set()
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -2162,9 +2210,9 @@ class MozarieTests(unittest.TestCase):
             active_lock = threading.Lock()
             overlap = threading.Event()
             release = threading.Event()
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(data):
+            def blocked_inspect(path, suffix):
                 nonlocal active, peak
                 with active_lock:
                     active += 1
@@ -2173,7 +2221,7 @@ class MozarieTests(unittest.TestCase):
                         overlap.set()
                 try:
                     self.assertTrue(release.wait(2))
-                    return original_verify(data)
+                    return original_inspect(path, suffix)
                 finally:
                     with active_lock:
                         active -= 1
@@ -2185,7 +2233,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 first = threading.Thread(target=worker, args=("first.png",))
                 second = threading.Thread(target=worker, args=("second.png",))
                 first.start(); second.start()
@@ -2358,12 +2406,13 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             errors: list[Exception] = []
-            original_verify = catalog_module._verify_decodable_image
+            original_inspect = catalog_module.inspect_import_image
 
-            def blocked_verify(raw):
-                original_verify(raw)
+            def blocked_inspect(path, suffix):
+                result = original_inspect(path, suffix)
                 entered.set()
                 self.assertTrue(release.wait(2))
+                return result
 
             def import_worker():
                 try:
@@ -2371,7 +2420,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
-            with patch.object(catalog_module, "_verify_decodable_image", side_effect=blocked_verify):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
                 importer.start()
                 self.assertTrue(entered.wait(2))
@@ -2434,22 +2483,27 @@ class MozarieTests(unittest.TestCase):
             original_open = server_module.Image.open
 
             def delayed_open(path, *args, **kwargs):
-                if Path(path) == mask_path:
+                if isinstance(path, io.BytesIO):
                     opened.set()
-                    self.assertTrue(release.wait(2))
+                    release.wait(2)
                 return original_open(path, *args, **kwargs)
 
             with patch.object(server_module.Image, "open", side_effect=delayed_open):
-                reader = threading.Thread(target=state.read_candidate_mask_png, args=(image_id, "candidate"))
+                outcome = {}
+                def read_mask():
+                    try:
+                        outcome["value"] = state.read_candidate_mask_png(image_id, "candidate")
+                    except Exception as exc:
+                        outcome["error"] = exc
+                reader = threading.Thread(target=read_mask)
                 clearer = threading.Thread(target=lambda: (state.clear_masks([image_id]), cleared.set()))
                 reader.start()
                 self.assertTrue(opened.wait(2))
                 clearer.start()
-                self.assertFalse(cleared.wait(0.1))
+                self.assertTrue(cleared.wait(2))
                 snapshotter = threading.Thread(target=lambda: (state.catalog_snapshot(), snapshot_done.set()))
                 snapshotter.start()
                 self.assertTrue(snapshot_done.wait(2))
-                self.assertTrue(mask_path.exists())
                 release.set()
                 reader.join(2)
                 clearer.join(2)
@@ -2458,6 +2512,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(cleared.is_set())
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
+            self.assertIsInstance(outcome.get("error"), server_module.StaleMaskError)
 
     def test_candidate_mask_read_rejects_expected_revision_before_decoding(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3809,6 +3864,39 @@ class MozarieTests(unittest.TestCase):
             state.clear_catalog()
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
                 state.commit_browser_save(image_id, rendered_revision, catalog_token, "keep")
+
+    def test_browser_save_claim_keeps_rendered_file_during_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            rendered_path = state.browser_save_tokens[token].rendered_path
+            claimed = threading.Event(); release = threading.Event(); outcome = {}
+            original_fingerprint = state._source_fingerprint
+
+            def block_after_claim(record):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_fingerprint(record)
+
+            def commit():
+                try:
+                    outcome["value"] = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(state, "_source_fingerprint", side_effect=block_after_claim):
+                thread = threading.Thread(target=commit); thread.start()
+                self.assertTrue(claimed.wait(2))
+                state.cleanup_expired_browser_save_tokens()
+                self.assertTrue(rendered_path.exists())
+                release.set(); thread.join(2)
+
+            self.assertNotIn("error", outcome)
+            self.assertTrue(outcome["value"]["cleared"])
+            self.assertFalse(rendered_path.exists())
 
     def test_browser_save_catalog_mismatch_removes_rendered_file(self):
         with tempfile.TemporaryDirectory() as directory:
