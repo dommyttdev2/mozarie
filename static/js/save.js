@@ -166,8 +166,8 @@ async function restoreOutputDirectory() {
 }
 
 async function waitForBrowserSave(save) {
-  while (save.paused && !save.cancelled) await new Promise((resolve) => setTimeout(resolve, 100));
-  return !save.cancelled;
+  while (save.paused && !save.cancelled && !save.failed) await new Promise((resolve) => setTimeout(resolve, 100));
+  return !save.cancelled && !save.failed;
 }
 
 function showBrowserSaveProgress(save, entry) {
@@ -337,14 +337,28 @@ async function uniqueOutputFileHandle(rootHandle, relativePath, suffix) {
   throw new Error(t("error.outputNameExhausted"));
 }
 
-async function writeCopyOutput(rootHandle, entry, suffix, bytes) {
-  const output = await uniqueOutputFileHandle(rootHandle, entry.relativePath, suffix);
+async function reserveCopyOutputs(rootHandle, entries, suffix) {
+  // Handle creation is intentionally ordered.  It reserves every name before
+  // parallel rendering starts, preventing two workers from selecting one path.
+  for (const entry of entries) {
+    entry.outputWritten = false;
+    entry.outputHandle = await uniqueOutputFileHandle(rootHandle, entry.relativePath, suffix);
+  }
+}
+
+async function releaseUnusedCopyOutputs(entries) {
+  await Promise.all(entries.filter((entry) => entry.outputHandle && !entry.outputWritten && !entry.outputHandle.released).map(async (entry) => {
+    try { await entry.outputHandle.directory.removeEntry(entry.outputHandle.name); } catch { /* Best-effort reservation cleanup. */ }
+  }));
+}
+
+async function writeCopyOutput(output, bytes) {
   const fileHandle = output.fileHandle;
   const writable = await fileHandle.createWritable({ keepExistingData: false });
   try { await writable.write(bytes); await writable.close(); }
   catch (error) {
     try { await writable.abort?.(); } catch { /* Continue with best-effort cleanup below. */ }
-    try { await output.directory.removeEntry(output.name); } catch { /* Preserve the original write error. */ }
+    try { await output.directory.removeEntry(output.name); output.released = true; } catch { /* Preserve the original write error. */ }
     throw error;
   }
 }
@@ -355,8 +369,9 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
     body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
   const save = {
-    directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, removeAfterSave,
+    directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
     removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
+    catalogEpoch: state.catalogEpoch,
   };
   state.browserSave = save;
   state.saving = true;
@@ -370,6 +385,7 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
   updateActionButtons();
   try {
     await navigator.locks.request("mozarie-output", { mode: "exclusive" }, async () => {
+      if (mode === "copy") await reserveCopyOutputs(directory, save.entries, suffix);
       const saveEntry = async (entry) => {
         showBrowserSaveProgress(save, entry);
         const draft = draftPayload([entry.imageId])[entry.imageId] || null;
@@ -391,7 +407,8 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
         if (mode === "copy") {
-          await writeCopyOutput(directory, entry, suffix, bytes);
+          await writeCopyOutput(entry.outputHandle, bytes);
+          entry.outputWritten = true;
           if (deleteOriginal) {
             if (access?.fileHandle) await removeSourceHandle(access);
             sourceAction = "deleted";
@@ -419,7 +436,6 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
         }
         if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
         if (committed.stale) save.stale += 1;
-        state.images = committed.images;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
         pruneSourceAccess();
         save.completed += 1;
@@ -427,16 +443,19 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
       };
       let nextEntry = 0;
       const parallelism = Math.min(save.entries.length, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 1)));
-      await Promise.all(Array.from({ length: parallelism }, async () => {
+      const settled = await Promise.allSettled(Array.from({ length: parallelism }, async () => {
         while (true) {
           // Cancellation is observed only before an entry starts. Once an output or source has
           // changed, commit that entry so browser files and catalog state remain consistent.
           if (!await waitForBrowserSave(save)) return;
           const entry = save.entries[nextEntry++];
           if (!entry) return;
-          await saveEntry(entry);
+          try { await saveEntry(entry); }
+          catch (error) { save.failed = true; throw error; }
         }
       }));
+      const failed = settled.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
     });
     const cancelled = save.cancelled;
     setApplyResult(cancelled
@@ -450,16 +469,29 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
     $("#applyPauseButton").hidden = true;
     $("#applyCancelButton").hidden = true;
     $("#applyCloseButton").hidden = false;
+    if (mode === "copy") await releaseUnusedCopyOutputs(save.entries);
+    let catalogCurrent = false;
     try {
-      await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+      // Commits may resolve out of order; apply one authoritative catalogue
+      // snapshot only after every started entry has settled.
+      const latest = await api("/api/images");
+      catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
+      if (catalogCurrent) state.images = latest.images;
     } catch (error) {
       setApplyResult(error.message, true);
     }
-    reconcileBrowserSaveState();
-    if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
-      await selectImage(state.currentId, true, { saveCurrentDraft: false });
+    if (catalogCurrent) {
+      try {
+        await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+      } catch (error) {
+        setApplyResult(error.message, true);
+      }
+      reconcileBrowserSaveState();
+      if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
+        await selectImage(state.currentId, true, { saveCurrentDraft: false });
+      }
+      updateActionButtons();
     }
-    updateActionButtons();
   }
 }
 
