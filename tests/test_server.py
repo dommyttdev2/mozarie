@@ -3022,6 +3022,36 @@ class MozarieTests(unittest.TestCase):
                     httpd.shutdown()
                     httpd.server_close()
 
+    def test_binary_import_reader_uses_bounded_chunks_and_cleans_short_body(self):
+        class RecordingReader(io.BytesIO):
+            def __init__(self, value):
+                super().__init__(value)
+                self.requests = []
+
+            def read(self, size=-1):
+                self.requests.append(size)
+                return super().read(size)
+
+        state = self.new_state()
+        handler = object.__new__(MosaicHandler)
+        body = b"x" * (server_module.IO_CHUNK_BYTES + 7)
+        reader = RecordingReader(body)
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = reader
+        with patch.object(http_module, "STATE", state):
+            staged = handler._read_binary_body_to_file()
+        try:
+            self.assertEqual(staged.read_bytes(), body)
+            self.assertTrue(all(0 < size <= server_module.IO_CHUNK_BYTES for size in reader.requests))
+        finally:
+            staged.unlink(missing_ok=True)
+
+        handler.headers = {"Content-Length": "9"}
+        handler.rfile = RecordingReader(b"short")
+        with patch.object(http_module, "STATE", state), self.assertRaisesRegex(ClientError, "最後まで"):
+            handler._read_binary_body_to_file()
+        self.assertEqual(list((state.cache_dir / "import-staging").glob("*")), [])
+
     def test_browser_save_overwrite_updates_state_when_timestamp_restore_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
