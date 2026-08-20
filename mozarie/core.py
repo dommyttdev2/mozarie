@@ -176,6 +176,10 @@ class ImageRecord:
     size_bytes: int = 0
     source_kind: str = "filesystem"
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.content_digest, str) or len(self.content_digest) != 64 or any(char not in "0123456789abcdef" for char in self.content_digest):
+            raise ValueError("content_digest must be a lowercase SHA-256 digest")
+
 
 @dataclass(frozen=True)
 class BrowserSaveToken:
