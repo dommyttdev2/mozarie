@@ -922,6 +922,136 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
 
+    def test_parallel_apply_starts_two_workers_and_publishes_results_in_input_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(4):
+                Image.new("RGB", (16, 16), f"#{index}{index}{index}{index}{index}{index}").save(root / f"image-{index}.png")
+            state = self.new_state()
+            image_ids = tuple(image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in image_ids]
+            masks = {image_id: self._mask(16, 16) for image_id in image_ids}
+            state.job = server_module.Job(kind="apply", state="running", total=4, image_ids=image_ids)
+            rendezvous = threading.Barrier(2)
+            two_workers_started = threading.Event()
+            release = threading.Event()
+            non_first_finished = threading.Event()
+            started: list[int] = []
+            completion_order: list[int] = []
+            started_lock = threading.Lock()
+            completion_lock = threading.Lock()
+            record_indexes = {record.image_id: index for index, record in enumerate(records)}
+            output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
+            written_paths: list[Path] = []
+
+            def render_in_inverse_order(record, _mask, _block_size):
+                index = record_indexes[record.image_id]
+                with started_lock:
+                    started.append(index)
+                    if len(started) == 2:
+                        two_workers_started.set()
+                if index in (0, 1):
+                    rendezvous.wait(timeout=2)
+                    if not release.wait(2):
+                        raise RuntimeError("test did not release both workers")
+                if index == 0:
+                    if not non_first_finished.wait(2):
+                        raise RuntimeError("later records did not finish")
+                else:
+                    with completion_lock:
+                        completion_order.append(index)
+                        if len(completion_order) == 3:
+                            non_first_finished.set()
+                if index == 0:
+                    with completion_lock:
+                        completion_order.append(index)
+                return f"rendered-{index}".encode("ascii")
+
+            def capture_copy(destination, _output):
+                written_paths.append(destination)
+
+            def output_destination(record, _suffix, _reserved):
+                return output_paths[record.image_id]
+
+            thread = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, masks),
+                kwargs={"copy_to_default": True, "saving_parallelism": 2},
+            )
+            with patch.object(saving_module, "_default_output_destination", side_effect=output_destination), \
+                 patch.object(saving_module, "render_with_mask", side_effect=render_in_inverse_order), \
+                 patch.object(saving_module, "write_rendered_copy", side_effect=capture_copy):
+                thread.start()
+                self.assertTrue(two_workers_started.wait(2))
+                self.assertEqual(set(started), {0, 1})
+                self.assertEqual(state.job.completed_image_ids, ())
+                self.assertEqual(state.job.outputs, [])
+                release.set()
+                thread.join(2)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(completion_order, [1, 2, 3, 0])
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.completed_image_ids, image_ids)
+            self.assertEqual(state.job.outputs, [str(output_paths[record.image_id]) for record in records])
+            self.assertEqual(set(written_paths), set(output_paths.values()))
+
+    def test_parallel_apply_failure_stops_workers_from_claiming_more_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(4):
+                Image.new("RGB", (16, 16), f"#{index}{index}{index}{index}{index}{index}").save(root / f"image-{index}.png")
+            state = self.new_state()
+            image_ids = tuple(image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in image_ids]
+            masks = {image_id: self._mask(16, 16) for image_id in image_ids}
+            state.job = server_module.Job(kind="apply", state="running", total=4, image_ids=image_ids)
+            second_started = threading.Event()
+            first_failed = threading.Event()
+            release_second = threading.Event()
+            claimed: list[int] = []
+            claimed_lock = threading.Lock()
+            record_indexes = {record.image_id: index for index, record in enumerate(records)}
+            output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
+
+            def fail_first_render(record, _mask, _block_size):
+                index = record_indexes[record.image_id]
+                with claimed_lock:
+                    claimed.append(index)
+                if index == 0:
+                    if not second_started.wait(2):
+                        raise RuntimeError("second worker did not start")
+                    first_failed.set()
+                    raise RuntimeError("first record failed")
+                if index != 1:
+                    raise RuntimeError(f"unexpected record claimed after failure: {index}")
+                second_started.set()
+                if not release_second.wait(2):
+                    raise RuntimeError("test did not release the second worker")
+                return b"rendered-second"
+
+            def output_destination(record, _suffix, _reserved):
+                return output_paths[record.image_id]
+
+            thread = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, masks),
+                kwargs={"copy_to_default": True, "saving_parallelism": 2},
+            )
+            with patch.object(saving_module, "_default_output_destination", side_effect=output_destination), \
+                 patch.object(saving_module, "render_with_mask", side_effect=fail_first_render), \
+                 patch.object(saving_module, "write_rendered_copy"):
+                thread.start()
+                self.assertTrue(second_started.wait(2))
+                self.assertTrue(first_failed.wait(2))
+                release_second.set()
+                thread.join(2)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(set(claimed), {0, 1})
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.completed_image_ids, (image_ids[1],))
+
     def test_combined_mask_includes_draft_add_and_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
