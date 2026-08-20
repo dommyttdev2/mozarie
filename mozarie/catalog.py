@@ -695,32 +695,34 @@ class CatalogMixin:
         operation = payload.get("operation")
         if role not in {"apply", "exclude"} or operation not in {"enable", "disable", "delete"}:
             raise ClientError("候補の一括操作が正しくありません。")
-        with self.lock:
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。")
-            selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
-            if operation == "delete":
-                for item in selected:
-                    try:
-                        item.mask_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
-            else:
-                for item in selected:
-                    item.enabled = operation == "enable"
-            return self._touch_candidates(image_id)
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
+                if operation == "delete":
+                    self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
+                    paths = [item.mask_path for item in selected]
+                else:
+                    paths = []
+                    for item in selected:
+                        item.enabled = operation == "enable"
+                revision = self._touch_candidates(image_id)
+            for path in paths:
+                path.unlink(missing_ok=True)
+            return revision
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
         self.image_for_id(image_id)
-        with self.lock:
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。")
-            candidates = self.candidates.get(image_id, [])
-            candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
-            if candidate is None:
-                return False
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                candidates = self.candidates.get(image_id, [])
+                candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
+                if candidate is None:
+                    return False
+                self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
+                self._touch_candidates(image_id)
             candidate.mask_path.unlink(missing_ok=True)
-            self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
-            self._touch_candidates(image_id)
             return True
