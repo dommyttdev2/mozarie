@@ -40,12 +40,15 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # global lock is held.
         self._image_io_locks: dict[str, threading.RLock] = {}
         self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
-        self.import_staging_gate = threading.BoundedSemaphore(4)
+        self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self._pending_browser_save_cleanup: list[Path] = []
         self.output_destination_lock = threading.Lock()
-        self.output_picker_lock = threading.Lock()
+        # Windows native dialogs are process-modal. Keep folder and model
+        # pickers mutually exclusive without blocking unrelated work.
+        self.native_picker_lock = threading.Lock()
+        self.output_picker_lock = self.native_picker_lock
         self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()

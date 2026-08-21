@@ -132,8 +132,8 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .help-button::before { display: grid; width: 16px; height: 16px; place-items: center; border: 1px solid currentColor; border-radius: 50%; content: "i"; font-family: Georgia, serif; font-size: 12px; font-weight: 700; line-height: 1; }
 .help-button:hover { color: #e9f5f0; background: #313941; }
 .help-button:focus-visible { outline: 2px solid #87e1c8; outline-offset: 2px; }
-.inline-field { display: flex; min-width: 0; gap: 6px; }
-.inline-field input { min-width: 0; flex: 1 1 auto; }
+.inline-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-width: 0; gap: 6px; }
+.inline-field input { min-width: 0; }
 .setting-label { display: inline-flex; align-items: center; justify-content: flex-start; gap: 4px; }
 .compact-dialog { width: min(680px, calc(100vw - 32px)); max-width: 680px; }
 .model-help-table { width: auto; max-width: 100%; border-collapse: collapse; table-layout: auto; font-size: 13px; } .model-help-table th, .model-help-table td { padding: 6px; border: 1px solid #596570; overflow-wrap: anywhere; text-align: left; vertical-align: top; } .model-help-table th { color: #f0f5f8; background: #20252a; } .model-help-table :is(th:nth-child(1), th:nth-child(2), th:nth-child(3), th:nth-child(4), td:nth-child(1), td:nth-child(2), td:nth-child(3), td:nth-child(4)) { white-space: nowrap; }

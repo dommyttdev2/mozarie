@@ -276,6 +276,26 @@ async function chooseSettingsOutputDirectory() {
   }
 }
 
+function syncSamTypeFromPath(path) {
+  const match = /(?:^|[_-])vit[_-]?([blh])(?:[_.-]|$)/i.exec(path.split(/[\\/]/).pop() || "");
+  if (match) $("#settingsSamType").value = `vit_${match[1].toLowerCase()}`;
+}
+
+async function chooseSettingsModelFile(button) {
+  const buttons = [...document.querySelectorAll("[data-model-picker]")];
+  buttons.forEach((item) => { item.disabled = true; });
+  try {
+    const data = await api("/api/model-file/pick", { method: "POST", body: JSON.stringify({ modelKey: button.dataset.modelPicker }) });
+    if (!data.cancelled && data.path) {
+      $(`#${button.dataset.modelInput}`).value = data.path;
+      if (button.dataset.modelPicker === "sam_checkpoint") syncSamTypeFromPath(data.path);
+    }
+  } catch (error) {
+    $("#settingsResult").textContent = error.message;
+    $("#settingsResult").classList.add("error");
+  } finally { buttons.forEach((item) => { item.disabled = false; }); }
+}
+
 async function refreshSettingsStatus() {
   const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
   button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");

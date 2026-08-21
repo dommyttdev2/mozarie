@@ -231,25 +231,25 @@ async function directFilesFromDrop(dataTransfer) {
     .map((item) => item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null)
     .filter(Boolean);
   if (handles.length) {
-    const files = [];
+    const entries = [];
     async function collectHandle(handle, parent = "", parentHandle = null) {
       if (!handle) return;
       const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
-      if (handle.kind === "file") files.push(droppedFile(await handle.getFile(), relativePath, handle, parentHandle));
+      if (handle.kind === "file") entries.push({ handle, relativePath, parentHandle });
       else for await (const entry of handle.values()) await collectHandle(entry, relativePath, handle);
     }
     for (const handlePromise of handles) {
       const handle = await handlePromise;
       if (handle) await collectHandle(handle);
     }
-    return files;
+    return { handleEntries: entries };
   }
   const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
   if (entries.length) {
     const files = [];
     async function collectEntry(entry, parent = "") {
       const relativePath = parent ? `${parent}/${entry.name}` : entry.name;
-      if (entry.isFile) files.push(droppedFile(await new Promise((resolve, reject) => entry.file(resolve, reject)), relativePath));
+      if (entry.isFile) files.push({ name: entry.name, relativePath, getFile: () => new Promise((resolve, reject) => entry.file(resolve, reject)), fileHandle: null, parentHandle: null });
       else if (entry.isDirectory) {
         const reader = entry.createReader(); const children = [];
         while (true) {
@@ -279,12 +279,22 @@ function pruneSourceAccess() {
   for (const imageId of state.sourceAccess.keys()) if (!imageIds.has(imageId)) state.sourceAccess.delete(imageId);
 }
 
+function rememberImportedSource(result) {
+  for (const imported of result.data.imported || []) {
+    if (imported.clientKey !== result.clientKey || !result.entry.fileHandle || !imported.imageId) continue;
+    state.sourceAccess.set(imported.imageId, {
+      fileHandle: result.entry.fileHandle, parentHandle: result.entry.parentHandle || null,
+      name: result.entry.file.name, size: result.entry.file.size, lastModified: result.entry.file.lastModified,
+    });
+  }
+}
+
 async function importFiles(files) {
   const session = arguments.length > 1 ? arguments[1] : beginImportSession();
   if (!session || state.importSession !== session) return;
   const supportedFiles = [...files]
-    .map((entry) => entry.file ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name, fileHandle: null, parentHandle: null })
-    .filter(({ file }) => isSupportedImageFile(file));
+    .map((entry) => entry.file || entry.getFile ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name, fileHandle: null, parentHandle: null })
+    .filter((entry) => isSupportedImageFile(entry.file || { name: entry.name || entry.relativePath }));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
     session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
@@ -297,15 +307,22 @@ async function importFiles(files) {
         if (session.cancelled) return;
         const index = nextIndex; nextIndex += 1;
         if (index >= supportedFiles.length) return;
-        const entry = supportedFiles[index]; const clientKey = newClientKey();
+        const descriptor = supportedFiles[index]; const clientKey = newClientKey();
+        const file = descriptor.file || await descriptor.getFile();
+        if (session.cancelled || state.importSession !== session) return;
+        if (!isSupportedImageFile(file)) continue;
+        const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.webkitRelativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
         const data = await importSingleFile(entry, clientKey);
         results[index] = { entry, clientKey, data };
+        // Keep source access for each committed upload, including a later
+        // cancellation or an unrelated upload failure.
+        rememberImportedSource(results[index]);
         session.completed += 1;
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
       }
     };
-    const workerCount = Math.min(supportedFiles.length, importParallelism());
+    const workerCount = Math.min(supportedFiles.length, 10, importParallelism());
     const workers = Array.from({ length: workerCount }, worker);
     try {
       await Promise.all(workers);
@@ -323,16 +340,6 @@ async function importFiles(files) {
       pruneSourceAccess(); renderCatalogViews();
       setStatusKey("status.importCancelled", { completed: session.completed });
       return;
-    }
-    for (const result of results) {
-      if (!result) continue;
-      for (const imported of result.data.imported || []) {
-        if (imported.clientKey !== result.clientKey || !result.entry.fileHandle || !imported.imageId) continue;
-        state.sourceAccess.set(imported.imageId, {
-          fileHandle: result.entry.fileHandle, parentHandle: result.entry.parentHandle || null,
-          name: result.entry.file.name, size: result.entry.file.size, lastModified: result.entry.file.lastModified,
-        });
-      }
     }
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
@@ -388,24 +395,9 @@ async function waitForImportSession(session) {
 }
 
 async function importHandleEntries(entries, session) {
-  if (!entries.length) return finishImportSession(session);
-  showProcessing({ kind: "import", state: "running", total: entries.length, completed: 0, current: "" });
-  const files = new Array(entries.length);
-  let nextIndex = 0;
-  const worker = async () => {
-    while (await waitForImportSession(session)) {
-      const index = nextIndex; nextIndex += 1;
-      if (index >= entries.length) return;
-      const entry = entries[index];
-      showProcessing({ kind: "import", state: session.paused ? "paused" : "running", total: entries.length, completed: 0, current: entry.relativePath });
-      const file = await entry.handle.getFile();
-      files[index] = droppedFile(file, entry.relativePath, entry.handle, entry.parentHandle || null);
-    }
-  };
-  const parallelism = Math.min(entries.length, importParallelism());
-  await Promise.all(Array.from({ length: parallelism }, worker));
-  if (!await waitForImportSession(session)) return finishImportSession(session);
-  await importFiles(files.filter(Boolean), session);
+  await importFiles(entries.map((entry) => ({
+    ...entry, name: entry.handle.name, getFile: () => entry.handle.getFile(), fileHandle: entry.handle,
+  })), session);
 }
 
 async function importFileHandles(handles, session = beginImportSession()) {
@@ -451,7 +443,9 @@ async function importDroppedFiles(event) {
   const session = beginImportSession();
   if (!session) return;
   try {
-    await importFiles(await directFilesFromDrop(event.dataTransfer), session);
+    const dropped = await directFilesFromDrop(event.dataTransfer);
+    if (dropped?.handleEntries) await importHandleEntries(dropped.handleEntries, session);
+    else await importFiles(dropped, session);
   } catch (error) { setStatus(error.message, "error"); }
   finally { finishImportSession(session); setGalleryDropOverlay(false); }
 }
