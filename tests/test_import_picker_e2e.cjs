@@ -261,6 +261,8 @@ async function assertSettingsDialogLayout(page, width, height) {
         rows: table.tBodies[0].rows.length,
         columns: [...table.rows].every((row) => row.cells.length === 5),
         headers: [...table.tHead.rows[0].cells].map((cell) => cell.textContent),
+        columnScopes: [...table.tHead.rows[0].cells].map((cell) => cell.scope),
+        rowScopes: [...table.tBodies[0].rows].map((row) => row.cells[0].scope),
         tableScrollWidth: table.scrollWidth, tableClientWidth: table.clientWidth,
         dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
       };
@@ -270,6 +272,8 @@ async function assertSettingsDialogLayout(page, width, height) {
     assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
     assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
     assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Accuracy", "VRAM", "Best for"] : ["モデル", "速度", "精度目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.columnScopes, ["col", "col", "col", "col", "col"], `SAM table headers use column scopes at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.rowScopes, ["row", "row", "row"], `SAM table model names use row scopes at ${width}x${height} (${language})`);
     assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);
     await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
     await page.locator('[data-model-help="ntd11"]').click();
