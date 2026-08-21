@@ -255,25 +255,16 @@ function selectedImages() { return state.images.filter((image) => state.selected
 function clearBatchSelection() { state.selectedImageIds.clear(); state.selectionAnchorId = null; }
 function updateSelectionActionBar() {
   const count = state.selectedImageIds.size;
-  $("#batchModeButton").hidden = state.batchMode;
   $("#batchModeButton").setAttribute("aria-pressed", String(state.batchMode));
-  $("#batchSelectionControls").hidden = !state.batchMode;
+  $("#overviewSelectionBar").hidden = !state.batchMode;
   $("#selectionCount").textContent = t("selection.count", { count });
   $("#selectionActionsButton").disabled = count === 0;
 }
-function selectCatalogImage(imageId, event = null) {
-  const index = state.images.findIndex((image) => image.id === imageId); if (index < 0) return;
-  if (!state.batchMode) {
-    clearBatchSelection();
-  } else if (event?.shiftKey && state.selectionAnchorId) {
-    const anchor = state.images.findIndex((image) => image.id === state.selectionAnchorId);
-    const range = state.images.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
-    if (event.ctrlKey || event.metaKey) range.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(range);
-  } else {
-    if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
-    state.selectionAnchorId = imageId;
-  }
-  updateSelectionActionBar(); renderCatalogViews(); void selectImage(imageId);
+function selectCatalogImage(imageId) {
+  if (!state.images.some((image) => image.id === imageId)) return;
+  clearBatchSelection();
+  updateSelectionActionBar();
+  void selectImage(imageId);
 }
 function refreshReviewViews() {
   renderGallery(true);

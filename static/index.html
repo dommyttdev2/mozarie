@@ -46,17 +46,6 @@
         </select>
         <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
       </div>
-      <div class="gallery-batch-bar">
-        <button id="batchModeButton" type="button" aria-pressed="false" disabled data-i18n="selection.batchMode">一括編集</button>
-        <div id="batchSelectionControls" class="batch-selection-controls" hidden>
-          <output id="selectionCount" aria-live="polite">0件を選択中</output>
-          <button id="selectionActionsButton" type="button" popovertarget="selectionActionsMenu" aria-expanded="false" data-i18n="selection.actions">一括操作</button>
-          <div id="selectionActionsMenu" class="batch-more-menu" popover>
-            <button data-selection-action="remove" type="button" data-i18n="selection.remove">一覧から削除</button><button data-selection-action="hide" type="button" data-i18n="selection.hide">非表示</button><button data-selection-action="show" type="button" data-i18n="selection.show">再表示</button><button data-selection-action="clear" type="button" data-i18n="selection.clear">モザイククリア</button><button data-selection-action="detect" type="button" data-i18n="selection.detect">自動検出</button><button data-selection-action="reviewed" type="button" data-i18n="selection.reviewed">確認済</button><button data-selection-action="unreviewed" type="button" data-i18n="selection.unreviewed">未確認</button>
-          </div>
-          <button id="selectionClearButton" type="button" data-i18n="selection.end">終了</button>
-        </div>
-      </div>
       <div class="gallery-viewport">
         <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">
           <div id="galleryEmptyState" class="gallery-empty-state" data-i18n="gallery.empty">画像を追加してください</div>
@@ -147,6 +136,7 @@
           <button id="closeOverviewButton" class="text-button" type="button" data-i18n="overview.back">編集に戻る</button>
           <h2 data-i18n="overview.title">画像一覧</h2>
           <output id="overviewCount" class="muted">0 / 0</output>
+          <button id="batchModeButton" type="button" aria-pressed="false" disabled data-i18n="selection.batchMode">一括編集</button>
         </div>
         <div class="overview-filters" data-i18n-aria-label="overview.filters" aria-label="一覧の絞り込み">
           <button class="overview-filter active" type="button" data-overview-filter="all" aria-pressed="true" data-i18n="overview.filterAll">全体</button>
@@ -161,6 +151,14 @@
           <select id="overviewFolder" data-i18n-aria-label="overview.folder" aria-label="フォルダで絞り込み"></select>
         </div>
       </header>
+      <div id="overviewSelectionBar" class="overview-selection-bar" hidden>
+        <output id="selectionCount" aria-live="polite">0件を選択中</output>
+        <button id="selectionActionsButton" type="button" popovertarget="selectionActionsMenu" aria-expanded="false" data-i18n="selection.actions">一括操作</button>
+        <div id="selectionActionsMenu" class="batch-more-menu" popover>
+          <button data-selection-action="remove" type="button" data-i18n="selection.remove">一覧から削除</button><button data-selection-action="hide" type="button" data-i18n="selection.hide">非表示</button><button data-selection-action="show" type="button" data-i18n="selection.show">再表示</button><button data-selection-action="clear" type="button" data-i18n="selection.clear">モザイククリア</button><button data-selection-action="detect" type="button" data-i18n="selection.detect">自動検出</button><button data-selection-action="reviewed" type="button" data-i18n="selection.reviewed">確認済</button><button data-selection-action="unreviewed" type="button" data-i18n="selection.unreviewed">未確認</button>
+        </div>
+        <button id="selectionClearButton" type="button" data-i18n="selection.end">終了</button>
+      </div>
       <div class="overview-grid-viewport">
         <div id="overviewGrid" class="overview-grid"></div>
         <p id="overviewEmptyState" class="overview-empty-state" hidden data-i18n="overview.empty">該当する画像はありません</p>

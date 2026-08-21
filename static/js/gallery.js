@@ -40,11 +40,10 @@ function renderGallery(force = false) {
     }
     item.dataset.id = image.id;
     const current = image.id === state.currentId;
-    const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
     item.classList.toggle("current", current);
-    item.classList.toggle("batch-selected", batchSelected);
+    item.classList.remove("batch-selected");
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
-    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
+    item.removeAttribute?.("aria-pressed");
     item.classList.toggle("hidden", isHidden(image));
     item.classList.toggle("reviewed", isReviewed(image));
     const preview = item.querySelector("img");
@@ -54,14 +53,14 @@ function renderGallery(force = false) {
     item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
     reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
-    item.onclick = (event) => selectCatalogImage(image.id, event);
+    item.onclick = () => selectCatalogImage(image.id);
     item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `${image.relativePath}、${isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")}`);
     item.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id, event); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id); }
       else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
     };
     gallery.append(item);
@@ -80,14 +79,13 @@ function imageMatchesGalleryFilter(image) {
   return true;
 }
 
-function updateGallerySelection() {
+function updateGalleryCurrent() {
   for (const item of $("#gallery").children) {
     const current = item.dataset.id === state.currentId;
-    const batchSelected = state.batchMode && state.selectedImageIds.has(item.dataset.id);
     item.classList.toggle("current", current);
-    item.classList.toggle("batch-selected", batchSelected);
+    item.classList.remove("batch-selected");
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
-    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
+    item.removeAttribute?.("aria-pressed");
   }
   updateActionButtons();
 }
@@ -126,6 +124,27 @@ function syncOverviewFolders() {
   }
   select.value = state.overviewFolder;
 }
+function selectOverviewImage(imageId, event = null) {
+  const visibleImages = overviewImages();
+  const index = visibleImages.findIndex((image) => image.id === imageId);
+  if (index < 0) return;
+  if (!state.batchMode) {
+    setViewMode("edit");
+    selectCatalogImage(imageId);
+    return;
+  }
+  const additive = event?.ctrlKey || event?.metaKey;
+  const anchor = event?.shiftKey ? visibleImages.findIndex((image) => image.id === state.selectionAnchorId) : -1;
+  if (event?.shiftKey && anchor >= 0) {
+    const ids = visibleImages.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
+    if (additive) ids.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(ids);
+  } else {
+    if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
+    state.selectionAnchorId = imageId;
+  }
+  updateSelectionActionBar();
+  renderOverview();
+}
 function renderOverview(force = false) {
   if (!force && state.viewMode !== "overview") return;
   const grid = $("#overviewGrid");
@@ -150,7 +169,12 @@ function renderOverview(force = false) {
       state.overviewNodes.set(image.id, item);
     }
     item.dataset.id = image.id;
-    item.classList.toggle("current", image.id === state.currentId);
+    const current = image.id === state.currentId;
+    const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
+    item.classList.toggle("current", current);
+    item.classList.toggle("batch-selected", batchSelected);
+    if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
+    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
     const preview = item.querySelector("img");
     observeThumbnail(preview, image, "overview");
     preview.alt = image.relativePath;
@@ -163,13 +187,24 @@ function renderOverview(force = false) {
     stateLabel.textContent = statuses.join(" / ");
     stateLabel.classList.toggle("reviewed", isReviewed(image));
     stateLabel.classList.toggle("masked", imageHasMask(image));
-    item.onclick = (event) => { setViewMode("edit"); selectCatalogImage(image.id, event); };
+    item.onclick = (event) => selectOverviewImage(image.id, event);
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     grid.append(item);
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectOverviewImage(image.id, event); }
+      else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
+    };
   }
 }
 function renderCatalogViews() { renderGallery(); renderOverview(); }
 function setViewMode(mode, refreshGallery = true) {
+  if (state.viewMode !== mode) {
+    state.batchMode = false;
+    clearBatchSelection();
+    updateSelectionActionBar();
+  }
   const viewGeneration = ++state.viewGeneration;
   state.viewMode = mode;
   const active = mode === "overview";

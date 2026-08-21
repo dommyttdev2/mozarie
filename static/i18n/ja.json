@@ -132,7 +132,6 @@
   "confirm.clearCatalog.title": "読み込んだ画像をすべてクリア",
   "confirm.clearCatalog.message": "読み込んだ画像一覧と作業用の一時コピーをクリアします。通常の参照元画像は削除しません。",
   "batch.actions": "全画像操作",
-  "batch.clear": "クリア",
   "context.review": "確認済にする",
   "context.unreview": "未確認に戻す",
   "confirm.removeImage.title": "画像削除",

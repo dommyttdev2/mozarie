@@ -27,7 +27,6 @@
   "apply.target": "{count} image(s) will be saved.",
   "apply.title": "Save files",
   "batch.actions": "More",
-  "batch.clear": "Clear",
   "candidates.aria": "Mosaic processing",
   "candidates.count": "{count} ranges",
   "candidates.countWithManual": "{count} ranges including manual edits",

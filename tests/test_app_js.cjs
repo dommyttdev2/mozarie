@@ -62,7 +62,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "removeAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
   "status", "statusLine", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsHandSegmentationModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsHandSegmentationCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsHandSegmentationToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpSamTable", "modelHelpCloseButton", "batchModeButton", "batchSelectionControls", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsHandSegmentationModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsHandSegmentationCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsHandSegmentationToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpSamTable", "modelHelpCloseButton", "batchModeButton", "overviewSelectionBar", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
@@ -306,12 +306,13 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
+  source = source.replace("renderCandidates, overviewFolderOptions", "renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
   assert.equal(elements.get("#statusLine").hidden, true, "the status line starts hidden with no notification");
@@ -326,8 +327,8 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   state.selectedImageIds = new Set(["one", "two"]);
   state.selectionAnchorId = "one";
   updateSelectionActionBar();
-  assert.equal(elements.get("#batchModeButton").hidden, true, "batch mode replaces its entry button with the gallery work row");
-  assert.equal(elements.get("#batchSelectionControls").hidden, false, "batch controls are visible only while editing a selection");
+  assert.equal(elements.get("#batchModeButton").hidden, false, "batch mode keeps its entry available in the overview heading");
+  assert.equal(elements.get("#overviewSelectionBar").hidden, false, "batch controls are visible only while editing a selection");
   assert.equal(elements.get("#selectionCount").textContent, "selection.count");
   state.batchMode = false;
   clearBatchSelection();
@@ -335,7 +336,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(state.selectedImageIds.size, 0, "leaving batch mode clears selected ids without retaining green state");
   assert.equal(state.selectionAnchorId, null, "leaving batch mode clears the range anchor");
   assert.equal(elements.get("#batchModeButton").hidden, false);
-  assert.equal(elements.get("#batchSelectionControls").hidden, true);
+  assert.equal(elements.get("#overviewSelectionBar").hidden, true);
   state.images = [];
   updateActionButtons();
   assert.equal(elements.get("#batchModeButton").disabled, true, "batch edit is unavailable while the catalog is empty");
@@ -1915,7 +1916,41 @@ const completionWatchdog = setTimeout(() => {
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
   state.reviewedPaths = new Set(["second.png"]);
+  state.viewMode = "overview";
+  state.batchMode = true;
+  clearBatchSelection();
+  renderOverview(true);
+  selectOverviewImage("first");
+  assert.deepEqual([...state.selectedImageIds], ["first"], "plain overview selection toggles the visible target");
+  assert.equal(state.selectionAnchorId, "first", "plain overview selection updates the range anchor");
+  assert.equal(state.currentId, "first", "batch selection does not change the current image");
+  const currentOverviewItem = overviewGrid.children.find((item) => item.dataset.id === "first");
+  assert.equal(currentOverviewItem.classList.contains("current"), true, "the current overview item keeps its current state while selected");
+  assert.equal(currentOverviewItem.classList.contains("batch-selected"), true, "the current overview item also keeps its batch selection state");
+  assert.equal(currentOverviewItem.getAttribute("aria-current"), "true", "the current overview item exposes current state independently");
+  assert.equal(currentOverviewItem.getAttribute("aria-pressed"), "true", "the current overview item exposes selected state independently");
+  selectOverviewImage("third", { shiftKey: true });
+  assert.deepEqual([...state.selectedImageIds], ["first", "second", "third"], "shift selection replaces with the visible overview range");
+  clearBatchSelection();
+  selectOverviewImage("first");
+  selectOverviewImage("third", { ctrlKey: true, shiftKey: true });
+  assert.deepEqual([...state.selectedImageIds], ["first", "second", "third"], "ctrl-shift adds the visible overview range");
+  state.overviewQuery = "second";
+  selectOverviewImage("second", { shiftKey: true });
+  assert.equal(state.selectionAnchorId, "second", "a filtered-out anchor falls back to toggling the overview target");
+  assert.equal(state.viewMode, "overview", "batch selection stays in the overview");
+  renderGallery(true);
+  assert.equal([...state.galleryNodes.values()].some((item) => item.classList.contains("batch-selected") || item.getAttribute("aria-pressed") !== null), false, "the normal gallery never exposes batch selection state");
+  state.overviewQuery = "";
+  setViewMode("edit");
+  assert.equal(state.batchMode, false, "returning to edit exits overview batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "returning to edit clears overview selection");
+  state.batchMode = true;
+  state.selectedImageIds.add("first");
+  state.selectionAnchorId = "first";
   setViewMode("overview");
+  assert.equal(state.batchMode, false, "opening the overview starts without stale batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "opening the overview clears stale selection");
   overviewGrid.children.find((item) => item.dataset.id === "first").click();
   assert.equal(state.viewMode, "edit");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
@@ -2149,10 +2184,15 @@ const completionWatchdog = setTimeout(() => {
   state.candidateDeleting.add("old:row");
   setBoundaryModeMenuOpen(true);
   elements.get("#rectangleTool").focus();
+  state.batchMode = true;
+  state.selectedImageIds.add("old:row");
+  state.selectionAnchorId = "old:row";
   resetCatalog([], "");
   assert.equal(state.candidateUpdateVersions.size, 0);
   assert.equal(state.candidateDeleting.size, 0);
   assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(state.batchMode, false, "resetting the catalog exits batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "resetting the catalog clears batch selection");
   assert.equal(document.activeElement, elements.get("#boundaryTool"));
   setBoundaryModeMenuOpen(true);
   elements.get("#polygonTool").focus();

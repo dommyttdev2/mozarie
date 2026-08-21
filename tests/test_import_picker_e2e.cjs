@@ -160,7 +160,7 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
   if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
@@ -173,27 +173,35 @@ async function assertDesktopLayout(page, width, height) {
     });
     assert.ok(heading.rightGap <= 12, `all-image actions align with the gallery right edge at ${width}x${height}`);
   }
-  if (width === 1280 && height === 720) {
-    const heading = await page.evaluate(() => {
-      const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
-      return { pane: box("#galleryPane"), title: box(".gallery-title"), count: box(".gallery-local-count"), actions: box("#batchMoreButton"), batch: box("#batchModeButton") };
-    });
-    assert.ok(heading.title.top <= heading.actions.bottom && heading.actions.top <= heading.title.bottom, "image count and all-image actions share the gallery heading row");
-    assert.ok(heading.count.top <= heading.actions.bottom && heading.actions.top <= heading.count.bottom, "image count remains on the all-image action row");
-    assert.ok(heading.actions.right <= heading.pane.right, "all-image actions fit inside the gallery pane");
-    assert.ok(heading.batch.top >= heading.title.bottom, "batch edit moves to its own row");
-    const batchTarget = await page.locator("#batchModeButton").evaluate((button) => {
-      const rect = button.getBoundingClientRect();
-      return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id;
-    });
-    assert.equal(batchTarget, "batchModeButton", "the gallery filter must not cover batch edit");
-    await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch edit opens its gallery work row");
-    await page.locator("#selectionClearButton").click();
-  }
+  assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "the gallery has no inactive batch-edit row");
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
   await assertVisibleButtons(page, `${width}x${height} overview`);
+  const overview = await page.evaluate(() => {
+    const toolbar = document.querySelector(".overview-toolbar");
+    const bar = document.querySelector("#overviewSelectionBar");
+    const button = document.querySelector("#batchModeButton");
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return {
+      headingTail: button.parentElement.lastElementChild === button,
+      followsToolbar: toolbar.nextElementSibling === bar,
+      hiddenBarLeavesNoGap: bar.hidden && Math.abs(document.querySelector(".overview-grid-viewport").getBoundingClientRect().top - toolbarRect.bottom) <= 1,
+      buttonHit: document.elementFromPoint(buttonRect.x + buttonRect.width / 2, buttonRect.y + buttonRect.height / 2) === button,
+      toolbarBottom: toolbarRect.bottom, barTop: barRect.top,
+    };
+  });
+  assert.equal(overview.headingTail, true, `batch edit ends the overview heading at ${width}x${height}`);
+  assert.equal(overview.followsToolbar, true, `selection actions follow the overview toolbar at ${width}x${height}`);
+  assert.equal(overview.hiddenBarLeavesNoGap, true, `hidden selection actions leave no overview gap at ${width}x${height}`);
+  assert.equal(overview.buttonHit, true, `batch edit owns its physical click target at ${width}x${height}`);
+  await page.locator("#batchModeButton").click();
+  await assertVisibleButtons(page, `${width}x${height} overview batch`);
+  const batchDimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, visible: !document.querySelector("#overviewSelectionBar").hidden }));
+  assert.equal(batchDimensions.visible, true, `selection actions become visible in overview batch mode at ${width}x${height}`);
+  assert.equal(batchDimensions.scrollWidth, batchDimensions.clientWidth, `batch actions do not create horizontal overflow at ${width}x${height}`);
+  await page.locator("#selectionClearButton").click();
   await page.locator("#closeOverviewButton").click();
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
@@ -642,10 +650,7 @@ async function main() {
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
     assert.equal(await page.locator(".appbar-commands #batchMoreButton").count(), 0, "batch menu belongs beside the image count, not in the appbar");
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
-    await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
-    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch controls replace the entry in the image list");
-    await page.locator("#selectionClearButton").click();
+    assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "batch edit leaves no control row in the gallery");
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
@@ -680,20 +685,23 @@ async function main() {
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
+    assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "the normal gallery owns only the current-image state");
+    await page.locator("#overviewButton").click();
+    await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+    const currentBeforeBatch = await page.locator(".overview-item.current").getAttribute("data-id");
     await page.locator("#batchModeButton").click();
-    await page.locator('.gallery-item[data-id="sample"]').focus();
+    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit overview mode");
+    assert.equal(await page.locator("#overviewSelectionBar").isVisible(), true, "batch controls appear immediately below the overview toolbar");
+    assert.equal(await page.locator('[data-selection-action]').count(), 7, "overview batch edit retains all seven actions");
+    await page.locator('.overview-item[data-id="sample"]').focus();
     await page.keyboard.press("Space");
-    await page.locator('.gallery-item[data-id="sample-two"]').click();
-    await page.waitForFunction(() => {
-      const item = document.querySelector('.gallery-item[data-id="sample-two"]');
-      return item?.classList.contains("current") && item.getAttribute("aria-current") === "true";
-    });
-    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
-    assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("current")), true, "the current image state remains separate from batch selection");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').getAttribute("aria-current"), "true", "the current image exposes its neutral current state");
-    assert.equal(await page.locator('.gallery-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard batch selection exposes its selected state");
+    await page.locator('.overview-item[data-id="sample-two"]').click();
+    assert.equal(await page.locator("#overviewPane").isVisible(), true, "batch selection stays in the overview");
+    assert.equal(await page.locator(".overview-item.current").getAttribute("data-id"), currentBeforeBatch, "batch selection does not change the current image");
+    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the overview selection bar reports the selected image count");
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first overview selection is green");
+    assert.equal(await page.locator('.overview-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second overview selection is green");
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard overview selection exposes its selected state");
     const batchDetectBefore = detectRequests.length;
     await page.locator("#selectionActionsButton").click();
     await page.locator('[data-selection-action="detect"]').click();
@@ -703,11 +711,14 @@ async function main() {
     assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     await page.locator("#selectionClearButton").click();
-    assert.equal(await page.locator('.gallery-item.batch-selected').count(), 0, "exiting batch edit clears every green selection");
-    assert.equal(await page.locator('.gallery-item[aria-pressed]').count(), 0, "exiting batch edit removes batch selection semantics");
+    assert.equal(await page.locator('.overview-item.batch-selected').count(), 0, "exiting batch edit clears every green overview selection");
+    assert.equal(await page.locator('.overview-item[aria-pressed]').count(), 0, "exiting batch edit removes overview selection semantics");
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#selectionCount").textContent(), "0件を選択中", "re-entering batch edit starts with no stale selection");
     await page.locator("#selectionClearButton").click();
+    await page.locator('.overview-item[data-id="sample-two"]').click();
+    await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+    assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

@@ -246,6 +246,7 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   if (!removedIds.size) return;
 
   for (const imageId of removedIds) {
+    state.selectedImageIds.delete(imageId);
     releaseImageCaches(imageId);
     state.sourceAccess.delete(imageId);
     state.drafts.delete(imageId);
@@ -254,6 +255,7 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
     const image = recordsById.get(imageId);
     if (image) clearReviewForRemovedImage(image);
   }
+  if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
 
   if (currentId && removedIds.has(currentId)) {
     releaseCandidateBundles(currentId);
@@ -264,7 +266,7 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
     clearEditor();
   }
   pruneSourceAccess();
-  renderCatalogViews();
+  renderCatalogViews(); updateSelectionActionBar();
 
   if (currentId && removedIds.has(currentId)) {
     const survivors = new Set(state.images.map((image) => image.id));

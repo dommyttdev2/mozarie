@@ -85,8 +85,8 @@ function bindEvents() {
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
   document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
-  $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
-  $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
+  $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
+  $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
   $("#settingsLanguage").addEventListener("change", async (event) => {
     const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
