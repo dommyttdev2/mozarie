@@ -329,8 +329,9 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           });
           if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
+          const bytes = await binary.arrayBuffer();
           await ensureHandlePermission(access, true);
-          await writeSourceHandle(access, await binary.arrayBuffer());
+          await writeSourceHandle(access, bytes);
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
