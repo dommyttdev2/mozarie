@@ -36,7 +36,7 @@ class CatalogMixin:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+        if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -325,7 +325,7 @@ class CatalogMixin:
             for _image_id, image_lock in sorted(locks):
                 stack.enter_context(image_lock)
             with self.lock:
-                if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中はモザイク候補をクリアできません。")
                 mask_paths = [
                     candidate.mask_path

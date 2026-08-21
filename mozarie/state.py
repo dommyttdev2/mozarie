@@ -17,6 +17,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
         self.importing_count = 0
+        self.import_transfer_count = 0
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -48,7 +49,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # Windows native dialogs are process-modal. Keep folder and model
         # pickers mutually exclusive without blocking unrelated work.
         self.native_picker_lock = threading.Lock()
-        self.output_picker_lock = self.native_picker_lock
         self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
@@ -71,7 +71,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not isinstance(update, dict):
             raise ClientError("設定の形式が正しくありません。", "invalid_settings")
         with self.inference_lock, self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
             previous_output_directory = self.settings["saving"]["default_output_directory"]
@@ -100,7 +100,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             try:
                 settings = self.settings_store.default_settings()
@@ -115,9 +115,21 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self.hand_segmentation_image_id = None
             return self.settings
 
-    def settings_status(self) -> dict[str, Any]:
+    def begin_import_transfer(self) -> None:
+        """Block conflicting mutations from the first upload byte onward."""
+        with self.lock:
+            if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                raise ClientError("処理中は画像を追加できません。")
+            self.import_transfer_count += 1
+
+    def end_import_transfer(self) -> None:
+        with self.lock:
+            if self.import_transfer_count:
+                self.import_transfer_count -= 1
+
+    def settings_status(self, settings: dict[str, Any] | None = None, *, verify_sam_checkpoint: bool = False) -> dict[str, Any]:
         """Report model compatibility without constructing inference sessions."""
-        models = self.settings["models"]
+        models = (settings or self.settings)["models"]
         result: dict[str, dict[str, Any]] = {}
         validators = {
             "target_segmentation": validate_target_profile,
@@ -177,6 +189,19 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
                 reason_code = "invalid_format"
+            if valid and key == "sam_checkpoint" and verify_sam_checkpoint:
+                expected_width = {"vit_b": 768, "vit_l": 1024, "vit_h": 1280}[models["sam_model_type"]]
+                try:
+                    torch = torch_module()
+                    checkpoint = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
+                    state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+                    patch_embed = state_dict["image_encoder.patch_embed.proj.weight"]
+                    valid = tuple(patch_embed.shape) == (expected_width, 3, 16, 16)
+                    if not valid:
+                        reason_code = "invalid_model"
+                except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+                    valid = False
+                    reason_code = "invalid_model"
             result[key] = {
                 "required": required,
                 "enabled": enabled,
@@ -204,6 +229,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             "gpus": gpus,
             "gpuDevice": models.get("gpu_device", 0),
         }
+
+    def preview_settings_status(self, update: dict[str, Any]) -> dict[str, Any]:
+        try:
+            settings = self.settings_store.validate_update(update)
+        except SettingsError as exc:
+            raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+        return self.settings_status(settings, verify_sam_checkpoint=True)
 
     @staticmethod
     def _lock_directory(directory: Path) -> Any:

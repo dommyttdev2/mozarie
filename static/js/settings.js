@@ -285,9 +285,10 @@ async function chooseSettingsModelFile(button) {
   const buttons = [...document.querySelectorAll("[data-model-picker]")];
   buttons.forEach((item) => { item.disabled = true; });
   try {
-    const data = await api("/api/model-file/pick", { method: "POST", body: JSON.stringify({ modelKey: button.dataset.modelPicker }) });
+    const input = $(`#${button.dataset.modelInput}`);
+    const data = await api("/api/model-file/pick", { method: "POST", body: JSON.stringify({ modelKey: button.dataset.modelPicker, currentPath: input.value }) });
     if (!data.cancelled && data.path) {
-      $(`#${button.dataset.modelInput}`).value = data.path;
+      input.value = data.path;
       if (button.dataset.modelPicker === "sam_checkpoint") syncSamTypeFromPath(data.path);
     }
   } catch (error) {
@@ -300,7 +301,7 @@ async function refreshSettingsStatus() {
   const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
   button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");
   try {
-    const data = await api("/api/settings");
+    const data = await api("/api/settings/status", { method: "POST", body: JSON.stringify(settingsPayload()) });
     renderSettingsStatus(data.status);
     result.textContent = t("settings.statusChecked");
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }

@@ -126,7 +126,7 @@ class JobsMixin:
         remove_after_save: bool = False,
     ) -> None:
         with self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("別の処理が進行中です。")
             if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
                 raise ClientError("画像一覧が更新されたため、もう一度実行してください。")

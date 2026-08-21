@@ -137,8 +137,8 @@ class MozarieTests(unittest.TestCase):
                 run.call_args.kwargs["env"]["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"],
                 state.settings["saving"]["default_output_directory"],
             )
-        self.assertTrue(state.output_picker_lock.acquire(blocking=False))
-        state.output_picker_lock.release()
+        self.assertTrue(state.native_picker_lock.acquire(blocking=False))
+        state.native_picker_lock.release()
         self.assertTrue(state.import_lock.acquire(blocking=False))
         state.import_lock.release()
 
@@ -159,12 +159,16 @@ class MozarieTests(unittest.TestCase):
             selected = root / "model.onnx"; selected.touch()
             completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
             with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), patch.object(http_module.subprocess, "run", return_value=completed) as run:
-                self.assertEqual(http_module._pick_model_file("target_segmentation", state), str(selected.resolve()))
+                self.assertEqual(http_module._pick_model_file("target_segmentation", state, str(selected)), str(selected.resolve()))
+                picker_kwargs = run.call_args.kwargs
+                command = run.call_args.args[0]
                 with self.assertRaisesRegex(ClientError, "正しくありません"):
                     http_module._pick_model_file("sam_checkpoint", state)
-            command = run.call_args.args[0]
-            self.assertIn("OpenFileDialog", base64.b64decode(command[-1]).decode("utf-16le"))
-            self.assertFalse(run.call_args.kwargs["shell"])
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertIn("OpenFileDialog", script)
+            self.assertIn("RestoreDirectory", script)
+            self.assertFalse(picker_kwargs["shell"])
+            self.assertEqual(picker_kwargs["env"]["MOZARIE_MODEL_INITIAL_DIRECTORY"], str(root))
             self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
             state.native_picker_lock.acquire()
             try:
@@ -182,6 +186,160 @@ class MozarieTests(unittest.TestCase):
         finally:
             for acquired_one in acquired:
                 if acquired_one: state.import_staging_gate.release()
+
+    def test_model_file_picker_releases_its_lock_after_cancel_and_bad_results(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            cases = [
+                (types.SimpleNamespace(returncode=0, stdout=b""), None),
+                (types.SimpleNamespace(returncode=1, stdout=b""), "model_picker_failed"),
+                (types.SimpleNamespace(returncode=0, stdout=b"not-base64"), "model_picker_invalid"),
+            ]
+            for completed, error_code in cases:
+                with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
+                     patch.object(http_module.subprocess, "run", return_value=completed):
+                    if error_code is None:
+                        self.assertIsNone(http_module._pick_model_file("target_segmentation", state))
+                    else:
+                        with self.assertRaises(ClientError) as raised:
+                            http_module._pick_model_file("target_segmentation", state)
+                        self.assertEqual(raised.exception.error_code, error_code)
+                self.assertTrue(state.native_picker_lock.acquire(blocking=False))
+                state.native_picker_lock.release()
+
+    def test_settings_status_preview_does_not_save_or_replace_settings(self):
+        state = self.new_state()
+        original = copy.deepcopy(state.settings)
+        preview = copy.deepcopy(state.settings)
+        preview["models"]["target_segmentation"] = "unsaved.onnx"
+        status = {"models": {"target_segmentation": {"valid": False, "reasonCode": "missing"}}}
+        with patch.object(state.settings_store, "validate_update", return_value=preview) as validate, \
+             patch.object(state.settings_store, "save") as save, \
+             patch.object(state, "settings_status", return_value=status) as settings_status:
+            self.assertEqual(state.preview_settings_status(preview), status)
+        validate.assert_called_once_with(preview)
+        settings_status.assert_called_once_with(preview, verify_sam_checkpoint=True)
+        save.assert_not_called()
+        self.assertEqual(state.settings, original)
+
+    def test_settings_status_checks_sam_patch_embed_shape_only_when_requested(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sam_vit_b.pth"
+            torch.save({"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}, checkpoint)
+            settings = copy.deepcopy(state.settings)
+            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+            with patch.object(torch, "load", wraps=torch.load) as load:
+                self.assertTrue(state.settings_status(settings)["models"]["sam_checkpoint"]["valid"])
+                load.assert_not_called()
+            self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
+            settings["models"]["sam_model_type"] = "vit_l"
+            mismatch = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
+            self.assertFalse(mismatch["valid"])
+            self.assertEqual(mismatch["reasonCode"], "invalid_model")
+
+    def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        source = state.cache_dir.parent / "source.png"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), "white").save(source)
+        record = self._record(source, 8, 8)
+        state.root = source.parent
+        state.images = {record.image_id: record}
+        state.order = [record.image_id]
+        state.candidates = {record.image_id: []}
+        state.candidate_revisions = {record.image_id: 0}
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        entered = threading.Event(); release = threading.Event(); result = {}
+        staged = state.cache_dir / "pending.upload.tmp"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+
+        def read_body(_handler):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            _handler.rfile.read(1)
+            staged.write_bytes(b"x")
+            return staged
+
+        def upload():
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                connection.request("POST", "/api/import/file", b"x", {
+                    "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
+                    "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
+                    "X-Mozarie-Token": state.session_token, "Origin": origin,
+                })
+                response = connection.getresponse(); result["status"] = response.status; response.read()
+            finally:
+                connection.close()
+
+        try:
+            with patch.object(http_module, "STATE", state), \
+                 patch.object(MosaicHandler, "_read_binary_body_to_file", read_body), \
+                 patch.object(state, "import_image_file_for_api", return_value=([], [])):
+                upload_thread = threading.Thread(target=upload)
+                upload_thread.start()
+                self.assertTrue(entered.wait(3))
+                self.assertEqual(state.import_transfer_count, 1)
+                mutations = [
+                    ("/api/catalog/clear", {}),
+                    ("/api/folder", {"path": str(source.parent)}),
+                    ("/api/settings", state.settings),
+                    ("/api/detect", {"imageIds": [record.image_id], "confidence": 0.5, "parallelism": 1}),
+                ]
+                for path, payload in mutations:
+                    mutation = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        mutation.request("POST", path, json.dumps(payload).encode("utf-8"), {
+                            "Content-Type": "application/json", "X-Mozarie-Token": state.session_token, "Origin": origin,
+                        })
+                        response = mutation.getresponse(); response.read()
+                        self.assertEqual(response.status, 400, path)
+                    finally:
+                        mutation.close()
+                release.set(); upload_thread.join(5)
+                self.assertFalse(upload_thread.is_alive())
+                self.assertEqual(result["status"], 200)
+                self.assertEqual(state.import_transfer_count, 0)
+                self.assertFalse(staged.exists())
+        finally:
+            release.set()
+            httpd.shutdown(); httpd.server_close()
+
+    def test_rejected_import_transfer_closes_the_unread_request_connection(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", total=1)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(http_module, "STATE", state), patch.object(MosaicHandler, "_read_binary_body_to_file") as read_body:
+                connection.request("POST", "/api/import/file", b"unread", {
+                    "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
+                    "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
+                    "X-Mozarie-Token": state.session_token, "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse(); response.read()
+            self.assertEqual(response.status, 400)
+            self.assertEqual(response.getheader("Connection"), "close")
+            read_body.assert_not_called()
+        finally:
+            connection.close()
+            httpd.shutdown(); httpd.server_close()
 
     def test_output_directory_picker_allows_folder_reload_while_open(self):
         state = self.new_state()

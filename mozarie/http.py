@@ -10,7 +10,7 @@ def _pick_output_directory(state: StudioState = STATE) -> str | None:
     try:
         with state.lock:
             default_output_directory = state.settings["saving"]["default_output_directory"]
-            if state.importing_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            if state.importing_count or state.import_transfer_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
                 raise ClientError("処理中は保存先を変更できません。")
         system_root = Path(os.environ.get("SystemRoot", r"C:\\Windows"))
         executable = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
@@ -60,7 +60,7 @@ _MODEL_PICKER_SUFFIXES = {
 }
 
 
-def _pick_model_file(model_key: str, state: StudioState = STATE) -> str | None:
+def _pick_model_file(model_key: str, state: StudioState = STATE, current_path: str = "") -> str | None:
     suffixes = _MODEL_PICKER_SUFFIXES.get(model_key)
     if suffixes is None:
         raise ClientError("選択するモデルの種類が正しくありません。", "model_picker_invalid")
@@ -68,7 +68,7 @@ def _pick_model_file(model_key: str, state: StudioState = STATE) -> str | None:
         raise ClientError("ファイルの選択を開いています。", "model_picker_busy")
     try:
         with state.lock:
-            if state.importing_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            if state.importing_count or state.import_transfer_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
                 raise ClientError("処理中はモデルを選択できません。", "job_running")
         executable = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         if not executable.is_file():
@@ -80,16 +80,23 @@ $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Filter = 'Model files ({pattern})|{pattern}'
 $dialog.CheckFileExists = $true
 $dialog.Multiselect = $false
+$dialog.RestoreDirectory = $true
+$initial = $env:MOZARIE_MODEL_INITIAL_DIRECTORY
+if ($initial -and [System.IO.Directory]::Exists($initial)) {{ $dialog.InitialDirectory = $initial }}
 if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {{ exit 0 }}
 $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.FileName)
 [Console]::Out.Write([Convert]::ToBase64String($bytes))
 """
         encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        picker_environment = os.environ.copy()
+        candidate = Path(current_path).expanduser() if isinstance(current_path, str) and current_path else None
+        if candidate is not None and candidate.is_absolute() and candidate.parent.is_dir():
+            picker_environment["MOZARIE_MODEL_INITIAL_DIRECTORY"] = str(candidate.parent)
         try:
             completed = subprocess.run(
                 [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
                 stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=picker_environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ClientError("モデルファイルの選択を開けませんでした。", "model_picker_failed") from exc
@@ -213,19 +220,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
-                with STATE.import_staging_gate:
-                    staged_path = self._read_binary_body_to_file()
-                    try:
-                        _images, imported = STATE.import_image_file_for_api(
-                            staged_path,
-                            name=name,
-                            relative_path=relative_path,
-                            client_key=client_key,
-                            include_images=False,
-                        )
-                    finally:
-                        staged_path.unlink(missing_ok=True)
-                self._json({"imported": imported})
+                try:
+                    STATE.begin_import_transfer()
+                except ClientError as exc:
+                    self._reject_unread_request(exc)
+                try:
+                    with STATE.import_staging_gate:
+                        staged_path = self._read_binary_body_to_file()
+                        try:
+                            _images, imported = STATE.import_image_file_for_api(
+                                staged_path,
+                                name=name,
+                                relative_path=relative_path,
+                                client_key=client_key,
+                                include_images=False,
+                            )
+                        finally:
+                            staged_path.unlink(missing_ok=True)
+                    self._json({"imported": imported})
+                finally:
+                    STATE.end_import_transfer()
                 return
             self._require_json_request()
             payload = self._read_json_body()
@@ -263,6 +277,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     response["status"] = STATE.settings_status()
                 self._json(response)
+            elif path == "/api/settings/status":
+                self._json({"status": STATE.preview_settings_status(payload)})
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 response = {"settings": settings, "version": _local_version()}
@@ -273,7 +289,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 selected = _pick_output_directory()
                 self._json({"path": selected} if selected else {"cancelled": True})
             elif path == "/api/model-file/pick":
-                selected = _pick_model_file(str(payload.get("modelKey", "")))
+                selected = _pick_model_file(str(payload.get("modelKey", "")), current_path=str(payload.get("currentPath", "")))
                 self._json({"path": selected} if selected else {"cancelled": True})
             elif path == "/api/update/start":
                 self._json({"ok": True})
