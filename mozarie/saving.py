@@ -286,6 +286,7 @@ class SavingMixin:
                     if source_action == "overwrite":
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
+                        record.asset_revision = record_snapshot.asset_revision + 1
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -368,6 +369,7 @@ class SavingMixin:
                         if not copy_to_default:
                             record.mtime_ns = output_stat.st_mtime_ns
                             record.size_bytes = output_stat.st_size
+                            record.asset_revision += 1
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)

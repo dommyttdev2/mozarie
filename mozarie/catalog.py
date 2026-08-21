@@ -667,7 +667,7 @@ class CatalogMixin:
     @staticmethod
     def asset_version(record: ImageRecord) -> str:
         """The inexpensive HTTP version based on the catalogued file stat."""
-        return f"{record.mtime_ns}-{record.size_bytes}"
+        return f"{record.mtime_ns}-{record.size_bytes}-{record.asset_revision}"
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])

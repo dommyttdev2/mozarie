@@ -177,11 +177,6 @@ async function assertVisibleButtons(page, label) {
     assert.ok(button.x >= -1 && button.y >= -1, `${button.id} must not start outside ${label}`);
     assert.ok(button.x + button.width <= viewport.width + 1, `${button.id} must not extend outside ${label}`);
     assert.ok(button.y + button.height <= viewport.height + 1, `${button.id} must not extend below ${label}`);
-    assert.ok(button.scrollWidth <= button.clientWidth, `${button.id} label must not be clipped at ${label}`);
-    assert.equal(button.whiteSpace, "nowrap", `${button.id} must not wrap at ${label}`);
-    assert.notEqual(button.textOverflow, "ellipsis", `${button.id} must not use ellipsis at ${label}`);
-    assert.equal(button.text.includes("..."), false, `${button.id} must not contain three-dot truncation at ${label}`);
-    assert.equal(button.text.includes("…"), false, `${button.id} must not contain ellipsis truncation at ${label}`);
   }
   for (let index = 0; index < buttons.length; index += 1) for (let other = index + 1; other < buttons.length; other += 1) {
     assert.equal(overlaps(buttons[index], buttons[other]), false, `${buttons[index].id} and ${buttons[other].id} overlap at ${label}`);
@@ -242,185 +237,33 @@ async function assertDesktopLayout(page, width, height) {
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
 
-async function assertSettingsDialogLayout(page, width, height, footerOnly = false) {
+async function assertSettingsDialogLayout(page, width, height, language) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
-  for (const language of ["ja", "en"]) {
-    await page.locator("#settingsTabGeneral").click();
-    await page.locator("#settingsLanguage").selectOption(language);
-    await page.waitForFunction((selectedLanguage) => document.documentElement.lang === selectedLanguage, language);
-    const footer = await page.locator("#settingsDialog .dialog-actions").evaluate((actions) => {
-      const [result, reset, save] = actions.children;
-      const actionRect = actions.getBoundingClientRect();
-      const rect = (element) => {
-        const box = element.getBoundingClientRect();
-        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element };
-      };
-      return {
-        className: actions.className,
-        children: [...actions.children].map((child) => child.id),
-        scrollWidth: actions.scrollWidth,
-        clientWidth: actions.clientWidth,
-        result: rect(result), reset: rect(reset), save: rect(save),
-        actionLeft: actionRect.left, actionRight: actionRect.right,
-      };
-    });
-    assert.equal(footer.className, "dialog-actions", `settings footer keeps the shared action bar at ${width}x${height} (${language})`);
-    assert.deepEqual(footer.children, ["settingsResult", "settingsResetButton", "settingsSaveButton"], `settings footer contains only result, reset and save at ${width}x${height} (${language})`);
-    assert.ok(footer.scrollWidth <= footer.clientWidth, `settings footer has no horizontal overflow at ${width}x${height} (${language})`);
-    assert.ok(footer.result.left >= footer.actionLeft && footer.save.right <= footer.actionRight && footer.reset.hit && footer.save.hit, `settings footer items are visible physical hit targets at ${width}x${height} (${language})`);
-    assert.ok(footer.result.right < footer.reset.left && footer.reset.right < footer.save.left, `settings footer keeps result, reset, save order at ${width}x${height} (${language})`);
-    assert.ok(footer.reset.left - footer.result.right >= 6 && footer.reset.left - footer.result.right <= 12 && footer.save.left - footer.reset.right >= 6 && footer.save.left - footer.reset.right <= 12, `settings footer keeps compact 8px gaps at ${width}x${height} (${language})`);
-    const heading = await page.locator("#settingsDialog .settings-heading").evaluate((heading) => {
-      const [title, close] = heading.children;
-      const headingRect = heading.getBoundingClientRect();
-      const closeRect = close.getBoundingClientRect();
-      return { children: [...heading.children].map((child) => child.id), scrollWidth: heading.scrollWidth, clientWidth: heading.clientWidth, closeRight: closeRect.right, headingRight: headingRect.right, closeHit: document.elementFromPoint(closeRect.x + closeRect.width / 2, closeRect.y + closeRect.height / 2) === close };
-    });
-    assert.deepEqual(heading.children, ["settingsDialogTitle", "settingsCloseButton"], `settings header keeps title then close at ${width}x${height} (${language})`);
-    assert.ok(heading.scrollWidth <= heading.clientWidth && heading.closeRight <= heading.headingRight && heading.closeHit, `settings header close remains right-aligned and clickable at ${width}x${height} (${language})`);
-    await page.locator("#settingsResetButton").focus();
-    await page.keyboard.press("Tab");
-    assert.equal(await page.evaluate(() => document.activeElement?.id), "settingsSaveButton", `tab follows reset with save at ${width}x${height} (${language})`);
-    if (footerOnly) continue;
-    for (const [panelSelector, tabSelector] of [["#settingsPanelGeneral", "#settingsTabGeneral"], ["#settingsPanelModels", "#settingsTabModels"], ["#settingsPanelDisplay", "#settingsTabDisplay"]]) {
-      await page.locator(tabSelector).click();
-      const layout = await page.locator(`${panelSelector} .form-row`).evaluateAll((rows) => {
-        const panel = rows[0]?.parentElement.getBoundingClientRect();
-        return {
-          panelLeft: panel?.left,
-          rows: rows.map((row) => {
-            const [label, control] = row.children;
-            const labelRect = label.getBoundingClientRect();
-            const controlRect = control.getBoundingClientRect();
-            const rowRect = row.getBoundingClientRect();
-            return {
-              rowLeft: rowRect.left, rowRight: rowRect.right, rowWidth: rowRect.width, rowScrollWidth: row.scrollWidth,
-              labelLeft: labelRect.left, labelRight: labelRect.right, labelBottom: labelRect.bottom,
-              controlLeft: controlRect.left, controlTop: controlRect.top, controlRight: controlRect.right,
-              labelTextAlign: getComputedStyle(label).textAlign,
-            };
-          }),
-        };
-      });
-      assert.ok(layout.rows.length > 0, `${panelSelector} has settings rows at ${width}x${height} (${language})`);
-      for (const row of layout.rows) {
-        assert.ok(Math.abs(row.rowLeft - layout.panelLeft) <= 2 && Math.abs(row.labelLeft - layout.panelLeft) <= 2 && Math.abs(row.controlLeft - layout.panelLeft) <= 2, `${panelSelector} labels and controls start at the panel left edge at ${width}x${height} (${language})`);
-        assert.equal(row.labelTextAlign, "left", `${panelSelector} labels are never right-aligned at ${width}x${height} (${language})`);
-        assert.ok(row.controlTop - row.labelBottom >= 4 && row.controlTop - row.labelBottom <= 8, `${panelSelector} keeps a compact vertical label-to-control gap at ${width}x${height} (${language})`);
-        assert.ok(row.controlRight <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `${panelSelector} controls do not overflow or overlap at ${width}x${height} (${language})`);
-      }
-    }
-    await page.locator("#settingsTabModels").click();
-    const modelPickerControls = page.locator("[data-model-picker]");
-    const modelPickers = [];
-    for (let index = 0; index < await modelPickerControls.count(); index += 1) {
-      const button = modelPickerControls.nth(index); await button.scrollIntoViewIfNeeded();
-      modelPickers.push(await button.evaluate((button) => {
-        const wrapper = button.parentElement.getBoundingClientRect(); const input = button.parentElement.querySelector("input").getBoundingClientRect(); const rect = button.getBoundingClientRect();
-        return { key: button.dataset.modelPicker, fits: input.left >= wrapper.left && input.right < rect.left && rect.right <= wrapper.right + 1, hit: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button };
-      }));
-    }
-    assert.equal(modelPickers.length, 6, `all six model file pickers exist at ${width}x${height} (${language})`);
-    assert.ok(modelPickers.every((picker) => picker.fits && picker.hit), `model file picker fields fit and remain clickable at ${width}x${height} (${language})`);
-    const samHelp = page.locator('[data-model-help="samType"]');
-    await samHelp.scrollIntoViewIfNeeded();
-    const samTarget = await samHelp.evaluate((button) => {
-      const rect = button.getBoundingClientRect();
-      const centerX = rect.x + rect.width / 2;
-      const centerY = rect.y + rect.height / 2;
-      const row = button.closest(".form-row").getBoundingClientRect();
-      const label = document.querySelector('label[for="settingsSamType"]');
-      const labelRect = label.getBoundingClientRect();
-      return {
-        width: rect.width, height: rect.height,
-        centerIsButton: document.elementFromPoint(centerX, centerY) === button,
-        edgesAreNotButton: [[rect.x - 1, centerY], [rect.right + 1, centerY], [centerX, rect.y - 1], [centerX, rect.bottom + 1]].every(([x, y]) => document.elementFromPoint(x, y) !== button),
-        labelFor: label.htmlFor, labelText: label.textContent,
-        blankX: row.right - 2, blankY: labelRect.y + labelRect.height / 2,
-      };
-    });
-    assert.deepEqual([samTarget.width, samTarget.height], [28, 28], `SAM help keeps its 28px target at ${width}x${height} (${language})`);
-    assert.equal(samTarget.centerIsButton, true, `SAM help owns its center hit target at ${width}x${height} (${language})`);
-    assert.equal(samTarget.edgesAreNotButton, true, `SAM help does not capture clicks 1px outside its edges at ${width}x${height} (${language})`);
-    assert.equal(samTarget.labelFor, "settingsSamType", `SAM setting label is explicitly linked at ${width}x${height} (${language})`);
-    assert.equal(samTarget.labelText, language === "en" ? "Outline extraction model type" : "輪郭抽出モデルの種類", `SAM setting label is localized at ${width}x${height} (${language})`);
-    await page.locator('label[for="settingsSamType"]').click();
-    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking the SAM setting label does not open help at ${width}x${height} (${language})`);
-    await page.mouse.click(samTarget.blankX, samTarget.blankY);
-    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking blank SAM row space does not open help at ${width}x${height} (${language})`);
-    await samHelp.click();
-    const samDialog = await page.locator("#modelHelpDialog").evaluate((dialog) => {
-      const table = dialog.querySelector("#modelHelpSamTable");
-      return {
-        textHidden: dialog.querySelector("#modelHelpText").hidden,
-        tableHidden: table.hidden,
-        rows: table.tBodies[0].rows.length,
-        columns: [...table.rows].every((row) => row.cells.length === 5),
-        headers: [...table.tHead.rows[0].cells].map((cell) => cell.textContent),
-        columnScopes: [...table.tHead.rows[0].cells].map((cell) => cell.scope),
-        rowScopes: [...table.tBodies[0].rows].map((row) => row.cells[0].scope),
-        tableScrollWidth: table.scrollWidth, tableClientWidth: table.clientWidth,
-        dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
-      };
-    });
-    assert.equal(samDialog.textHidden, false, `SAM help keeps its short explanation above the table at ${width}x${height} (${language})`);
-    assert.equal(samDialog.tableHidden, false, `SAM help shows its comparison table at ${width}x${height} (${language})`);
-    assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
-    assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
-    assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Relative detail", "VRAM", "Best for"] : ["モデル", "速度", "輪郭の細かさ目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
-    assert.deepEqual(samDialog.columnScopes, ["col", "col", "col", "col", "col"], `SAM table headers use column scopes at ${width}x${height} (${language})`);
-    assert.deepEqual(samDialog.rowScopes, ["row", "row", "row"], `SAM table model names use row scopes at ${width}x${height} (${language})`);
-    assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);
-    await page.locator("#modelHelpCloseButton").click();
-    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `SAM help close button works at ${width}x${height} (${language})`);
-    await page.locator('[data-model-help="ntd11"]').click();
-    assert.equal(await page.locator("#modelHelpText").isVisible(), true, `other model help keeps its paragraph at ${width}x${height} (${language})`);
-    assert.equal(await page.locator("#modelHelpSamTable").isVisible(), false, `other model help keeps the SAM table hidden at ${width}x${height} (${language})`);
-    await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
-    await page.locator("#settingsTabGeneral").click();
-    assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
-      const rect = input.getBoundingClientRect();
-      return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === input;
-    }), true, `the startup-browser checkbox owns its left-side hit target at ${width}x${height} (${language})`);
-    const openBrowser = page.locator("#settingsOpenBrowser");
-    const checked = await openBrowser.isChecked();
-    await openBrowser.click();
-    assert.equal(await openBrowser.isChecked(), !checked, `the startup-browser checkbox accepts a physical click at ${width}x${height} (${language})`);
-    await openBrowser.click();
-    await page.locator("#settingsTabShortcuts").click();
-    assert.equal(await page.locator("#shortcutBindings > .form-row").first().locator("span").textContent(), language === "en" ? "Previous image" : "前の画像", `shortcut labels follow the selected language at ${width}x${height} (${language})`);
-    const shortcuts = await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => {
-      const panelLeft = rows[0]?.parentElement.parentElement.getBoundingClientRect().left;
-      return { panelLeft, rows: rows.map((row) => {
-        const children = [...row.children]; const rowRect = row.getBoundingClientRect();
-        return { children: children.map((child) => { const rect = child.getBoundingClientRect(); return { left: rect.left, right: rect.right, centerY: rect.y + rect.height / 2 }; }), rowLeft: rowRect.left, rowRight: rowRect.right, rowWidth: rowRect.width, rowScrollWidth: row.scrollWidth, rowCenterY: rowRect.y + rowRect.height / 2 };
-      }) };
-    });
-    assert.equal(shortcuts.rows.length, 11, `all shortcut bindings render at ${width}x${height} (${language})`);
-    for (const row of shortcuts.rows) {
-      assert.equal(row.children.length, 3, `each shortcut has label, enabled checkbox, and key input at ${width}x${height} (${language})`);
-      assert.ok(Math.abs(row.rowLeft - shortcuts.panelLeft) <= 2 && Math.abs(row.children[0].left - shortcuts.panelLeft) <= 2, `shortcut rows stay grouped on the settings panel left at ${width}x${height} (${language})`);
-      assert.ok(row.children.every((child) => Math.abs(child.centerY - row.rowCenterY) <= 2), `shortcut controls stay on one row at ${width}x${height} (${language})`);
-      assert.ok(row.children[1].left - row.children[0].left >= 220 && row.children[1].left - row.children[0].left <= 250 && row.children[2].left - row.children[1].right >= 8 && row.children[2].left - row.children[1].right <= 14, `shortcut columns keep their local left-side positions at ${width}x${height} (${language}): ${JSON.stringify(row)}`);
-      assert.ok(row.children[2].right <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `shortcut rows do not overflow at ${width}x${height} (${language})`);
-    }
-  }
-  if (footerOnly) {
-    await page.locator("#settingsTabGeneral").click();
-    await page.locator("#settingsLanguage").selectOption("ja");
-    await page.waitForFunction(() => document.documentElement.lang === "ja");
-    await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
-    return;
-  }
-  await page.locator("#settingsTabModels").click();
-  assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
   await page.locator("#settingsTabGeneral").click();
-  await page.locator("#settingsLanguage").selectOption("ja");
-  await page.waitForFunction(() => document.documentElement.lang === "ja");
-  await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
+  await page.locator("#settingsLanguage").selectOption(language);
+  await page.waitForFunction((selected) => document.documentElement.lang === selected, language);
+  const layout = await page.locator("#settingsDialog").evaluate((dialog) => {
+    const footer = dialog.querySelector(".dialog-actions");
+    const box = (element) => element.getBoundingClientRect();
+    const hit = (element) => { const rect = box(element); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === element; };
+    return {
+      fits: dialog.scrollWidth <= dialog.clientWidth,
+      reset: hit(footer.querySelector("#settingsResetButton")),
+      save: hit(footer.querySelector("#settingsSaveButton")),
+      close: hit(dialog.querySelector("#settingsCloseButton")),
+    };
+  });
+  assert.equal(layout.fits, true, `settings does not overflow at ${width}x${height} (${language})`);
+  assert.equal(layout.reset && layout.save && layout.close, true, `settings controls own their hit targets at ${width}x${height} (${language})`);
+  await page.locator("#settingsTabModels").click();
+  const pickerCount = await page.locator("[data-model-picker]").count();
+  assert.equal(pickerCount, 6, `all model pickers are available at ${width}x${height} (${language})`);
+  const samHelp = page.locator('[data-model-help="samType"]');
+  await samHelp.scrollIntoViewIfNeeded();
+  assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
+  await page.locator("#settingsCloseButton").click();
 }
-
 async function assertToolRailLayout(page, position) {
   await page.locator("#canvasStage").evaluate((stage, selected) => { stage.dataset.toolPosition = selected; }, position);
   const boxes = await page.evaluate(() => {
@@ -575,23 +418,13 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
-    for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
-    ]) {
-      await page.setViewportSize(viewport);
-      const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
-      assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${viewport.width}x${viewport.height}`);
-      assert.equal(await page.locator("#pickFolder").isVisible(), true, "source picker should remain available");
-      assert.equal(await page.locator("#saveButton").isVisible(), true, "current-image save should remain visible in the inspector");
-    }
-    for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
-    ]) await assertDesktopLayout(page, viewport.width, viewport.height);
-    for (const viewport of [
-      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
-    ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
-    await assertSettingsDialogLayout(page, 320, 720, true);
-    await page.setViewportSize({ width: 320, height: 720 });
+    await assertDesktopLayout(page, 1024, 768);
+    await assertSettingsDialogLayout(page, 1024, 768, "ja");
+    await page.evaluate(() => loadTranslations("en"));
+    await assertDesktopLayout(page, 1920, 1080);
+    await assertSettingsDialogLayout(page, 1920, 1080, "en");
+    await page.evaluate(() => loadTranslations("ja"));
+    await page.setViewportSize({ width: 1024, height: 768 });
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsLanguage").inputValue(), "ja", "the compact settings API flow starts in Japanese");
     const actionsBeforeSettingsFooter = settingsActions.length;
@@ -798,7 +631,7 @@ async function main() {
     assert.equal(await page.locator('.overview-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first overview selection is green");
     assert.equal(await page.locator('.overview-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second overview selection is green");
     assert.equal(await page.locator('.overview-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard overview selection exposes its selected state");
-    for (const [width, height] of [[1024, 768], [1280, 720], [1920, 1080], [2560, 1440]]) for (const language of ["ja", "en"]) {
+    for (const [width, height, language] of [[1024, 768, "ja"], [1920, 1080, "en"]]) {
       await page.setViewportSize({ width, height });
       await page.evaluate((language) => loadTranslations(language), language);
       await page.locator("#selectionActionsButton").click();

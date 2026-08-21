@@ -167,6 +167,7 @@ class ImageRecord:
     mtime_ns: int
     size_bytes: int = 0
     source_kind: str = "filesystem"
+    asset_revision: int = 0
 
 
 @dataclass(frozen=True)
