@@ -4,6 +4,37 @@ from .image_io import *
 from typing import BinaryIO
 
 
+def _pick_output_directory() -> str | None:
+    script = """
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Mozarie の保存先を選択'
+if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
+[Console]::Out.Write([Convert]::ToBase64String($bytes))
+"""
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True, check=False, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ClientError("保存先の選択を開けませんでした。") from exc
+    if completed.returncode:
+        raise ClientError("保存先の選択を開けませんでした。")
+    encoded = completed.stdout.strip()
+    if not encoded:
+        return None
+    try:
+        selected = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ClientError("保存先の選択結果が正しくありません。") from exc
+    if not Path(selected).is_absolute():
+        raise ClientError("保存先は絶対パスで選択してください。")
+    return str(Path(selected))
+
+
 class MosaicHandler(BaseHTTPRequestHandler):
     server_version = "Mozarie/1.0"
     protocol_version = "HTTP/1.1"
@@ -163,6 +194,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     response["status"] = STATE.settings_status()
                 self._json(response)
+            elif path == "/api/output-directory/pick":
+                selected = _pick_output_directory()
+                self._json({"path": selected} if selected else {"cancelled": True})
             elif path == "/api/update/start":
                 self._json({"ok": True})
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
@@ -178,20 +212,27 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 )
                 self._json({"entries": entries})
             elif path == "/api/save/render":
+                copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
                 output, record, revision, save_token = STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     _read_mosaic_divisor(payload.get("divisor")),
                     payload.get("draft"),
+                    copy_to_default=copy_to_default,
+                    suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                 )
-                self._binary(
-                    output,
-                    mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
-                    headers={
-                        "X-Mozarie-Revision": str(revision),
-                        "X-Mozarie-Save-Token": save_token,
-                    },
-                )
+                if copy_to_default:
+                    token = STATE.browser_save_tokens.get(save_token)
+                    self._json({"output": str(token.output_path), "candidateRevision": revision, "saveToken": save_token})
+                else:
+                    self._binary(
+                        output,
+                        mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
+                        headers={
+                            "X-Mozarie-Revision": str(revision),
+                            "X-Mozarie-Save-Token": save_token,
+                        },
+                    )
             elif path == "/api/save/commit":
                 self._json(STATE.commit_browser_save(
                     str(payload.get("imageId", "")),

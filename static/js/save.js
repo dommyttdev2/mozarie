@@ -38,10 +38,7 @@ function syncApplyMode() {
   $("#applyOutputDirectoryRow").hidden = !copying;
   $("#applySuffix").disabled = state.applyRunning;
   $("#chooseOutputDirectoryButton").disabled = state.applyRunning || state.saveStarting;
-  const outputDirectory = state.outputDirectoryHandle;
-  $("#applyOutputDirectoryStatus").textContent = outputDirectory
-    ? t("apply.outputDirectorySelected", { name: outputDirectory.name })
-    : t("apply.outputDirectorySelected", { name: "Mozarie/output" });
+  $("#applyOutputDirectoryStatus").value = state.settings?.saving?.default_output_directory || "";
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
@@ -87,82 +84,28 @@ function draftPayload(imageIds) {
   return drafts;
 }
 
-const OUTPUT_HANDLE_DB = "mozarie-output";
-const OUTPUT_HANDLE_STORE = "handles";
-const OUTPUT_HANDLE_KEY = "default";
-
-function outputHandleDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(OUTPUT_HANDLE_DB, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(OUTPUT_HANDLE_STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function readOutputHandle() {
-  const database = await outputHandleDatabase();
-  return new Promise((resolve, reject) => {
-    const request = database.transaction(OUTPUT_HANDLE_STORE, "readonly").objectStore(OUTPUT_HANDLE_STORE).get(OUTPUT_HANDLE_KEY);
-    request.onsuccess = () => { database.close(); resolve(request.result || null); };
-    request.onerror = () => { database.close(); reject(request.error); };
-  });
-}
-
-async function storeOutputHandle(handle) {
-  const database = await outputHandleDatabase();
-  return new Promise((resolve, reject) => {
-    const request = database.transaction(OUTPUT_HANDLE_STORE, "readwrite").objectStore(OUTPUT_HANDLE_STORE).put(handle, OUTPUT_HANDLE_KEY);
-    request.onsuccess = () => { database.close(); resolve(); };
-    request.onerror = () => { database.close(); reject(request.error); };
-  });
-}
-
-async function ensureOutputHandlePermission(handle) {
-  let permission = await handle.queryPermission({ mode: "readwrite" });
-  if (permission !== "granted") permission = await handle.requestPermission({ mode: "readwrite" });
-  if (permission !== "granted") throw new Error(t("error.directoryPermissionDenied"));
-  return handle;
-}
-
-function renderOutputHandle() {
-  const label = state.outputDirectoryHandle?.name || "Mozarie/output";
-  $("#settingsDefaultOutputDirectory").textContent = label;
+function renderOutputDirectory() {
+  const directory = state.settings?.saving?.default_output_directory || "";
+  $("#settingsDefaultOutputDirectory").value = directory;
+  $("#applyOutputDirectoryStatus").value = directory;
   syncApplyMode();
 }
 
-async function selectOutputDirectory() {
-  if (typeof window.showDirectoryPicker !== "function") throw new Error(t("error.directoryPickerUnsupported"));
-  const handle = await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" });
-  await ensureOutputHandlePermission(handle);
-  await storeOutputHandle(handle);
-  state.outputDirectoryHandle = handle;
-  renderOutputHandle();
-  return handle;
-}
-
-async function outputDirectoryForSave() {
-  if (state.outputDirectoryHandle) return ensureOutputHandlePermission(state.outputDirectoryHandle);
-  return selectOutputDirectory();
-}
-
 async function pickOutputDirectory() {
-  return selectOutputDirectory();
+  const selected = await api("/api/output-directory/pick", { method: "POST", body: JSON.stringify({}) });
+  return selected.path || null;
 }
 
 async function chooseOutputDirectory() {
   if (state.applyRunning || state.saveStarting) return;
-  try { await selectOutputDirectory(); setApplyResult(""); }
-  catch (error) { if (error?.name !== "AbortError") setApplyResult(error.message, true); }
-}
-
-async function restoreOutputDirectory() {
   try {
-    const handle = await readOutputHandle();
-    if (!handle || await handle.queryPermission({ mode: "readwrite" }) !== "granted") return;
-    state.outputDirectoryHandle = handle;
-    renderOutputHandle();
-  } catch { /* The save picker remains available even when browser storage is unavailable. */ }
+    const directory = await pickOutputDirectory();
+    if (!directory) return;
+    const settings = await api("/api/settings?status=0", {
+      method: "POST", body: JSON.stringify({ saving: { ...state.settings.saving, default_output_directory: directory } }),
+    });
+    setSettingsForm(settings.settings); setApplyResult("");
+  } catch (error) { setApplyResult(error.message, true); }
 }
 
 async function waitForBrowserSave(save) {
@@ -317,59 +260,13 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   updateActionButtons();
 }
 
-async function uniqueOutputFileHandle(rootHandle, relativePath, suffix) {
-  const parts = String(relativePath).split("/").filter(Boolean);
-  const sourceName = parts.pop();
-  const dot = sourceName.lastIndexOf(".");
-  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
-  const extension = dot > 0 ? sourceName.slice(dot) : "";
-  let directory = rootHandle;
-  for (const part of parts) directory = await directory.getDirectoryHandle(part, { create: true });
-  for (let index = 1; index < 10000; index += 1) {
-    const name = `${stem}${suffix}${index === 1 ? "" : `_${index}`}${extension}`;
-    try {
-      await directory.getFileHandle(name);
-    } catch (error) {
-      if (error?.name !== "NotFoundError") throw error;
-      return { directory, name, fileHandle: await directory.getFileHandle(name, { create: true }) };
-    }
-  }
-  throw new Error(t("error.outputNameExhausted"));
-}
-
-async function reserveCopyOutputs(rootHandle, entries, suffix) {
-  // Handle creation is intentionally ordered.  It reserves every name before
-  // parallel rendering starts, preventing two workers from selecting one path.
-  for (const entry of entries) {
-    entry.outputWritten = false;
-    entry.outputHandle = await uniqueOutputFileHandle(rootHandle, entry.relativePath, suffix);
-  }
-}
-
-async function releaseUnusedCopyOutputs(entries) {
-  await Promise.all(entries.filter((entry) => entry.outputHandle && !entry.outputWritten && !entry.outputHandle.released).map(async (entry) => {
-    try { await entry.outputHandle.directory.removeEntry(entry.outputHandle.name); } catch { /* Best-effort reservation cleanup. */ }
-  }));
-}
-
-async function writeCopyOutput(output, bytes) {
-  const fileHandle = output.fileHandle;
-  const writable = await fileHandle.createWritable({ keepExistingData: false });
-  try { await writable.write(bytes); await writable.close(); }
-  catch (error) {
-    try { await writable.abort?.(); } catch { /* Continue with best-effort cleanup below. */ }
-    try { await output.directory.removeEntry(output.name); output.released = true; } catch { /* Preserve the original write error. */ }
-    throw error;
-  }
-}
-
-async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
+async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
   const result = await api("/api/save/prepare", {
     method: "POST",
     body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
   const save = {
-    directory, entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
+    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
     removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
     catalogEpoch: state.catalogEpoch,
   };
@@ -384,46 +281,52 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
   $("#applyCancelButton").hidden = false;
   updateActionButtons();
   try {
-    await navigator.locks.request("mozarie-output", { mode: "exclusive" }, async () => {
-      if (mode === "copy") await reserveCopyOutputs(directory, save.entries, suffix);
+    {
       const saveEntry = async (entry) => {
         showBrowserSaveProgress(save, entry);
         const draft = draftPayload([entry.imageId])[entry.imageId] || null;
-        const response = await fetch("/api/save/render", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "",
-          },
-          body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
-        });
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({}));
-          throw new Error(body.error || t("error.requestFailed"));
-        }
-        const saveToken = response.headers?.get("X-Mozarie-Save-Token") || "";
-        const bytes = await response.arrayBuffer();
         const sourceImage = state.images.find((image) => image.id === entry.imageId);
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
         if (mode === "copy") {
-          await writeCopyOutput(entry.outputHandle, bytes);
-          entry.outputWritten = true;
+          const response = await api("/api/save/render", {
+            method: "POST", body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
+              divisor: Number($("#applyDivisor").value), draft, copyToDefault: true, suffix }),
+          });
           if (deleteOriginal) {
             if (access?.fileHandle) await removeSourceHandle(access);
             sourceAction = "deleted";
           }
+          const committed = await commitBrowserSaveWithRetry({
+            imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken: response.saveToken,
+          });
+          return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else if (access?.fileHandle) {
-          await writeSourceHandle(access, bytes);
+          const binary = await fetch("/api/save/render", {
+            method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
+          });
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
+          const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
+          await writeSourceHandle(access, await binary.arrayBuffer());
           sourceAction = "overwrite";
+          const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
+          return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else if (sourceImage?.sourceKind === "filesystem") {
+          const binary = await fetch("/api/save/render", {
+            method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
+          });
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
+          const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
+          const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
+          return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else {
           throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
         }
-        const committed = await commitBrowserSaveWithRetry({
-          imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken,
-        });
+      };
+      const finishBrowserSaveEntry = (committed, entry, save, sourceAction) => {
         if (committed.cleared) {
           state.drafts.delete(entry.imageId);
           if (state.currentId === entry.imageId) {
@@ -456,14 +359,13 @@ async function runBrowserSave(directory, imageIds, suffix, deleteOriginal, mode 
       }));
       const failed = settled.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
-    });
+    }
     const cancelled = save.cancelled;
     setApplyResult(cancelled
       ? t("apply.cancelled", { completed: save.completed })
       : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed })));
   } finally {
     try {
-      if (mode === "copy") await releaseUnusedCopyOutputs(save.entries);
       let catalogCurrent = false;
       try {
         // Commits may resolve out of order; apply one authoritative catalogue
@@ -529,7 +431,7 @@ async function startApplyFromDialog(event) {
   state.saving = true;
   state.applyRunning = true;
   updateActionButtons();
-  if (copy && !state.outputDirectoryHandle) {
+  if (copy && !$("#deleteOriginal").checked) {
     try {
       await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
@@ -542,23 +444,11 @@ async function startApplyFromDialog(event) {
     setApplyResult(error.message, true);
     return finishSaveStart();
   }
-  let outputDirectory = null;
-  if (copy) {
-    try {
-      // An existing tab-scoped handle is reused. The picker only opens on the
-      // first copy save or after the user explicitly changes the destination.
-      outputDirectory = await outputDirectoryForSave();
-      if (!outputDirectory) return finishSaveStart();
-    } catch (error) {
-      setApplyResult(error.message, true);
-      return finishSaveStart();
-    }
-  }
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (state.importing) return finishSaveStart();
   try {
     state.saveStarting = false;
-    await runBrowserSave(outputDirectory, imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
+    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
   } catch (error) {
     setApplyResult(error.message, true);
     state.saving = false;

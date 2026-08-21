@@ -3621,7 +3621,8 @@ class MozarieTests(unittest.TestCase):
         self.assertNotIn("...", dictionary["gallery.saveAll"])
         self.assertNotIn("...", dictionary["gallery.clearAllMasks"])
         self.assertNotIn("...", dictionary["gallery.clearCatalog"])
-        self.assertIn('outputDirectoryForSave()', app)
+        self.assertIn('api("/api/output-directory/pick"', app)
+        self.assertNotIn('outputDirectoryForSave()', app)
         self.assertIn('chooseOutputDirectoryButton', app)
         self.assertNotIn('data-i18n="batch.more"', page)
         self.assertIn('data-i18n="batch.actions"', page)
@@ -4385,6 +4386,32 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(np.array_equal(rendered_pixels[600:616, 400:416], pixels[600:616, 400:416]))
             state.commit_browser_save(image_id, revision, token, "keep")
 
+    def test_browser_copy_render_writes_configured_unicode_destination_before_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "入力.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            state.settings["saving"]["default_output_directory"] = str(root / "出力先")
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            _output, _record, rendered_revision, token = state.render_browser_save(
+                image_id, revision, 100, None, copy_to_default=True, suffix="_モザイク",
+            )
+
+            destination = root / "出力先" / "入力_モザイク.png"
+            self.assertTrue(destination.is_file())
+            self.assertEqual(state.browser_save_tokens[token].output_path, destination)
+            self.assertEqual(len(state.candidates[image_id]), 1, "rendering a copy must not clear candidates")
+            committed = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            self.assertTrue(committed["cleared"])
+            self.assertTrue(destination.is_file())
+
     def test_browser_save_renders_then_clears_only_matching_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4664,13 +4691,17 @@ class MozarieTests(unittest.TestCase):
             source = root / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
+            state.settings["saving"]["default_output_directory"] = str(root / "output")
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
-            _output, record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
+            _output, record, rendered_revision, save_token = state.render_browser_save(
+                image_id, revision, 100, None, copy_to_default=True,
+            )
+            output_path = state.browser_save_tokens[save_token].output_path
 
             original_unlink = Path.unlink
 
@@ -4684,6 +4715,7 @@ class MozarieTests(unittest.TestCase):
                     state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
 
             self.assertTrue(source.is_file())
+            self.assertTrue(output_path.is_file())
             self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertNotIn(save_token, state.browser_save_tokens)
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):

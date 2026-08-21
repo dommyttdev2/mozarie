@@ -109,7 +109,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
   $("#settingsSaveParallelism").value = String(settings.saving?.parallelism || 2);
   $("#settingsShortcutsEnabled").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
-  renderOutputHandle();
+  renderOutputDirectory();
   setNavigationShortcutsEnabled(settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
@@ -188,7 +188,10 @@ function settingsPayload() {
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked, targets: detectionTargets(),
     },
-    saving: { parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))) },
+    saving: {
+      parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),
+      default_output_directory: $("#settingsDefaultOutputDirectory").value.trim(),
+    },
     shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload(), actions: shortcutActionsPayload() },
     confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked, candidateDelete: $("#confirmCandidateDelete").checked, candidateRoleDelete: $("#confirmCandidateRoleDelete").checked, overwriteSource: $("#confirmOverwriteSource").checked, deleteSourceAfterCopy: $("#confirmDeleteSourceAfterCopy").checked },
   };
@@ -260,7 +263,8 @@ async function resetSettings() {
 
 async function chooseSettingsOutputDirectory() {
   try {
-    await selectOutputDirectory();
+    const directory = await pickOutputDirectory();
+    if (directory) $("#settingsDefaultOutputDirectory").value = directory;
   } catch (error) {
     if (error?.name !== "AbortError") { $("#settingsResult").textContent = error.message; $("#settingsResult").classList.add("error"); }
   }

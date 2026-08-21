@@ -31,9 +31,11 @@ class SettingsStore:
 
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        if not self.local_path.is_file():
-            return defaults
-        return _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
+        settings = defaults if not self.local_path.is_file() else _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
+        saving = settings.setdefault("saving", {})
+        if not str(saving.get("default_output_directory", "")).strip():
+            saving["default_output_directory"] = str((self.defaults_path.parent.parent / "output").resolve())
+        return settings
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
         settings = validate_settings(_merge(self.load(), update))
@@ -157,7 +159,12 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
         },
-        "saving": {"parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8))},
+        "saving": {
+            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8)),
+            "default_output_directory": _validate_output_directory(
+                saving.get("default_output_directory") or str((Path(__file__).resolve().parent.parent / "output").resolve())
+            ),
+        },
         "shortcuts": {
             "enabled": _expect_bool(shortcuts.get("enabled", general.get("shortcuts_enabled", True)), "shortcuts.enabled"),
             "bindings": _validate_shortcuts(shortcuts.get("bindings", _DEFAULT_SHORTCUTS)),
@@ -168,6 +175,15 @@ def validate_settings(value: Any) -> dict[str, Any]:
             for key in ("clearMasks", "clearCatalog", "removeImage", "candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy")
         },
     }
+
+
+def _validate_output_directory(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SettingsError("saving.default_output_directory must be an absolute path")
+    path = Path(value.strip())
+    if not path.is_absolute():
+        raise SettingsError("saving.default_output_directory must be an absolute path")
+    return str(path)
 
 
 def _validate_targets(value: Any) -> list[str]:

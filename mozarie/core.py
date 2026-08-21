@@ -194,6 +194,7 @@ class BrowserSaveToken:
     catalog_generation: int
     issued_at: float
     rendered_path: Path
+    output_path: Path | None = None
 
 
 @dataclass(frozen=True)

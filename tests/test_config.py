@@ -45,7 +45,9 @@ class SettingsTests(unittest.TestCase):
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root); store.save({"general": {"language": "en"}})
             self.assertTrue((root / "config" / "local.json").is_file())
-            self.assertEqual(store.reset(), defaults)
+            reset = store.reset()
+            self.assertEqual(reset["general"], defaults["general"])
+            self.assertEqual(reset["saving"]["default_output_directory"], str((root / "output").resolve()))
             self.assertFalse((root / "config" / "local.json").exists())
 
     def test_invalid_provider_and_threshold_are_rejected(self):
@@ -77,6 +79,18 @@ class SettingsTests(unittest.TestCase):
         settings = validate_settings(legacy)
         self.assertEqual(settings["models"]["hand_segmentation"], "")
         self.assertFalse(settings["models"]["hand_segmentation_enabled"])
+        self.assertTrue(Path(settings["saving"]["default_output_directory"]).is_absolute())
+
+    def test_output_directory_must_be_an_absolute_path(self):
+        legacy = {
+            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
+            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
+            "saving": {"parallelism": 2, "default_output_directory": "relative-output"},
+        }
+        with self.assertRaises(SettingsError):
+            validate_settings(legacy)
 
     def test_legacy_shortcuts_gain_per_action_defaults(self):
         legacy = {

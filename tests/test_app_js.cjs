@@ -377,7 +377,6 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const applyImage = { id: "apply-image", sourceKind: "filesystem", relativePath: "apply.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   state.images = [applyImage];
   state.applyTargetIds = [applyImage.id];
-  state.outputDirectoryHandle = { name: "保存先" };
   elements.get("#applySuffix").value = "_keep";
   elements.get("#deleteOriginal").checked = true;
   elements.get("#applyOverwriteMode").checked = true;
@@ -2117,7 +2116,7 @@ const completionWatchdog = setTimeout(() => {
 
   // Loading either language refreshes dynamic detection labels and model status,
   // and parameterized strings never leak unresolved placeholders to the UI.
-  state.settings = { general: { language: "en" } };
+  state.settings = { general: { language: "en" }, saving: { default_output_directory: "G:\\saved-output" } };
   state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   state.images = [{ id: "dynamic", relativePath: "dynamic-name.png", width: 20, height: 10, candidateCount: 1, enabledCandidateCount: 1 }];
   state.currentId = "dynamic";
@@ -2125,7 +2124,6 @@ const completionWatchdog = setTimeout(() => {
   state.candidates = [{ id: "dynamic-candidate", enabled: true }];
   state.reviewedPaths = new Set(["dynamic-name.png"]);
   state.job = { kind: "detect", state: "running", completed: 2, total: 4 };
-  state.outputDirectoryHandle = { name: "saved-output" };
   setStatus("");
   const englishLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2158,7 +2156,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
   assert.equal(elements.get("#processingProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
   assert.equal(elements.get("#status").textContent, "");
-  assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "saved-output"));
+  assert.equal(elements.get("#applyOutputDirectoryStatus").value, "G:\\saved-output");
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
     t("apply.completeWithStale", { completed: 3, stale: 1 }),

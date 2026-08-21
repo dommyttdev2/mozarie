@@ -475,6 +475,7 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
     """Write a default-output copy without exposing a partial image."""
     temporary_path: Path | None = None
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)

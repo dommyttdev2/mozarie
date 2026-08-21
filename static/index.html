@@ -240,7 +240,7 @@
       <section id="settingsPanelGeneral" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabGeneral" data-settings-panel="general">
         <label class="form-row"><span data-i18n="settings.language">言語</span><select id="settingsLanguage"><option value="ja">日本語</option><option value="en">English</option></select></label>
         <label class="form-row"><span data-i18n="settings.port">次回起動時のポート</span><input id="settingsPort" type="number" min="1024" max="65535" step="1"></label>
-        <div class="form-row"><span data-i18n="settings.defaultOutputDirectory">既定の保存先</span><span class="inline-field"><output id="settingsDefaultOutputDirectory" class="truncate" data-i18n-dynamic></output><button id="settingsChooseOutputDirectory" type="button" data-i18n="settings.browseOutputDirectory">変更</button></span></div>
+        <div class="form-row"><span data-i18n="settings.defaultOutputDirectory">既定の保存先</span><span class="inline-field"><input id="settingsDefaultOutputDirectory" type="text" spellcheck="false"><button id="settingsChooseOutputDirectory" type="button" data-i18n="settings.browseOutputDirectory">変更</button></span></div>
         <label class="form-row"><span data-i18n="settings.importParallelism">画像読み込み同時処理数</span><input id="settingsImportParallelism" type="number" min="1" max="10" step="1"></label>
         <label class="form-row"><span data-i18n="settings.saveParallelism">ファイル保存同時処理数</span><input id="settingsSaveParallelism" type="number" min="1" max="8" step="1"></label>
         <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>
@@ -299,7 +299,7 @@
         <label id="applySuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
         <div id="applyOutputDirectoryRow" class="output-directory-row">
-          <span id="applyOutputDirectoryStatus" class="fixed-note" data-i18n-dynamic>保存先: 未選択</span>
+          <input id="applyOutputDirectoryStatus" class="fixed-note" type="text" readonly data-i18n-dynamic data-i18n-aria-label="settings.defaultOutputDirectory" aria-label="既定の保存先">
           <button id="chooseOutputDirectoryButton" type="button" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
         </div>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>

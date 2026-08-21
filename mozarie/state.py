@@ -44,6 +44,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self._pending_browser_save_cleanup: list[Path] = []
+        self.output_destination_lock = threading.Lock()
+        self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0

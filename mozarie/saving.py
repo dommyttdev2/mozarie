@@ -23,12 +23,31 @@ class SavingMixin:
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
         suffix = _read_save_suffix(suffix)
+        output_directory = Path(self.settings["saving"]["default_output_directory"])
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
-            int(self.settings.get("saving", {}).get("parallelism", 2)),
+            int(self.settings.get("saving", {}).get("parallelism", 2)), output_directory,
             expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
         )
         return True
+
+    def _reserve_output_destination(self, record: ImageRecord, suffix: str, output_directory: Path) -> Path:
+        """Reserve a name briefly; rendering and writes deliberately happen unlocked."""
+        with self.output_destination_lock:
+            if output_directory.resolve() == (APP_DIR / "output").resolve():
+                destination = _default_output_destination(record, suffix, self.reserved_output_paths)
+            else:
+                relative = safe_import_relative_path(record.relative_path)
+                target = output_directory / relative
+                destination = unique_session_import_destination(
+                    target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"), self.reserved_output_paths,
+                )
+            self.reserved_output_paths.add(destination)
+            return destination
+
+    def _release_output_destination(self, destination: Path) -> None:
+        with self.output_destination_lock:
+            self.reserved_output_paths.discard(destination)
 
     def prepare_browser_save(
         self,
@@ -60,11 +79,15 @@ class SavingMixin:
         revision: int,
         divisor: int,
         draft: Any,
+        *,
+        copy_to_default: bool = False,
+        suffix: str = "_censored",
     ) -> tuple[bytes, ImageRecord, int, str]:
         record = self.image_snapshot(image_id)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
+        output_path: Path | None = None
         image_lock = self.image_io_lock(image_id)
         try:
             # The per-image lock comes first.  The state lock only captures an
@@ -112,6 +135,14 @@ class SavingMixin:
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                 if self._source_fingerprint(record) != source_fingerprint:
                     raise ClientError("元画像が変更されました。保存をやり直してください。")
+                if copy_to_default:
+                    output_path = self._reserve_output_destination(
+                        record, _read_save_suffix(suffix), Path(self.settings["saving"]["default_output_directory"]),
+                    )
+                    try:
+                        write_rendered_copy(output_path, output)
+                    finally:
+                        self._release_output_destination(output_path)
                 rendered_dir = self.cache_dir / "browser-save"
                 rendered_dir.mkdir(parents=True, exist_ok=True)
                 with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=record.path.suffix.lower(), delete=False) as handle:
@@ -126,7 +157,7 @@ class SavingMixin:
                     if self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
                     save_token = self._issue_browser_save_token_unchecked(
-                        record, current_revision, source_fingerprint, catalog_generation, rendered_path,
+                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path,
                     )
                     rendered_path = None
             return output, record, current_revision, save_token
@@ -203,7 +234,11 @@ class SavingMixin:
                         if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
                             raise ClientError("元画像が変更されました。保存をやり直してください。", "stale_asset")
                     if source_action == "deleted":
-                        record_snapshot.path.unlink()
+                        # Browser-imported files are removed through their File
+                        # System Access handle before this commit.  The server
+                        # owns deletion for filesystem catalogue records.
+                        if record_snapshot.source_kind != "session" or record_snapshot.path.exists():
+                            record_snapshot.path.unlink()
                 except ClientError:
                     rendered_path = token_details.rendered_path
                     rendered_path.unlink(missing_ok=True)
@@ -263,6 +298,7 @@ class SavingMixin:
         copy_to_default: bool = False,
         suffix: str = "_censored",
         saving_parallelism: int = 1,
+        output_directory: Path | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
@@ -270,39 +306,7 @@ class SavingMixin:
     ) -> None:
         try:
             empty_indices: set[int] = set()
-            skipped_destination_indices: set[int] = set()
-            destination_condition = threading.Condition()
-            reserved: set[Path] = set()
-            next_destination_index = 0
-
-            def advance_past_skipped_destinations() -> None:
-                nonlocal next_destination_index
-                while next_destination_index in skipped_destination_indices:
-                    skipped_destination_indices.remove(next_destination_index)
-                    next_destination_index += 1
-
-            def skip_destination(index: int) -> None:
-                if not copy_to_default:
-                    return
-                with destination_condition:
-                    skipped_destination_indices.add(index)
-                    advance_past_skipped_destinations()
-                    destination_condition.notify_all()
-
-            def reserve_destination(index: int, record: ImageRecord) -> Path:
-                nonlocal next_destination_index
-                with destination_condition:
-                    while index != next_destination_index:
-                        destination_condition.wait()
-                    try:
-                        destination = _default_output_destination(record, suffix, reserved)
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        reserved.add(destination)
-                        return destination
-                    finally:
-                        next_destination_index += 1
-                        advance_past_skipped_destinations()
-                        destination_condition.notify_all()
+            output_directory = output_directory or Path(self.settings["saving"]["default_output_directory"])
 
             def save_record(index: int, record: ImageRecord) -> None:
                 with self.image_io_lock(record.image_id):
@@ -313,18 +317,19 @@ class SavingMixin:
                             record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
                         ))
                     except Exception:
-                        skip_destination(index)
                         raise
                     if mask is None or not np.any(mask):
-                        with destination_condition:
+                        with self.lock:
                             empty_indices.add(index)
-                        skip_destination(index)
                         return
-                    output_path = reserve_destination(index, record) if copy_to_default else record.path
+                    output_path = self._reserve_output_destination(record, suffix, output_directory) if copy_to_default else record.path
                     if copy_to_default:
-                        output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                        self._assert_record_fresh(record)
-                        write_rendered_copy(output_path, output)
+                        try:
+                            output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                            self._assert_record_fresh(record)
+                            write_rendered_copy(output_path, output)
+                        finally:
+                            self._release_output_destination(output_path)
                     else:
                         output_digest = save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()

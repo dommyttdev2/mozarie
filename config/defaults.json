@@ -38,7 +38,8 @@
     "targets": ["penis", "pussy"]
   },
   "saving": {
-    "parallelism": 2
+    "parallelism": 2,
+    "default_output_directory": ""
   },
   "shortcuts": {
     "enabled": true,
