@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -80,15 +81,22 @@ class MozarieTests(unittest.TestCase):
     def setUp(self) -> None:
         self._cache_directory = tempfile.TemporaryDirectory()
         self.cache_dir = Path(self._cache_directory.name) / "cache"
+        self._app_directory = tempfile.TemporaryDirectory()
+        self.app_dir = Path(self._app_directory.name) / "app"
+        config_dir = self.app_dir / "config"
+        config_dir.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "config" / "defaults.json", config_dir / "defaults.json")
         self._states: list[StudioState] = []
 
     def tearDown(self) -> None:
         for state in self._states:
             state.shutdown()
+        self._app_directory.cleanup()
         self._cache_directory.cleanup()
 
-    def new_state(self) -> StudioState:
-        state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
+    def new_state(self, app_dir: Path | None = None) -> StudioState:
+        with patch.object(state_module, "APP_DIR", app_dir or self.app_dir):
+            state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
         self._states.append(state)
         return state
 
@@ -105,8 +113,7 @@ class MozarieTests(unittest.TestCase):
             source_dir.mkdir()
             Image.new("RGB", (16, 16), "white").save(source_dir / "source.png")
 
-            with patch.object(state_module, "APP_DIR", app_dir):
-                state = self.new_state()
+            state = self.new_state(app_dir)
             self.assertEqual(state.settings["saving"]["default_output_directory"], str((app_dir / "output").resolve()))
             image_id = state.set_root(str(source_dir))[0]["id"]
             self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}, copy_to_default=True))
@@ -2076,6 +2083,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_hand_segmentation_setting_keeps_onnx_sessions(self):
         state = self.new_state()
+        state.settings["models"]["hand_detection_enabled"] = True
         next_settings = copy.deepcopy(state.settings)
         next_settings["models"]["hand_segmentation_enabled"] = True
         models = object()
@@ -2142,7 +2150,11 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handsegnet.safetensors"
             path.write_bytes(b"header-only-test")
-            state.settings["models"].update({"hand_segmentation": str(path), "hand_segmentation_enabled": True})
+            state.settings["models"].update({
+                "hand_detection_enabled": True,
+                "hand_segmentation": str(path),
+                "hand_segmentation_enabled": True,
+            })
 
             class Header:
                 def __init__(self):
