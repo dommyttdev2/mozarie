@@ -15,7 +15,7 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import cv2
@@ -1488,6 +1488,23 @@ class MozarieTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected[1], 1)
 
+    def test_sam_refinement_points_are_vectorized_and_deterministic(self):
+        source = np.zeros((2160, 3840), dtype=np.uint8)
+        source[240:1920, 480:3360] = 255
+        hand = np.zeros_like(source)
+        with patch("builtins.sorted", side_effect=AssertionError("SAM prompt selection must not sort candidates")), patch.object(
+            np, "nonzero", side_effect=AssertionError("SAM prompt selection must not materialize candidate coordinates")
+        ):
+            points, labels = sam_refinement_prompts(source, hand)
+        safe = cv2.erode(np.asarray(source > 0, dtype=np.uint8), np.ones((3, 3), dtype=np.uint8))
+        distance = cv2.distanceTransform(safe, cv2.DIST_L2, 3)
+        expected_y, expected_x = np.unravel_index(int(np.argmax(distance)), distance.shape)
+        self.assertEqual(points.shape, (3, 2))
+        self.assertTrue(np.array_equal(labels, np.ones(3, dtype=np.int32)))
+        self.assertEqual(tuple(points[0]), (expected_x, expected_y))
+        self.assertEqual(len({tuple(point) for point in points}), 3)
+        self.assertTrue(all(source[int(y), int(x)] and not hand[int(y), int(x)] for x, y in points))
+
     def test_specialist_hand_mask_requires_box_containment_and_genital_intersection(self):
         genital = np.zeros((12, 12), dtype=np.uint8); genital[4:8, 4:8] = 255
         accepted = np.zeros((1, 12, 12), dtype=bool); accepted[0, 4:8, 4:8] = True
@@ -1657,6 +1674,83 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(status["sensitive"]["enabled"])
         self.assertFalse(status["hand_detection"]["enabled"])
 
+    def test_enabled_hand_segmentation_status_reads_only_safetensors_header(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handsegnet.safetensors"
+            path.write_bytes(b"header-only-test")
+            state.settings["models"].update({"hand_segmentation": str(path), "hand_segmentation_enabled": True})
+
+            class Header:
+                def __init__(self):
+                    self.keys_called = False
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def keys(self):
+                    self.keys_called = True
+                    return server_module.HAND_SEGMENTATION_VIT_B_KEYS
+
+            header = Header()
+            safe_open = MagicMock(return_value=header)
+            fake_safetensors = types.SimpleNamespace(SafetensorError=ValueError, safe_open=safe_open)
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors}):
+                status = state.settings_status()["models"]["hand_segmentation"]
+            self.assertTrue(status["valid"])
+            self.assertTrue(header.keys_called)
+            safe_open.assert_called_once_with(str(path), framework="pt", device="cpu")
+
+    def test_hand_segmentation_hash_mismatch_is_a_client_error_before_loading(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handsegnet.safetensors"
+            path.write_bytes(b"wrong-checkpoint")
+            state.settings["models"].update({"hand_segmentation": str(path), "hand_segmentation_enabled": True})
+            with patch.object(catalog_module, "file_sha256", return_value="0" * 64) as digest:
+                with self.assertRaises(ClientError) as raised:
+                    state._hand_segmentation_predictor_for(Mock())
+            self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
+            digest.assert_called_once_with(path)
+
+    def test_loaded_hand_segmentation_predictor_does_not_rehash(self):
+        state = self.new_state()
+        state.hand_segmentation_predictor = Mock()
+        state.hand_segmentation_image_id = "test"
+        record = Mock(image_id="test")
+        with patch.object(catalog_module, "file_sha256", side_effect=AssertionError("cached predictor must not rehash")):
+            self.assertIs(state._hand_segmentation_predictor_for(record), state.hand_segmentation_predictor)
+
+    def test_hand_segmentation_predictor_strictly_loads_vit_b_once_per_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            checkpoint = root / "handsegnet.safetensors"; checkpoint.write_bytes(b"checkpoint")
+            record = self._record(image_path, 8, 8)
+            state = self.new_state()
+            state.settings["models"].update({"hand_segmentation": str(checkpoint), "provider": "cpu"})
+            state_dict = {"mask_decoder.mask_tokens.weight": object()}
+            load_file = Mock(return_value=state_dict)
+            model = Mock(); predictor = Mock()
+            vit_b = Mock(return_value=model)
+            fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
+            fake_safetensors_torch = types.ModuleType("safetensors.torch"); fake_safetensors_torch.load_file = load_file
+            fake_segment_anything = types.SimpleNamespace(SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_b": vit_b})
+            with patch.object(catalog_module, "file_sha256", return_value=server_module.HAND_SEGMENTATION_SHA256), patch.dict(
+                sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}
+            ):
+                self.assertIs(state._hand_segmentation_predictor_for(record), predictor)
+                self.assertIs(state._hand_segmentation_predictor_for(record), predictor)
+            load_file.assert_called_once_with(str(checkpoint), device="cpu")
+            vit_b.assert_called_once_with(checkpoint=None)
+            model.load_state_dict.assert_called_once_with(state_dict, strict=True)
+            model.to.assert_called_once_with(device="cpu")
+            fake_segment_anything.SamPredictor.assert_called_once_with(model)
+            predictor.set_image.assert_called_once()
+
     def test_target_and_auxiliary_segments_are_arbitrated_once(self):
         state = self.new_state()
         state.settings["models"]["provider"] = "cpu"
@@ -1702,6 +1796,60 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(result[0]["refinement"], "hand")
         self.assertEqual(np.count_nonzero(result[0]["mask"]), 48)
         predictor.predict.assert_called_once()
+
+    def test_specialist_hand_segmentation_success_never_uses_generic_sam(self):
+        state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        record = Mock(image_id="image")
+        genital = np.zeros((16, 16), dtype=np.uint8); genital[4:12, 4:12] = 255
+        specialist_mask = np.zeros((1, 16, 16), dtype=bool); specialist_mask[0, 4:8, 4:8] = True
+        specialist = Mock(); specialist.predict.return_value = specialist_mask, np.asarray([0.5]), None
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_hand_segmentation_predictor_for", return_value=specialist
+        ), patch.object(state, "_sam_predictor_for") as generic:
+            result = state._refine_detected_segments(
+                Mock(), record, Image.new("RGB", (16, 16), "white"),
+                [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
+            )
+        generic.assert_not_called()
+        specialist.predict.assert_called_once()
+        self.assertEqual(result[0]["refinement"], "hand")
+
+    def test_specialist_fallback_releases_its_lock_before_generic_sam(self):
+        state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        events: list[str] = []
+
+        class TraceLock:
+            def __enter__(self):
+                events.append("specialist-enter")
+                return self
+
+            def __exit__(self, *_args):
+                events.append("specialist-exit")
+                return False
+
+        state.hand_segmentation_lock = TraceLock()
+        genital = np.zeros((16, 16), dtype=np.uint8); genital[4:12, 4:12] = 255
+        invalid = np.zeros((1, 16, 16), dtype=bool)
+        specialist = Mock()
+        specialist.predict.side_effect = lambda **_kwargs: events.append("specialist-predict") or (invalid, np.asarray([0.5]), None)
+        generic_mask = np.zeros((1, 16, 16), dtype=bool); generic_mask[0, 4:8, 4:8] = True
+        generic = Mock(); generic.predict.return_value = generic_mask, np.asarray([0.95]), None
+
+        def generic_predictor(_record):
+            self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
+            return generic
+
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_hand_segmentation_predictor_for", return_value=specialist
+        ), patch.object(state, "_sam_predictor_for", side_effect=generic_predictor):
+            state._refine_detected_segments(
+                Mock(), Mock(image_id="image"), Image.new("RGB", (16, 16), "white"),
+                [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
+            )
+        self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
+        generic.predict.assert_called_once()
 
     def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
@@ -2002,6 +2150,70 @@ class MozarieTests(unittest.TestCase):
                 refined = state._high_precision_segments(DetectionModels(target=object()), record, [segment])[0]
             self.assertTrue(np.array_equal(refined["mask"], mask))
             self.assertEqual(refined["refinement"], "sam_fallback")
+
+    def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
+        state = self.new_state()
+        record = Mock(image_id="image")
+        source = np.zeros((12, 12), dtype=np.uint8); source[2:10, 2:10] = 255
+        hand = np.zeros_like(source); hand[3:7, 3:7] = 255
+        initial = source.astype(bool); initial[3:7, 3:7] = False; initial[3, 4] = True
+        improved = initial.copy(); improved[3, 4] = False
+        rejected_retry = initial.copy()
+        bad = np.zeros_like(initial)
+        logits = np.arange(2 * 256 * 256, dtype=np.float32).reshape(2, 256, 256)
+        calls: list[dict[str, Any]] = []
+
+        def predict(**kwargs):
+            calls.append(kwargs)
+            if len(calls) in {1, 3}:
+                return np.asarray([bad, initial]), np.asarray([0.99, 0.8]), logits
+            retry = improved if len(calls) == 2 else rejected_retry
+            return np.asarray([retry]), np.asarray([0.8]), None
+
+        predictor = Mock(); predictor.predict.side_effect = predict
+        segments = [
+            {"class_name": "penis", "confidence": 0.8, "mask": source.copy(), "source": "target", "_detector_mask": source.copy(), "_confirmed_hand": hand.copy()},
+            {"class_name": "penis", "confidence": 0.8, "mask": source.copy(), "source": "target", "_detector_mask": source.copy(), "_confirmed_hand": hand.copy()},
+        ]
+        points = np.asarray([[8, 8], [3, 3]], dtype=np.float32)
+        labels = np.asarray([1, 0], dtype=np.int32)
+        with patch.object(state, "_sam_predictor_for", return_value=predictor), patch.object(
+            detection_module, "sam_refinement_prompts", return_value=(points, labels)
+        ):
+            refined = state._high_precision_segments(DetectionModels(target=object()), record, segments)
+        self.assertTrue(np.array_equal(refined[0]["mask"] > 0, improved))
+        self.assertTrue(np.array_equal(refined[1]["mask"] > 0, initial))
+        self.assertTrue(np.array_equal(calls[0]["point_coords"], points))
+        self.assertTrue(np.array_equal(calls[0]["point_labels"], labels))
+        self.assertEqual(calls[1]["mask_input"].shape, (1, 256, 256))
+        self.assertTrue(np.array_equal(calls[1]["mask_input"], logits[1:2]))
+
+    def test_detect_image_persists_the_refined_apply_mask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            detector_mask = np.zeros((12, 12), dtype=np.uint8); detector_mask[2:10, 2:10] = 255
+            refined_mask = detector_mask.copy(); refined_mask[2:6, 2:6] = 0
+            fluid_mask = np.zeros((12, 12), dtype=np.uint8); fluid_mask[7:9, 7:9] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": detector_mask, "source": "target"}]
+
+            def refine(_models, _record, _rgb, detected):
+                detected[0]["mask"] = refined_mask
+                detected[0]["_apply_mask"] = refined_mask
+                detected[0]["exclusions"] = {"fluid": fluid_mask}
+                return detected
+
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_refine_detected_segments", side_effect=refine
+            ):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
+            with Image.open(candidates[0].mask_path) as stored:
+                self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
+            self.assertEqual(candidates[1].role, server_module.CandidateRole.EXCLUDE)
+            self.assertFalse(candidates[1].enabled)
 
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:

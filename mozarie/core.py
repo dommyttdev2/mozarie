@@ -80,6 +80,12 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
+HAND_SEGMENTATION_SHA256 = "64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14"
+HAND_SEGMENTATION_VIT_B_KEYS = frozenset({
+    "image_encoder.patch_embed.proj.weight",
+    "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
+    "mask_decoder.mask_tokens.weight",
+})
 FLUID_MAX_COMPONENTS = 8
 FLUID_MAX_COMPONENT_RATIO = 0.15
 FLUID_MAX_TOTAL_RATIO = 0.20
@@ -598,20 +604,25 @@ def sam_refinement_prompts(source_mask: np.ndarray, hand_mask: np.ndarray) -> tu
         distance = cv2.distanceTransform(source, cv2.DIST_L2, 3)
         y, x = np.unravel_index(int(np.argmax(distance)), distance.shape)
         return np.asarray([[x, y]], dtype=np.float32), np.asarray([1], dtype=np.int32)
-    distance = cv2.distanceTransform(eroded, cv2.DIST_L2, 3)
-    candidates = np.argwhere(eroded > 0)
-    count = 1 if len(candidates) < 64 else 3
-    selected: list[tuple[int, int]] = []
-    for _index in range(count):
-        if not selected:
-            order = sorted(candidates, key=lambda point: (-float(distance[tuple(point)]), int(point[0]), int(point[1])))
-        else:
-            order = sorted(candidates, key=lambda point: (
-                -min((int(point[0]) - y) ** 2 + (int(point[1]) - x) ** 2 for y, x in selected),
-                -float(distance[tuple(point)]), int(point[0]), int(point[1]),
-            ))
-        y, x = map(int, order[0])
-        selected.append((y, x))
+    source_distance = cv2.distanceTransform(eroded, cv2.DIST_L2, 3)
+    count = 1 if np.count_nonzero(eroded) < 64 else 3
+    first_y, first_x = np.unravel_index(int(np.argmax(source_distance)), source_distance.shape)
+    selected = [(int(first_y), int(first_x))]
+    # Distance-transforming the inverse seed mask avoids materializing every
+    # candidate coordinate or an N-by-selected-point distance matrix.
+    inverse_seeds = np.ones_like(eroded, dtype=np.uint8)
+    inverse_seeds[first_y, first_x] = 0
+    for _index in range(1, count):
+        selected_distance = cv2.distanceTransform(inverse_seeds, cv2.DIST_L2, 3)
+        farthest_distance = np.where(eroded > 0, selected_distance, -1.0)
+        farthest = farthest_distance == np.max(farthest_distance)
+        # np.argmax remains row-major on equal source depth, preserving the
+        # previous y/x tie-break without a candidate sort.
+        choice_y, choice_x = np.unravel_index(
+            int(np.argmax(np.where(farthest, source_distance, -1.0))), source_distance.shape
+        )
+        selected.append((int(choice_y), int(choice_x)))
+        inverse_seeds[choice_y, choice_x] = 0
     points = [[x, y] for y, x in selected]
     negative = source & hand
     if np.any(negative):

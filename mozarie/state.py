@@ -135,6 +135,16 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 except ModelProfileError as exc:
                     valid = False
                     detail = str(exc)
+            if valid and key == "hand_segmentation":
+                try:
+                    from safetensors import SafetensorError, safe_open
+                    with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
+                        keys = set(checkpoint.keys())
+                    if not HAND_SEGMENTATION_VIT_B_KEYS.issubset(keys):
+                        raise ModelProfileError("HandSegNetモデルは対応するViT-Bチェックポイントではありません")
+                except (ImportError, OSError, ValueError, SafetensorError, ModelProfileError) as exc:
+                    valid = False
+                    detail = str(exc)
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
                 detail = "SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください"

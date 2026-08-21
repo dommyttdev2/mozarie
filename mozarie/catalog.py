@@ -587,6 +587,12 @@ class CatalogMixin:
                 if path.suffix.lower() != ".safetensors":
                     raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
                 try:
+                    digest = file_sha256(path)
+                except OSError as exc:
+                    raise ClientError("HandSegNetモデルのSHA-256を確認できません。", "hand_segmentation_invalid") from exc
+                if digest != HAND_SEGMENTATION_SHA256:
+                    raise ClientError("HandSegNetモデルのSHA-256が固定版と一致しません。", "hand_segmentation_invalid")
+                try:
                     from safetensors.torch import load_file
                     from segment_anything import SamPredictor, sam_model_registry
                     state_dict = load_file(str(path), device="cpu")

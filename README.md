@@ -60,7 +60,7 @@ Enable this only when hands overlap a detected genital area. It requires a hand-
 
 ### Optional: HandSegNet anime SDXL
 
-When hand detection is enabled, you can optionally use the pinned [HandSegNet anime SDXL checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) for hand outlines. Download it manually; Mozarie does not bundle or download models. Use revision `77ff734683306141e56aef9d491958a82508b41a`, SHA-256 `64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14`, and review its [Apache-2.0 license](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE) before use.
+When hand detection is enabled, you can optionally use the pinned [HandSegNet anime SDXL checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) for hand outlines. Download it manually; Mozarie does not bundle or download models. Use revision `77ff734683306141e56aef9d491958a82508b41a` and SHA-256 `64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14`. The pinned [LICENSE_WEIGHTS.txt](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE_WEIGHTS.txt) applies to the model weights, not the repository's inference and conversion scripts.
 
 ### Optional: detect white-fluid candidates
 
