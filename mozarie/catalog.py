@@ -244,13 +244,9 @@ class CatalogMixin:
             self._image_io_locks[image_id] = image_lock
             return image_lock
 
-    def _source_fingerprint(self, record: ImageRecord) -> tuple[int, int, str]:
-        self._assert_record_fresh(record)
-        return record.mtime_ns, record.size_bytes, record.content_digest
-
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
-        if details is not None:
+        if details is not None and details.rendered_path is not None:
             self._pending_browser_save_cleanup.append(details.rendered_path)
         return details
 
@@ -278,11 +274,11 @@ class CatalogMixin:
         with self.lock:
             expired_paths = self._pending_browser_save_cleanup
             self._pending_browser_save_cleanup = []
-            expired_paths += [
-                self.browser_save_tokens.pop(token).rendered_path
-                for token, details in tuple(self.browser_save_tokens.items())
-                if details.issued_at < cutoff
-            ]
+            for token, details in tuple(self.browser_save_tokens.items()):
+                if details.issued_at < cutoff:
+                    self.browser_save_tokens.pop(token)
+                    if details.rendered_path is not None:
+                        expired_paths.append(details.rendered_path)
             for token, receipt in tuple(self.browser_save_receipts.items()):
                 if receipt.completed_at < cutoff:
                     self.browser_save_receipts.pop(token, None)
@@ -295,7 +291,7 @@ class CatalogMixin:
         revision: int,
         source_fingerprint: tuple[int, int, str],
         catalog_generation: int,
-        rendered_path: Path,
+        rendered_path: Path | None,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
@@ -308,19 +304,6 @@ class CatalogMixin:
             rendered_path=rendered_path,
         )
         return token
-
-    def _assert_record_fresh(self, record: ImageRecord) -> None:
-        try:
-            stat = record.path.stat()
-        except OSError as exc:
-            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
-        if stat.st_mtime_ns != record.mtime_ns or (record.size_bytes > 0 and stat.st_size != record.size_bytes):
-            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-        try:
-            if file_sha256(record.path) != record.content_digest:
-                raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-        except OSError as exc:
-            raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
 
     @staticmethod
     def _assert_record_stat_matches(record: ImageRecord) -> None:
@@ -540,13 +523,18 @@ class CatalogMixin:
     def _invalidate_sam_cache(self) -> None:
         with self.sam_lock:
             self.sam_image_id = None
+        with self.hand_segmentation_lock:
+            self.hand_segmentation_image_id = None
 
     def invalidate_sam_image(self, image_id: str) -> None:
         with self.sam_lock:
             if self.sam_image_id == image_id:
                 self.sam_image_id = None
+        with self.hand_segmentation_lock:
+            if self.hand_segmentation_image_id == image_id:
+                self.hand_segmentation_image_id = None
 
-    def _sam_predictor_for(self, record: ImageRecord) -> Any:
+    def _sam_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
         with self.sam_lock:
             if self.sam_predictor is None:
                 sam_path = self._configured_sam_path()
@@ -564,10 +552,45 @@ class CatalogMixin:
                 self.sam_predictor = SamPredictor(model)
 
             if self.sam_image_id != record.image_id:
-                with Image.open(record.path) as image:
-                    self.sam_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
+                self.sam_predictor.set_image(rgb)
                 self.sam_image_id = record.image_id
             return self.sam_predictor
+
+    def _hand_segmentation_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
+        """Load the configured HandSegNet ViT-B checkpoint without substitutions."""
+        with self.hand_segmentation_lock:
+            if self.hand_segmentation_predictor is None:
+                raw_path = str(self.settings["models"].get("hand_segmentation", "")).strip()
+                if not raw_path:
+                    raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "hand_segmentation_invalid")
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "hand_segmentation_invalid")
+                if path.suffix.lower() != ".safetensors":
+                    raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
+                try:
+                    from safetensors.torch import load_file
+                    from segment_anything import SamPredictor, sam_model_registry
+                    state_dict = load_file(str(path), device="cpu")
+                    model = sam_model_registry["vit_b"](checkpoint=None)
+                    model.load_state_dict(state_dict, strict=True)
+                except ImportError as exc:
+                    raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
+                except Exception as exc:
+                    raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
+                provider = self.settings["models"]["provider"]
+                if provider == "gpu" and not torch_module().cuda.is_available():
+                    raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "hand_segmentation_invalid")
+                device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
+                try:
+                    model.to(device=device)
+                except RuntimeError:
+                    raise
+                self.hand_segmentation_predictor = SamPredictor(model)
+            if self.hand_segmentation_image_id != record.image_id:
+                self.hand_segmentation_predictor.set_image(rgb)
+                self.hand_segmentation_image_id = record.image_id
+            return self.hand_segmentation_predictor
 
     @staticmethod
     def _allowed_root_for_record(
@@ -637,7 +660,7 @@ class CatalogMixin:
         return self.candidate_snapshot(image_id)["candidates"]
 
     def candidate_snapshot(self, image_id: str) -> dict[str, Any]:
-        """Return a digest-gated candidate snapshot for the selected image."""
+        """Return a stat-gated candidate snapshot for the selected image."""
         for _attempt in range(2):
             with self.image_io_lock(image_id):
                 with self.lock:
@@ -647,7 +670,7 @@ class CatalogMixin:
                     record = replace(record)
                     revision = self._candidate_revision(image_id)
                     snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
-                self._assert_record_fresh(record)
+                self._assert_record_stat_matches(record)
                 available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
                 with self.lock:
                     if self._candidate_revision(image_id) != revision:

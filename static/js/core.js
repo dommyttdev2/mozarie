@@ -14,6 +14,7 @@ const state = {
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
   applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
+  outputDirectoryPicking: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
@@ -21,8 +22,7 @@ const state = {
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
-  // The save folder handle is browser-local and never sent to the server.
-  outputDirectoryHandle: null, processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
+  processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null, jobPollTimer: null,
   imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(),
@@ -255,25 +255,16 @@ function selectedImages() { return state.images.filter((image) => state.selected
 function clearBatchSelection() { state.selectedImageIds.clear(); state.selectionAnchorId = null; }
 function updateSelectionActionBar() {
   const count = state.selectedImageIds.size;
-  $("#batchModeButton").hidden = state.batchMode;
   $("#batchModeButton").setAttribute("aria-pressed", String(state.batchMode));
-  $("#batchSelectionControls").hidden = !state.batchMode;
+  $("#overviewSelectionBar").hidden = !state.batchMode;
   $("#selectionCount").textContent = t("selection.count", { count });
   $("#selectionActionsButton").disabled = count === 0;
 }
-function selectCatalogImage(imageId, event = null) {
-  const index = state.images.findIndex((image) => image.id === imageId); if (index < 0) return;
-  if (!state.batchMode) {
-    clearBatchSelection();
-  } else if (event?.shiftKey && state.selectionAnchorId) {
-    const anchor = state.images.findIndex((image) => image.id === state.selectionAnchorId);
-    const range = state.images.slice(Math.min(anchor, index), Math.max(anchor, index) + 1).map((image) => image.id);
-    if (event.ctrlKey || event.metaKey) range.forEach((id) => state.selectedImageIds.add(id)); else state.selectedImageIds = new Set(range);
-  } else {
-    if (state.selectedImageIds.has(imageId)) state.selectedImageIds.delete(imageId); else state.selectedImageIds.add(imageId);
-    state.selectionAnchorId = imageId;
-  }
-  updateSelectionActionBar(); renderCatalogViews(); void selectImage(imageId);
+function selectCatalogImage(imageId) {
+  if (!state.images.some((image) => image.id === imageId)) return;
+  clearBatchSelection();
+  updateSelectionActionBar();
+  void selectImage(imageId);
 }
 function refreshReviewViews() {
   renderGallery(true);

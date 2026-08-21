@@ -68,7 +68,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#emptyState").hidden = true;
     $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
     updateCandidateStatus();
-    renderCandidates(); updateGallerySelection(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
+    renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
     state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     state.overviewNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     prefetchNeighbors(record);
@@ -108,7 +108,7 @@ function invalidateStaleAsset(imageId) {
   if (state.currentId !== imageId) return;
   closeBoundaryModeMenu({ restoreFocus: true });
   state.currentId = null; state.currentImage = null; state.candidates = []; state.candidateImages = new Map();
-  clearEditor(); updateGallerySelection();
+  clearEditor(); updateGalleryCurrent();
 }
 function imageCacheKey(record) { return `${record.id}:${imageAssetVersion(record)}`; }
 function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`; }

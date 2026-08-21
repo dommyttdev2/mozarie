@@ -452,7 +452,6 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
                     handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
-        _verify_decodable_image(temporary_path.read_bytes())
         if file_sha256(record.path) != expected_digest:
             raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         os.replace(temporary_path, record.path)
@@ -475,12 +474,12 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
     """Write a default-output copy without exposing a partial image."""
     temporary_path: Path | None = None
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
-        _verify_decodable_image(temporary_path.read_bytes())
         os.replace(temporary_path, destination)
         temporary_path = None
     finally:
@@ -517,14 +516,6 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> st
             handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
-        temporary_bytes = temporary_path.read_bytes()
-        if suffix == ".png" and png_ancillary_manifest(source, exclude={b"eXIf"} if normalize_orientation else set()) != png_ancillary_manifest(temporary_bytes, exclude={b"eXIf"} if normalize_orientation else set()):
-            raise ClientError("PNGメタデータ検証に失敗したため置換しませんでした。")
-        if suffix in {".jpg", ".jpeg"} and not normalize_orientation and jpeg_metadata_manifest(source) != jpeg_metadata_manifest(temporary_bytes):
-            raise ClientError("JPEGメタデータ検証に失敗したため置換しませんでした。")
-        if suffix == ".webp" and webp_metadata_manifest(source, exclude={b"EXIF"} if normalize_orientation else set()) != webp_metadata_manifest(temporary_bytes, exclude={b"EXIF"} if normalize_orientation else set()):
-            raise ClientError("WebPメタデータ検証に失敗したため置換しませんでした。")
-        _verify_decodable_image(temporary_bytes)
         if file_sha256(destination) != record.content_digest:
             raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
         os.replace(temporary_path, destination)

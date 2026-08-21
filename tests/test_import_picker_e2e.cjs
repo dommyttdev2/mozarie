@@ -17,6 +17,7 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 function startFixtureServer() {
   const detectRequests = [];
   const settingsRequests = [];
+  const settingsActions = [];
   const updateRequests = [];
   let releaseFullSettings = null;
   let deferFullSettings = false;
@@ -26,13 +27,24 @@ function startFixtureServer() {
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
-    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+    shortcuts: {
+      enabled: true,
+      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
+      actions: {},
+    }, confirmations: {},
   };
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
     const requestPath = requestUrl.pathname;
+    if (requestPath === "/api/settings/reset" && request.method === "POST") {
+      settingsActions.push({ path: requestPath, method: request.method });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ settings, version: "v1.0.0" }));
+      return;
+    }
     if (requestPath === "/api/settings") {
       settingsRequests.push(requestUrl.search);
+      if (request.method === "POST") settingsActions.push({ path: requestPath, method: request.method });
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
       if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
       reply();
@@ -104,7 +116,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -152,7 +164,7 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton", "#batchModeButton"].every(hit) };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
   if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
@@ -165,38 +177,80 @@ async function assertDesktopLayout(page, width, height) {
     });
     assert.ok(heading.rightGap <= 12, `all-image actions align with the gallery right edge at ${width}x${height}`);
   }
-  if (width === 1280 && height === 720) {
-    const heading = await page.evaluate(() => {
-      const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom, right: rect.right }; };
-      return { pane: box("#galleryPane"), title: box(".gallery-title"), count: box(".gallery-local-count"), actions: box("#batchMoreButton"), batch: box("#batchModeButton") };
-    });
-    assert.ok(heading.title.top <= heading.actions.bottom && heading.actions.top <= heading.title.bottom, "image count and all-image actions share the gallery heading row");
-    assert.ok(heading.count.top <= heading.actions.bottom && heading.actions.top <= heading.count.bottom, "image count remains on the all-image action row");
-    assert.ok(heading.actions.right <= heading.pane.right, "all-image actions fit inside the gallery pane");
-    assert.ok(heading.batch.top >= heading.title.bottom, "batch edit moves to its own row");
-    const batchTarget = await page.locator("#batchModeButton").evaluate((button) => {
-      const rect = button.getBoundingClientRect();
-      return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id;
-    });
-    assert.equal(batchTarget, "batchModeButton", "the gallery filter must not cover batch edit");
-    await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch edit opens its gallery work row");
-    await page.locator("#selectionClearButton").click();
-  }
+  assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "the gallery has no inactive batch-edit row");
   await page.locator("#overviewButton").click();
   await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
   await assertVisibleButtons(page, `${width}x${height} overview`);
+  const overview = await page.evaluate(() => {
+    const toolbar = document.querySelector(".overview-toolbar");
+    const bar = document.querySelector("#overviewSelectionBar");
+    const button = document.querySelector("#batchModeButton");
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return {
+      headingTail: button.parentElement.lastElementChild === button,
+      followsToolbar: toolbar.nextElementSibling === bar,
+      hiddenBarLeavesNoGap: bar.hidden && Math.abs(document.querySelector(".overview-grid-viewport").getBoundingClientRect().top - toolbarRect.bottom) <= 1,
+      buttonHit: document.elementFromPoint(buttonRect.x + buttonRect.width / 2, buttonRect.y + buttonRect.height / 2) === button,
+      toolbarBottom: toolbarRect.bottom, barTop: barRect.top,
+    };
+  });
+  assert.equal(overview.headingTail, true, `batch edit ends the overview heading at ${width}x${height}`);
+  assert.equal(overview.followsToolbar, true, `selection actions follow the overview toolbar at ${width}x${height}`);
+  assert.equal(overview.hiddenBarLeavesNoGap, true, `hidden selection actions leave no overview gap at ${width}x${height}`);
+  assert.equal(overview.buttonHit, true, `batch edit owns its physical click target at ${width}x${height}`);
+  await page.locator("#batchModeButton").click();
+  await assertVisibleButtons(page, `${width}x${height} overview batch`);
+  const batchDimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, visible: !document.querySelector("#overviewSelectionBar").hidden }));
+  assert.equal(batchDimensions.visible, true, `selection actions become visible in overview batch mode at ${width}x${height}`);
+  assert.equal(batchDimensions.scrollWidth, batchDimensions.clientWidth, `batch actions do not create horizontal overflow at ${width}x${height}`);
+  await page.locator("#selectionClearButton").click();
   await page.locator("#closeOverviewButton").click();
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
 
-async function assertSettingsDialogLayout(page, width, height) {
+async function assertSettingsDialogLayout(page, width, height, footerOnly = false) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
   for (const language of ["ja", "en"]) {
     await page.locator("#settingsTabGeneral").click();
     await page.locator("#settingsLanguage").selectOption(language);
     await page.waitForFunction((selectedLanguage) => document.documentElement.lang === selectedLanguage, language);
+    const footer = await page.locator("#settingsDialog .dialog-actions").evaluate((actions) => {
+      const [result, reset, save] = actions.children;
+      const actionRect = actions.getBoundingClientRect();
+      const rect = (element) => {
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element };
+      };
+      return {
+        className: actions.className,
+        children: [...actions.children].map((child) => child.id),
+        scrollWidth: actions.scrollWidth,
+        clientWidth: actions.clientWidth,
+        result: rect(result), reset: rect(reset), save: rect(save),
+        actionLeft: actionRect.left, actionRight: actionRect.right,
+      };
+    });
+    assert.equal(footer.className, "dialog-actions", `settings footer keeps the shared action bar at ${width}x${height} (${language})`);
+    assert.deepEqual(footer.children, ["settingsResult", "settingsResetButton", "settingsSaveButton"], `settings footer contains only result, reset and save at ${width}x${height} (${language})`);
+    assert.ok(footer.scrollWidth <= footer.clientWidth, `settings footer has no horizontal overflow at ${width}x${height} (${language})`);
+    assert.ok(footer.result.left >= footer.actionLeft && footer.save.right <= footer.actionRight && footer.reset.hit && footer.save.hit, `settings footer items are visible physical hit targets at ${width}x${height} (${language})`);
+    assert.ok(footer.result.right < footer.reset.left && footer.reset.right < footer.save.left, `settings footer keeps result, reset, save order at ${width}x${height} (${language})`);
+    assert.ok(footer.reset.left - footer.result.right >= 6 && footer.reset.left - footer.result.right <= 12 && footer.save.left - footer.reset.right >= 6 && footer.save.left - footer.reset.right <= 12, `settings footer keeps compact 8px gaps at ${width}x${height} (${language})`);
+    const heading = await page.locator("#settingsDialog .settings-heading").evaluate((heading) => {
+      const [title, close] = heading.children;
+      const headingRect = heading.getBoundingClientRect();
+      const closeRect = close.getBoundingClientRect();
+      return { children: [...heading.children].map((child) => child.id), scrollWidth: heading.scrollWidth, clientWidth: heading.clientWidth, closeRight: closeRect.right, headingRight: headingRect.right, closeHit: document.elementFromPoint(closeRect.x + closeRect.width / 2, closeRect.y + closeRect.height / 2) === close };
+    });
+    assert.deepEqual(heading.children, ["settingsDialogTitle", "settingsCloseButton"], `settings header keeps title then close at ${width}x${height} (${language})`);
+    assert.ok(heading.scrollWidth <= heading.clientWidth && heading.closeRight <= heading.headingRight && heading.closeHit, `settings header close remains right-aligned and clickable at ${width}x${height} (${language})`);
+    await page.locator("#settingsResetButton").focus();
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "settingsSaveButton", `tab follows reset with save at ${width}x${height} (${language})`);
+    if (footerOnly) continue;
     for (const [panelSelector, tabSelector] of [["#settingsPanelGeneral", "#settingsTabGeneral"], ["#settingsPanelModels", "#settingsTabModels"], ["#settingsPanelDisplay", "#settingsTabDisplay"]]) {
       await page.locator(tabSelector).click();
       const layout = await page.locator(`${panelSelector} .form-row`).evaluateAll((rows) => {
@@ -225,6 +279,62 @@ async function assertSettingsDialogLayout(page, width, height) {
         assert.ok(row.controlRight <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `${panelSelector} controls do not overflow or overlap at ${width}x${height} (${language})`);
       }
     }
+    await page.locator("#settingsTabModels").click();
+    const samHelp = page.locator('[data-model-help="samType"]');
+    await samHelp.scrollIntoViewIfNeeded();
+    const samTarget = await samHelp.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      const centerX = rect.x + rect.width / 2;
+      const centerY = rect.y + rect.height / 2;
+      const row = button.closest(".form-row").getBoundingClientRect();
+      const label = document.querySelector('label[for="settingsSamType"]');
+      const labelRect = label.getBoundingClientRect();
+      return {
+        width: rect.width, height: rect.height,
+        centerIsButton: document.elementFromPoint(centerX, centerY) === button,
+        edgesAreNotButton: [[rect.x - 1, centerY], [rect.right + 1, centerY], [centerX, rect.y - 1], [centerX, rect.bottom + 1]].every(([x, y]) => document.elementFromPoint(x, y) !== button),
+        labelFor: label.htmlFor, labelText: label.textContent,
+        blankX: row.right - 2, blankY: labelRect.y + labelRect.height / 2,
+      };
+    });
+    assert.deepEqual([samTarget.width, samTarget.height], [28, 28], `SAM help keeps its 28px target at ${width}x${height} (${language})`);
+    assert.equal(samTarget.centerIsButton, true, `SAM help owns its center hit target at ${width}x${height} (${language})`);
+    assert.equal(samTarget.edgesAreNotButton, true, `SAM help does not capture clicks 1px outside its edges at ${width}x${height} (${language})`);
+    assert.equal(samTarget.labelFor, "settingsSamType", `SAM setting label is explicitly linked at ${width}x${height} (${language})`);
+    assert.equal(samTarget.labelText, language === "en" ? "Outline extraction model type" : "輪郭抽出モデルの種類", `SAM setting label is localized at ${width}x${height} (${language})`);
+    await page.locator('label[for="settingsSamType"]').click();
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking the SAM setting label does not open help at ${width}x${height} (${language})`);
+    await page.mouse.click(samTarget.blankX, samTarget.blankY);
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking blank SAM row space does not open help at ${width}x${height} (${language})`);
+    await samHelp.click();
+    const samDialog = await page.locator("#modelHelpDialog").evaluate((dialog) => {
+      const table = dialog.querySelector("#modelHelpSamTable");
+      return {
+        textHidden: dialog.querySelector("#modelHelpText").hidden,
+        tableHidden: table.hidden,
+        rows: table.tBodies[0].rows.length,
+        columns: [...table.rows].every((row) => row.cells.length === 5),
+        headers: [...table.tHead.rows[0].cells].map((cell) => cell.textContent),
+        columnScopes: [...table.tHead.rows[0].cells].map((cell) => cell.scope),
+        rowScopes: [...table.tBodies[0].rows].map((row) => row.cells[0].scope),
+        tableScrollWidth: table.scrollWidth, tableClientWidth: table.clientWidth,
+        dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
+      };
+    });
+    assert.equal(samDialog.textHidden, false, `SAM help keeps its short explanation above the table at ${width}x${height} (${language})`);
+    assert.equal(samDialog.tableHidden, false, `SAM help shows its comparison table at ${width}x${height} (${language})`);
+    assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
+    assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Relative detail", "VRAM", "Best for"] : ["モデル", "速度", "輪郭の細かさ目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.columnScopes, ["col", "col", "col", "col", "col"], `SAM table headers use column scopes at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.rowScopes, ["row", "row", "row"], `SAM table model names use row scopes at ${width}x${height} (${language})`);
+    assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);
+    await page.locator("#modelHelpCloseButton").click();
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `SAM help close button works at ${width}x${height} (${language})`);
+    await page.locator('[data-model-help="ntd11"]').click();
+    assert.equal(await page.locator("#modelHelpText").isVisible(), true, `other model help keeps its paragraph at ${width}x${height} (${language})`);
+    assert.equal(await page.locator("#modelHelpSamTable").isVisible(), false, `other model help keeps the SAM table hidden at ${width}x${height} (${language})`);
+    await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
     await page.locator("#settingsTabGeneral").click();
     assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
       const rect = input.getBoundingClientRect();
@@ -253,11 +363,15 @@ async function assertSettingsDialogLayout(page, width, height) {
       assert.ok(row.children[2].right <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `shortcut rows do not overflow at ${width}x${height} (${language})`);
     }
   }
+  if (footerOnly) {
+    await page.locator("#settingsTabGeneral").click();
+    await page.locator("#settingsLanguage").selectOption("ja");
+    await page.waitForFunction(() => document.documentElement.lang === "ja");
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
+    return;
+  }
   await page.locator("#settingsTabModels").click();
   assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
-  await page.locator('[data-model-help="samType"]').click();
-  assert.equal(await page.locator("#modelHelpDialog").isVisible(), true, `SAM type help opens from its physical button at ${width}x${height}`);
-  await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
   await page.locator("#settingsTabGeneral").click();
   await page.locator("#settingsLanguage").selectOption("ja");
   await page.waitForFunction(() => document.documentElement.lang === "ja");
@@ -306,11 +420,12 @@ async function main() {
   let fixtureUrl;
   let detectRequests;
   let settingsRequests;
+  let settingsActions;
   let updateRequests;
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, settingsRequests, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -407,8 +522,27 @@ async function main() {
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertDesktopLayout(page, viewport.width, viewport.height);
     for (const viewport of [
-      { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
+    await assertSettingsDialogLayout(page, 320, 720, true);
+    await page.setViewportSize({ width: 320, height: 720 });
+    await page.locator("#settingsButton").click();
+    assert.equal(await page.locator("#settingsLanguage").inputValue(), "ja", "the compact settings API flow starts in Japanese");
+    const actionsBeforeSettingsFooter = settingsActions.length;
+    await page.locator("#settingsResetButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "初期値に戻しました。");
+    assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
+    const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
+    assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");
+    assert.equal(shortcutsAfterReset.every(Boolean) && new Set(shortcutsAfterReset).size === shortcutsAfterReset.length, true, "reset restores valid unique shortcut bindings before compact save");
+    const savesBeforeCompactSave = settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length;
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.equal(settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length, savesBeforeCompactSave + 1, "the compact save button posts exactly once");
+    assert.deepEqual(settingsActions.at(-1), { path: "/api/settings", method: "POST" }, "the compact save button reaches the settings API route");
+    await page.locator("#settingsCloseButton").click();
+    await page.waitForFunction(() => !document.querySelector("#settingsDialog").open);
+    assert.equal(settingsActions.length, actionsBeforeSettingsFooter + 2, "the compact close button does not call a settings API route");
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
     assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 690), true, "the canvas stage keeps a full editing surface beneath the compact status line at 1024x768");
@@ -525,10 +659,7 @@ async function main() {
     assert.equal(await page.locator("#batchMoreButton").getAttribute("aria-expanded"), "false");
     assert.equal(await page.locator(".appbar-commands #batchMoreButton").count(), 0, "batch menu belongs beside the image count, not in the appbar");
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
-    await page.locator("#batchModeButton").click();
-    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit mode");
-    assert.equal(await page.locator("#batchSelectionControls").isVisible(), true, "batch controls replace the entry in the image list");
-    await page.locator("#selectionClearButton").click();
+    assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "batch edit leaves no control row in the gallery");
     assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
     assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
@@ -563,16 +694,24 @@ async function main() {
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
+    await selectFixtureImage(page, pageErrors, consoleErrors);
+    assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "the normal gallery owns only the current-image state");
+    await page.locator("#overviewButton").click();
+    await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+    const currentBeforeBatch = await page.locator(".overview-item.current").getAttribute("data-id");
     await page.locator("#batchModeButton").click();
-    await page.locator('.gallery-item[data-id="sample"]').focus();
+    assert.equal(await page.locator("#batchModeButton").getAttribute("aria-pressed"), "true", "batch edit is an explicit overview mode");
+    assert.equal(await page.locator("#overviewSelectionBar").isVisible(), true, "batch controls appear immediately below the overview toolbar");
+    assert.equal(await page.locator('[data-selection-action]').count(), 7, "overview batch edit retains all seven actions");
+    await page.locator('.overview-item[data-id="sample"]').focus();
     await page.keyboard.press("Space");
-    await page.locator('.gallery-item[data-id="sample-two"]').click();
-    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
-    assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("current")), true, "the current image state remains separate from batch selection");
-    assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').getAttribute("aria-current"), "true", "the current image exposes its neutral current state");
-    assert.equal(await page.locator('.gallery-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard batch selection exposes its selected state");
+    await page.locator('.overview-item[data-id="sample-two"]').click();
+    assert.equal(await page.locator("#overviewPane").isVisible(), true, "batch selection stays in the overview");
+    assert.equal(await page.locator(".overview-item.current").getAttribute("data-id"), currentBeforeBatch, "batch selection does not change the current image");
+    assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the overview selection bar reports the selected image count");
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first overview selection is green");
+    assert.equal(await page.locator('.overview-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second overview selection is green");
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard overview selection exposes its selected state");
     const batchDetectBefore = detectRequests.length;
     await page.locator("#selectionActionsButton").click();
     await page.locator('[data-selection-action="detect"]').click();
@@ -582,11 +721,14 @@ async function main() {
     assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     await page.locator("#selectionClearButton").click();
-    assert.equal(await page.locator('.gallery-item.batch-selected').count(), 0, "exiting batch edit clears every green selection");
-    assert.equal(await page.locator('.gallery-item[aria-pressed]').count(), 0, "exiting batch edit removes batch selection semantics");
+    assert.equal(await page.locator('.overview-item.batch-selected').count(), 0, "exiting batch edit clears every green overview selection");
+    assert.equal(await page.locator('.overview-item[aria-pressed]').count(), 0, "exiting batch edit removes overview selection semantics");
     await page.locator("#batchModeButton").click();
     assert.equal(await page.locator("#selectionCount").textContent(), "0件を選択中", "re-entering batch edit starts with no stale selection");
     await page.locator("#selectionClearButton").click();
+    await page.locator('.overview-item[data-id="sample-two"]').click();
+    await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+    assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);

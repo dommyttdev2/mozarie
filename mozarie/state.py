@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from .core import *
+from .config import validate_output_directory_ready
 from .image_io import *
-from .image_io import _default_output_destination
 from .runtime_types import DetectionModels
 from .catalog import CatalogMixin
 from .saving import SavingMixin
@@ -44,6 +44,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self._pending_browser_save_cleanup: list[Path] = []
+        self.output_destination_lock = threading.Lock()
+        self.output_picker_lock = threading.Lock()
+        self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
         self.catalog_generation = 0
@@ -54,6 +57,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
+        self.hand_segmentation_predictor: Any | None = None
+        self.hand_segmentation_image_id: str | None = None
+        self.hand_segmentation_lock = threading.RLock()
         self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
 
@@ -62,11 +68,15 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not isinstance(update, dict):
             raise ClientError("設定の形式が正しくありません。", "invalid_settings")
         with self.inference_lock, self.lock:
-            if self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
+            previous_output_directory = self.settings["saving"]["default_output_directory"]
             try:
-                settings = self.settings_store.save(update)
+                settings = self.settings_store.validate_update(update)
+                if settings["saving"]["default_output_directory"] != previous_output_directory:
+                    validate_output_directory_ready(settings["saving"]["default_output_directory"])
+                settings = self.settings_store.save(settings)
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = settings
@@ -80,16 +90,26 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
                 self.sam_predictor = None
                 self.sam_image_id = None
+            if any(settings["models"].get(key) != previous_models.get(key) for key in {"hand_segmentation", "hand_segmentation_enabled", "provider", "gpu_device"}):
+                self.hand_segmentation_predictor = None
+                self.hand_segmentation_image_id = None
             return self.settings
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
-            if self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
+            try:
+                settings = self.settings_store.default_settings()
+                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+            except SettingsError as exc:
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = self.settings_store.reset()
             self.models = None
             self.sam_predictor = None
             self.sam_image_id = None
+            self.hand_segmentation_predictor = None
+            self.hand_segmentation_image_id = None
             return self.settings
 
     def settings_status(self) -> dict[str, Any]:
@@ -112,31 +132,55 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     "configured": bool(raw),
                     "exists": False,
                     "valid": False,
-                    "detail": "",
+                    "reasonCode": None,
                     "profile": None,
                 }
                 return
             path = Path(raw).expanduser() if raw else None
             exists = bool(path and path.is_file())
             valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
-            detail = ""
+            reason_code: str | None = None
             profile: dict[str, object] | None = None
+            if not raw:
+                reason_code = "not_configured"
+            elif not exists:
+                reason_code = "missing"
+            elif not valid:
+                reason_code = "invalid_format"
             if valid and key in validators:
                 try:
                     profile = profile_summary(validators[key](path))
-                except ModelProfileError as exc:
+                except ModelProfileError:
                     valid = False
-                    detail = str(exc)
+                    reason_code = "invalid_model"
+            if valid and key == "hand_segmentation":
+                try:
+                    from safetensors import SafetensorError, safe_open
+                except ImportError:
+                    valid = False
+                    reason_code = "invalid_model"
+                else:
+                    try:
+                        with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
+                            valid = all(
+                                key in checkpoint.keys() and tuple(checkpoint.get_slice(key).get_shape()) == shape
+                                for key, shape in HAND_SEGMENTATION_VIT_B_TENSORS.items()
+                            )
+                        if not valid:
+                            reason_code = "invalid_model"
+                    except (OSError, ValueError, SafetensorError):
+                        valid = False
+                        reason_code = "invalid_model"
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
-                detail = "SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください"
+                reason_code = "invalid_format"
             result[key] = {
                 "required": required,
                 "enabled": enabled,
                 "configured": bool(raw),
                 "exists": exists,
                 "valid": valid,
-                "detail": detail,
+                "reasonCode": reason_code,
                 "profile": profile,
             }
 
@@ -144,6 +188,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         add_status("ntd11", required=False, enabled=bool(models["ntd11_enabled"]), required_suffix=".onnx")
         add_status("sensitive", required=False, enabled=bool(models["sensitive_enabled"]), required_suffix=".onnx")
         add_status("hand_detection", required=False, enabled=bool(models["hand_detection_enabled"]), required_suffix=".onnx")
+        add_status("hand_segmentation", required=False, enabled=bool(models.get("hand_segmentation_enabled")), required_suffix=".safetensors")
         add_status("sam_checkpoint", required=True, enabled=True)
         gpus = []
         if torch_module().cuda.is_available():

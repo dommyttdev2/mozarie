@@ -6,6 +6,11 @@ const translationFixtures = Object.fromEntries(["en", "ja"].map((language) => [
   language,
   JSON.parse(fs.readFileSync(path.join(__dirname, "..", "static", "i18n", `${language}.json`), "utf8")),
 ]));
+for (const language of ["en", "ja"]) {
+  const source = fs.readFileSync(path.join(__dirname, "..", "static", "i18n", `${language}.json`), "utf8");
+  const keys = [...source.matchAll(/^  "([^"]+)":/gm)].map((match) => match[1]);
+  assert.equal(new Set(keys).size, keys.length, `${language} translations do not repeat keys`);
+}
 
 function element(tagName = "") {
   const listeners = new Map();
@@ -21,7 +26,7 @@ function element(tagName = "") {
         if (enabled) classes.add(name); else classes.delete(name);
         return enabled;
       },
-    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, matches(selector) { return selector === ":popover-open" && Boolean(this.popoverOpen); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; this.popoverOpen = false; listeners.get("toggle")?.({ currentTarget: this, target: this }); }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -57,7 +62,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "removeAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
   "status", "statusLine", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpCloseButton", "batchModeButton", "batchSelectionControls", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsHandSegmentationModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsHandSegmentationCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsHandSegmentationToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpSamTable", "modelHelpCloseButton", "batchModeButton", "overviewSelectionBar", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
@@ -130,11 +135,11 @@ const settingsPanels = [
   const panel = element("section"); panel.id = id; panel.dataset.settingsPanel = name; elements.set(`#${id}`, panel); return panel;
 });
 const modelCards = [
-  ["settingsNtd11Toggle", "ntd11"], ["settingsSensitiveToggle", "sensitive"], ["settingsHandToggle", "hand_detection"],
+  ["settingsNtd11Toggle", "ntd11"], ["settingsSensitiveToggle", "sensitive"], ["settingsHandToggle", "hand_detection"], ["settingsHandSegmentationToggle", "hand_segmentation"],
 ].map(([id, modelToggle]) => {
   const toggle = elements.get(`#${id}`); toggle.dataset.modelToggle = modelToggle; return toggle;
 });
-for (const [toggleId, cardId] of [["settingsNtd11Toggle", "settingsNtd11Card"], ["settingsSensitiveToggle", "settingsSensitiveCard"], ["settingsHandToggle", "settingsHandCard"], ["settingsPrecisionToggle", "settingsPrecisionCard"], ["settingsFluidToggle", "settingsFluidCard"]]) {
+for (const [toggleId, cardId] of [["settingsNtd11Toggle", "settingsNtd11Card"], ["settingsSensitiveToggle", "settingsSensitiveCard"], ["settingsHandToggle", "settingsHandCard"], ["settingsHandSegmentationToggle", "settingsHandSegmentationCard"], ["settingsPrecisionToggle", "settingsPrecisionCard"], ["settingsFluidToggle", "settingsFluidCard"]]) {
   const toggle = elements.get(`#${toggleId}`);
   toggle.closest = (selector) => selector === ".model-card" ? elements.get(`#${cardId}`) : null;
 }
@@ -261,13 +266,13 @@ const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"
 const styles = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");
 assert.match(markup, /data-i18n="settings\.genitalDetection"/);
 assert.match(markup, /data-i18n="settings\.exclusionProcessing"/);
-assert.equal((markup.match(/role="switch"/g) || []).length, 5, "five optional processing switches are rendered");
+assert.equal((markup.match(/role="switch"/g) || []).length, 6, "six optional processing switches are rendered");
 assert.doesNotMatch(markup, /modelProfileHelp|modelsRequired|補助セグメンテーション|SAM チェックポイント/);
 assert.doesNotMatch(source, /model-card-toggle|aria-pressed.*model/);
 assert.equal(translationFixtures.ja["settings.models"], "検出");
 assert.equal(translationFixtures.en["settings.models"], "Detection");
 assert.equal(translationFixtures.ja["settings.precisionModel"], "自動検出の輪郭を補正");
-assert.equal(translationFixtures.en["settings.fluidExclusion"], "Exclude semen");
+assert.equal(translationFixtures.en["settings.fluidExclusion"], "Detect white-fluid candidates");
 assert.equal(translationFixtures.ja["detectDialog.help"], "高いほど誤検出は減りますが、見逃しは増えます。");
 assert.equal(translationFixtures.en["detectDialog.help"], "Higher values reduce false positives but can miss targets.");
 assert.equal(translationFixtures.ja["detection.help"], "高いほど誤検出は減りますが、見逃しは増えます。");
@@ -301,12 +306,15 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   assert.ok(!/title="[^\"]*[ぁ-んァ-ン一-龯]/.test(tag) || /data-i18n-title=/.test(tag), `Japanese title lacks a translation key: ${tag}`);
 }
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
+  source = source.replace("renderCandidates, overviewFolderOptions", "renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
+  source = source.replace("runNavigationAction, setNavigation", "runNavigationAction, runSelectionAction, setNavigation");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
+  const { runSelectionAction } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
   assert.equal(elements.get("#statusLine").hidden, true, "the status line starts hidden with no notification");
@@ -321,8 +329,8 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   state.selectedImageIds = new Set(["one", "two"]);
   state.selectionAnchorId = "one";
   updateSelectionActionBar();
-  assert.equal(elements.get("#batchModeButton").hidden, true, "batch mode replaces its entry button with the gallery work row");
-  assert.equal(elements.get("#batchSelectionControls").hidden, false, "batch controls are visible only while editing a selection");
+  assert.equal(elements.get("#batchModeButton").hidden, false, "batch mode keeps its entry available in the overview heading");
+  assert.equal(elements.get("#overviewSelectionBar").hidden, false, "batch controls are visible only while editing a selection");
   assert.equal(elements.get("#selectionCount").textContent, "selection.count");
   state.batchMode = false;
   clearBatchSelection();
@@ -330,7 +338,7 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   assert.equal(state.selectedImageIds.size, 0, "leaving batch mode clears selected ids without retaining green state");
   assert.equal(state.selectionAnchorId, null, "leaving batch mode clears the range anchor");
   assert.equal(elements.get("#batchModeButton").hidden, false);
-  assert.equal(elements.get("#batchSelectionControls").hidden, true);
+  assert.equal(elements.get("#overviewSelectionBar").hidden, true);
   state.images = [];
   updateActionButtons();
   assert.equal(elements.get("#batchModeButton").disabled, true, "batch edit is unavailable while the catalog is empty");
@@ -372,7 +380,6 @@ vm.runInNewContext(source, context, { filename: "static/app.js" });
   const applyImage = { id: "apply-image", sourceKind: "filesystem", relativePath: "apply.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
   state.images = [applyImage];
   state.applyTargetIds = [applyImage.id];
-  state.outputDirectoryHandle = { name: "保存先" };
   elements.get("#applySuffix").value = "_keep";
   elements.get("#deleteOriginal").checked = true;
   elements.get("#applyOverwriteMode").checked = true;
@@ -689,6 +696,23 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsTabModels").tabIndex, 0);
   assert.equal(elements.get("#settingsTabGeneral").tabIndex, -1);
   assert.equal(elements.get("#settingsPanelModels").hidden, false);
+  elements.get("#settingsResult").textContent = "global settings error";
+  elements.get("#settingsResult").classList.add("error");
+  elements.get("#settingsStatusResult").textContent = "panel-local status";
+  elements.get("#settingsModelStatus").textContent = "panel-local model";
+  elements.get("#updateStatus").textContent = "panel-local update";
+  selectSettingsTab("models");
+  assert.equal(elements.get("#settingsResult").textContent, "global settings error", "selecting the active settings tab preserves the global result");
+  assert.equal(elements.get("#settingsResult").classList.contains("error"), true, "selecting the active settings tab preserves result styling");
+  selectSettingsTab("missing");
+  assert.equal(elements.get("#settingsResult").textContent, "global settings error", "an unknown settings tab leaves the global result alone");
+  assert.equal(elements.get("#settingsTabModels").classList.contains("active"), true, "an unknown settings tab leaves the actual tab active");
+  selectSettingsTab("display");
+  assert.equal(elements.get("#settingsResult").textContent, "", "changing settings tabs clears the global result");
+  assert.equal(elements.get("#settingsResult").classList.contains("error"), false, "changing settings tabs clears global error styling");
+  assert.equal(elements.get("#settingsStatusResult").textContent, "panel-local status", "changing settings tabs preserves panel-local results");
+  assert.equal(elements.get("#settingsModelStatus").textContent, "panel-local model", "changing settings tabs preserves model status");
+  assert.equal(elements.get("#updateStatus").textContent, "panel-local update", "changing settings tabs preserves update status");
   moveSettingsTab({ currentTarget: elements.get("#settingsTabModels"), key: "ArrowRight", preventDefault() {} });
   assert.equal(document.activeElement, elements.get("#settingsTabDisplay"));
   moveSettingsTab({ currentTarget: elements.get("#settingsTabDisplay"), key: "End", preventDefault() {} });
@@ -1488,6 +1512,35 @@ const completionWatchdog = setTimeout(() => {
   resolveFetch({ ok: true, status: 200, json: async () => ({ cleared: true }) });
   assert.equal((await retryPromise).cleared, true);
 
+  // Retry only twice after the initial request: 150ms, then 500ms. Each
+  // retry keeps the original token and a final transient failure is surfaced.
+  const requestCountBeforeExhaustion = requests.length;
+  const timersBeforeExhaustion = new Set(scheduledTimers.keys());
+  const exhaustedRetry = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "same-token", sourceAction: "keep" });
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstExhaustionTimer = [...scheduledTimers].find(([id, timer]) => !timersBeforeExhaustion.has(id) && timer.delay === 150);
+  assert.ok(firstExhaustionTimer);
+  scheduledTimers.delete(firstExhaustionTimer[0]); firstExhaustionTimer[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondExhaustionTimer = [...scheduledTimers].find(([, timer]) => timer.delay === 500);
+  assert.ok(secondExhaustionTimer);
+  scheduledTimers.delete(secondExhaustionTimer[0]); secondExhaustionTimer[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await assert.rejects(exhaustedRetry);
+  const exhaustedRequests = requests.slice(requestCountBeforeExhaustion);
+  assert.equal(exhaustedRequests.length, 3);
+  assert.ok(exhaustedRequests.every((request) => request.path === "/api/save/commit" && request.options.body.includes("same-token")));
+
+  const requestCountBeforeClientError = requests.length;
+  const noRetry = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "client-error", sourceAction: "keep" });
+  resolveFetch({ ok: false, status: 400, json: async () => ({ error: "invalid" }) });
+  await assert.rejects(noRetry);
+  assert.equal(requests.length, requestCountBeforeClientError + 1);
+
   // Same-tab completion reloads a target image without putting its old canvas
   // back into drafts.
   const target = { id: "target", relativePath: "target.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
@@ -1845,7 +1898,21 @@ const completionWatchdog = setTimeout(() => {
   state.overviewFilter = "unreviewed";
   assert.deepEqual(JSON.parse(JSON.stringify(overviewImages().map((image) => image.id))), ["second"]);
   assert.equal(nextUnreviewedImage()?.id, "second");
+  state.viewMode = "edit";
+  const batchMoreMenu = elements.get("#batchMoreMenu");
+  const selectionActionsMenu = elements.get("#selectionActionsMenu");
+  batchMoreMenu.hidePopoverCalls = 0; selectionActionsMenu.hidePopoverCalls = 0;
+  batchMoreMenu.popoverOpen = true; selectionActionsMenu.popoverOpen = true;
+  elements.get("#batchMoreButton").setAttribute("aria-expanded", "true");
+  elements.get("#selectionActionsButton").setAttribute("aria-expanded", "true");
   setViewMode("overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 1, "opening overview closes the gallery menu once");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 1, "opening overview closes the selection menu once");
+  assert.equal(elements.get("#batchMoreButton").getAttribute("aria-expanded"), "false");
+  assert.equal(elements.get("#selectionActionsButton").getAttribute("aria-expanded"), "false");
+  setViewMode("overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 1, "staying in overview does not close menus again");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 1, "staying in overview does not close selection menus again");
   assert.equal(overviewGrid.children.filter((item) => item.dataset.id === "second").length, 1);
   state.overviewFilter = "all";
   state.images = [
@@ -1865,10 +1932,68 @@ const completionWatchdog = setTimeout(() => {
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
   state.reviewedPaths = new Set(["second.png"]);
+  state.viewMode = "overview";
+  state.batchMode = true;
+  clearBatchSelection();
+  renderOverview(true);
+  selectOverviewImage("first");
+  assert.deepEqual([...state.selectedImageIds], ["first"], "plain overview selection toggles the visible target");
+  assert.equal(state.selectionAnchorId, "first", "plain overview selection updates the range anchor");
+  assert.equal(state.currentId, "first", "batch selection does not change the current image");
+  const currentOverviewItem = overviewGrid.children.find((item) => item.dataset.id === "first");
+  assert.equal(currentOverviewItem.classList.contains("current"), true, "the current overview item keeps its current state while selected");
+  assert.equal(currentOverviewItem.classList.contains("batch-selected"), true, "the current overview item also keeps its batch selection state");
+  assert.equal(currentOverviewItem.getAttribute("aria-current"), "true", "the current overview item exposes current state independently");
+  assert.equal(currentOverviewItem.getAttribute("aria-pressed"), "true", "the current overview item exposes selected state independently");
+  selectOverviewImage("third", { shiftKey: true });
+  assert.deepEqual([...state.selectedImageIds], ["first", "second", "third"], "shift selection replaces with the visible overview range");
+  clearBatchSelection();
+  selectOverviewImage("first");
+  selectOverviewImage("third", { ctrlKey: true, shiftKey: true });
+  assert.deepEqual([...state.selectedImageIds], ["first", "second", "third"], "ctrl-shift adds the visible overview range");
+  state.overviewQuery = "second";
+  selectOverviewImage("second", { shiftKey: true });
+  assert.equal(state.selectionAnchorId, "second", "a filtered-out anchor falls back to toggling the overview target");
+  assert.equal(state.viewMode, "overview", "batch selection stays in the overview");
+  renderGallery(true);
+  assert.equal([...state.galleryNodes.values()].some((item) => item.classList.contains("batch-selected") || item.getAttribute("aria-pressed") !== null), false, "the normal gallery never exposes batch selection state");
+  state.overviewQuery = "";
+  batchMoreMenu.popoverOpen = true; selectionActionsMenu.popoverOpen = true;
+  setViewMode("edit");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 2, "returning to edit closes the gallery menu once");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 2, "returning to edit closes the selection menu once");
+  assert.equal(state.batchMode, false, "returning to edit exits overview batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "returning to edit clears overview selection");
+  state.batchMode = true;
+  state.selectedImageIds.add("first");
+  state.selectionAnchorId = "first";
   setViewMode("overview");
+  assert.equal(state.batchMode, false, "opening the overview starts without stale batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "opening the overview clears stale selection");
+  selectionActionsMenu.popoverOpen = true;
   overviewGrid.children.find((item) => item.dataset.id === "first").click();
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 3, "opening an overview image closes the selection menu once");
   assert.equal(state.viewMode, "edit");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
+  state.viewMode = "overview";
+  state.batchMode = true;
+  state.selectedImageIds = new Set(["second"]);
+  state.selectionAnchorId = "second";
+  state.settings.confirmations = { ...state.settings.confirmations, removeImage: false };
+  const imagesBeforeBatchRemoval = [...state.images];
+  const reviewedPathsBeforeBatchRemoval = new Set(state.reviewedPaths);
+  renderOverview(true);
+  const removeSelection = runSelectionAction("remove");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/catalog/image/second", "batch removal deletes only the selected overview image");
+  resolveFetch({ ok: true, json: async () => ({ images: [state.images[0], state.images[2]] }) });
+  await removeSelection;
+  assert.equal(state.batchMode, false, "batch removal exits batch mode after removing a subset");
+  assert.equal(state.selectedImageIds.size, 0, "batch removal clears the selected ids after removing a subset");
+  assert.equal(overviewGrid.children.filter((item) => !item.sentinel).some((item) => item.classList.contains("batch-selected") || item.getAttribute("aria-pressed") !== null), false, "batch removal clears selection state from surviving overview cards");
+  state.images = imagesBeforeBatchRemoval;
+  state.reviewedPaths = reviewedPathsBeforeBatchRemoval;
+  setViewMode("edit");
   state.navigationShortcutsEnabled = false;
   const disabledEnter = keyEvent("Enter");
   assert.equal(handleNavigationKeydown(disabledEnter), false);
@@ -1886,11 +2011,15 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(navigationShortcutAction(keyEvent("g")), null);
   elements.get("#confirmDialog").open = false;
   const toggleOverview = keyEvent("g");
+  batchMoreMenu.popoverOpen = true;
   assert.equal(handleNavigationKeydown(toggleOverview), true);
   assert.equal(toggleOverview.prevented, true);
   assert.equal(state.viewMode, "overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 3, "overview keyboard navigation closes the gallery menu once");
   assert.equal(document.activeElement, elements.get("#overviewPane"));
+  selectionActionsMenu.popoverOpen = true;
   setViewMode("edit");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 4, "return navigation closes the selection menu once");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   runNavigationAction(() => {});
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
@@ -2099,10 +2228,15 @@ const completionWatchdog = setTimeout(() => {
   state.candidateDeleting.add("old:row");
   setBoundaryModeMenuOpen(true);
   elements.get("#rectangleTool").focus();
+  state.batchMode = true;
+  state.selectedImageIds.add("old:row");
+  state.selectionAnchorId = "old:row";
   resetCatalog([], "");
   assert.equal(state.candidateUpdateVersions.size, 0);
   assert.equal(state.candidateDeleting.size, 0);
   assert.equal(elements.get("#boundaryModeMenu").hidden, true);
+  assert.equal(state.batchMode, false, "resetting the catalog exits batch mode");
+  assert.equal(state.selectedImageIds.size, 0, "resetting the catalog clears batch selection");
   assert.equal(document.activeElement, elements.get("#boundaryTool"));
   setBoundaryModeMenuOpen(true);
   elements.get("#polygonTool").focus();
@@ -2112,7 +2246,7 @@ const completionWatchdog = setTimeout(() => {
 
   // Loading either language refreshes dynamic detection labels and model status,
   // and parameterized strings never leak unresolved placeholders to the UI.
-  state.settings = { general: { language: "en" } };
+  state.settings = { general: { language: "en" }, saving: { default_output_directory: "G:\\saved-output" } };
   state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   state.images = [{ id: "dynamic", relativePath: "dynamic-name.png", width: 20, height: 10, candidateCount: 1, enabledCandidateCount: 1 }];
   state.currentId = "dynamic";
@@ -2120,7 +2254,6 @@ const completionWatchdog = setTimeout(() => {
   state.candidates = [{ id: "dynamic-candidate", enabled: true }];
   state.reviewedPaths = new Set(["dynamic-name.png"]);
   state.job = { kind: "detect", state: "running", completed: 2, total: 4 };
-  state.outputDirectoryHandle = { name: "saved-output" };
   setStatus("");
   const englishLoad = loadTranslations();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2128,21 +2261,32 @@ const completionWatchdog = setTimeout(() => {
   await englishLoad;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  const invalidModelStatuses = {
+    target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "" },
+    ntd11: { required: false, enabled: true, configured: true, valid: false, reasonCode: "invalid_model" },
+    hand_detection: { required: false, enabled: true, configured: true, valid: false, reasonCode: "missing" },
+  };
+  state.settingsStatus = { models: invalidModelStatuses };
+  renderModelStatus();
+  assert.equal(elements.get("#settingsModelStatus").textContent, [
+    `${translationFixtures.en["settings.ntd11Model"]}: ${translationFixtures.en["settings.modelStatus.invalid_model"]}`,
+    `${translationFixtures.en["settings.handModel"]}: ${translationFixtures.en["settings.modelStatus.missing"]}`,
+  ].join("\n"));
   state.settingsStatus = { models: {
-    target: { required: true, enabled: true, configured: true, valid: true, detail: "" },
-    ntd11: { required: false, enabled: true, configured: true, valid: false, detail: "invalid auxiliary" },
+    target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "" },
+    ntd11: { required: false, enabled: true, configured: true, valid: false, reasonCode: "invalid_model" },
     sensitive: { required: false, enabled: false, configured: false, valid: false, detail: "" },
   } };
   renderModelStatus();
-  assert.match(elements.get("#settingsModelStatus").textContent, /ntd11: invalid auxiliary/);
-  state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
+  assert.equal(elements.get("#settingsModelStatus").textContent, `${translationFixtures.en["settings.ntd11Model"]}: ${translationFixtures.en["settings.modelStatus.invalid_model"]}`);
+  state.settingsStatus = { models: { target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   renderModelStatus();
   assert.equal(elements.get("#imageInfo").textContent, "dynamic-name.png / 20 x 10");
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
   assert.equal(elements.get("#candidateStatus").textContent, translationFixtures.en["candidates.count"].replace("{count}", "1"));
   assert.equal(elements.get("#processingProgressText").textContent, translationFixtures.en["status.progressCount"].replace("{completed}", "2").replace("{total}", "4"));
   assert.equal(elements.get("#status").textContent, "");
-  assert.equal(elements.get("#applyOutputDirectoryStatus").textContent, translationFixtures.en["apply.outputDirectorySelected"].replace("{name}", "saved-output"));
+  assert.equal(elements.get("#applyOutputDirectoryStatus").value, "G:\\saved-output");
   for (const rendered of [
     t("apply.complete", { completed: 3 }),
     t("apply.completeWithStale", { completed: 3, stale: 1 }),
@@ -2174,6 +2318,13 @@ const completionWatchdog = setTimeout(() => {
   await japaneseLoad;
   assert.equal(document.documentElement.lang, "ja");
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  state.settingsStatus = { models: invalidModelStatuses };
+  renderModelStatus();
+  assert.equal(elements.get("#settingsModelStatus").textContent, [
+    `${translationFixtures.ja["settings.ntd11Model"]}: ${translationFixtures.ja["settings.modelStatus.invalid_model"]}`,
+    `${translationFixtures.ja["settings.handModel"]}: ${translationFixtures.ja["settings.modelStatus.missing"]}`,
+  ].join("\n"));
+  state.settingsStatus = { models: { target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   assert.equal(elements.get("#status").textContent, translationFixtures.ja["status.imagesLoaded"].replace("{count}", "3"));
 
   // Selecting a language updates immediately, while closing without Save
@@ -2203,7 +2354,7 @@ const completionWatchdog = setTimeout(() => {
   // success message is rendered, so the result cannot be left in the old UI language.
   const japaneseSettings = {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
+    models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, hand_segmentation: "hand.safetensors", hand_segmentation_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true },
     importing: { parallelism: 3 },
     detection: { threshold: 0.5, parallelism: 2, mode: "standard", fluid_exclusion_enabled: true },
@@ -2216,6 +2367,15 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsSensitiveCard").classList.contains("active"), false);
   assert.equal(elements.get("#settingsHandToggle").checked, true);
   assert.equal(elements.get("#settingsHandCard").classList.contains("active"), true);
+  assert.equal(elements.get("#settingsHandSegmentationToggle").checked, true);
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
+  elements.get("#settingsHandSegmentationToggle").checked = false;
+  elements.get("#settingsHandSegmentationToggle").dispatch("change");
+  assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), false);
+  elements.get("#settingsHandSegmentationToggle").checked = true;
+  elements.get("#settingsHandSegmentationToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
   assert.equal(elements.get("#settingsPrecisionToggle").checked, false);
   assert.equal(elements.get("#settingsFluidToggle").checked, true);
   selectSettingsTab("models");
@@ -2263,6 +2423,7 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsToolPosition").value = "bottom";
   assert.equal(settingsPayload().display.tool_position, "bottom");
   state.translations = translationFixtures.ja;
+  selectSettingsTab("general");
   elements.get("#settingsLanguage").value = "en";
   let preventedSettingsSubmit = false;
   const languageSwitchSave = saveSettings({ preventDefault() { preventedSettingsSubmit = true; } });
@@ -2276,6 +2437,10 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"]);
   assert.equal(state.settingsStatus, null, "saving leaves model and GPU status unverified");
+  selectSettingsTab("general");
+  assert.equal(elements.get("#settingsResult").textContent, translationFixtures.en["settings.saved"], "reselecting the saved tab preserves the save result");
+  selectSettingsTab("models");
+  assert.equal(elements.get("#settingsResult").textContent, "", "changing tabs after a save clears the save result");
   const resetSettingsRun = context.__mosaicTest.resetSettings();
   assert.equal(requests.at(-1).path, "/api/settings/reset?status=0", "resetting settings skips the expensive status probe");
   resolvePendingFetch("/api/settings/reset?status=0", { ok: true, json: async () => ({ settings: englishSettings, version: "v0.3.1" }) });

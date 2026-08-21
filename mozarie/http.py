@@ -1,7 +1,57 @@
 from .core import *
-from .state import STATE
+from .state import STATE, StudioState
 from .image_io import *
 from typing import BinaryIO
+
+
+def _pick_output_directory(state: StudioState = STATE) -> str | None:
+    if not state.output_picker_lock.acquire(blocking=False):
+        raise ClientError("保存先の選択を開いています。")
+    try:
+        with state.lock:
+            default_output_directory = state.settings["saving"]["default_output_directory"]
+            if state.importing_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+                raise ClientError("処理中は保存先を変更できません。")
+        system_root = Path(os.environ.get("SystemRoot", r"C:\\Windows"))
+        executable = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if not executable.is_file():
+            raise ClientError("保存先の選択を開けませんでした。")
+        script = """
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Mozarie の保存先を選択'
+$initial = $env:MOZARIE_DEFAULT_OUTPUT_DIRECTORY
+if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
+if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
+[Console]::Out.Write([Convert]::ToBase64String($bytes))
+"""
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        picker_environment = os.environ.copy()
+        picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(default_output_directory)
+        try:
+            completed = subprocess.run(
+                [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False, env=picker_environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ClientError("保存先の選択を開けませんでした。") from exc
+        if completed.returncode:
+            raise ClientError("保存先の選択を開けませんでした。")
+        encoded = completed.stdout.strip()
+        if not encoded:
+            return None
+        try:
+            selected = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ClientError("保存先の選択結果が正しくありません。") from exc
+        path = Path(selected)
+        if not path.is_absolute() or not path.is_dir():
+            raise ClientError("保存先は存在する絶対パスで選択してください。")
+        return str(path.resolve())
+    finally:
+        state.output_picker_lock.release()
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
@@ -163,6 +213,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     response["status"] = STATE.settings_status()
                 self._json(response)
+            elif path == "/api/output-directory/pick":
+                selected = _pick_output_directory()
+                self._json({"path": selected} if selected else {"cancelled": True})
             elif path == "/api/update/start":
                 self._json({"ok": True})
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
@@ -178,20 +231,27 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 )
                 self._json({"entries": entries})
             elif path == "/api/save/render":
-                output, record, revision, save_token = STATE.render_browser_save(
+                copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
+                rendered = STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     _read_mosaic_divisor(payload.get("divisor")),
                     payload.get("draft"),
+                    copy_to_default=copy_to_default,
+                    suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                 )
-                self._binary(
-                    output,
-                    mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
-                    headers={
-                        "X-Mozarie-Revision": str(revision),
-                        "X-Mozarie-Save-Token": save_token,
-                    },
-                )
+                output, record, revision, save_token = rendered
+                if copy_to_default:
+                    self._json({"output": str(rendered.output_path), "candidateRevision": revision, "saveToken": save_token})
+                else:
+                    self._binary(
+                        output,
+                        mimetypes.guess_type(record.path.name)[0] or "application/octet-stream",
+                        headers={
+                            "X-Mozarie-Revision": str(revision),
+                            "X-Mozarie-Save-Token": save_token,
+                        },
+                    )
             elif path == "/api/save/commit":
                 self._json(STATE.commit_browser_save(
                     str(payload.get("imageId", "")),

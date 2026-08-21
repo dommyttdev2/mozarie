@@ -1,6 +1,8 @@
 function openModelHelp(key) {
   $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
+  $("#modelHelpText").hidden = false;
   $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpSamTable").hidden = key !== "samType";
   $("#modelHelpDialog").showModal();
 }
 
@@ -83,8 +85,8 @@ function bindEvents() {
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
   document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
-  $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
-  $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
+  $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
+  $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
   $("#settingsLanguage").addEventListener("change", async (event) => {
     const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
@@ -372,7 +374,6 @@ async function initialise() {
     $("#settingsVersion").textContent = settings.version;
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
   await loadTranslations(); bindEvents();
-  await restoreOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
   document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));

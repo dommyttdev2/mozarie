@@ -185,6 +185,8 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
     const data = await api(`/api/catalog/image/${encodeURIComponent(imageId)}`, { method: "DELETE" });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     state.images = data.images;
+    state.selectedImageIds.delete(imageId);
+    if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
     releaseImageCaches(imageId);
     state.sourceAccess.delete(imageId);
     state.drafts.delete(imageId);
@@ -194,7 +196,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
       state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
       state.candidates = []; state.candidateImages = new Map(); clearEditor();
     }
-    renderCatalogViews();
+    renderCatalogViews(); updateSelectionActionBar();
     if (removingCurrent && nextImageId && state.images.some((item) => item.id === nextImageId)) {
       await selectImage(nextImageId, true, { saveCurrentDraft: false });
     } else {
@@ -215,7 +217,8 @@ async function runSelectionAction(action) {
   if (action === "clear") return clearMasks(ids, "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
   if (action === "remove") {
     for (const image of [...images]) await removeImageFromCatalog(image.id);
-    clearBatchSelection(); updateSelectionActionBar();
+    state.batchMode = false; clearBatchSelection(); updateSelectionActionBar();
+    renderOverview();
   }
 }
 

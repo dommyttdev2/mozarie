@@ -31,12 +31,35 @@ class SettingsStore:
 
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        if not self.local_path.is_file():
-            return defaults
-        return _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
+        settings = defaults if not self.local_path.is_file() else _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
+        return self._set_builtin_output_directory(settings)
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
-        settings = validate_settings(_merge(self.load(), update))
+        return self.save_validated(self.validate_update(update))
+
+    def validate_update(self, update: dict[str, Any]) -> dict[str, Any]:
+        return validate_settings(_merge(self.load(), update))
+
+    def default_settings(self) -> dict[str, Any]:
+        defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
+        return validate_settings(self._set_builtin_output_directory(defaults))
+
+    def _set_builtin_output_directory(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Fill a missing built-in output setting and ensure that folder exists."""
+        saving = settings.setdefault("saving", {})
+        configured_directory = str(saving.get("default_output_directory", "")).strip()
+        output_directory = (self.defaults_path.parent.parent / "output").resolve()
+        try:
+            uses_builtin_output = Path(configured_directory).is_absolute() and Path(configured_directory).resolve() == output_directory
+        except (OSError, ValueError):
+            uses_builtin_output = False
+        if not configured_directory or uses_builtin_output:
+            output_directory.mkdir(parents=True, exist_ok=True)
+        if not configured_directory:
+            saving["default_output_directory"] = str(output_directory.resolve())
+        return settings
+
+    def save_validated(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -117,14 +140,14 @@ def validate_settings(value: Any) -> dict[str, Any]:
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
     paths = {}
-    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "sam_checkpoint"):
-        path = models.get(key)
+    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation", "sam_checkpoint"):
+        path = models.get(key, "") if key == "hand_segmentation" else models.get(key)
         if not isinstance(path, str):
             raise SettingsError(f"models.{key} must be a string")
         paths[key] = path.strip()
     enabled = {
-        key: _expect_bool(models.get(key), f"models.{key}")
-        for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled")
+        key: _expect_bool(models.get(key, False) if key == "hand_segmentation_enabled" else models.get(key), f"models.{key}")
+        for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled", "hand_segmentation_enabled")
     }
     return {
         "general": {
@@ -157,7 +180,12 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
         },
-        "saving": {"parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8))},
+        "saving": {
+            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8)),
+            "default_output_directory": _validate_output_directory(
+                saving.get("default_output_directory") or str((Path(__file__).resolve().parent.parent / "output").resolve())
+            ),
+        },
         "shortcuts": {
             "enabled": _expect_bool(shortcuts.get("enabled", general.get("shortcuts_enabled", True)), "shortcuts.enabled"),
             "bindings": _validate_shortcuts(shortcuts.get("bindings", _DEFAULT_SHORTCUTS)),
@@ -168,6 +196,41 @@ def validate_settings(value: Any) -> dict[str, Any]:
             for key in ("clearMasks", "clearCatalog", "removeImage", "candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy")
         },
     }
+
+
+def _validate_output_directory(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SettingsError("saving.default_output_directory must be an absolute path")
+    raw = value.strip()
+    if "\x00" in raw:
+        raise SettingsError("saving.default_output_directory must not contain NUL")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise SettingsError("saving.default_output_directory must be an absolute path")
+    return str(path)
+
+
+def validate_output_directory_ready(value: str | Path) -> Path:
+    """Require an existing writable output folder without creating it."""
+    temporary_path: Path | None = None
+    try:
+        raw = os.fspath(value)
+        if "\x00" in raw:
+            raise SettingsError("saving.default_output_directory must not contain NUL")
+        path = Path(raw).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise SettingsError("saving.default_output_directory must be an existing directory")
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".mozarie-write-check-", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(b"1")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return path.resolve()
+    except (OSError, ValueError) as exc:
+        raise SettingsError("saving.default_output_directory must be writable") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _validate_targets(value: Any) -> list[str]:

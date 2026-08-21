@@ -13,6 +13,7 @@ Mozarie is distributed under the [MIT License](LICENSE). The following direct ru
 | PyTorch | SAM runtime | [pytorch/pytorch](https://github.com/pytorch/pytorch) | [BSD-3-Clause](https://github.com/pytorch/pytorch/blob/main/LICENSE) |
 | Torchvision | SAM image helpers | [pytorch/vision](https://github.com/pytorch/vision) | [BSD-3-Clause](https://github.com/pytorch/vision/blob/main/LICENSE) |
 | Segment Anything | Boundary refinement integration | [facebookresearch/segment-anything](https://github.com/facebookresearch/segment-anything) | [Apache-2.0](https://github.com/facebookresearch/segment-anything/blob/main/LICENSE) |
+| safetensors | HandSegNet checkpoint loading | [huggingface/safetensors](https://github.com/huggingface/safetensors) | [Apache-2.0](https://github.com/huggingface/safetensors/blob/main/LICENSE) |
 
 ## Model Weights
 

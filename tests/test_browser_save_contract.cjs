@@ -8,18 +8,19 @@ const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "ut
 const app = [...manifest.matchAll(/"([a-z-]+\.js)"/g)]
   .map((match) => fs.readFileSync(path.join(staticRoot, "js", match[1]), "utf8"))
   .join("\n");
-const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const server = fs.readFileSync(path.join(root, "mozarie", "http.py"), "utf8");
 
-assert.match(app, /window\.showDirectoryPicker\(\{ mode: "readwrite", id: "mozarie-output" \}\)/);
-assert.match(app, /createWritable\(\{ keepExistingData: false \}\)/);
-assert.match(app, /indexedDB\.open\(OUTPUT_HANDLE_DB, 1\)/);
-assert.doesNotMatch(app, /api\("\/api\/dialog\/output-directory"/);
-assert.doesNotMatch(app, /api\("\/api\/save\/copy"/);
-assert.match(app, /response\.headers\?\.get\("X-Mozarie-Save-Token"\)/);
-assert.match(app, /candidateRevision: entry\.candidateRevision, deleteOriginal, sourceAction, saveToken/);
-assert.doesNotMatch(app, /deleteOriginal: entry\.deleteOriginal/);
-assert.ok(app.indexOf("writeCopyOutput(directory, entry, suffix, bytes)") < app.indexOf('api("/api/save/commit"'), "the output must be written before commit");
-assert.match(readme, /Saving preserves image metadata/);
-assert.match(readme, /never downloads or bundles models/);
-
+assert.match(app, /api\("\/api\/output-directory\/pick"/);
+assert.match(app, /copyToDefault: true, suffix/);
+assert.match(app, /const delays = \[0, 150, 500\]/);
+assert.match(app, /api\("\/api\/apply"/);
+const save = fs.readFileSync(path.join(staticRoot, "js", "save.js"), "utf8");
+assert.doesNotMatch(save, /showDirectoryPicker|indexedDB|outputDirectoryHandle|uniqueOutputFileHandle|writeCopyOutput/);
+assert.match(save, /let outputDirectoryPickRequest = null/);
+assert.match(save, /state\.outputDirectoryPicking = picking/);
+assert.match(save, /if \(!outputDirectoryPickRequest\)/);
+assert.match(save, /selected\.path \|\| null/);
+assert.match(server, /path == "\/api\/output-directory\/pick"/);
+assert.match(server, /if copy_to_default:\s*\n\s*self\._json\(\{"output": str\(rendered\.output_path\)/);
+assert.doesNotMatch(server, /browser_save_tokens\.get\(save_token\)/);
 console.log("test_browser_save_contract: passed");

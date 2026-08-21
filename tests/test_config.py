@@ -6,10 +6,82 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mozarie.config import SettingsError, SettingsStore, validate_settings
+from mozarie.config import SettingsError, SettingsStore, validate_output_directory_ready, validate_settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_missing_builtin_output_directory_is_created_for_load_save_and_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults["saving"].pop("default_output_directory")
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            store = SettingsStore(root)
+            output = root / "output"
+
+            loaded = store.load()
+            self.assertEqual(loaded["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertEqual(validate_output_directory_ready(output), output.resolve())
+
+            store.save({"general": {"language": "en"}})
+            self.assertTrue((config / "local.json").is_file())
+            output.rmdir()
+            self.assertFalse(output.exists())
+            self.assertEqual(store.load()["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            reset = store.reset()
+            self.assertEqual(reset["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertFalse((config / "local.json").exists())
+
+    def test_blank_legacy_output_directory_falls_back_to_the_builtin_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults["saving"]["default_output_directory"] = str(root / "configured-output")
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            (config / "local.json").write_text(json.dumps({"saving": {"default_output_directory": "   "}}), encoding="utf-8")
+
+            settings = SettingsStore(root).load()
+            output = root / "output"
+            self.assertEqual(settings["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertEqual(validate_output_directory_ready(output), output.resolve())
+
+    def test_missing_custom_output_directory_is_not_created_by_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            custom_output = root / "custom-output"
+            defaults["saving"]["default_output_directory"] = str(custom_output)
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+
+            settings = SettingsStore(root).load()
+            self.assertEqual(settings["saving"]["default_output_directory"], str(custom_output))
+            self.assertFalse(custom_output.exists())
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(custom_output)
+
+    def test_output_directory_ready_requires_an_existing_writable_directory_without_creating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "保存先"
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(target)
+            self.assertFalse(target.exists())
+            target.mkdir()
+            self.assertEqual(validate_output_directory_ready(target), target.resolve())
+            self.assertEqual(list(target.iterdir()), [])
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(str(target) + "\x00bad")
+
     def test_valid_settings_are_persisted_only_to_local_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -45,7 +117,9 @@ class SettingsTests(unittest.TestCase):
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root); store.save({"general": {"language": "en"}})
             self.assertTrue((root / "config" / "local.json").is_file())
-            self.assertEqual(store.reset(), defaults)
+            reset = store.reset()
+            self.assertEqual(reset["general"], defaults["general"])
+            self.assertEqual(reset["saving"]["default_output_directory"], str((root / "output").resolve()))
             self.assertFalse((root / "config" / "local.json").exists())
 
     def test_invalid_provider_and_threshold_are_rejected(self):
@@ -66,6 +140,32 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(SettingsError): validate_settings(invalid_tool_position)
         with self.assertRaises(SettingsError): validate_settings(invalid_fluid_exclusion)
         with self.assertRaises(SettingsError): validate_settings(invalid_import_parallelism)
+
+    def test_hand_segmentation_settings_merge_with_legacy_defaults(self):
+        legacy = {
+            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
+            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
+        }
+        settings = validate_settings(legacy)
+        self.assertEqual(settings["models"]["hand_segmentation"], "")
+        self.assertFalse(settings["models"]["hand_segmentation_enabled"])
+        self.assertTrue(Path(settings["saving"]["default_output_directory"]).is_absolute())
+
+    def test_output_directory_must_be_an_absolute_path(self):
+        legacy = {
+            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
+            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
+            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
+            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
+            "saving": {"parallelism": 2, "default_output_directory": "relative-output"},
+        }
+        with self.assertRaises(SettingsError):
+            validate_settings(legacy)
+        legacy["saving"]["default_output_directory"] = "C:\\output\x00bad"
+        with self.assertRaises(SettingsError):
+            validate_settings(legacy)
 
     def test_legacy_shortcuts_gain_per_action_defaults(self):
         legacy = {

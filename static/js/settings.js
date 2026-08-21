@@ -10,10 +10,20 @@ function renderModelStatus() {
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
   $("#settingsModelStatus").textContent = activeModels.length && activeModels.every(([, model]) => model.valid)
     ? ""
-    : activeModels.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n");
+    : activeModels.map(([key, model]) => {
+      const labelKey = {
+        target_segmentation: "settings.targetModel",
+        ntd11: "settings.ntd11Model",
+        sensitive: "settings.sensitiveModel",
+        hand_detection: "settings.handModel",
+        hand_segmentation: "settings.handSegmentationModel",
+        sam_checkpoint: "settings.samModel",
+      }[key];
+      return labelKey && model.reasonCode ? `${t(labelKey)}: ${t(`settings.modelStatus.${model.reasonCode}`)}` : "";
+    }).filter(Boolean).join("\n");
 }
 
-const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle" };
+const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle", hand_segmentation: "#settingsHandSegmentationToggle" };
 
 function setModelCardEnabled(key, enabled) {
   const toggle = $(MODEL_TOGGLE_IDS[key]);
@@ -99,7 +109,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsImportParallelism").value = String(settings.importing?.parallelism || 3);
   $("#settingsSaveParallelism").value = String(settings.saving?.parallelism || 2);
   $("#settingsShortcutsEnabled").checked = settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled;
-  renderOutputHandle();
+  renderOutputDirectory();
   setNavigationShortcutsEnabled(settings.shortcuts?.enabled ?? settings.general.shortcuts_enabled);
   $("#settingsTargetModel").value = settings.models.target_segmentation;
   $("#settingsNtd11Model").value = settings.models.ntd11;
@@ -108,6 +118,8 @@ function setSettingsForm(settings, status = null) {
   setModelCardEnabled("sensitive", settings.models.sensitive_enabled);
   $("#settingsHandModel").value = settings.models.hand_detection;
   setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
+  $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
+  setModelCardEnabled("hand_segmentation", settings.models.hand_segmentation_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
@@ -161,6 +173,7 @@ function settingsPayload() {
       target_segmentation: $("#settingsTargetModel").value.trim(), ntd11: $("#settingsNtd11Model").value.trim(), ntd11_enabled: modelCardEnabled("ntd11"),
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
+      hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: modelCardEnabled("hand_segmentation"),
       sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
     },
     display: {
@@ -175,18 +188,27 @@ function settingsPayload() {
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked, targets: detectionTargets(),
     },
-    saving: { parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))) },
+    saving: {
+      parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),
+      default_output_directory: $("#settingsDefaultOutputDirectory").value.trim(),
+    },
     shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload(), actions: shortcutActionsPayload() },
     confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked, candidateDelete: $("#confirmCandidateDelete").checked, candidateRoleDelete: $("#confirmCandidateRoleDelete").checked, overwriteSource: $("#confirmOverwriteSource").checked, deleteSourceAfterCopy: $("#confirmDeleteSourceAfterCopy").checked },
   };
 }
 
 function selectSettingsTab(name) {
-  document.querySelectorAll(".settings-tab").forEach((button) => {
+  const tabs = [...document.querySelectorAll(".settings-tab")];
+  const nextTab = tabs.find((button) => button.dataset.settingsTab === name);
+  if (!nextTab) return;
+  const activeTab = tabs.find((button) => button.classList.contains("active"));
+  const changed = activeTab && activeTab !== nextTab;
+  tabs.forEach((button) => {
     const active = button.dataset.settingsTab === name;
     button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
+  if (changed) { const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error"); }
 }
 
 function moveSettingsTab(event) {
@@ -247,7 +269,8 @@ async function resetSettings() {
 
 async function chooseSettingsOutputDirectory() {
   try {
-    await selectOutputDirectory();
+    const directory = await pickOutputDirectory();
+    if (directory) $("#settingsDefaultOutputDirectory").value = directory;
   } catch (error) {
     if (error?.name !== "AbortError") { $("#settingsResult").textContent = error.message; $("#settingsResult").classList.add("error"); }
   }
