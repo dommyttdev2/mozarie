@@ -10,6 +10,65 @@ from mozarie.config import SettingsError, SettingsStore, validate_output_directo
 
 
 class SettingsTests(unittest.TestCase):
+    def test_missing_builtin_output_directory_is_created_for_load_save_and_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults["saving"].pop("default_output_directory")
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            store = SettingsStore(root)
+            output = root / "output"
+
+            loaded = store.load()
+            self.assertEqual(loaded["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertEqual(validate_output_directory_ready(output), output.resolve())
+
+            store.save({"general": {"language": "en"}})
+            self.assertTrue((config / "local.json").is_file())
+            output.rmdir()
+            self.assertFalse(output.exists())
+            self.assertEqual(store.load()["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            reset = store.reset()
+            self.assertEqual(reset["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertFalse((config / "local.json").exists())
+
+    def test_blank_legacy_output_directory_falls_back_to_the_builtin_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults["saving"]["default_output_directory"] = str(root / "configured-output")
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            (config / "local.json").write_text(json.dumps({"saving": {"default_output_directory": "   "}}), encoding="utf-8")
+
+            settings = SettingsStore(root).load()
+            output = root / "output"
+            self.assertEqual(settings["saving"]["default_output_directory"], str(output.resolve()))
+            self.assertTrue(output.is_dir())
+            self.assertEqual(validate_output_directory_ready(output), output.resolve())
+
+    def test_missing_custom_output_directory_is_not_created_by_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            custom_output = root / "custom-output"
+            defaults["saving"]["default_output_directory"] = str(custom_output)
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+
+            settings = SettingsStore(root).load()
+            self.assertEqual(settings["saving"]["default_output_directory"], str(custom_output))
+            self.assertFalse(custom_output.exists())
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(custom_output)
+
     def test_output_directory_ready_requires_an_existing_writable_directory_without_creating_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

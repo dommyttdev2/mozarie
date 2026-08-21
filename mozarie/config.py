@@ -32,10 +32,7 @@ class SettingsStore:
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
         settings = defaults if not self.local_path.is_file() else _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
-        saving = settings.setdefault("saving", {})
-        if not str(saving.get("default_output_directory", "")).strip():
-            saving["default_output_directory"] = str((self.defaults_path.parent.parent / "output").resolve())
-        return settings
+        return self._set_builtin_output_directory(settings)
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
         return self.save_validated(self.validate_update(update))
@@ -45,10 +42,22 @@ class SettingsStore:
 
     def default_settings(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        saving = defaults.setdefault("saving", {})
-        if not str(saving.get("default_output_directory", "")).strip():
-            saving["default_output_directory"] = str((self.defaults_path.parent.parent / "output").resolve())
-        return validate_settings(defaults)
+        return validate_settings(self._set_builtin_output_directory(defaults))
+
+    def _set_builtin_output_directory(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Fill a missing built-in output setting and ensure that folder exists."""
+        saving = settings.setdefault("saving", {})
+        configured_directory = str(saving.get("default_output_directory", "")).strip()
+        output_directory = (self.defaults_path.parent.parent / "output").resolve()
+        try:
+            uses_builtin_output = Path(configured_directory).is_absolute() and Path(configured_directory).resolve() == output_directory
+        except (OSError, ValueError):
+            uses_builtin_output = False
+        if not configured_directory or uses_builtin_output:
+            output_directory.mkdir(parents=True, exist_ok=True)
+        if not configured_directory:
+            saving["default_output_directory"] = str(output_directory.resolve())
+        return settings
 
     def save_validated(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.local_path.parent.mkdir(parents=True, exist_ok=True)

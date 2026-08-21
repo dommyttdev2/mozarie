@@ -92,6 +92,30 @@ class MozarieTests(unittest.TestCase):
         self._states.append(state)
         return state
 
+    def test_builtin_output_directory_is_created_for_default_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_dir = root / "app"
+            config = app_dir / "config"
+            config.mkdir(parents=True)
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults["saving"].pop("default_output_directory")
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            source_dir = root / "images"
+            source_dir.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source_dir / "source.png")
+
+            with patch.object(state_module, "APP_DIR", app_dir):
+                state = self.new_state()
+            self.assertEqual(state.settings["saving"]["default_output_directory"], str((app_dir / "output").resolve()))
+            image_id = state.set_root(str(source_dir))[0]["id"]
+            self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}, copy_to_default=True))
+            assert state.worker_thread is not None
+            state.worker_thread.join(2)
+
+            self.assertEqual(state.job.state, "complete")
+            self.assertTrue((app_dir / "output" / "source_censored.png").is_file())
+
     def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
         state = self.new_state()
         with tempfile.TemporaryDirectory() as directory:
