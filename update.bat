@@ -9,10 +9,9 @@ if defined MOZARIE_PYTHON (
   if exist "%MOZARIE_PYTHON%" (
     set "PYTHON=%MOZARIE_PYTHON%"
     call :validate_python
-    if errorlevel 1 goto :missing_python
+    if errorlevel 1 goto :invalid_mozarie_python
   ) else (
-    echo [Mozarie] MOZARIE_PYTHON does not point to a Python executable.
-    goto :missing_python
+    goto :invalid_mozarie_python
   )
 )
 if not defined PYTHON if exist "%APP_DIR%.venv\Scripts\python.exe" (
@@ -48,18 +47,21 @@ if not defined PYTHON (
 )
 if not defined PYTHON goto :missing_python
 
-"%PYTHON%" %PYTHON_ARGS% "%APP_DIR%updater.py"
+"%PYTHON%" %PYTHON_ARGS% -X utf8 "%APP_DIR%updater.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 
+:invalid_mozarie_python
+echo [Mozarie] MOZARIE_PYTHON is invalid. / MOZARIE_PYTHON が正しくありません。
+set "EXIT_CODE=1"
+goto :finish
+
 :missing_python
-echo [Mozarie] Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv.
+echo [Mozarie] Python 3.11+ was not found. / Python 3.11 以上が見つかりません。
 set "EXIT_CODE=1"
 
 :finish
-echo.
-echo 何かキーを押すと閉じます...
-pause >nul
+pause
 exit /b %EXIT_CODE%
 
 :validate_python
