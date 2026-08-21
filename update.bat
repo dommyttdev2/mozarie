@@ -57,7 +57,7 @@ set "EXIT_CODE=1"
 goto :finish
 
 :missing_python
-echo [Mozarie] Python 3.11+ was not found. / Python 3.11 以上が見つかりません。
+echo [Mozarie] Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv. / Python 3.11 以上が見つかりません。MOZARIE_PYTHONを設定するか.venvを作成してください。
 set "EXIT_CODE=1"
 
 :finish

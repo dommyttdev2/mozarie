@@ -124,7 +124,7 @@ def read_language(app_dir: Path = APP_DIR) -> str:
             continue
         general = config.get("general") if isinstance(config, dict) else None
         language = general.get("language") if isinstance(general, dict) else None
-        if language in MESSAGES:
+        if isinstance(language, str) and language in MESSAGES:
             return language
     return "ja"
 

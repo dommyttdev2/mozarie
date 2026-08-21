@@ -183,11 +183,22 @@ class UpdaterTests(unittest.TestCase):
             local.write_text('{"general": {"language": "invalid"}}', encoding="utf-8")
             self.assertEqual(updater.read_language(app), "en")
 
+            for invalid_language in ([], {}):
+                with self.subTest(invalid_language=invalid_language):
+                    local.write_text(
+                        json.dumps({"general": {"language": invalid_language}}), encoding="utf-8"
+                    )
+                    self.assertEqual(updater.read_language(app), "en")
+
             local.write_bytes(b"\xff")
             self.assertEqual(updater.read_language(app), "en")
 
             local.write_text("{", encoding="utf-8")
             defaults.write_text('{"general": []}', encoding="utf-8")
+            self.assertEqual(updater.read_language(app), "ja")
+
+            local.write_text('{"general": {"language": {}}}', encoding="utf-8")
+            defaults.write_text('{"general": {"language": []}}', encoding="utf-8")
             self.assertEqual(updater.read_language(app), "ja")
 
     def test_i18n_message_keys_and_placeholders_match(self):
@@ -340,7 +351,11 @@ class UpdaterTests(unittest.TestCase):
         self.assertRegex(batch, r"(?m)^pause\r?$")
         self.assertNotIn("pause >nul", batch)
         self.assertIn("MOZARIE_PYTHON is invalid. / MOZARIE_PYTHON が正しくありません。", batch)
-        self.assertIn("Python 3.11+ was not found. / Python 3.11 以上が見つかりません。", batch)
+        self.assertIn(
+            "Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv. / "
+            "Python 3.11 以上が見つかりません。MOZARIE_PYTHONを設定するか.venvを作成してください。",
+            batch,
+        )
         self.assertEqual(len(re.findall(r"(?mi)^echo (?!off$)", batch)), 2)
         self.assertNotIn("run.bat", batch.lower())
         self.assertNotIn("update.bat", updater.MANAGED_FILES)
