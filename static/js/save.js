@@ -567,7 +567,7 @@ async function finishApplyJob(job) {
     $("#applyCloseButton").hidden = false;
     if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
     else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
-    else setApplyResult(t("apply.error", { error: job.error || t("error.background") }), true);
+    else setApplyResult(t("apply.error", { error: jobErrorMessage(job) }), true);
     reconciled = true;
   } finally {
     if (reconciled && job.startedAt != null) state.handledApplyStartedAt = job.startedAt;
@@ -576,9 +576,15 @@ async function finishApplyJob(job) {
 }
 
 function isTerminalDetection(job, previous) {
-  if (job.kind !== "detect" || !["complete", "cancelled"].includes(job.state) || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
+  if (job.kind !== "detect" || !["complete", "cancelled", "error"].includes(job.state) || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
   const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "pausing", "paused"].includes(previous.state);
   return observedRunning || Number(job.startedAt) >= state.pageLoadedAt;
+}
+
+function jobErrorMessage(job) {
+  if (!job.errorCode) return job.error || t("error.background");
+  const localized = t(`errorCode.${job.errorCode}`, job.params || {});
+  return localized === `errorCode.${job.errorCode}` ? (job.error || t("error.background")) : localized;
 }
 
 async function finishDetectionJob(job) {
@@ -611,12 +617,13 @@ async function pollJob() {
   state.pollInFlight = (async () => {
   try {
     const job = await api("/api/job"); const previous = state.job; state.job = job; state.pollFailures = 0; updateProgress(job);
+    const jobError = jobErrorMessage(job);
     const terminalApply = isTerminalApply(job);
     if (terminalApply) {
       await finishApplyJob(job);
       if (job.state === "complete") setStatusKey("status.applyDone");
       else if (job.state === "cancelled") setStatusKey("status.applyCancelled");
-      else if (job.error) setStatus(job.error, "error");
+      else if (jobError) setStatus(jobError, "error");
       else setStatusKey("error.background", {}, "error");
     } else if (job.kind === "apply" && ["running", "pausing", "paused"].includes(job.state)) {
       if (!state.applyRunning) showRunningApply(job);
@@ -627,14 +634,10 @@ async function pollJob() {
       $("#applyPauseButton").textContent = t(job.state === "paused" ? "apply.resume" : "apply.pause");
       $("#applyPauseButton").disabled = job.state === "pausing";
       if (job.state === "running") setStatusKey("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }, "running");
-    } else if (job.kind === "detect" && job.state === "error" && previous?.state !== "error") {
-      state.detectCancelRequested = false;
-      await finishDetectionJob(job);
-      if (job.error) setStatus(job.error, "error");
-      else setStatusKey("error.background", {}, "error");
-  } else if (isTerminalDetection(job, previous)) {
+    } else if (isTerminalDetection(job, previous)) {
     await finishDetectionJob(job);
-      if (job.state === "cancelled") setStatusKey("status.detectCancelled", { completed: job.completed });
+      if (job.state === "error") setStatus(jobError, "error");
+      else if (job.state === "cancelled") setStatusKey("status.detectCancelled", { completed: job.completed });
       else setStatusKey("status.detectDone");
     }
   } catch (error) {

@@ -149,15 +149,21 @@ function showProcessing(processing) {
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
   $("#processingProgressText").textContent = t("status.progressCount", { completed: current.completed || 0, total: current.total || 0 });
+  const cancelling = Boolean(state.detectCancelRequested || state.importSession?.cancelled);
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
-  $("#processingPauseButton").disabled = current.state === "pausing";
+  $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
+  $("#processingCancelButton").disabled = cancelling;
   if (!modal.open) modal.showModal();
 }
 
 function closeProcessing() {
   state.processing = null;
+  for (const id of ["#processingPauseButton", "#processingCancelButton"]) {
+    const control = $(id); control.disabled = false; delete control.dataset.disabledByLock;
+  }
   const modal = $("#processingDialog");
   if (modal.open) modal.close();
+  updateActionButtons();
 }
 
 function renderStatus() {
@@ -201,6 +207,7 @@ function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor())
 function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
+    || state.processing?.kind === "detect"
     || state.catalogMutation || state.boundaryPending || state.fillPending;
 }
 function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
@@ -394,9 +401,9 @@ function updateActionButtons() {
   $("#pickFolder").disabled = running || state.importing;
   const batchDetectButtons = [$("#detectAllButton")];
   for (const detectAllButton of batchDetectButtons) {
-    detectAllButton.textContent = t(detecting ? (state.detectCancelRequested ? "detectDialog.stopping" : "detectDialog.stop") : "gallery.detectAll");
-    detectAllButton.classList.toggle("detect-stop", detecting);
-    detectAllButton.disabled = detecting ? state.detectCancelRequested : (running || state.images.length === 0);
+    detectAllButton.textContent = t("gallery.detectAll");
+    detectAllButton.classList.toggle("detect-stop", false);
+    detectAllButton.disabled = running || state.images.length === 0;
   }
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));

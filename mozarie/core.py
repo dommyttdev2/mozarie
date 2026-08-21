@@ -234,6 +234,8 @@ class Job:
     completed: int = 0
     current: str = ""
     error: str = ""
+    error_code: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
     outputs: list[str] = field(default_factory=list)
     image_ids: tuple[str, ...] = ()
@@ -249,6 +251,8 @@ class Job:
             "completed": self.completed,
             "current": self.current,
             "error": self.error,
+            "errorCode": self.error_code,
+            "params": self.params,
             "startedAt": self.started_at,
             "outputs": self.outputs,
             "imageIds": list(self.image_ids),

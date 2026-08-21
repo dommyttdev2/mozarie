@@ -546,7 +546,12 @@ class CatalogMixin:
                 provider = self.settings["models"]["provider"]
                 if provider == "gpu" and not torch_module().cuda.is_available():
                     raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
-                model = sam_model_registry[model_type](checkpoint=str(sam_path))
+                try:
+                    model = sam_model_registry[model_type](checkpoint=str(sam_path))
+                except RuntimeError as exc:
+                    # The constructor validates checkpoint tensors. Do not
+                    # catch model.to() failures such as device OOM below.
+                    raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
                 device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
                 model.to(device=device)
                 self.sam_predictor = SamPredictor(model)

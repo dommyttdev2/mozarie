@@ -150,6 +150,39 @@ class MozarieTests(unittest.TestCase):
             http_module._pick_output_directory(state)
         run.assert_not_called()
 
+    def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            selected = root / "model.onnx"; selected.touch()
+            completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
+            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), patch.object(http_module.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(http_module._pick_model_file("target_segmentation", state), str(selected.resolve()))
+                with self.assertRaisesRegex(ClientError, "正しくありません"):
+                    http_module._pick_model_file("sam_checkpoint", state)
+            command = run.call_args.args[0]
+            self.assertIn("OpenFileDialog", base64.b64decode(command[-1]).decode("utf-16le"))
+            self.assertFalse(run.call_args.kwargs["shell"])
+            self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
+            state.native_picker_lock.acquire()
+            try:
+                with self.assertRaisesRegex(ClientError, "選択を開いています"):
+                    http_module._pick_model_file("target_segmentation", state)
+            finally:
+                state.native_picker_lock.release()
+
+    def test_import_staging_gate_allows_ten_concurrent_uploads(self):
+        state = self.new_state()
+        acquired = [state.import_staging_gate.acquire(blocking=False) for _ in range(10)]
+        try:
+            self.assertEqual(acquired, [True] * 10)
+            self.assertFalse(state.import_staging_gate.acquire(blocking=False))
+        finally:
+            for acquired_one in acquired:
+                if acquired_one: state.import_staging_gate.release()
+
     def test_output_directory_picker_allows_folder_reload_while_open(self):
         state = self.new_state()
         with tempfile.TemporaryDirectory() as directory:
@@ -1700,6 +1733,31 @@ class MozarieTests(unittest.TestCase):
                 state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             model.to.assert_called_once_with(device="cpu")
             fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
+
+    def test_sam_constructor_checkpoint_error_is_a_client_error_but_device_error_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            checkpoint = Path(directory) / "sam.pth"; checkpoint.write_bytes(b"checkpoint")
+            record = self._record(image_path, 8, 8)
+            state = self.new_state()
+            state.settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b", "provider": "cpu"})
+            constructor = Mock(side_effect=RuntimeError("bad state dict"))
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}):
+                with self.assertRaises(ClientError) as raised:
+                    state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+            self.assertEqual(raised.exception.error_code, "sam_checkpoint_invalid")
+
+            model = Mock(); model.to.side_effect = RuntimeError("out of memory")
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}):
+                with self.assertRaisesRegex(RuntimeError, "out of memory"):
+                    state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+
+    def test_job_error_response_preserves_client_error_code_and_params(self):
+        state = self.new_state(); state.job = server_module.Job(kind="detect", state="running")
+        state._fail_job(ClientError("invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
+        data = state.job.as_dict()
+        self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
+        self.assertEqual(data["params"], {"model": "vit_b"})
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()

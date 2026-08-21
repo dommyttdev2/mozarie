@@ -538,6 +538,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#galleryDropOverlay").hidden, true);
   state.images = [loadedImage];
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   state.currentId = loadedImage.id;
   state.currentImage = { width: loadedImage.width, height: loadedImage.height };
@@ -553,6 +554,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(requests.at(-1).path, "/api/detect");
   assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 1.00, parallelism: 1, targetClasses: ["penis", "pussy"] });
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   state.currentId = null;
   state.currentImage = null;
@@ -573,16 +575,16 @@ const completionWatchdog = setTimeout(() => {
   assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 0.67, parallelism: 2, targetClasses: ["penis", "pussy"] });
   assert.equal(elements.get("#confidence").value, "0.67", "dialog confidence should synchronize to the right pane");
   updateActionButtons();
-  assert.equal(elements.get("#detectAllButton").disabled, false, "stop must remain available while detecting");
+  assert.equal(elements.get("#detectAllButton").disabled, true, "header detection stays unavailable while detecting");
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
   assert.equal(elements.get("#saveAllButton").disabled, true);
   const cancelDetectionRequest = cancelDetection();
-  assert.equal(elements.get("#detectAllButton").disabled, true, "stop button disables while cancellation is pending");
-  assert.equal(elements.get("#detectAllButton").textContent, "Stopping...");
+  assert.equal(elements.get("#detectAllButton").disabled, true, "header detection remains unavailable while cancellation is pending");
   resolveFetch({ ok: true, json: async () => ({ kind: "detect", state: "running" }) });
   await cancelDetectionRequest;
   assert.equal(requests.at(-1).path, "/api/job/cancel");
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   updateActionButtons();
   fetchCalls = 0;
@@ -1012,6 +1014,15 @@ const completionWatchdog = setTimeout(() => {
   updateProgress({ kind: "detect", state: "pausing", total: 3, completed: 1 });
   assert.equal(elements.get("#processingPauseButton").disabled, true);
 
+  state.job = { kind: "detect", state: "error", total: 3, completed: 1 };
+  state.processing = { kind: "detect", state: "error", total: 3, completed: 1 };
+  updateActionButtons();
+  assert.equal(isBusy(), true, "terminal detection stays locked while its image reconciliation is pending");
+  assert.equal(elements.get("#detectCurrentButton").disabled, true);
+  state.processing = null;
+  updateActionButtons();
+  assert.equal(isBusy(), false, "terminal detection releases controls after reconciliation closes processing");
+
   state.applyRunning = false;
   state.job = { kind: "detect", state: "running", total: 80, completed: 0 };
   updateProgress(state.job);
@@ -1033,6 +1044,9 @@ const completionWatchdog = setTimeout(() => {
     updateProgress({ kind: "detect", state: terminalState, total: 80, completed: 80 });
     assert.equal(elements.get("#processingDialog").open, true, `${terminalState} must not reset the active modal`);
   }
+  assert.equal(elements.get("#pickFolder").disabled, true, "terminal detection remains locked until reconciliation closes the processing modal");
+  state.processing = null;
+  updateActionButtons();
   assert.equal(elements.get("#pickFolder").disabled, false);
   setMosaicPreviewEnabled(false);
   assert.equal(state.mosaicPreviewEnabled, false);
@@ -1804,6 +1818,9 @@ const completionWatchdog = setTimeout(() => {
   updateProgress(state.job);
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
   assert.equal(elements.get("#saveButton").disabled, true);
+  assert.equal(elements.get("#folderPath").disabled, true);
+  state.processing = null;
+  updateActionButtons();
   assert.equal(elements.get("#folderPath").disabled, false);
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
@@ -2109,6 +2126,45 @@ const completionWatchdog = setTimeout(() => {
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), partialCatalog);
   assert.equal(state.importing, false);
 
+  // File-system handles stay as descriptors until a bounded worker is ready;
+  // cancelling while getFile is pending never starts another upload.
+  state.settings = { ...(state.settings || {}), importing: { parallelism: 2 } };
+  const lazyCalls = []; const lazyResolvers = new Map();
+  const lazyDescriptor = (name) => ({ name, relativePath: `lazy/${name}`, fileHandle: { name }, getFile: () => {
+    lazyCalls.push(name); return new Promise((resolve) => lazyResolvers.set(name, resolve));
+  } });
+  const lazyImport = importFiles([lazyDescriptor("one.png"), lazyDescriptor("two.png"), lazyDescriptor("three.png")]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(lazyCalls, ["one.png", "two.png"], "lazy descriptors call getFile only up to configured worker count");
+  lazyResolvers.get("one.png")({ name: "one.png", size: 1, lastModified: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/import/file", "the first descriptor uploads without waiting for every getFile");
+  state.importSession.cancelled = true;
+  lazyResolvers.get("two.png")({ name: "two.png", size: 1, lastModified: 1 });
+  resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lazyCalls.includes("three.png"), false, "cancel prevents queued descriptor getFile calls");
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: state.images }) });
+  await lazyImport;
+
+  const partialHandle = { name: "partial-modern.png" };
+  const partialFile = { name: partialHandle.name, size: 2, lastModified: 2 };
+  const partialStart = requests.length;
+  const partialImport = importFiles([
+    { name: partialFile.name, relativePath: partialFile.name, fileHandle: partialHandle, getFile: async () => partialFile },
+    { name: "later-error.png", relativePath: "later-error.png", getFile: async () => ({ name: "later-error.png" }) },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  const partialRequest = requests.slice(partialStart).find((request) => request.path === "/api/import/file");
+  const partialKey = decodeURIComponent(partialRequest.options.headers["X-Mozarie-Client-Key"]);
+  resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [{ clientKey: partialKey, imageId: "partial-modern" }] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/import/file", { ok: false, json: async () => ({ error: "later failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: [{ id: "partial-modern", relativePath: partialFile.name, width: 1, height: 1 }] }) });
+  await partialImport;
+  assert.equal(state.sourceAccess.get("partial-modern").fileHandle, partialHandle, "a committed modern descriptor retains source access after a later worker rejection");
+
   // Import mappings bind browser-only source handles to the returned image id.
   let clientKeyCounter = 0;
   context.crypto.randomUUID = () => `mapped-${++clientKeyCounter}`;
@@ -2129,7 +2185,7 @@ const completionWatchdog = setTimeout(() => {
     items: [{ getAsFileSystemHandle: () => Promise.resolve(handledSource) }],
     files: [],
   });
-  assert.equal(dragged[0].fileHandle, handledSource, "drag-and-drop retains the file handle through import");
+  assert.equal(dragged.handleEntries[0].handle, handledSource, "drag-and-drop retains a lightweight file handle descriptor through import");
 
   let openFileOptions = null;
   let openDirectoryOptions = null;
@@ -2449,7 +2505,7 @@ const completionWatchdog = setTimeout(() => {
   await resetSettingsRun;
   assert.equal(state.settingsStatus, null, "resetting leaves model and GPU status unverified");
   const settingsRequestsBeforeReopen = requests.filter((request) => request.path.startsWith("/api/settings")).length;
-  state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
+  state.job = null; state.processing = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
   elements.get("#settingsVersion").textContent = "v0.2.0";
   elements.get("#settingsButton").click();
   assert.equal(elements.get("#settingsDialog").open, true, "opening settings uses the already loaded settings immediately");

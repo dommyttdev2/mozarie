@@ -63,8 +63,7 @@ function bindEvents() {
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#loadFolderButton").addEventListener("click", loadFolder);
   const detectAll = () => {
-    if (activeDetection()) void cancelDetection();
-    else openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
+    if (!activeDetection()) openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
@@ -182,12 +181,16 @@ function bindEvents() {
       showProcessing({ ...processing, state: session.paused ? "paused" : "running" });
       return;
     }
-    try { await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) }); }
+    try {
+      const job = await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) });
+      state.job = job; updateProgress(job); scheduleJobPoll(true);
+    }
     catch (error) { setStatus(error.message, "error"); }
   });
   $("#processingCancelButton").addEventListener("click", async () => {
     const processing = state.processing;
-    if (!processing) return;
+    if (!processing || $("#processingCancelButton").disabled) return;
+    $("#processingCancelButton").disabled = true;
     if (processing.kind === "import") { if (state.importSession) state.importSession.cancelled = true; return; }
     await cancelDetection();
   });

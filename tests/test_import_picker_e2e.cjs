@@ -19,8 +19,10 @@ function startFixtureServer() {
   const settingsRequests = [];
   const settingsActions = [];
   const updateRequests = [];
+  const modelPickerRequests = [];
   let releaseFullSettings = null;
   let deferFullSettings = false;
+  let currentJob = { kind: "idle", state: "idle" };
   const settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
@@ -63,7 +65,7 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/job") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ state: "idle" }));
+      response.end(JSON.stringify(currentJob));
       return;
     }
     if (requestPath === "/api/update/status") {
@@ -72,10 +74,19 @@ function startFixtureServer() {
       response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
       return;
     }
+    if (requestPath === "/api/model-file/pick" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      modelPickerRequests.push(JSON.parse(body));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(modelPickerRequests.length === 1 ? { path: "C:\\models\\sam_vit_l_0b3195.pth" } : { cancelled: true }));
+      return;
+    }
     if (requestPath === "/api/detect" && request.method === "POST") {
       let body = "";
       for await (const chunk of request) body += chunk;
       detectRequests.push(JSON.parse(body));
+      const imageIds = detectRequests.at(-1).imageIds;
+      currentJob = { kind: "detect", state: "complete", total: imageIds.length, completed: imageIds.length, current: "", startedAt: Date.now() / 1000, imageIds, completedImageIds: imageIds };
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ ok: true }));
       return;
@@ -116,7 +127,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, updateRequests, modelPickerRequests, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -280,6 +291,17 @@ async function assertSettingsDialogLayout(page, width, height, footerOnly = fals
       }
     }
     await page.locator("#settingsTabModels").click();
+    const modelPickerControls = page.locator("[data-model-picker]");
+    const modelPickers = [];
+    for (let index = 0; index < await modelPickerControls.count(); index += 1) {
+      const button = modelPickerControls.nth(index); await button.scrollIntoViewIfNeeded();
+      modelPickers.push(await button.evaluate((button) => {
+        const wrapper = button.parentElement.getBoundingClientRect(); const input = button.parentElement.querySelector("input").getBoundingClientRect(); const rect = button.getBoundingClientRect();
+        return { key: button.dataset.modelPicker, fits: input.left >= wrapper.left && input.right < rect.left && rect.right <= wrapper.right + 1, hit: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button };
+      }));
+    }
+    assert.equal(modelPickers.length, 6, `all six model file pickers exist at ${width}x${height} (${language})`);
+    assert.ok(modelPickers.every((picker) => picker.fits && picker.hit), `model file picker fields fit and remain clickable at ${width}x${height} (${language})`);
     const samHelp = page.locator('[data-model-help="samType"]');
     await samHelp.scrollIntoViewIfNeeded();
     const samTarget = await samHelp.evaluate((button) => {
@@ -418,14 +440,14 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests;
+  let detectRequests, modelPickerRequests, resetJob;
   let settingsRequests;
   let settingsActions;
   let updateRequests;
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, updateRequests, modelPickerRequests, resetJob, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -468,6 +490,17 @@ async function main() {
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
     await page.locator("#settingsTabModels").click();
+    await page.locator('[data-model-picker="sam_checkpoint"]').click();
+    await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
+    assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint" }, "SAM browse posts only its model key");
+    assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
+    const targetBeforeCancel = await page.locator("#settingsTargetModel").inputValue();
+    const statusBeforeCancel = await page.locator("#settingsResult").textContent();
+    const cancelResponse = page.waitForResponse((response) => response.url().includes("/api/model-file/pick") && response.status() === 200);
+    await page.locator('[data-model-picker="target_segmentation"]').click();
+    await cancelResponse;
+    assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
+    assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
     await page.locator("#settingsStatusButton").click();
@@ -609,6 +642,7 @@ async function main() {
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
     assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
 
+    resetJob();
     await page.reload({ waitUntil: "networkidle" });
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
@@ -622,6 +656,7 @@ async function main() {
     assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
     assert.equal(detectRequests[1].parallelism, 3, "dialog parallelism should be submitted");
     assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
+    resetJob();
     await page.reload({ waitUntil: "networkidle" });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");
@@ -712,14 +747,35 @@ async function main() {
     assert.equal(await page.locator('.overview-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first overview selection is green");
     assert.equal(await page.locator('.overview-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second overview selection is green");
     assert.equal(await page.locator('.overview-item[data-id="sample"]').getAttribute("aria-pressed"), "true", "keyboard overview selection exposes its selected state");
+    for (const [width, height] of [[1024, 768], [1280, 720], [1920, 1080], [2560, 1440]]) for (const language of ["ja", "en"]) {
+      await page.setViewportSize({ width, height });
+      await page.evaluate((language) => loadTranslations(language), language);
+      await page.locator("#selectionActionsButton").click();
+      const geometry = await page.locator("#selectionActionsMenu").evaluate((menu) => {
+        const button = document.querySelector("#selectionActionsButton").getBoundingClientRect(); const rect = menu.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonLeft: button.left, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollWidth: document.documentElement.scrollWidth };
+      });
+      assert.equal(geometry.left, geometry.buttonLeft, `selection menu left aligns with its button at ${width}x${height} (${language})`);
+      assert.ok(geometry.top >= geometry.buttonBottom + 4 && geometry.top <= geometry.buttonBottom + 6 && geometry.right <= geometry.viewportWidth && geometry.bottom <= geometry.viewportHeight && geometry.scrollWidth <= geometry.viewportWidth, `selection menu stays in the viewport without horizontal overflow at ${width}x${height} (${language})`);
+      await page.locator("#selectionActionsMenu").evaluate((menu) => menu.hidePopover());
+    }
+    await page.evaluate(() => loadTranslations("ja"));
+    await page.setViewportSize({ width: 1280, height: 720 });
     const batchDetectBefore = detectRequests.length;
     await page.locator("#selectionActionsButton").click();
+    const selectionMenu = await page.locator("#selectionActionsMenu").evaluate((menu) => {
+      const button = document.querySelector("#selectionActionsButton").getBoundingClientRect(); const rect = menu.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonLeft: button.left, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    });
+    assert.equal(selectionMenu.left, selectionMenu.buttonLeft, "selection menu left edge anchors to its button");
+    assert.ok(selectionMenu.top >= selectionMenu.buttonBottom && selectionMenu.right <= selectionMenu.viewportWidth && selectionMenu.bottom <= selectionMenu.viewportHeight, `selection menu is visibly anchored below its button: ${JSON.stringify(selectionMenu)}`);
     await page.locator('[data-selection-action="detect"]').click();
     await page.locator("#detectStartButton").click();
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(detectRequests.length, batchDetectBefore + 1, "batch auto detect sends exactly one request");
     assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
-    await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
+    await page.evaluate(() => pollJob());
+    await page.waitForFunction(() => !document.querySelector("#processingDialog").open, null, { timeout: 5000 });
     await page.locator("#selectionClearButton").click();
     assert.equal(await page.locator('.overview-item.batch-selected').count(), 0, "exiting batch edit clears every green overview selection");
     assert.equal(await page.locator('.overview-item[aria-pressed]').count(), 0, "exiting batch edit removes overview selection semantics");
