@@ -225,6 +225,57 @@ async function assertSettingsDialogLayout(page, width, height) {
         assert.ok(row.controlRight <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `${panelSelector} controls do not overflow or overlap at ${width}x${height} (${language})`);
       }
     }
+    await page.locator("#settingsTabModels").click();
+    const samHelp = page.locator('[data-model-help="samType"]');
+    await samHelp.scrollIntoViewIfNeeded();
+    const samTarget = await samHelp.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      const centerX = rect.x + rect.width / 2;
+      const centerY = rect.y + rect.height / 2;
+      const row = button.closest(".form-row").getBoundingClientRect();
+      const label = document.querySelector('label[for="settingsSamType"]');
+      const labelRect = label.getBoundingClientRect();
+      return {
+        width: rect.width, height: rect.height,
+        centerIsButton: document.elementFromPoint(centerX, centerY) === button,
+        edgesAreNotButton: [[rect.x - 1, centerY], [rect.right + 1, centerY], [centerX, rect.y - 1], [centerX, rect.bottom + 1]].every(([x, y]) => document.elementFromPoint(x, y) !== button),
+        labelFor: label.htmlFor, labelText: label.textContent,
+        blankX: row.right - 2, blankY: labelRect.y + labelRect.height / 2,
+      };
+    });
+    assert.deepEqual([samTarget.width, samTarget.height], [28, 28], `SAM help keeps its 28px target at ${width}x${height} (${language})`);
+    assert.equal(samTarget.centerIsButton, true, `SAM help owns its center hit target at ${width}x${height} (${language})`);
+    assert.equal(samTarget.edgesAreNotButton, true, `SAM help does not capture clicks 1px outside its edges at ${width}x${height} (${language})`);
+    assert.equal(samTarget.labelFor, "settingsSamType", `SAM setting label is explicitly linked at ${width}x${height} (${language})`);
+    assert.equal(samTarget.labelText, language === "en" ? "Outline extraction model type" : "輪郭抽出モデルの種類", `SAM setting label is localized at ${width}x${height} (${language})`);
+    await page.locator('label[for="settingsSamType"]').click();
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking the SAM setting label does not open help at ${width}x${height} (${language})`);
+    await page.mouse.click(samTarget.blankX, samTarget.blankY);
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `clicking blank SAM row space does not open help at ${width}x${height} (${language})`);
+    await samHelp.click();
+    const samDialog = await page.locator("#modelHelpDialog").evaluate((dialog) => {
+      const table = dialog.querySelector("#modelHelpSamTable");
+      return {
+        textHidden: dialog.querySelector("#modelHelpText").hidden,
+        tableHidden: table.hidden,
+        rows: table.tBodies[0].rows.length,
+        columns: [...table.rows].every((row) => row.cells.length === 5),
+        headers: [...table.tHead.rows[0].cells].map((cell) => cell.textContent),
+        tableScrollWidth: table.scrollWidth, tableClientWidth: table.clientWidth,
+        dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
+      };
+    });
+    assert.equal(samDialog.textHidden, true, `SAM help hides the paragraph at ${width}x${height} (${language})`);
+    assert.equal(samDialog.tableHidden, false, `SAM help shows its comparison table at ${width}x${height} (${language})`);
+    assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
+    assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Accuracy", "VRAM", "Best for"] : ["モデル", "速度", "精度目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
+    assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);
+    await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
+    await page.locator('[data-model-help="ntd11"]').click();
+    assert.equal(await page.locator("#modelHelpText").isVisible(), true, `other model help keeps its paragraph at ${width}x${height} (${language})`);
+    assert.equal(await page.locator("#modelHelpSamTable").isVisible(), false, `other model help keeps the SAM table hidden at ${width}x${height} (${language})`);
+    await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
     await page.locator("#settingsTabGeneral").click();
     assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
       const rect = input.getBoundingClientRect();
@@ -255,9 +306,6 @@ async function assertSettingsDialogLayout(page, width, height) {
   }
   await page.locator("#settingsTabModels").click();
   assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
-  await page.locator('[data-model-help="samType"]').click();
-  assert.equal(await page.locator("#modelHelpDialog").isVisible(), true, `SAM type help opens from its physical button at ${width}x${height}`);
-  await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
   await page.locator("#settingsTabGeneral").click();
   await page.locator("#settingsLanguage").selectOption("ja");
   await page.waitForFunction(() => document.documentElement.lang === "ja");
@@ -407,7 +455,7 @@ async function main() {
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertDesktopLayout(page, viewport.width, viewport.height);
     for (const viewport of [
-      { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
+      { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
