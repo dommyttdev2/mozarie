@@ -13,7 +13,7 @@ function renderModelStatus() {
     : activeModels.map(([key, model]) => model.configured && model.detail ? `${key}: ${model.detail}` : "").filter(Boolean).join("\n");
 }
 
-const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle" };
+const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle", hand_segmentation: "#settingsHandSegmentationToggle" };
 
 function setModelCardEnabled(key, enabled) {
   const toggle = $(MODEL_TOGGLE_IDS[key]);
@@ -35,14 +35,6 @@ function setPrecisionDetectionEnabled(enabled) {
 
 function setFluidExclusionEnabled(enabled) {
   const toggle = $("#settingsFluidToggle");
-  toggle.checked = Boolean(enabled);
-  toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
-  const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
-  if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
-}
-
-function setHandSegmentationEnabled(enabled) {
-  const toggle = $("#settingsHandSegmentationToggle");
   toggle.checked = Boolean(enabled);
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
@@ -117,7 +109,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsHandModel").value = settings.models.hand_detection;
   setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
   $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
-  setHandSegmentationEnabled(settings.models.hand_segmentation_enabled);
+  setModelCardEnabled("hand_segmentation", settings.models.hand_segmentation_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
@@ -171,7 +163,7 @@ function settingsPayload() {
       target_segmentation: $("#settingsTargetModel").value.trim(), ntd11: $("#settingsNtd11Model").value.trim(), ntd11_enabled: modelCardEnabled("ntd11"),
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
-      hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: $("#settingsHandSegmentationToggle").checked,
+      hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: modelCardEnabled("hand_segmentation"),
       sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
     },
     display: {

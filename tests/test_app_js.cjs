@@ -130,11 +130,11 @@ const settingsPanels = [
   const panel = element("section"); panel.id = id; panel.dataset.settingsPanel = name; elements.set(`#${id}`, panel); return panel;
 });
 const modelCards = [
-  ["settingsNtd11Toggle", "ntd11"], ["settingsSensitiveToggle", "sensitive"], ["settingsHandToggle", "hand_detection"],
+  ["settingsNtd11Toggle", "ntd11"], ["settingsSensitiveToggle", "sensitive"], ["settingsHandToggle", "hand_detection"], ["settingsHandSegmentationToggle", "hand_segmentation"],
 ].map(([id, modelToggle]) => {
   const toggle = elements.get(`#${id}`); toggle.dataset.modelToggle = modelToggle; return toggle;
 });
-for (const [toggleId, cardId] of [["settingsNtd11Toggle", "settingsNtd11Card"], ["settingsSensitiveToggle", "settingsSensitiveCard"], ["settingsHandToggle", "settingsHandCard"], ["settingsPrecisionToggle", "settingsPrecisionCard"], ["settingsFluidToggle", "settingsFluidCard"]]) {
+for (const [toggleId, cardId] of [["settingsNtd11Toggle", "settingsNtd11Card"], ["settingsSensitiveToggle", "settingsSensitiveCard"], ["settingsHandToggle", "settingsHandCard"], ["settingsHandSegmentationToggle", "settingsHandSegmentationCard"], ["settingsPrecisionToggle", "settingsPrecisionCard"], ["settingsFluidToggle", "settingsFluidCard"]]) {
   const toggle = elements.get(`#${toggleId}`);
   toggle.closest = (selector) => selector === ".model-card" ? elements.get(`#${cardId}`) : null;
 }
@@ -2217,9 +2217,14 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsHandToggle").checked, true);
   assert.equal(elements.get("#settingsHandCard").classList.contains("active"), true);
   assert.equal(elements.get("#settingsHandSegmentationToggle").checked, true);
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
   elements.get("#settingsHandSegmentationToggle").checked = false;
   elements.get("#settingsHandSegmentationToggle").dispatch("change");
   assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), false);
+  elements.get("#settingsHandSegmentationToggle").checked = true;
+  elements.get("#settingsHandSegmentationToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
   assert.equal(elements.get("#settingsPrecisionToggle").checked, false);
   assert.equal(elements.get("#settingsFluidToggle").checked, true);
   selectSettingsTab("models");
