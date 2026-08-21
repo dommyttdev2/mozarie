@@ -10,6 +10,48 @@ from .detection import DetectionMixin
 from .jobs import JobsMixin
 
 
+SAM_CHECKPOINT_METADATA = {
+    "vit_b": {
+        "tensor_count": 314,
+        "shapes": {
+            "image_encoder.patch_embed.proj.weight": (768, 3, 16, 16),
+            "image_encoder.blocks.11.attn.qkv.weight": (2304, 768),
+            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
+            "mask_decoder.mask_tokens.weight": (4, 256),
+        },
+    },
+    "vit_l": {
+        "tensor_count": 482,
+        "shapes": {
+            "image_encoder.patch_embed.proj.weight": (1024, 3, 16, 16),
+            "image_encoder.blocks.23.attn.qkv.weight": (3072, 1024),
+            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
+            "mask_decoder.mask_tokens.weight": (4, 256),
+        },
+    },
+    "vit_h": {
+        "tensor_count": 594,
+        "shapes": {
+            "image_encoder.patch_embed.proj.weight": (1280, 3, 16, 16),
+            "image_encoder.blocks.31.attn.qkv.weight": (3840, 1280),
+            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
+            "mask_decoder.mask_tokens.weight": (4, 256),
+        },
+    },
+}
+
+
+def is_valid_sam_checkpoint_metadata(checkpoint: object, model_type: str) -> bool:
+    """Recognize official flat SAM checkpoints from their loaded metadata."""
+    expected = SAM_CHECKPOINT_METADATA.get(model_type)
+    if not isinstance(checkpoint, dict) or expected is None or len(checkpoint) != expected["tensor_count"]:
+        return False
+    return all(
+        key in checkpoint and tuple(checkpoint[key].shape) == shape
+        for key, shape in expected["shapes"].items()
+    )
+
+
 class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.settings_store = SettingsStore(APP_DIR)
@@ -190,12 +232,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 valid = False
                 reason_code = "invalid_format"
             if valid and key == "sam_checkpoint" and verify_sam_checkpoint:
-                expected_width = {"vit_b": 768, "vit_l": 1024, "vit_h": 1280}[models["sam_model_type"]]
                 try:
                     torch = torch_module()
                     checkpoint = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
-                    patch_embed = checkpoint["image_encoder.patch_embed.proj.weight"]
-                    valid = tuple(patch_embed.shape) == (expected_width, 3, 16, 16)
+                    valid = is_valid_sam_checkpoint_metadata(checkpoint, models["sam_model_type"])
                     if not valid:
                         reason_code = "invalid_model"
                 except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):

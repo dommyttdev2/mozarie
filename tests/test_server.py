@@ -225,7 +225,7 @@ class MozarieTests(unittest.TestCase):
         save.assert_not_called()
         self.assertEqual(state.settings, original)
 
-    def test_settings_status_checks_sam_patch_embed_shape_only_when_requested(self):
+    def test_settings_status_skips_sam_loading_until_preview_and_rejects_truncated_checkpoint(self):
         state = self.new_state()
         torch = state_module.torch_module()
         if not hasattr(torch, "save"):
@@ -238,11 +238,53 @@ class MozarieTests(unittest.TestCase):
             with patch.object(torch, "load", wraps=torch.load) as load:
                 self.assertTrue(state.settings_status(settings)["models"]["sam_checkpoint"]["valid"])
                 load.assert_not_called()
-            self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
-            settings["models"]["sam_model_type"] = "vit_l"
-            mismatch = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
-            self.assertFalse(mismatch["valid"])
-            self.assertEqual(mismatch["reasonCode"], "invalid_model")
+            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
+            self.assertFalse(status["valid"])
+            self.assertEqual(status["reasonCode"], "invalid_model")
+
+    def test_settings_status_accepts_synthetic_flat_sam_checkpoint_metadata(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            for model_type, metadata in state_module.SAM_CHECKPOINT_METADATA.items():
+                checkpoint = Path(directory) / f"sam_{model_type}.pth"
+                tensors = {
+                    key: torch.empty(shape, device="meta")
+                    for key, shape in metadata["shapes"].items()
+                }
+                tensors.update({
+                    f"placeholder.{index}": torch.empty((), device="meta")
+                    for index in range(metadata["tensor_count"] - len(tensors))
+                })
+                torch.save(tensors, checkpoint)
+                settings = copy.deepcopy(state.settings)
+                settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": model_type})
+                self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
+                for key in metadata["shapes"]:
+                    wrong_shape = dict(tensors)
+                    wrong_shape[key] = torch.empty((), device="meta")
+                    self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(wrong_shape, model_type))
+                too_few = dict(tensors)
+                too_few.pop(next(iter(too_few)))
+                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_few, model_type))
+                too_many = dict(tensors)
+                too_many["placeholder.extra"] = torch.empty((), device="meta")
+                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_many, model_type))
+
+    @unittest.skipUnless(
+        os.environ.get("MOZARIE_TEST_LOCAL_MODELS") == "1",
+        "set MOZARIE_TEST_LOCAL_MODELS=1 to verify the local official SAM model",
+    )
+    def test_local_official_vit_b_sam_checkpoint_metadata(self):
+        checkpoint = state_module.APP_DIR / "models" / "sam_vit_b_01ec64.pth"
+        if not checkpoint.is_file():
+            self.skipTest("local official SAM ViT-B checkpoint is not installed")
+        state = self.new_state()
+        settings = copy.deepcopy(state.settings)
+        settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+        self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
 
     def test_settings_status_rejects_wrapped_sam_checkpoint(self):
         state = self.new_state()
