@@ -359,6 +359,7 @@ class SavingMixin:
                         finally:
                             self._release_output_destination(output_path)
                     else:
+                        self._assert_record_stat_matches(record)
                         save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed

@@ -1424,6 +1424,48 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(started.count(first_id), 2)
 
+    def test_queued_overwrite_preserves_externally_changed_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.png"
+            second_path = root / "second.png"
+            Image.new("RGB", (16, 16), "white").save(first_path)
+            Image.new("RGB", (16, 16), "black").save(second_path)
+            state = self.new_state()
+            first_id, second_id = (image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in (first_id, second_id)]
+            masks = {image_id: self._mask(16, 16) for image_id in (first_id, second_id)}
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            original_save = saving_module.save_with_mask
+
+            def hold_first_save(record, mask, block_size):
+                if record.image_id == first_id:
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(2))
+                return original_save(record, mask, block_size)
+
+            worker = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, masks),
+                kwargs={"saving_parallelism": 1},
+            )
+            with patch.object(saving_module, "save_with_mask", side_effect=hold_first_save):
+                worker.start()
+                self.assertTrue(first_entered.wait(2))
+                previous_stat = second_path.stat()
+                Image.new("RGB", (16, 16), "green").save(second_path)
+                os.utime(second_path, ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000))
+                external_contents = second_path.read_bytes()
+                release_first.set()
+                worker.join(3)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.completed_image_ids, (first_id,))
+            self.assertEqual(second_path.read_bytes(), external_contents)
+
     def test_parallel_apply_starts_two_workers_and_publishes_results_in_input_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
