@@ -242,14 +242,30 @@ async function runCopyFailureCase() {
 }
 
 async function runCommitFailureCase() {
-    const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, 500) });
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /commit failed/);
+  for (const status of [500, 400]) {
+    const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, status) });
+    await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /commit failed/);
+    assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `${status} is not retried`);
+    assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
+  }
+}
 
-  assert.equal(runtime.state.images.length, 1);
-  const paths = runtime.requests.map((request) => request.path);
-  assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
-  assert.equal(paths.filter((path) => path === "/api/save/commit").length, 3);
-  assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
+async function runRetryableCommitCase() {
+  let commits = 0;
+  const runtime = createRuntime({
+    commit: () => {
+      commits += 1;
+      return commits === 1
+        ? jsonResponse({ error: "temporarily unavailable" }, 503)
+        : jsonResponse({ cleared: true, stale: false, images: [] });
+    },
+  });
+
+  await runtime.runBrowserSave(["image-1"], "_censored", false);
+  const requests = runtime.requests.filter((request) => request.path === "/api/save/commit");
+  assert.equal(requests.length, 2, "503 is retried once");
+  assert.equal(requests[0].options.body, requests[1].options.body, "retry keeps the same save token and payload");
+  assert.equal(JSON.parse(requests[0].options.body).saveToken, "runtime-render-token");
 }
 
 async function runCancelCase() {
@@ -442,6 +458,7 @@ async function runRemoveAfterSaveCases() {
   await runRemoveAfterSavePartialAndStaleCase();
   await runCopyFailureCase();
   await runCommitFailureCase();
+  await runRetryableCommitCase();
   await runCancelCase();
   await runDeleteOriginalCase();
   await runHandleOverwriteCase();
