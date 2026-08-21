@@ -248,7 +248,7 @@ async function runCommitFailureCase() {
   assert.equal(runtime.state.images.length, 1);
   const paths = runtime.requests.map((request) => request.path);
   assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
-  assert.equal(paths.filter((path) => path === "/api/save/commit").length, 12);
+  assert.equal(paths.filter((path) => path === "/api/save/commit").length, 3);
   assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
 }
 

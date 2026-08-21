@@ -271,7 +271,7 @@ async function assertSettingsDialogLayout(page, width, height) {
     assert.equal(samDialog.tableHidden, false, `SAM help shows its comparison table at ${width}x${height} (${language})`);
     assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
     assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
-    assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Accuracy", "VRAM", "Best for"] : ["モデル", "速度", "精度目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
+    assert.deepEqual(samDialog.headers, language === "en" ? ["Model", "Speed", "Relative detail", "VRAM", "Best for"] : ["モデル", "速度", "輪郭の細かさ目安", "VRAM", "向いている用途"], `SAM table headers are localized at ${width}x${height} (${language})`);
     assert.deepEqual(samDialog.columnScopes, ["col", "col", "col", "col", "col"], `SAM table headers use column scopes at ${width}x${height} (${language})`);
     assert.deepEqual(samDialog.rowScopes, ["row", "row", "row"], `SAM table model names use row scopes at ${width}x${height} (${language})`);
     assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);

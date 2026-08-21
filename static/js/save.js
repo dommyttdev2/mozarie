@@ -417,7 +417,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
 }
 
 async function commitBrowserSaveWithRetry(payload) {
-  const delays = [0, 150, 300, 600, 1000, 1500, 2000, 2000, 2000, 2000, 2000, 2000];
+  const delays = [0, 150, 500];
   let lastError;
   for (const delay of delays) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));

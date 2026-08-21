@@ -1492,6 +1492,35 @@ const completionWatchdog = setTimeout(() => {
   resolveFetch({ ok: true, status: 200, json: async () => ({ cleared: true }) });
   assert.equal((await retryPromise).cleared, true);
 
+  // Retry only twice after the initial request: 150ms, then 500ms. Each
+  // retry keeps the original token and a final transient failure is surfaced.
+  const requestCountBeforeExhaustion = requests.length;
+  const timersBeforeExhaustion = new Set(scheduledTimers.keys());
+  const exhaustedRetry = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "same-token", sourceAction: "keep" });
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstExhaustionTimer = [...scheduledTimers].find(([id, timer]) => !timersBeforeExhaustion.has(id) && timer.delay === 150);
+  assert.ok(firstExhaustionTimer);
+  scheduledTimers.delete(firstExhaustionTimer[0]); firstExhaustionTimer[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondExhaustionTimer = [...scheduledTimers].find(([, timer]) => timer.delay === 500);
+  assert.ok(secondExhaustionTimer);
+  scheduledTimers.delete(secondExhaustionTimer[0]); secondExhaustionTimer[1].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
+  await assert.rejects(exhaustedRetry);
+  const exhaustedRequests = requests.slice(requestCountBeforeExhaustion);
+  assert.equal(exhaustedRequests.length, 3);
+  assert.ok(exhaustedRequests.every((request) => request.path === "/api/save/commit" && request.options.body.includes("same-token")));
+
+  const requestCountBeforeClientError = requests.length;
+  const noRetry = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "client-error", sourceAction: "keep" });
+  resolveFetch({ ok: false, status: 400, json: async () => ({ error: "invalid" }) });
+  await assert.rejects(noRetry);
+  assert.equal(requests.length, requestCountBeforeClientError + 1);
+
   // Same-tab completion reloads a target image without putting its old canvas
   // back into drafts.
   const target = { id: "target", relativePath: "target.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 };
