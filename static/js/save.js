@@ -558,6 +558,7 @@ async function finishApplyJob(job) {
     }
     else { state.currentId = null; state.currentImage = null; clearEditor(); }
     renderCatalogViews();
+    state.saving = false;
     state.applyRunning = false;
     $("#applyPauseButton").hidden = true;
     $("#applyCancelButton").hidden = true;
@@ -565,6 +566,7 @@ async function finishApplyJob(job) {
     if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
     else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
     else setApplyResult(t("apply.error", { error: jobErrorMessage(job) }), true);
+    updateActionButtons();
     reconciled = true;
   } finally {
     if (reconciled && job.startedAt != null) state.handledApplyStartedAt = job.startedAt;

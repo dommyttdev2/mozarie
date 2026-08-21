@@ -16,6 +16,7 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 
 function startFixtureServer() {
   const detectRequests = [];
+  const applyRequests = [];
   const settingsRequests = [];
   const settingsActions = [];
   const settingsStatusRequests = [];
@@ -112,6 +113,19 @@ function startFixtureServer() {
       response.end(JSON.stringify({ ok: true }));
       return;
     }
+    if (requestPath === "/api/apply" && request.method === "POST") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const apply = JSON.parse(body);
+      applyRequests.push(apply);
+      currentJob = {
+        kind: "apply", state: "running", total: apply.imageIds.length, completed: 0, current: "sample.png",
+        startedAt: Date.now() / 1000, imageIds: apply.imageIds, completedImageIds: [], removeAfterSave: Boolean(apply.removeAfterSave),
+      };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (requestPath.startsWith("/api/candidates/")) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
@@ -148,7 +162,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
     });
   });
 }
@@ -304,7 +318,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, modelPickerRequests, resetJob;
+  let detectRequests, applyRequests, modelPickerRequests, resetJob, finishApply;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -313,7 +327,7 @@ async function main() {
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests, holdDetection, failCancel, resetJob, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests, holdDetection, failCancel, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -490,6 +504,22 @@ async function main() {
     assert.equal(await page.locator("#applySuffix").isDisabled(), false);
     assert.equal(await page.locator("#removeAfterSave").isVisible(), true);
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
+
+    await page.evaluate(() => { state.maskStatus.set(state.currentId, true); updateActionButtons(); });
+    await page.locator("#saveButton").click();
+    await page.locator("#applySuffix").fill("_qa");
+    await page.locator("#applyStartButton").click();
+    await page.waitForFunction(() => state.applyRunning && state.saving);
+    assert.equal(applyRequests.length, 1, "copy save starts exactly one server job");
+    assert.equal(await page.locator("#settingsButton").isDisabled(), true, "background controls lock while a server copy is running");
+    finishApply();
+    await page.evaluate(() => pollJob());
+    await page.waitForFunction(() => !state.applyRunning && !state.saving);
+    assert.match(await page.locator("#applyResult").textContent(), /完了しました。1件を処理しました。/, "server copy reports its completed result");
+    assert.equal(await page.locator("#applyCloseButton").isDisabled(), false, "the completed copy dialog can be closed");
+    await page.locator("#applyCloseButton").click();
+    assert.equal(await page.locator("#applyDialog").evaluate((dialog) => dialog.open), false, "the completed copy dialog closes");
+    assert.equal(await page.locator("#settingsButton").isDisabled(), false, "background controls unlock after a reconciled server copy");
 
     await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
