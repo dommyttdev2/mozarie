@@ -145,7 +145,7 @@ class DetectionMixin:
                     raise
                 with image_lock:
                     try:
-                        self._assert_record_fresh(record)
+                        self._assert_record_stat_matches(record)
                     except ClientError:
                         self._discard_candidates(candidates)
                         raise
@@ -375,10 +375,10 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
         target_classes: set[str] | None = None,
     ) -> list[Candidate]:
-        # Hash and decode are a short per-image phase.  Do not hold the image
+        # Decode is a short per-image phase. Do not hold the image
         # lock while detector/SAM inference runs.
         with self.image_io_lock(record.image_id):
-            self._assert_record_fresh(record)
+            self._assert_record_stat_matches(record)
             with Image.open(record.path) as image:
                 rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB")).copy()
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
@@ -437,14 +437,14 @@ class DetectionMixin:
                 return self.add_boundary_candidate(image_id, payload, _gate_held=True)
         with self.image_io_lock(image_id):
             record = self.image_for_id(image_id)
-            self._assert_record_fresh(record)
+            self._assert_record_stat_matches(record)
         polygon_mask: np.ndarray | None = None
         if "points" in payload:
             roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
         else:
             roi, point = read_boundary_request(payload, record.width, record.height)
         with self.image_io_lock(image_id):
-            self._assert_record_fresh(record)
+            self._assert_record_stat_matches(record)
             with Image.open(record.path) as image:
                 rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB")).copy()
         with self.inference_lock:
@@ -515,7 +515,7 @@ class DetectionMixin:
                     Image.fromarray(np.asarray(candidate_mask, dtype=np.uint8)).save(temporary, format="PNG")
                     temporary_paths.append(temporary)
                 with self.image_io_lock(image_id):
-                    self._assert_record_fresh(record)
+                    self._assert_record_stat_matches(record)
                     with self.lock:
                         if self.images.get(image_id) is not record:
                             raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")

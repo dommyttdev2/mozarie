@@ -7,11 +7,9 @@ from typing import BinaryIO
 def _pick_output_directory(state: StudioState = STATE) -> str | None:
     if not state.output_picker_lock.acquire(blocking=False):
         raise ClientError("保存先の選択を開いています。")
-    if not state.import_lock.acquire(blocking=False):
-        state.output_picker_lock.release()
-        raise ClientError("画像の追加中です。完了後にもう一度実行してください。")
     try:
         with state.lock:
+            default_output_directory = state.settings["saving"]["default_output_directory"]
             if state.importing_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
                 raise ClientError("処理中は保存先を変更できません。")
         system_root = Path(os.environ.get("SystemRoot", r"C:\\Windows"))
@@ -30,9 +28,7 @@ $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
 """
         encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
         picker_environment = os.environ.copy()
-        picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(
-            state.settings["saving"]["default_output_directory"]
-        )
+        picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(default_output_directory)
         try:
             completed = subprocess.run(
                 [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
@@ -55,7 +51,6 @@ $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
             raise ClientError("保存先は存在する絶対パスで選択してください。")
         return str(path.resolve())
     finally:
-        state.import_lock.release()
         state.output_picker_lock.release()
 
 

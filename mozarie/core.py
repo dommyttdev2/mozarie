@@ -193,7 +193,7 @@ class BrowserSaveToken:
     source_fingerprint: tuple[int, int, str]
     catalog_generation: int
     issued_at: float
-    rendered_path: Path
+    rendered_path: Path | None
 
 
 @dataclass(frozen=True)

@@ -71,9 +71,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
+            previous_output_directory = self.settings["saving"]["default_output_directory"]
             try:
                 settings = self.settings_store.validate_update(update)
-                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+                if settings["saving"]["default_output_directory"] != previous_output_directory:
+                    validate_output_directory_ready(settings["saving"]["default_output_directory"])
                 settings = self.settings_store.save(settings)
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
@@ -154,16 +156,21 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if valid and key == "hand_segmentation":
                 try:
                     from safetensors import SafetensorError, safe_open
-                    with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
-                        valid = all(
-                            key in checkpoint.keys() and tuple(checkpoint.get_slice(key).get_shape()) == shape
-                            for key, shape in HAND_SEGMENTATION_VIT_B_TENSORS.items()
-                        )
-                    if not valid:
-                        reason_code = "invalid_model"
-                except (ImportError, OSError, ValueError, SafetensorError):
+                except ImportError:
                     valid = False
                     reason_code = "invalid_model"
+                else:
+                    try:
+                        with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
+                            valid = all(
+                                key in checkpoint.keys() and tuple(checkpoint.get_slice(key).get_shape()) == shape
+                                for key, shape in HAND_SEGMENTATION_VIT_B_TENSORS.items()
+                            )
+                        if not valid:
+                            reason_code = "invalid_model"
+                    except (OSError, ValueError, SafetensorError):
+                        valid = False
+                        reason_code = "invalid_model"
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
                 reason_code = "invalid_format"

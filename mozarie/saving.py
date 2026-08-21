@@ -117,12 +117,7 @@ class SavingMixin:
                     catalog_generation = self.catalog_generation
                     candidates = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
                     if copy_to_default:
-                        configured_output_directory = Path(self.settings["saving"]["default_output_directory"])
-                if configured_output_directory is not None:
-                    try:
-                        configured_output_directory = validate_output_directory_ready(configured_output_directory)
-                    except SettingsError as exc:
-                        raise ClientError("保存先フォルダを使用できません。設定で変更してください。") from exc
+                        configured_output_directory = Path(self.settings["saving"]["default_output_directory"]).resolve()
                 # A candidate can disappear between the metadata snapshot and the
                 # disk read.  Do not compose a silently reduced mask.
                 apply_masks: list[np.ndarray] = []
@@ -150,23 +145,27 @@ class SavingMixin:
                     raise ClientError("保存するモザイク範囲がありません。")
                 source_fingerprint = (record.mtime_ns, record.size_bytes, record.content_digest)
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                if self._source_fingerprint(record) != source_fingerprint:
-                    raise ClientError("元画像が変更されました。保存をやり直してください。")
+                self._assert_record_stat_matches(record)
                 if copy_to_default:
+                    if not configured_output_directory.is_dir():
+                        raise ClientError("保存先フォルダを使用できません。設定で変更してください。")
                     output_path = self._reserve_output_destination(
                         record, _read_save_suffix(suffix), configured_output_directory,
                     )
                     try:
                         write_rendered_copy(output_path, output)
+                    except OSError as exc:
+                        raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。") from exc
                     finally:
                         self._release_output_destination(output_path)
-                rendered_dir = self.cache_dir / "browser-save"
-                rendered_dir.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=record.path.suffix.lower(), delete=False) as handle:
-                    rendered_path = Path(handle.name)
-                    handle.write(output)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                else:
+                    rendered_dir = self.cache_dir / "browser-save"
+                    rendered_dir.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=record.path.suffix.lower(), delete=False) as handle:
+                        rendered_path = Path(handle.name)
+                        handle.write(output)
+                        handle.flush()
+                        os.fsync(handle.fileno())
 
                 with self.lock:
                     if (
@@ -211,6 +210,8 @@ class SavingMixin:
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                if source_action == "overwrite" and token_details.rendered_path is None:
+                    raise ClientError("コピー保存の確認トークンでは上書き保存できません。")
             image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
@@ -225,6 +226,8 @@ class SavingMixin:
                         raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    if source_action == "overwrite" and token_details.rendered_path is None:
+                        raise ClientError("コピー保存の確認トークンでは上書き保存できません。")
                     if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                         expired_token = True
@@ -243,20 +246,20 @@ class SavingMixin:
                         self.browser_save_tokens.pop(save_token)
 
                 if expired_token:
-                    assert rendered_path is not None
-                    rendered_path.unlink(missing_ok=True)
+                    if rendered_path is not None:
+                        rendered_path.unlink(missing_ok=True)
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
                 if catalog_invalid:
-                    assert rendered_path is not None
-                    rendered_path.unlink(missing_ok=True)
+                    if rendered_path is not None:
+                        rendered_path.unlink(missing_ok=True)
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。")
 
                 try:
                     if source_action == "overwrite":
+                        assert token_details.rendered_path is not None
                         _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint[2])
                     else:
-                        if self._source_fingerprint(record_snapshot) != token_details.source_fingerprint:
-                            raise ClientError("元画像が変更されました。保存をやり直してください。", "stale_asset")
+                        self._assert_record_stat_matches(record_snapshot)
                     if source_action == "deleted":
                         # Browser-imported files are removed through their File
                         # System Access handle before this commit.  The server
@@ -265,11 +268,13 @@ class SavingMixin:
                             record_snapshot.path.unlink()
                 except ClientError:
                     rendered_path = token_details.rendered_path
-                    rendered_path.unlink(missing_ok=True)
+                    if rendered_path is not None:
+                        rendered_path.unlink(missing_ok=True)
                     raise
                 except OSError as exc:
                     rendered_path = token_details.rendered_path
-                    rendered_path.unlink(missing_ok=True)
+                    if rendered_path is not None:
+                        rendered_path.unlink(missing_ok=True)
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
 
                 with self.lock:
@@ -350,7 +355,7 @@ class SavingMixin:
                     if copy_to_default:
                         try:
                             output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                            self._assert_record_fresh(record)
+                            self._assert_record_stat_matches(record)
                             write_rendered_copy(output_path, output)
                         finally:
                             self._release_output_destination(output_path)
