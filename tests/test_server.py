@@ -1991,6 +1991,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_precise_segments_receive_hand_refinement(self):
         state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = False
         precise_mask = np.zeros((16, 16), dtype=np.uint8)
         precise_mask[4:12, 4:12] = 255
         record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
