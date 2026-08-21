@@ -41,6 +41,14 @@ function setFluidExclusionEnabled(enabled) {
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
 }
 
+function setHandSegmentationEnabled(enabled) {
+  const toggle = $("#settingsHandSegmentationToggle");
+  toggle.checked = Boolean(enabled);
+  toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
+  const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
+  if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
+}
+
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
 
 function normaliseToolPosition(position) { return TOOL_POSITIONS.has(position) ? position : "left"; }
@@ -108,6 +116,8 @@ function setSettingsForm(settings, status = null) {
   setModelCardEnabled("sensitive", settings.models.sensitive_enabled);
   $("#settingsHandModel").value = settings.models.hand_detection;
   setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
+  $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
+  setHandSegmentationEnabled(settings.models.hand_segmentation_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
@@ -161,6 +171,7 @@ function settingsPayload() {
       target_segmentation: $("#settingsTargetModel").value.trim(), ntd11: $("#settingsNtd11Model").value.trim(), ntd11_enabled: modelCardEnabled("ntd11"),
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
+      hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: $("#settingsHandSegmentationToggle").checked,
       sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
     },
     display: {

@@ -540,11 +540,16 @@ class CatalogMixin:
     def _invalidate_sam_cache(self) -> None:
         with self.sam_lock:
             self.sam_image_id = None
+        with self.hand_segmentation_lock:
+            self.hand_segmentation_image_id = None
 
     def invalidate_sam_image(self, image_id: str) -> None:
         with self.sam_lock:
             if self.sam_image_id == image_id:
                 self.sam_image_id = None
+        with self.hand_segmentation_lock:
+            if self.hand_segmentation_image_id == image_id:
+                self.hand_segmentation_image_id = None
 
     def _sam_predictor_for(self, record: ImageRecord) -> Any:
         with self.sam_lock:
@@ -568,6 +573,43 @@ class CatalogMixin:
                     self.sam_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
                 self.sam_image_id = record.image_id
             return self.sam_predictor
+
+    def _hand_segmentation_predictor_for(self, record: ImageRecord) -> Any:
+        """Load only the pinned HandSegNet ViT-B checkpoint; never substitute another model."""
+        with self.hand_segmentation_lock:
+            if self.hand_segmentation_predictor is None:
+                raw_path = str(self.settings["models"].get("hand_segmentation", "")).strip()
+                if not raw_path:
+                    raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "hand_segmentation_invalid")
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "hand_segmentation_invalid")
+                if path.suffix.lower() != ".safetensors":
+                    raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
+                try:
+                    from safetensors.torch import load_file
+                    from segment_anything import SamPredictor, sam_model_registry
+                    state_dict = load_file(str(path), device="cpu")
+                    model = sam_model_registry["vit_b"](checkpoint=None)
+                    model.load_state_dict(state_dict, strict=True)
+                except ImportError as exc:
+                    raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
+                except Exception as exc:
+                    raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
+                provider = self.settings["models"]["provider"]
+                if provider == "gpu" and not torch_module().cuda.is_available():
+                    raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "hand_segmentation_invalid")
+                device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
+                try:
+                    model.to(device=device)
+                except RuntimeError:
+                    raise
+                self.hand_segmentation_predictor = SamPredictor(model)
+            if self.hand_segmentation_image_id != record.image_id:
+                with Image.open(record.path) as image:
+                    self.hand_segmentation_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
+                self.hand_segmentation_image_id = record.image_id
+            return self.hand_segmentation_predictor
 
     @staticmethod
     def _allowed_root_for_record(

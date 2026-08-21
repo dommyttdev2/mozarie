@@ -54,6 +54,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
+        self.hand_segmentation_predictor: Any | None = None
+        self.hand_segmentation_image_id: str | None = None
+        self.hand_segmentation_lock = threading.RLock()
         self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
 
@@ -72,7 +75,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self.settings = settings
             detection_keys = {
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
-                "hand_detection", "hand_detection_enabled", "provider", "gpu_device",
+                "hand_detection", "hand_detection_enabled", "hand_segmentation", "hand_segmentation_enabled", "provider", "gpu_device",
             }
             sam_keys = {"sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
@@ -80,6 +83,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
                 self.sam_predictor = None
                 self.sam_image_id = None
+            if any(settings["models"].get(key) != previous_models.get(key) for key in {"hand_segmentation", "hand_segmentation_enabled", "provider", "gpu_device"}):
+                self.hand_segmentation_predictor = None
+                self.hand_segmentation_image_id = None
             return self.settings
 
     def reset_settings(self) -> dict[str, Any]:
@@ -90,6 +96,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self.models = None
             self.sam_predictor = None
             self.sam_image_id = None
+            self.hand_segmentation_predictor = None
+            self.hand_segmentation_image_id = None
             return self.settings
 
     def settings_status(self) -> dict[str, Any]:
@@ -144,6 +152,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         add_status("ntd11", required=False, enabled=bool(models["ntd11_enabled"]), required_suffix=".onnx")
         add_status("sensitive", required=False, enabled=bool(models["sensitive_enabled"]), required_suffix=".onnx")
         add_status("hand_detection", required=False, enabled=bool(models["hand_detection_enabled"]), required_suffix=".onnx")
+        add_status("hand_segmentation", required=False, enabled=bool(models.get("hand_segmentation_enabled")), required_suffix=".safetensors")
         add_status("sam_checkpoint", required=True, enabled=True)
         gpus = []
         if torch_module().cuda.is_available():

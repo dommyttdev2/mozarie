@@ -58,9 +58,13 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 | --- | --- |
 | 手の検出 | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 
-### 任意: 白い体液と思われる部分を除外
+### 任意: HandSegNet anime SDXL
 
-追加モデルは使いません。検出されたペニス範囲の中で、白色かつ小さい領域を色と面積で判定して除外する実験的な処理です。白いハイライトや明るい小物も誤って除外することがあるため、必ず結果を確認してください。
+手の検出をONにした場合は、手の輪郭に固定版の[HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors)を任意で使えます。Mozarieはモデルを同梱・自動ダウンロードしません。手動でダウンロードし、revision `77ff734683306141e56aef9d491958a82508b41a`、SHA-256 `64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14`、[Apache-2.0ライセンス](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE)を確認してください。
+
+### 任意: 白い体液候補を検出
+
+追加モデルは使いません。検出されたペニス範囲の中で、白色かつ小さい領域を色と面積で判定し、初期状態がOFFの除外候補として追加する実験的な処理です。白いハイライトや明るい小物も候補になることがあるため、確認してから必要な候補だけONにしてください。
 
 モデルファイルはこのリポジトリに含まれず、自動ダウンロードもしません。利用前に各配布元の利用条件とライセンスを確認してください。
 

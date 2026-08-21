@@ -58,9 +58,13 @@ Enable this only when hands overlap a detected genital area. It requires a hand-
 | --- | --- |
 | Hand detection | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
 
-### Optional: exclude suspected white fluid
+### Optional: HandSegNet anime SDXL
 
-This experimental option needs no additional model. Within a detected penis range, it uses color and area heuristics to exclude small white regions. White highlights, pale details, or other bright objects can be excluded by mistake, so always review the result.
+When hand detection is enabled, you can optionally use the pinned [HandSegNet anime SDXL checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) for hand outlines. Download it manually; Mozarie does not bundle or download models. Use revision `77ff734683306141e56aef9d491958a82508b41a`, SHA-256 `64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14`, and review its [Apache-2.0 license](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE) before use.
+
+### Optional: detect white-fluid candidates
+
+This experimental option needs no additional model. Within a detected penis range, it uses color and area heuristics to create disabled white-fluid exclusion candidates. White highlights, pale details, or other bright objects can be proposed by mistake, so review and enable a candidate only when appropriate.
 
 Model files are not included in this repository. Mozarie never downloads or bundles models. Review the terms and license at each distribution source before use.
 

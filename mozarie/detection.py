@@ -251,25 +251,51 @@ class DetectionMixin:
         intersecting_boxes = [box for box in hand_boxes if self._box_intersects_mask(box, genital_mask)]
         hand_mask = np.zeros_like(genital_mask, dtype=np.uint8)
         if intersecting_boxes:
-            # SAM caches one current image, so set_image and every predictor call share one lock.
-            with self.sam_lock:
-                predictor = self._sam_predictor_for(record)
-                for box in intersecting_boxes:
-                    padded_box = padded_hand_box(box, genital_mask.shape[:2])
-                    if padded_box is None:
-                        continue
-                    masks, scores, _ = predictor.predict(
-                        point_coords=None,
-                        point_labels=None,
-                        box=np.asarray(padded_box, dtype=np.float32),
-                        multimask_output=True,
-                    )
-                    confirmed = accepted_hand_sam_mask(masks, scores, genital_mask.shape[:2], padded_box)
-                    if confirmed is not None:
-                        hand_mask = np.maximum(hand_mask, confirmed)
+            specialist = bool(self.settings["models"].get("hand_segmentation_enabled"))
+            if specialist:
+                fallback_boxes: list[tuple[int, int, int, int]] = []
+                with self.hand_segmentation_lock:
+                    specialist_predictor = self._hand_segmentation_predictor_for(record)
+                    for box in intersecting_boxes:
+                        padded_box = padded_hand_box(box, genital_mask.shape[:2])
+                        if padded_box is None:
+                            continue
+                        masks, _scores, _ = specialist_predictor.predict(
+                            point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
+                        )
+                        confirmed = accepted_specialist_hand_mask(masks, genital_mask.shape[:2], padded_box, genital_mask)
+                        if confirmed is not None:
+                            hand_mask = np.maximum(hand_mask, confirmed)
+                            continue
+                        fallback_boxes.append(padded_box)
+                if fallback_boxes:
+                    with self.sam_lock:
+                        predictor = self._sam_predictor_for(record)
+                        for padded_box in fallback_boxes:
+                            masks, scores, _ = predictor.predict(
+                                point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
+                            )
+                            confirmed = accepted_hand_sam_mask(masks, scores, genital_mask.shape[:2], padded_box)
+                            if confirmed is not None:
+                                hand_mask = np.maximum(hand_mask, confirmed)
+            else:
+                with self.sam_lock:
+                    predictor = self._sam_predictor_for(record)
+                    for box in intersecting_boxes:
+                        padded_box = padded_hand_box(box, genital_mask.shape[:2])
+                        if padded_box is None:
+                            continue
+                        masks, scores, _ = predictor.predict(
+                            point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
+                        )
+                        confirmed = accepted_hand_sam_mask(masks, scores, genital_mask.shape[:2], padded_box)
+                        if confirmed is not None:
+                            hand_mask = np.maximum(hand_mask, confirmed)
 
         for segment in detected:
             original_mask = np.asarray(segment["mask"]).copy()
+            segment["_detector_mask"] = original_mask
+            segment["_confirmed_hand"] = hand_mask
             refined, decision = refine_mask_with_hand(segment["mask"], hand_mask)
             hand_exclusion = ((original_mask > 0) & (np.asarray(refined) == 0)).astype(np.uint8) * 255
             exclusions: dict[str, np.ndarray] = {}
@@ -284,50 +310,57 @@ class DetectionMixin:
             if self.settings["detection"]["fluid_exclusion_enabled"]:
                 fluid_mask = white_fluid_mask(rgb, segment["mask"])
                 if np.any(fluid_mask):
-                    before_fluid = np.asarray(segment["mask"]).copy()
-                    segment["mask"] = np.where(fluid_mask > 0, 0, before_fluid).astype(np.uint8)
-                    exclusions["fluid"] = ((before_fluid > 0) & (segment["mask"] == 0)).astype(np.uint8) * 255
-                    segment["refinement"] = "hand_fluid" if segment.get("refinement") == "hand" else "fluid"
+                    exclusions["fluid"] = fluid_mask
             segment["exclusions"] = exclusions
         return segments
 
     def _high_precision_segments(
         self, models: DetectionModels, record: ImageRecord, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Refine each detector region once with SAM, keeping the detector result on weak matches."""
-        del models  # The refinement is intentionally model-independent after target detection.
+        """Refine detector regions with semantic SAM prompts, keeping weak results untouched."""
         if not segments:
             return segments
         with self.sam_lock:
             predictor = self._sam_predictor_for(record)
             for segment in segments:
-                source_mask = (np.asarray(segment["mask"]) > 0).astype(np.uint8)
-                points = np.argwhere(source_mask > 0)
-                if not len(points):
+                source_mask = (np.asarray(segment.get("_detector_mask", segment["mask"])) > 0).astype(np.uint8)
+                hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
+                coordinates = np.argwhere(source_mask > 0)
+                if not len(coordinates):
                     continue
-                top, left = points.min(axis=0)
-                bottom, right = points.max(axis=0) + 1
+                top, left = coordinates.min(axis=0)
+                bottom, right = coordinates.max(axis=0) + 1
                 height, width = source_mask.shape
                 padding = max(2, int(max(bottom - top, right - left) * 0.05))
                 roi = (max(0, int(left - padding)), max(0, int(top - padding)),
                        min(width, int(right + padding)), min(height, int(bottom + padding)))
-                distances = cv2.distanceTransform(source_mask, cv2.DIST_L2, 3)
-                y, x = np.unravel_index(int(np.argmax(distances)), distances.shape)
-                masks, scores, _ = predictor.predict(
-                    point_coords=np.asarray([[x, y]], dtype=np.float32),
-                    point_labels=np.asarray([1], dtype=np.int32),
+                prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
+                if not len(prompt_points):
+                    segment["refinement"] = "sam_fallback"
+                    continue
+                masks, scores, logits = predictor.predict(
+                    point_coords=prompt_points,
+                    point_labels=labels,
                     box=np.asarray(roi, dtype=np.float32),
                     multimask_output=True,
                 )
-                refined, _score = select_best_sam_mask(masks, scores)
-                refined = clip_mask_to_roi(refined, roi)
-                overlap = mask_iou(source_mask, refined)
-                source_area = int(np.count_nonzero(source_mask))
-                refined_area = int(np.count_nonzero(refined))
-                if overlap < 0.20 or refined_area < max(8, source_area // 4) or refined_area > source_area * 3:
+                clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
+                selected = select_semantic_sam_mask(clipped_masks, scores, source_mask, hand_mask, prompt_points, labels)
+                if selected is None:
                     segment["refinement"] = "sam_fallback"
                     continue
+                refined, selected_index = selected
+                hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
+                if hand_overlap and logits is not None and len(logits) > selected_index:
+                    retry_masks, retry_scores, _ = predictor.predict(
+                        point_coords=prompt_points, point_labels=labels, box=np.asarray(roi, dtype=np.float32),
+                        mask_input=np.asarray(logits[selected_index]), multimask_output=False,
+                    )
+                    retry = select_semantic_sam_mask(np.asarray([clip_mask_to_roi(mask, roi) for mask in retry_masks]), retry_scores, source_mask, hand_mask, prompt_points, labels)
+                    if retry is not None and np.count_nonzero((retry[0] > 0) & (hand_mask > 0)) < hand_overlap:
+                        refined = retry[0]
                 segment["mask"] = refined
+                segment["_apply_mask"] = refined
                 segment["refinement"] = "sam_high_precision"
         return segments
 
@@ -342,23 +375,22 @@ class DetectionMixin:
             with Image.open(record.path) as image:
                 rgb = ImageOps.exif_transpose(image).convert("RGB")
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
-        if mode == "high_precision":
-            segments = self._high_precision_segments(models, record, segments)
         original_masks = {id(segment): np.asarray(segment["mask"]).copy() for segment in segments}
         segments = self._refine_detected_segments(models, record, rgb, segments)
+        if mode == "high_precision":
+            segments = self._high_precision_segments(models, record, segments)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
         for segment in segments:
             refined_mask = np.asarray(segment["mask"]).copy()
-            original_mask = np.asarray(original_masks.get(id(segment), refined_mask)).copy()
+            apply_mask = np.asarray(segment.get("_apply_mask", original_masks.get(id(segment), refined_mask))).copy()
             # Keep the detector/SAM mask intact.  Hands and fluid are separate
             # exclusion candidates, so their checkbox can genuinely restore the
             # underlying target mask when turned off.
-            segment["mask"] = original_mask
             candidate_id = uuid.uuid4().hex
             mask_path = destination / f".mozarie-pending-{candidate_id}.tmp"
-            Image.fromarray(np.asarray(segment["mask"], dtype=np.uint8)).save(mask_path, format="PNG")
+            Image.fromarray(np.asarray(apply_mask, dtype=np.uint8)).save(mask_path, format="PNG")
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
@@ -386,6 +418,7 @@ class DetectionMixin:
                     source=exclusion_source,
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
+                    enabled=exclusion_kind != "fluid",
                 ))
         return candidates
 

@@ -57,7 +57,7 @@ for (const id of [
   "editorCanvas", "canvasStage", "canvasToolRail", "detectAllButton", "detectCurrentButton", "clearCurrentMasksButton", "clearAllMasksButton", "clearCatalogButton", "saveAllButton", "saveButton", "removeCurrentImageButton", "galleryFilter", "pickFolder", "pickImages", "pickFolderFiles", "pickerMenu", "importImagesInput", "importFolderInput", "mosaicPreviewButton", "folderPath", "brushTool", "eraserTool", "boundaryTool", "rectangleTool", "boundaryModeMenu", "polygonTool", "boundaryBrushTool", "boundaryActions", "boundaryDetectButton", "boundaryCancelButton", "fitButton", "undoButton", "redoButton", "brushSize", "confidence", "confidenceValue", "detectDialog", "detectForm", "detectTargetCount", "detectConfidenceRange", "detectConfidenceNumber", "detectParallelism", "detectCancelButton", "detectStartButton", "settingsModelStatus", "settingsDialog", "settingsCloseButton",
   "overviewButton", "previousImageButton", "nextImageButton", "nextUnreviewedButton", "reviewAndNextButton", "removeAndNextButton", "imagePosition", "imageInfo", "reviewStatus", "closeOverviewButton", "overviewPane", "overviewGrid", "overviewCount", "overviewQuery", "overviewFolder", "confirmDialog", "settingsShortcutsEnabled",
   "status", "statusLine", "processingDialog", "processingTitle", "processingCurrent", "processingProgress", "processingProgressText", "processingPauseButton", "processingCancelButton", "gallery", "galleryEmptyState", "galleryFilteredEmptyState", "galleryDropOverlay", "candidateList", "candidateStatus", "divisor", "blockSizeValue", "batchMoreButton", "batchMoreMenu", "catalogContextMenu", "toggleReviewMenuItem", "removeImageMenuItem", "overviewEmptyState", "collapseGalleryButton", "collapseInspectorButton", "galleryPane", "galleryPaneContent", "candidatePane", "candidatePaneContent",
-  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpSamTable", "modelHelpCloseButton", "batchModeButton", "batchSelectionControls", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
+  "applyTargetCount", "applyBlockSize", "applyDivisor", "applyProgressPanel", "applyStartButton", "applyCloseButton", "applyPauseButton", "applyCancelButton", "applySettings", "applyResult", "applySuffix", "applySuffixRow", "deleteOriginal", "deleteOriginalRow", "applyDialog", "applyCopyMode", "applyOverwriteMode", "applyOverwriteRow", "applyTemporarySourceNote", "applyOutputDirectoryRow", "applyOutputDirectoryStatus", "chooseOutputDirectoryButton", "removeAfterSave", "settingsLanguage", "settingsOpenBrowser", "settingsPort", "settingsDefaultOutputDirectory", "settingsChooseOutputDirectory", "settingsImportParallelism", "settingsSaveParallelism", "settingsTargetModel", "settingsNtd11Model", "settingsSensitiveModel", "settingsHandModel", "settingsHandSegmentationModel", "settingsSamModel", "settingsSamType", "settingsProvider", "settingsApplyColor", "settingsExcludeColor", "settingsOpacity", "settingsMosaicPreview", "settingsToolPosition", "settingsResult", "settingsVersion", "settingsNtd11Card", "settingsSensitiveCard", "settingsHandCard", "settingsHandSegmentationCard", "settingsPrecisionCard", "settingsFluidCard", "settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsHandSegmentationToggle", "settingsPrecisionToggle", "settingsFluidToggle", "modelHelpDialog", "modelHelpTitle", "modelHelpText", "modelHelpSamTable", "modelHelpCloseButton", "batchModeButton", "batchSelectionControls", "selectionActionsButton", "selectionActionsMenu", "selectionCount", "selectionClearButton", "bucketToleranceControl", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy", "updateToast",
 ]) {
   const value = element();
   value.id = id;
@@ -261,13 +261,13 @@ const markup = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"
 const styles = fs.readFileSync(path.join(__dirname, "..", "static", "style.css"), "utf8");
 assert.match(markup, /data-i18n="settings\.genitalDetection"/);
 assert.match(markup, /data-i18n="settings\.exclusionProcessing"/);
-assert.equal((markup.match(/role="switch"/g) || []).length, 5, "five optional processing switches are rendered");
+assert.equal((markup.match(/role="switch"/g) || []).length, 6, "six optional processing switches are rendered");
 assert.doesNotMatch(markup, /modelProfileHelp|modelsRequired|補助セグメンテーション|SAM チェックポイント/);
 assert.doesNotMatch(source, /model-card-toggle|aria-pressed.*model/);
 assert.equal(translationFixtures.ja["settings.models"], "検出");
 assert.equal(translationFixtures.en["settings.models"], "Detection");
 assert.equal(translationFixtures.ja["settings.precisionModel"], "自動検出の輪郭を補正");
-assert.equal(translationFixtures.en["settings.fluidExclusion"], "Exclude semen");
+assert.equal(translationFixtures.en["settings.fluidExclusion"], "Detect white-fluid candidates");
 assert.equal(translationFixtures.ja["detectDialog.help"], "高いほど誤検出は減りますが、見逃しは増えます。");
 assert.equal(translationFixtures.en["detectDialog.help"], "Higher values reduce false positives but can miss targets.");
 assert.equal(translationFixtures.ja["detection.help"], "高いほど誤検出は減りますが、見逃しは増えます。");
@@ -2203,7 +2203,7 @@ const completionWatchdog = setTimeout(() => {
   // success message is rendered, so the result cannot be left in the old UI language.
   const japaneseSettings = {
     general: { language: "ja", open_browser: true, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
+    models: { target_segmentation: "target.onnx", ntd11: "ntd11.onnx", ntd11_enabled: true, sensitive: "sensitive.onnx", sensitive_enabled: false, hand_detection: "hand.onnx", hand_detection_enabled: true, hand_segmentation: "hand.safetensors", hand_segmentation_enabled: true, sam_checkpoint: "sam.pth", sam_model_type: "vit_b", provider: "cpu" },
     display: { apply_color: "#ff0000", exclude_color: "#00ffff", overlay_opacity: 0.5, mosaic_preview: true },
     importing: { parallelism: 3 },
     detection: { threshold: 0.5, parallelism: 2, mode: "standard", fluid_exclusion_enabled: true },
@@ -2216,6 +2216,10 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsSensitiveCard").classList.contains("active"), false);
   assert.equal(elements.get("#settingsHandToggle").checked, true);
   assert.equal(elements.get("#settingsHandCard").classList.contains("active"), true);
+  assert.equal(elements.get("#settingsHandSegmentationToggle").checked, true);
+  elements.get("#settingsHandSegmentationToggle").checked = false;
+  elements.get("#settingsHandSegmentationToggle").dispatch("change");
+  assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
   assert.equal(elements.get("#settingsPrecisionToggle").checked, false);
   assert.equal(elements.get("#settingsFluidToggle").checked, true);
   selectSettingsTab("models");

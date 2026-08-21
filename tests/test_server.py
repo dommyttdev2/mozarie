@@ -44,6 +44,7 @@ from server import (  # noqa: E402
     StudioState,
     TARGET_CLASSES,
     accepted_hand_sam_mask,
+    accepted_specialist_hand_mask,
     arbitrate_segment_sources,
     assert_onnx_cuda_available,
     calculate_block_size,
@@ -62,6 +63,8 @@ from server import (  # noqa: E402
     _read_mosaic_divisor,
     save_with_mask,
     select_best_sam_mask,
+    select_semantic_sam_mask,
+    sam_refinement_prompts,
     webp_metadata_manifest,
     white_fluid_mask,
     LOG_DATE_FORMAT,
@@ -1472,6 +1475,26 @@ class MozarieTests(unittest.TestCase):
         fluid = white_fluid_mask(Image.fromarray(rgb), penis)
         self.assertEqual(np.count_nonzero(fluid), 16)
 
+    def test_semantic_sam_refinement_uses_safe_points_and_rejects_hand_overlap(self):
+        source = np.zeros((16, 16), dtype=np.uint8); source[3:13, 3:13] = 255
+        hand = np.zeros_like(source); hand[3:7, 3:7] = 255
+        points, labels = sam_refinement_prompts(source, hand)
+        self.assertLessEqual(np.count_nonzero(labels == 1), 3)
+        self.assertLessEqual(np.count_nonzero(labels == 0), 1)
+        self.assertTrue(all(source[int(y), int(x)] and not hand[int(y), int(x)] for (x, y), label in zip(points, labels) if label == 1))
+        good = source.astype(bool); good[3:7, 3:7] = False
+        bad = source.astype(bool)
+        selected = select_semantic_sam_mask(np.asarray([bad, good]), np.asarray([0.99, 0.50]), source, hand, points, labels)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[1], 1)
+
+    def test_specialist_hand_mask_requires_box_containment_and_genital_intersection(self):
+        genital = np.zeros((12, 12), dtype=np.uint8); genital[4:8, 4:8] = 255
+        accepted = np.zeros((1, 12, 12), dtype=bool); accepted[0, 4:8, 4:8] = True
+        self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9), genital))
+        outside = np.zeros((1, 12, 12), dtype=bool); outside[0, :3, :3] = True
+        self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9), genital))
+
     def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
         rgb = np.zeros((24, 24, 3), dtype=np.uint8)
         penis = np.zeros((24, 24), dtype=np.uint8)
@@ -1740,9 +1763,10 @@ class MozarieTests(unittest.TestCase):
                 Mock(), record, Image.fromarray(rgb),
                 [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "target"}],
             )
-        self.assertEqual(result[0]["refinement"], "hand_fluid")
-        self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりと白い体液を除外")
-        self.assertEqual(np.count_nonzero(result[0]["mask"]), 368)
+        self.assertEqual(result[0]["refinement"], "hand")
+        self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりを除外")
+        self.assertEqual(np.count_nonzero(result[0]["mask"]), 384)
+        self.assertTrue(np.any(result[0]["exclusions"]["fluid"]))
 
     def test_fluid_exclusion_can_be_disabled_without_changing_hand_refinement(self):
         state = self.new_state()

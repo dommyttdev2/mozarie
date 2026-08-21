@@ -117,14 +117,14 @@ def validate_settings(value: Any) -> dict[str, Any]:
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
     paths = {}
-    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "sam_checkpoint"):
-        path = models.get(key)
+    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation", "sam_checkpoint"):
+        path = models.get(key, "") if key == "hand_segmentation" else models.get(key)
         if not isinstance(path, str):
             raise SettingsError(f"models.{key} must be a string")
         paths[key] = path.strip()
     enabled = {
-        key: _expect_bool(models.get(key), f"models.{key}")
-        for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled")
+        key: _expect_bool(models.get(key, False) if key == "hand_segmentation_enabled" else models.get(key), f"models.{key}")
+        for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled", "hand_segmentation_enabled")
     }
     return {
         "general": {

@@ -89,12 +89,12 @@ SOURCE_LABELS = {
     "sensitive": "Sensitive補助モデル",
     "boundary": "境界選択",
     "hand_exclusion": "手を除外",
-    "fluid_exclusion": "白い体液を除外",
+    "fluid_exclusion": "白い体液候補",
 }
 REFINEMENT_LABELS = {
     "hand": "手の重なりを除外",
-    "fluid": "白い体液を除外",
-    "hand_fluid": "手の重なりと白い体液を除外",
+    "fluid": "白い体液候補を検出",
+    "hand_fluid": "手の重なりを除外・白い体液候補を検出",
 }
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
@@ -463,6 +463,26 @@ def accepted_hand_sam_mask(
     return None
 
 
+def accepted_specialist_hand_mask(masks: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int], genital_mask: np.ndarray) -> np.ndarray | None:
+    """Accept only a bounded HandSegNet result that actually intersects detected anatomy."""
+    left, top, right, bottom = box
+    box_area = max(1, (right - left) * (bottom - top))
+    genital = np.asarray(genital_mask > 0, dtype=bool)
+    for raw_mask in masks:
+        mask = np.asarray(raw_mask > 0, dtype=np.uint8)
+        if mask.shape != expected_shape or not np.any(mask):
+            continue
+        inside = int(np.count_nonzero(mask[top:bottom, left:right]))
+        total = int(np.count_nonzero(mask))
+        if inside / total < 0.85 or not 0.03 <= inside / box_area <= 0.95:
+            continue
+        clipped = np.zeros_like(mask, dtype=np.uint8)
+        clipped[top:bottom, left:right] = mask[top:bottom, left:right]
+        if np.any((clipped > 0) & genital):
+            return clipped * 255
+    return None
+
+
 def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
     """Find small, neutral-white regions contained by a penis segment."""
     penis = np.asarray(penis_mask > 0, dtype=np.uint8)
@@ -564,6 +584,84 @@ def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndar
         raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
     index = int(np.argmax(scores))
     return np.asarray(masks[index]), float(scores[index])
+
+
+def sam_refinement_prompts(source_mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Build deterministic SAM points from detector certainty, never fluid proposals."""
+    source = np.asarray(source_mask > 0, dtype=np.uint8)
+    hand = np.asarray(hand_mask > 0, dtype=np.uint8)
+    if source.shape != hand.shape or not np.any(source):
+        return np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.int32)
+    safe = source & (1 - hand)
+    eroded = cv2.erode(safe, np.ones((3, 3), dtype=np.uint8))
+    if not np.any(eroded):
+        distance = cv2.distanceTransform(source, cv2.DIST_L2, 3)
+        y, x = np.unravel_index(int(np.argmax(distance)), distance.shape)
+        return np.asarray([[x, y]], dtype=np.float32), np.asarray([1], dtype=np.int32)
+    distance = cv2.distanceTransform(eroded, cv2.DIST_L2, 3)
+    candidates = np.argwhere(eroded > 0)
+    count = 1 if len(candidates) < 64 else 3
+    selected: list[tuple[int, int]] = []
+    for _index in range(count):
+        if not selected:
+            order = sorted(candidates, key=lambda point: (-float(distance[tuple(point)]), int(point[0]), int(point[1])))
+        else:
+            order = sorted(candidates, key=lambda point: (
+                -min((int(point[0]) - y) ** 2 + (int(point[1]) - x) ** 2 for y, x in selected),
+                -float(distance[tuple(point)]), int(point[0]), int(point[1]),
+            ))
+        y, x = map(int, order[0])
+        selected.append((y, x))
+    points = [[x, y] for y, x in selected]
+    negative = source & hand
+    if np.any(negative):
+        distance = cv2.distanceTransform(negative, cv2.DIST_L2, 3)
+        y, x = np.unravel_index(int(np.argmax(distance)), distance.shape)
+        points.append([int(x), int(y)])
+        labels = [1] * len(selected) + [0]
+    else:
+        labels = [1] * len(selected)
+    return np.asarray(points, dtype=np.float32), np.asarray(labels, dtype=np.int32)
+
+
+def select_semantic_sam_mask(
+    masks: np.ndarray, scores: np.ndarray, source_mask: np.ndarray, hand_mask: np.ndarray,
+    point_coords: np.ndarray, point_labels: np.ndarray,
+) -> tuple[np.ndarray, int] | None:
+    """Choose only a SAM proposal that preserves detector semantics and avoids hands."""
+    source = np.asarray(source_mask > 0, dtype=bool)
+    hand = np.asarray(hand_mask > 0, dtype=bool)
+    source_area = int(np.count_nonzero(source))
+    if source_area == 0 or len(masks) != len(scores):
+        return None
+    positive = point_coords[point_labels == 1].astype(int)
+    negative = point_coords[point_labels == 0].astype(int)
+    choices: list[tuple[tuple[float, float, float, float, int], np.ndarray, int]] = []
+    for index, raw_mask in enumerate(masks):
+        mask = np.asarray(raw_mask > 0, dtype=bool)
+        if mask.shape != source.shape:
+            continue
+        if any(not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]) or not mask[y, x] for x, y in positive):
+            continue
+        if any(0 <= x < mask.shape[1] and 0 <= y < mask.shape[0] and mask[y, x] for x, y in negative):
+            continue
+        area = int(np.count_nonzero(mask))
+        if not source_area // 4 <= area <= source_area * 3:
+            continue
+        overlap = int(np.count_nonzero(mask & source))
+        hand_overlap = int(np.count_nonzero(mask & hand))
+        hand_area = max(1, int(np.count_nonzero(hand)))
+        hand_ratio = hand_overlap / hand_area
+        if hand_ratio > 0.15:
+            continue
+        retention = overlap / source_area
+        union = area + source_area - overlap
+        iou = overlap / union if union else 0.0
+        choices.append(((hand_ratio, -retention, -iou, -float(scores[index]), index), mask.astype(np.uint8) * 255, index))
+    if not choices:
+        return None
+    _rank, mask, index = min(choices, key=lambda choice: choice[0])
+    return mask, index
 
 
 def confidence_for_source(source: str, confidence: float) -> float:
