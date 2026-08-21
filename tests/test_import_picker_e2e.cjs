@@ -619,6 +619,10 @@ async function main() {
     await page.locator('.gallery-item[data-id="sample"]').focus();
     await page.keyboard.press("Space");
     await page.locator('.gallery-item[data-id="sample-two"]').click();
+    await page.waitForFunction(() => {
+      const item = document.querySelector('.gallery-item[data-id="sample-two"]');
+      return item?.classList.contains("current") && item.getAttribute("aria-current") === "true";
+    });
     assert.equal(await page.locator("#selectionCount").textContent(), "2件を選択中", "the gallery work row reports the selected image count");
     assert.equal(await page.locator('.gallery-item[data-id="sample"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the first batch selection is green in the gallery");
     assert.equal(await page.locator('.gallery-item[data-id="sample-two"]').evaluate((item) => item.classList.contains("batch-selected")), true, "the second batch selection is green in the gallery");
