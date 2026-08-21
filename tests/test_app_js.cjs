@@ -6,6 +6,11 @@ const translationFixtures = Object.fromEntries(["en", "ja"].map((language) => [
   language,
   JSON.parse(fs.readFileSync(path.join(__dirname, "..", "static", "i18n", `${language}.json`), "utf8")),
 ]));
+for (const language of ["en", "ja"]) {
+  const source = fs.readFileSync(path.join(__dirname, "..", "static", "i18n", `${language}.json`), "utf8");
+  const keys = [...source.matchAll(/^  "([^"]+)":/gm)].map((match) => match[1]);
+  assert.equal(new Set(keys).size, keys.length, `${language} translations do not repeat keys`);
+}
 
 function element(tagName = "") {
   const listeners = new Map();
@@ -2130,11 +2135,11 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
   state.settingsStatus = { models: {
     target: { required: true, enabled: true, configured: true, valid: true, detail: "" },
-    ntd11: { required: false, enabled: true, configured: true, valid: false, detail: "invalid auxiliary" },
+    ntd11: { required: false, enabled: true, configured: true, valid: false, reasonCode: "invalid_model" },
     sensitive: { required: false, enabled: false, configured: false, valid: false, detail: "" },
   } };
   renderModelStatus();
-  assert.match(elements.get("#settingsModelStatus").textContent, /ntd11: invalid auxiliary/);
+  assert.equal(elements.get("#settingsModelStatus").textContent, translationFixtures.en["settings.modelStatus.invalid_model"]);
   state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   renderModelStatus();
   assert.equal(elements.get("#imageInfo").textContent, "dynamic-name.png / 20 x 10");

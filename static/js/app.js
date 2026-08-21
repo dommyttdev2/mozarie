@@ -1,9 +1,8 @@
 function openModelHelp(key) {
-  const isSamType = key === "samType";
   $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
-  $("#modelHelpText").hidden = isSamType;
-  $("#modelHelpSamTable").hidden = !isSamType;
-  if (!isSamType) $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpText").hidden = false;
+  $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpSamTable").hidden = key !== "samType";
   $("#modelHelpDialog").showModal();
 }
 

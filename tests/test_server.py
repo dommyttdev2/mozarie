@@ -1591,7 +1591,7 @@ class MozarieTests(unittest.TestCase):
                 SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_l": Mock(return_value=model)}
             )
             with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
-                state._sam_predictor_for(record)
+                state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             model.to.assert_called_once_with(device="cpu")
             fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
 
@@ -1620,6 +1620,16 @@ class MozarieTests(unittest.TestCase):
         self.assertIsNone(state.models)
         self.assertIs(state.sam_predictor, predictor)
         self.assertEqual(state.sam_image_id, "image")
+
+    def test_hand_segmentation_setting_keeps_onnx_sessions(self):
+        state = self.new_state()
+        next_settings = copy.deepcopy(state.settings)
+        next_settings["models"]["hand_segmentation_enabled"] = True
+        models = object()
+        state.models = models
+        with patch.object(state.settings_store, "save", return_value=next_settings):
+            state.update_settings(next_settings)
+        self.assertIs(state.models, models)
 
     def test_sam_setting_change_keeps_detection_model_cache(self):
         state = self.new_state()
@@ -1693,7 +1703,13 @@ class MozarieTests(unittest.TestCase):
 
                 def keys(self):
                     self.keys_called = True
-                    return server_module.HAND_SEGMENTATION_VIT_B_KEYS
+                    return server_module.HAND_SEGMENTATION_VIT_B_TENSORS.keys()
+
+                def get_slice(self, key):
+                    return types.SimpleNamespace(get_shape=lambda: server_module.HAND_SEGMENTATION_VIT_B_TENSORS[key])
+
+                def get_tensor(self, _key):
+                    raise AssertionError("settings status must not load a tensor")
 
             header = Header()
             safe_open = MagicMock(return_value=header)
@@ -1703,26 +1719,6 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(status["valid"])
             self.assertTrue(header.keys_called)
             safe_open.assert_called_once_with(str(path), framework="pt", device="cpu")
-
-    def test_hand_segmentation_hash_mismatch_is_a_client_error_before_loading(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "handsegnet.safetensors"
-            path.write_bytes(b"wrong-checkpoint")
-            state.settings["models"].update({"hand_segmentation": str(path), "hand_segmentation_enabled": True})
-            with patch.object(catalog_module, "file_sha256", return_value="0" * 64) as digest:
-                with self.assertRaises(ClientError) as raised:
-                    state._hand_segmentation_predictor_for(Mock())
-            self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
-            digest.assert_called_once_with(path)
-
-    def test_loaded_hand_segmentation_predictor_does_not_rehash(self):
-        state = self.new_state()
-        state.hand_segmentation_predictor = Mock()
-        state.hand_segmentation_image_id = "test"
-        record = Mock(image_id="test")
-        with patch.object(catalog_module, "file_sha256", side_effect=AssertionError("cached predictor must not rehash")):
-            self.assertIs(state._hand_segmentation_predictor_for(record), state.hand_segmentation_predictor)
 
     def test_hand_segmentation_predictor_strictly_loads_vit_b_once_per_image(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1739,11 +1735,10 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_safetensors_torch = types.ModuleType("safetensors.torch"); fake_safetensors_torch.load_file = load_file
             fake_segment_anything = types.SimpleNamespace(SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_b": vit_b})
-            with patch.object(catalog_module, "file_sha256", return_value=server_module.HAND_SEGMENTATION_SHA256), patch.dict(
-                sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}
-            ):
-                self.assertIs(state._hand_segmentation_predictor_for(record), predictor)
-                self.assertIs(state._hand_segmentation_predictor_for(record), predictor)
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}):
+                rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+                self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
+                self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
             load_file.assert_called_once_with(str(checkpoint), device="cpu")
             vit_b.assert_called_once_with(checkpoint=None)
             model.load_state_dict.assert_called_once_with(state_dict, strict=True)
@@ -1761,7 +1756,7 @@ class MozarieTests(unittest.TestCase):
             "class_name": "penis", "confidence": 0.9, "mask": np.full(tile.shape[:2], 255, dtype=np.uint8), "source": source,
         }]
         models = DetectionModels(target=target, auxiliaries=[("ntd11", auxiliary)])
-        segments = state._detect_arbitrated_segments(models, Image.new("RGB", (10, 10), "white"), 0.5)
+        segments = state._detect_arbitrated_segments(models, np.zeros((10, 10, 3), dtype=np.uint8), 0.5)
         self.assertEqual([segment["source"] for segment in segments], ["target"])
         self.assertEqual(auxiliary.detect.call_count, len(detection_tiles(10, 10)))
 
@@ -1793,8 +1788,8 @@ class MozarieTests(unittest.TestCase):
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
                 [{"class_name": "penis", "confidence": 0.8, "mask": precise_mask, "source": "target"}],
             )
-        self.assertEqual(result[0]["refinement"], "hand")
-        self.assertEqual(np.count_nonzero(result[0]["mask"]), 48)
+        self.assertTrue(np.array_equal(result[0]["mask"], precise_mask))
+        self.assertTrue(np.any(result[0]["_confirmed_hand"]))
         predictor.predict.assert_called_once()
 
     def test_specialist_hand_segmentation_success_never_uses_generic_sam(self):
@@ -1813,7 +1808,7 @@ class MozarieTests(unittest.TestCase):
             )
         generic.assert_not_called()
         specialist.predict.assert_called_once()
-        self.assertEqual(result[0]["refinement"], "hand")
+        self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
     def test_specialist_fallback_releases_its_lock_before_generic_sam(self):
         state = self.new_state()
@@ -1837,7 +1832,7 @@ class MozarieTests(unittest.TestCase):
         generic_mask = np.zeros((1, 16, 16), dtype=bool); generic_mask[0, 4:8, 4:8] = True
         generic = Mock(); generic.predict.return_value = generic_mask, np.asarray([0.95]), None
 
-        def generic_predictor(_record):
+        def generic_predictor(_record, _rgb):
             self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
             return generic
 
@@ -1850,6 +1845,30 @@ class MozarieTests(unittest.TestCase):
             )
         self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
         generic.predict.assert_called_once()
+
+    def test_specialist_client_error_falls_back_to_generic_hand_sam(self):
+        state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        genital = np.zeros((16, 16), dtype=np.uint8); genital[4:12, 4:12] = 255
+        generic_mask = np.zeros((1, 16, 16), dtype=bool); generic_mask[0, 4:8, 4:8] = True
+        generic = Mock(); generic.predict.return_value = generic_mask, np.asarray([0.95]), None
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_hand_segmentation_predictor_for", side_effect=ClientError("bad specialist", "hand_segmentation_invalid")
+        ), patch.object(state, "_sam_predictor_for", return_value=generic):
+            result = state._refine_detected_segments(
+                Mock(), Mock(image_id="image"), np.zeros((16, 16, 3), dtype=np.uint8),
+                [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
+            )
+        generic.predict.assert_called_once()
+        self.assertTrue(np.any(result[0]["_confirmed_hand"]))
+
+    def test_final_exclusion_subtracts_hand_from_sam_expansion(self):
+        state = self.new_state()
+        final_mask = np.zeros((12, 12), dtype=np.uint8); final_mask[2:10, 2:10] = 255
+        hand = np.zeros_like(final_mask); hand[8:10, 8:10] = 255
+        segment = {"class_name": "penis", "mask": final_mask, "_confirmed_hand": hand}
+        finalized = state._finalize_exclusions(np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
+        self.assertTrue(np.array_equal(finalized["exclusions"]["hand"], hand))
 
     def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
@@ -1877,8 +1896,8 @@ class MozarieTests(unittest.TestCase):
             result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
         hand_boxes.assert_called_once()
         self.assertEqual(predictor.predict.call_count, 2)
-        self.assertTrue(all(segment["refinement"] == "hand" for segment in result))
-        self.assertTrue(all(np.count_nonzero(segment["mask"]) == 56 for segment in result))
+        self.assertTrue(all(np.count_nonzero(segment["_confirmed_hand"]) == 8 for segment in result))
+        self.assertTrue(all(np.count_nonzero(segment["mask"]) == 64 for segment in result))
 
     def test_pussy_skips_white_fluid_refinement(self):
         state = self.new_state()
@@ -1911,9 +1930,9 @@ class MozarieTests(unittest.TestCase):
                 Mock(), record, Image.fromarray(rgb),
                 [{"class_name": "penis", "confidence": 0.8, "mask": penis, "source": "target"}],
             )
-        self.assertEqual(result[0]["refinement"], "hand")
-        self.assertEqual(server_module.REFINEMENT_LABELS[result[0]["refinement"]], "手の重なりを除外")
-        self.assertEqual(np.count_nonzero(result[0]["mask"]), 384)
+        result = state._finalize_exclusions(rgb, result)
+        self.assertEqual(np.count_nonzero(result[0]["mask"]), 400)
+        self.assertTrue(np.any(result[0]["exclusions"]["hand"]))
         self.assertTrue(np.any(result[0]["exclusions"]["fluid"]))
 
     def test_fluid_exclusion_can_be_disabled_without_changing_hand_refinement(self):
@@ -1929,6 +1948,7 @@ class MozarieTests(unittest.TestCase):
             )
         fluid_mask.assert_not_called()
         self.assertTrue(np.array_equal(result[0]["mask"], penis))
+        result = state._finalize_exclusions(np.zeros((16, 16, 3), dtype=np.uint8), result)
         self.assertEqual(result[0]["exclusions"], {})
 
     def test_boundary_request_requires_a_valid_roi_and_click(self):
@@ -2090,6 +2110,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
                  patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
                  patch.object(state, "_refine_detected_segments", return_value=[{"exclusions": {"hand": exclusion}}]), \
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments), \
                  patch.object(detection_module.Image, "fromarray", side_effect=fail_second_mask):
                 with self.assertRaisesRegex(OSError, "second mask"):
                     state.add_boundary_candidate(image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
@@ -2121,6 +2142,7 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()), \
                  patch.object(state, "_refine_detected_segments", side_effect=refine), \
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments), \
                  patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())):
                 state.add_boundary_candidate(record.image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
 
@@ -2147,7 +2169,7 @@ class MozarieTests(unittest.TestCase):
             mask = np.zeros((12, 12), dtype=np.uint8); mask[3:9, 3:9] = 255
             segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "target"}
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
-                refined = state._high_precision_segments(DetectionModels(target=object()), record, [segment])[0]
+                refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
             self.assertTrue(np.array_equal(refined["mask"], mask))
             self.assertEqual(refined["refinement"], "sam_fallback")
 
@@ -2180,8 +2202,8 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_sam_predictor_for", return_value=predictor), patch.object(
             detection_module, "sam_refinement_prompts", return_value=(points, labels)
         ):
-            refined = state._high_precision_segments(DetectionModels(target=object()), record, segments)
-        self.assertTrue(np.array_equal(refined[0]["mask"] > 0, improved))
+            refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), segments)
+        self.assertTrue(np.array_equal(refined[0]["mask"] > 0, initial))
         self.assertTrue(np.array_equal(refined[1]["mask"] > 0, initial))
         self.assertTrue(np.array_equal(calls[0]["point_coords"], points))
         self.assertTrue(np.array_equal(calls[0]["point_labels"], labels))
@@ -2208,7 +2230,7 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
                 state, "_refine_detected_segments", side_effect=refine
-            ):
+            ), patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))

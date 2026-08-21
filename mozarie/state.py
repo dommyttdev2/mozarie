@@ -75,7 +75,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self.settings = settings
             detection_keys = {
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
-                "hand_detection", "hand_detection_enabled", "hand_segmentation", "hand_segmentation_enabled", "provider", "gpu_device",
+                "hand_detection", "hand_detection_enabled", "provider", "gpu_device",
             }
             sam_keys = {"sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
@@ -120,41 +120,50 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     "configured": bool(raw),
                     "exists": False,
                     "valid": False,
-                    "detail": "",
+                    "reasonCode": None,
                     "profile": None,
                 }
                 return
             path = Path(raw).expanduser() if raw else None
             exists = bool(path and path.is_file())
             valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
-            detail = ""
+            reason_code: str | None = None
             profile: dict[str, object] | None = None
+            if not raw:
+                reason_code = "not_configured"
+            elif not exists:
+                reason_code = "missing"
+            elif not valid:
+                reason_code = "invalid_format"
             if valid and key in validators:
                 try:
                     profile = profile_summary(validators[key](path))
-                except ModelProfileError as exc:
+                except ModelProfileError:
                     valid = False
-                    detail = str(exc)
+                    reason_code = "invalid_model"
             if valid and key == "hand_segmentation":
                 try:
                     from safetensors import SafetensorError, safe_open
                     with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
-                        keys = set(checkpoint.keys())
-                    if not HAND_SEGMENTATION_VIT_B_KEYS.issubset(keys):
-                        raise ModelProfileError("HandSegNetモデルは対応するViT-Bチェックポイントではありません")
-                except (ImportError, OSError, ValueError, SafetensorError, ModelProfileError) as exc:
+                        valid = all(
+                            key in checkpoint.keys() and tuple(checkpoint.get_slice(key).get_shape()) == shape
+                            for key, shape in HAND_SEGMENTATION_VIT_B_TENSORS.items()
+                        )
+                    if not valid:
+                        reason_code = "invalid_model"
+                except (ImportError, OSError, ValueError, SafetensorError):
                     valid = False
-                    detail = str(exc)
+                    reason_code = "invalid_model"
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
-                detail = "SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください"
+                reason_code = "invalid_format"
             result[key] = {
                 "required": required,
                 "enabled": enabled,
                 "configured": bool(raw),
                 "exists": exists,
                 "valid": valid,
-                "detail": detail,
+                "reasonCode": reason_code,
                 "profile": profile,
             }
 

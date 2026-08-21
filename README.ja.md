@@ -60,7 +60,7 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 
 ### 任意: HandSegNet anime SDXL
 
-手の検出をONにした場合は、手の輪郭に固定版の[HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors)を任意で使えます。Mozarieはモデルを同梱・自動ダウンロードしません。手動でダウンロードし、revision `77ff734683306141e56aef9d491958a82508b41a` と SHA-256 `64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14` を確認してください。固定版の[LICENSE_WEIGHTS.txt](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE_WEIGHTS.txt)はモデル重みに適用され、配布元リポジトリの推論・変換スクリプトには適用されません。
+手の検出をONにした場合は、手の輪郭に固定版の[HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors)を任意で使えます。Mozarieはモデルを同梱・自動ダウンロードしません。手動でダウンロードし、revision `77ff734683306141e56aef9d491958a82508b41a` を確認してください。固定版の[LICENSE_WEIGHTS.txt](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE_WEIGHTS.txt)はモデル重みに適用され、配布元リポジトリの推論・変換スクリプトには適用されません。
 
 ### 任意: 白い体液候補を検出
 

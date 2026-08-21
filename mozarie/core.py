@@ -80,12 +80,11 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
-HAND_SEGMENTATION_SHA256 = "64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14"
-HAND_SEGMENTATION_VIT_B_KEYS = frozenset({
-    "image_encoder.patch_embed.proj.weight",
-    "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
-    "mask_decoder.mask_tokens.weight",
-})
+HAND_SEGMENTATION_VIT_B_TENSORS = {
+    "image_encoder.patch_embed.proj.weight": (768, 3, 16, 16),
+    "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
+    "mask_decoder.mask_tokens.weight": (4, 256),
+}
 FLUID_MAX_COMPONENTS = 8
 FLUID_MAX_COMPONENT_RATIO = 0.15
 FLUID_MAX_TOTAL_RATIO = 0.20
@@ -489,7 +488,7 @@ def accepted_specialist_hand_mask(masks: np.ndarray, expected_shape: tuple[int, 
     return None
 
 
-def white_fluid_mask(rgb: Image.Image, penis_mask: np.ndarray) -> np.ndarray:
+def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
     """Find small, neutral-white regions contained by a penis segment."""
     penis = np.asarray(penis_mask > 0, dtype=np.uint8)
     penis_area = int(np.count_nonzero(penis))
@@ -647,7 +646,7 @@ def select_semantic_sam_mask(
         return None
     positive = point_coords[point_labels == 1].astype(int)
     negative = point_coords[point_labels == 0].astype(int)
-    choices: list[tuple[tuple[float, float, float, float, int], np.ndarray, int]] = []
+    choices: list[tuple[tuple[float, float, float, int], np.ndarray, int]] = []
     for index, raw_mask in enumerate(masks):
         mask = np.asarray(raw_mask > 0, dtype=bool)
         if mask.shape != source.shape:
@@ -661,14 +660,15 @@ def select_semantic_sam_mask(
             continue
         overlap = int(np.count_nonzero(mask & source))
         hand_overlap = int(np.count_nonzero(mask & hand))
-        hand_area = max(1, int(np.count_nonzero(hand)))
-        hand_ratio = hand_overlap / hand_area
+        hand_ratio = hand_overlap / max(1, area)
         if hand_ratio > 0.15:
             continue
         retention = overlap / source_area
-        union = area + source_area - overlap
-        iou = overlap / union if union else 0.0
-        choices.append(((hand_ratio, -retention, -iou, -float(scores[index]), index), mask.astype(np.uint8) * 255, index))
+        if retention < 0.50:
+            continue
+        # Deterministic selection is intentionally limited to the semantic
+        # gates above, then retention and SAM's own score.
+        choices.append(((-retention, -float(scores[index]), hand_ratio, index), mask.astype(np.uint8) * 255, index))
     if not choices:
         return None
     _rank, mask, index = min(choices, key=lambda choice: choice[0])

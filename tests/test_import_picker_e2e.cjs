@@ -267,7 +267,7 @@ async function assertSettingsDialogLayout(page, width, height) {
         dialogScrollWidth: dialog.scrollWidth, dialogClientWidth: dialog.clientWidth,
       };
     });
-    assert.equal(samDialog.textHidden, true, `SAM help hides the paragraph at ${width}x${height} (${language})`);
+    assert.equal(samDialog.textHidden, false, `SAM help keeps its short explanation above the table at ${width}x${height} (${language})`);
     assert.equal(samDialog.tableHidden, false, `SAM help shows its comparison table at ${width}x${height} (${language})`);
     assert.equal(samDialog.rows, 3, `SAM help has three model rows at ${width}x${height} (${language})`);
     assert.equal(samDialog.columns, true, `SAM help has five columns at ${width}x${height} (${language})`);
@@ -275,7 +275,8 @@ async function assertSettingsDialogLayout(page, width, height) {
     assert.deepEqual(samDialog.columnScopes, ["col", "col", "col", "col", "col"], `SAM table headers use column scopes at ${width}x${height} (${language})`);
     assert.deepEqual(samDialog.rowScopes, ["row", "row", "row"], `SAM table model names use row scopes at ${width}x${height} (${language})`);
     assert.ok(samDialog.tableScrollWidth <= samDialog.tableClientWidth && samDialog.dialogScrollWidth <= samDialog.dialogClientWidth, `SAM help table has no horizontal overflow at ${width}x${height} (${language})`);
-    await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
+    await page.locator("#modelHelpCloseButton").click();
+    assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `SAM help close button works at ${width}x${height} (${language})`);
     await page.locator('[data-model-help="ntd11"]').click();
     assert.equal(await page.locator("#modelHelpText").isVisible(), true, `other model help keeps its paragraph at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpSamTable").isVisible(), false, `other model help keeps the SAM table hidden at ${width}x${height} (${language})`);

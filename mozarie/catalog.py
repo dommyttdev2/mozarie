@@ -551,7 +551,7 @@ class CatalogMixin:
             if self.hand_segmentation_image_id == image_id:
                 self.hand_segmentation_image_id = None
 
-    def _sam_predictor_for(self, record: ImageRecord) -> Any:
+    def _sam_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
         with self.sam_lock:
             if self.sam_predictor is None:
                 sam_path = self._configured_sam_path()
@@ -569,13 +569,12 @@ class CatalogMixin:
                 self.sam_predictor = SamPredictor(model)
 
             if self.sam_image_id != record.image_id:
-                with Image.open(record.path) as image:
-                    self.sam_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
+                self.sam_predictor.set_image(rgb)
                 self.sam_image_id = record.image_id
             return self.sam_predictor
 
-    def _hand_segmentation_predictor_for(self, record: ImageRecord) -> Any:
-        """Load only the pinned HandSegNet ViT-B checkpoint; never substitute another model."""
+    def _hand_segmentation_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
+        """Load the configured HandSegNet ViT-B checkpoint without substitutions."""
         with self.hand_segmentation_lock:
             if self.hand_segmentation_predictor is None:
                 raw_path = str(self.settings["models"].get("hand_segmentation", "")).strip()
@@ -587,12 +586,6 @@ class CatalogMixin:
                 if path.suffix.lower() != ".safetensors":
                     raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
                 try:
-                    digest = file_sha256(path)
-                except OSError as exc:
-                    raise ClientError("HandSegNetモデルのSHA-256を確認できません。", "hand_segmentation_invalid") from exc
-                if digest != HAND_SEGMENTATION_SHA256:
-                    raise ClientError("HandSegNetモデルのSHA-256が固定版と一致しません。", "hand_segmentation_invalid")
-                try:
                     from safetensors.torch import load_file
                     from segment_anything import SamPredictor, sam_model_registry
                     state_dict = load_file(str(path), device="cpu")
@@ -600,6 +593,8 @@ class CatalogMixin:
                     model.load_state_dict(state_dict, strict=True)
                 except ImportError as exc:
                     raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
+                except RuntimeError:
+                    raise
                 except Exception as exc:
                     raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
                 provider = self.settings["models"]["provider"]
@@ -612,8 +607,7 @@ class CatalogMixin:
                     raise
                 self.hand_segmentation_predictor = SamPredictor(model)
             if self.hand_segmentation_image_id != record.image_id:
-                with Image.open(record.path) as image:
-                    self.hand_segmentation_predictor.set_image(np.asarray(ImageOps.exif_transpose(image).convert("RGB")))
+                self.hand_segmentation_predictor.set_image(rgb)
                 self.hand_segmentation_image_id = record.image_id
             return self.hand_segmentation_predictor
 

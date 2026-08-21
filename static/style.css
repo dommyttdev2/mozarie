@@ -138,8 +138,8 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .inline-field { display: flex; min-width: 0; gap: 6px; }
 .inline-field input { min-width: 0; flex: 1 1 auto; }
 .setting-label { display: inline-flex; align-items: center; justify-content: flex-start; gap: 4px; }
-.compact-dialog { max-width: 520px; }
-.model-help-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; } .model-help-table th, .model-help-table td { padding: 6px; border: 1px solid #48515a; overflow-wrap: anywhere; text-align: left; vertical-align: top; } .model-help-table th { color: #dce5ec; background: #20252a; }
+.compact-dialog { width: min(680px, calc(100vw - 32px)); max-width: 680px; }
+.model-help-table { width: auto; max-width: 100%; border-collapse: collapse; table-layout: auto; font-size: 13px; } .model-help-table th, .model-help-table td { padding: 6px; border: 1px solid #596570; overflow-wrap: anywhere; text-align: left; vertical-align: top; } .model-help-table th { color: #f0f5f8; background: #20252a; } .model-help-table :is(th:nth-child(1), th:nth-child(2), th:nth-child(3), th:nth-child(4), td:nth-child(1), td:nth-child(2), td:nth-child(3), td:nth-child(4)) { white-space: nowrap; }
 .model-switch { display: inline-grid; grid-template-columns: 38px 28px; align-items: center; gap: 7px; color: #aeb8c2; font-size: 12px; cursor: pointer; user-select: none; }
 .model-switch input { position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 .model-switch-track { position: relative; display: block; width: 38px; height: 22px; border: 1px solid #5b6570; border-radius: 11px; background: #444c55; transition: background-color 120ms ease, border-color 120ms ease; }
