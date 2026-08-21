@@ -301,7 +301,15 @@ async function refreshSettingsStatus() {
   const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
   button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");
   try {
-    const data = await api("/api/settings/status", { method: "POST", body: JSON.stringify(settingsPayload()) });
+    const snapshot = JSON.stringify(settingsPayload());
+    const data = await api("/api/settings/status", { method: "POST", body: snapshot });
+    let currentSnapshot = null;
+    try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
+    if (snapshot !== currentSnapshot) {
+      result.textContent = t("settings.statusChanged");
+      result.classList.add("error");
+      return;
+    }
     renderSettingsStatus(data.status);
     result.textContent = t("settings.statusChecked");
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }

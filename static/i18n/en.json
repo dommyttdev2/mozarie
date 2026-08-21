@@ -203,6 +203,7 @@
   "settings.statusCheck": "Check model and GPU information",
   "settings.statusChecking": "Checking model and GPU information…",
   "settings.statusChecked": "Model and GPU information updated.",
+  "settings.statusChanged": "Settings changed. Please check again.",
   "settings.license": "License",
   "errorCode.invalid_request": "The request is invalid.",
   "errorCode.request_failed": "Request failed.",

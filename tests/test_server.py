@@ -244,6 +244,20 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(mismatch["valid"])
             self.assertEqual(mismatch["reasonCode"], "invalid_model")
 
+    def test_settings_status_rejects_wrapped_sam_checkpoint(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sam_vit_b.pth"
+            torch.save({"state_dict": {"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}}, checkpoint)
+            settings = copy.deepcopy(state.settings)
+            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
+        self.assertFalse(status["valid"])
+        self.assertEqual(status["reasonCode"], "invalid_model")
+
     def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
         from http.server import ThreadingHTTPServer
 

@@ -203,6 +203,7 @@
   "settings.statusCheck": "モデル・GPU情報を確認",
   "settings.statusChecking": "モデル・GPU情報を確認しています…",
   "settings.statusChecked": "モデル・GPU情報を更新しました。",
+  "settings.statusChanged": "設定が変更されたため、もう一度確認してください。",
   "settings.license": "ライセンス",
   "errorCode.invalid_request": "操作内容が正しくありません。",
   "errorCode.request_failed": "処理に失敗しました。",

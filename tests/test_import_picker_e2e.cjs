@@ -58,8 +58,9 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/settings/status" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
-      settingsStatusRequests.push(JSON.parse(body));
-      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus: [] } })); };
+      const submittedSettings = JSON.parse(body);
+      settingsStatusRequests.push(submittedSettings);
+      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus: [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default" }] } })); };
       if (deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
       reply();
       return;
@@ -147,7 +148,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
     });
   });
 }
@@ -530,9 +531,17 @@ async function main() {
     assert.equal(settingsStatusRequests[0].models.target_segmentation, "unsaved.onnx", "model confirmation validates the unsaved form value");
     assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
     assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
+    await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
     releaseFullSettings();
     await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
-    assert.equal(await page.locator("#settingsTargetModel").inputValue(), "unsaved.onnx", "model status refresh keeps unsaved form values");
+    assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
+    assert.equal(await page.locator("#settingsStatusResult").textContent(), "設定が変更されたため、もう一度確認してください。", "a stale form-status response requires an explicit recheck");
+    assert.equal(await page.locator("#settingsGpuDevice").textContent(), "GPU 0", "a stale form-status response does not render its GPU state");
+    await page.locator("#settingsStatusButton").click();
+    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
+    assert.equal(settingsStatusRequests.length, 2, "the changed form requires a second explicit status check");
+    assert.equal(settingsStatusRequests[1].models.target_segmentation, "changed-while-checking.onnx", "the recheck sends the changed form");
+    assert.equal(await page.locator("#settingsGpuDevice").textContent(), "GPU 2: changed-while-checking.onnx", "only the recheck renders model and GPU state");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");

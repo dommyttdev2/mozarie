@@ -194,8 +194,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 try:
                     torch = torch_module()
                     checkpoint = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
-                    state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-                    patch_embed = state_dict["image_encoder.patch_embed.proj.weight"]
+                    patch_embed = checkpoint["image_encoder.patch_embed.proj.weight"]
                     valid = tuple(patch_embed.shape) == (expected_width, 3, 16, 16)
                     if not valid:
                         reason_code = "invalid_model"
