@@ -4600,11 +4600,15 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = rendered
 
             destination = root / "出力先" / "入力_モザイク.png"
+            expected_destination = os.path.normcase(str(destination.resolve()))
             self.assertTrue(destination.is_file())
-            self.assertEqual(rendered.output_path, destination)
+            self.assertEqual(os.path.normcase(str(Path(rendered.output_path).resolve())), expected_destination)
             self.assertIsNone(state.browser_save_tokens[token].rendered_path)
             self.assertFalse((state.cache_dir / "browser-save").exists())
-            write_copy.assert_called_once_with(destination, _output)
+            write_copy.assert_called_once()
+            written_destination, written_output = write_copy.call_args.args
+            self.assertEqual(os.path.normcase(str(Path(written_destination).resolve())), expected_destination)
+            self.assertEqual(written_output, _output)
             self.assertEqual(len(state.candidates[image_id]), 1, "rendering a copy must not clear candidates")
             committed = state.commit_browser_save(image_id, rendered_revision, token, "keep")
             self.assertTrue(committed["cleared"])
@@ -5300,22 +5304,17 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
-            original_stat = source.stat()
+            source_bytes = source.read_bytes()
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
-            original_render = saving_module.render_with_mask
 
-            def render_then_mutate(*args):
-                output = original_render(*args)
-                Image.new("RGB", (16, 16), "blue").save(source)
-                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-                return output
-
-            with patch.object(saving_module, "render_with_mask", side_effect=render_then_mutate), \
+            with patch.object(saving_module, "file_sha256", side_effect=AssertionError("unexpected full-path hash")), \
+                 patch.object(saving_module, "render_with_mask", wraps=saving_module.render_with_mask) as render, \
                  patch.object(saving_module, "write_rendered_copy") as write_copy:
                 state._apply_worker([record], 100, {record.image_id: self._mask(16, 16)}, copy_to_default=True)
             write_copy.assert_called_once()
-            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+            self.assertEqual(render.call_count, 1)
+            self.assertEqual(source.read_bytes(), source_bytes)
 
     def test_capture_bytes_must_match_digest_even_if_source_is_restored_before_final_gate(self):
         with tempfile.TemporaryDirectory() as directory:
