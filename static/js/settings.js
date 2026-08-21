@@ -198,11 +198,17 @@ function settingsPayload() {
 }
 
 function selectSettingsTab(name) {
-  document.querySelectorAll(".settings-tab").forEach((button) => {
+  const tabs = [...document.querySelectorAll(".settings-tab")];
+  const nextTab = tabs.find((button) => button.dataset.settingsTab === name);
+  if (!nextTab) return;
+  const activeTab = tabs.find((button) => button.classList.contains("active"));
+  const changed = activeTab && activeTab !== nextTab;
+  tabs.forEach((button) => {
     const active = button.dataset.settingsTab === name;
     button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
+  if (changed) { const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error"); }
 }
 
 function moveSettingsTab(event) {

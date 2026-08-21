@@ -17,6 +17,7 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 function startFixtureServer() {
   const detectRequests = [];
   const settingsRequests = [];
+  const settingsActions = [];
   const updateRequests = [];
   let releaseFullSettings = null;
   let deferFullSettings = false;
@@ -31,8 +32,15 @@ function startFixtureServer() {
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
     const requestPath = requestUrl.pathname;
+    if (requestPath === "/api/settings/reset" && request.method === "POST") {
+      settingsActions.push({ path: requestPath, method: request.method });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ settings, version: "v1.0.0" }));
+      return;
+    }
     if (requestPath === "/api/settings") {
       settingsRequests.push(requestUrl.search);
+      if (request.method === "POST") settingsActions.push({ path: requestPath, method: request.method });
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
       if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
       reply();
@@ -104,7 +112,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -190,13 +198,47 @@ async function assertDesktopLayout(page, width, height) {
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
 
-async function assertSettingsDialogLayout(page, width, height) {
+async function assertSettingsDialogLayout(page, width, height, footerOnly = false) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
   for (const language of ["ja", "en"]) {
     await page.locator("#settingsTabGeneral").click();
     await page.locator("#settingsLanguage").selectOption(language);
     await page.waitForFunction((selectedLanguage) => document.documentElement.lang === selectedLanguage, language);
+    const footer = await page.locator("#settingsDialog .dialog-actions").evaluate((actions) => {
+      const [result, reset, save] = actions.children;
+      const actionRect = actions.getBoundingClientRect();
+      const rect = (element) => {
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element };
+      };
+      return {
+        className: actions.className,
+        children: [...actions.children].map((child) => child.id),
+        scrollWidth: actions.scrollWidth,
+        clientWidth: actions.clientWidth,
+        result: rect(result), reset: rect(reset), save: rect(save),
+        actionLeft: actionRect.left, actionRight: actionRect.right,
+      };
+    });
+    assert.equal(footer.className, "dialog-actions", `settings footer keeps the shared action bar at ${width}x${height} (${language})`);
+    assert.deepEqual(footer.children, ["settingsResult", "settingsResetButton", "settingsSaveButton"], `settings footer contains only result, reset and save at ${width}x${height} (${language})`);
+    assert.ok(footer.scrollWidth <= footer.clientWidth, `settings footer has no horizontal overflow at ${width}x${height} (${language})`);
+    assert.ok(footer.result.left >= footer.actionLeft && footer.save.right <= footer.actionRight && footer.reset.hit && footer.save.hit, `settings footer items are visible physical hit targets at ${width}x${height} (${language})`);
+    assert.ok(footer.result.right < footer.reset.left && footer.reset.right < footer.save.left, `settings footer keeps result, reset, save order at ${width}x${height} (${language})`);
+    assert.ok(footer.reset.left - footer.result.right >= 6 && footer.reset.left - footer.result.right <= 12 && footer.save.left - footer.reset.right >= 6 && footer.save.left - footer.reset.right <= 12, `settings footer keeps compact 8px gaps at ${width}x${height} (${language})`);
+    const heading = await page.locator("#settingsDialog .settings-heading").evaluate((heading) => {
+      const [title, close] = heading.children;
+      const headingRect = heading.getBoundingClientRect();
+      const closeRect = close.getBoundingClientRect();
+      return { children: [...heading.children].map((child) => child.id), scrollWidth: heading.scrollWidth, clientWidth: heading.clientWidth, closeRight: closeRect.right, headingRight: headingRect.right, closeHit: document.elementFromPoint(closeRect.x + closeRect.width / 2, closeRect.y + closeRect.height / 2) === close };
+    });
+    assert.deepEqual(heading.children, ["settingsDialogTitle", "settingsCloseButton"], `settings header keeps title then close at ${width}x${height} (${language})`);
+    assert.ok(heading.scrollWidth <= heading.clientWidth && heading.closeRight <= heading.headingRight && heading.closeHit, `settings header close remains right-aligned and clickable at ${width}x${height} (${language})`);
+    await page.locator("#settingsResetButton").focus();
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "settingsSaveButton", `tab follows reset with save at ${width}x${height} (${language})`);
+    if (footerOnly) continue;
     for (const [panelSelector, tabSelector] of [["#settingsPanelGeneral", "#settingsTabGeneral"], ["#settingsPanelModels", "#settingsTabModels"], ["#settingsPanelDisplay", "#settingsTabDisplay"]]) {
       await page.locator(tabSelector).click();
       const layout = await page.locator(`${panelSelector} .form-row`).evaluateAll((rows) => {
@@ -309,6 +351,13 @@ async function assertSettingsDialogLayout(page, width, height) {
       assert.ok(row.children[2].right <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `shortcut rows do not overflow at ${width}x${height} (${language})`);
     }
   }
+  if (footerOnly) {
+    await page.locator("#settingsTabGeneral").click();
+    await page.locator("#settingsLanguage").selectOption("ja");
+    await page.waitForFunction(() => document.documentElement.lang === "ja");
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
+    return;
+  }
   await page.locator("#settingsTabModels").click();
   assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
   await page.locator("#settingsTabGeneral").click();
@@ -359,11 +408,12 @@ async function main() {
   let fixtureUrl;
   let detectRequests;
   let settingsRequests;
+  let settingsActions;
   let updateRequests;
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, settingsRequests, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, updateRequests, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -462,6 +512,20 @@ async function main() {
     for (const viewport of [
       { width: 1024, height: 768 }, { width: 1280, height: 720 }, { width: 1920, height: 1080 }, { width: 2560, height: 1440 },
     ]) await assertSettingsDialogLayout(page, viewport.width, viewport.height);
+    await assertSettingsDialogLayout(page, 320, 720, true);
+    await page.setViewportSize({ width: 320, height: 720 });
+    await page.locator("#settingsButton").click();
+    assert.equal(await page.locator("#settingsLanguage").inputValue(), "ja", "the compact settings API flow starts in Japanese");
+    const actionsBeforeSettingsFooter = settingsActions.length;
+    await page.locator("#settingsResetButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "初期値に戻しました。");
+    assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.deepEqual(settingsActions.at(-1), { path: "/api/settings", method: "POST" }, "the compact save button reaches the settings API route");
+    await page.locator("#settingsCloseButton").click();
+    await page.waitForFunction(() => !document.querySelector("#settingsDialog").open);
+    assert.equal(settingsActions.length, actionsBeforeSettingsFooter + 2, "the compact close button does not call a settings API route");
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
     assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 690), true, "the canvas stage keeps a full editing surface beneath the compact status line at 1024x768");
