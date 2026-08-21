@@ -5193,17 +5193,18 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
+            target = record.path
             read_bytes = Path.read_bytes
             mutated_bytes = []
 
             def mutate_after_read(path):
                 result = read_bytes(path)
-                if path == source:
-                    Image.new("RGB", (16, 16), "blue").save(source)
+                if path == target:
+                    Image.new("RGB", (16, 16), "blue").save(target)
                     changed_timestamp = record.mtime_ns + 4_000_000_000
-                    os.utime(source, ns=(changed_timestamp, changed_timestamp))
-                    self.assertNotEqual(source.stat().st_mtime_ns, record.mtime_ns)
-                    mutated_bytes.append(read_bytes(source))
+                    os.utime(target, ns=(changed_timestamp, changed_timestamp))
+                    self.assertNotEqual(target.stat().st_mtime_ns, record.mtime_ns)
+                    mutated_bytes.append(read_bytes(target))
                 return result
 
             with patch.object(Path, "read_bytes", autospec=True, side_effect=mutate_after_read):
