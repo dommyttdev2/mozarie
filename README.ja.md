@@ -70,7 +70,7 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 
 ## CPUとGPU
 
-MozarieはCPUで動作します。GPUを使うにはCUDA対応のPyTorchと、そのPyTorchが対応するGPUアーキテクチャが必要です。**設定 > 検出**の**モデル・GPU情報を確認**ではGPUごとの対応可否を表示し、非対応GPUは選択できません。対応GPUがない場合はCPUを選んでください。この確認はモデル読込やGPUメモリ確保を行いません。
+MozarieはCPUで動作します。GPUを使うにはCUDA対応のPyTorchと、そのPyTorchが対応するGPUアーキテクチャが必要です。**設定 > 検出**の**モデル・GPU情報を確認**ではGPUごとの対応可否を表示し、非対応GPUは選択できません。対応GPUがない場合はCPUを選んでください。この確認では推論モデルを構築せず、GPUメモリも確保しません。SAMはチェックポイントのメタデータだけを確認します。
 
 ## 使い方
 

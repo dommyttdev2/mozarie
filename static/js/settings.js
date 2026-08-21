@@ -314,7 +314,10 @@ async function chooseSettingsModelFile(button) {
   } catch (error) {
     $("#settingsResult").textContent = error.message;
     $("#settingsResult").classList.add("error");
-  } finally { buttons.forEach((item) => { item.disabled = false; }); }
+  } finally {
+    buttons.forEach((item) => { item.disabled = false; });
+    setHandSegmentationAvailable(Boolean($(MODEL_TOGGLE_IDS.hand_detection).checked));
+  }
 }
 
 async function refreshSettingsStatus() {

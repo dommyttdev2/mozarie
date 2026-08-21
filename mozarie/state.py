@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import warnings
 
 from .core import *
@@ -63,7 +64,12 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     # adapter. The Settings check reports that incompatibility itself.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, module=r"torch\.cuda")
-        supported_arches = set(cuda.get_arch_list())
+        arch_list = cuda.get_arch_list()
+        supported_majors = {
+            int(match.group(1)) // 10
+            for arch in arch_list
+            if (match := re.fullmatch(r"sm_(\d+)(?:[af])?", arch))
+        }
         devices = []
         for index in range(cuda.device_count()):
             major, minor = cuda.get_device_capability(index)
@@ -72,7 +78,10 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
                 "id": index,
                 "name": cuda.get_device_name(index),
                 "architecture": architecture,
-                "supported": architecture in supported_arches,
+                # Match PyTorch's CUDA cubin check: an NVIDIA cubin is
+                # compatible with devices from the same compute major.
+                # With no embedded cubin list, PyTorch skips that warning.
+                "supported": not arch_list or major in supported_majors,
             })
     return devices
 

@@ -73,6 +73,12 @@ elements.get("#statusLine").hidden = true;
 elements.get("#applyDivisor").value = "100";
 elements.get("#divisor").value = "100";
 elements.get("#detectParallelism").value = "2";
+const modelPickerButtons = [
+  ["target_segmentation", "settingsTargetModel"], ["ntd11", "settingsNtd11Model"], ["sensitive", "settingsSensitiveModel"],
+  ["sam_checkpoint", "settingsSamModel"], ["hand_detection", "settingsHandModel"], ["hand_segmentation", "settingsHandSegmentationModel"],
+].map(([modelPicker, modelInput]) => {
+  const button = element("button"); button.dataset.modelPicker = modelPicker; button.dataset.modelInput = modelInput; return button;
+});
 for (const id of ["settingsButton", "settingsStatusButton", "settingsStatusResult", "checkUpdateButton", "updateStatus", "settingsGpuDevice"]) {
   const value = element(); value.id = id; elements.set(`#${id}`, value);
 }
@@ -194,6 +200,8 @@ const document = {
     if (selector === ".settings-tab") return settingsTabs;
     if (selector === "[data-settings-panel]") return settingsPanels;
     if (selector === "[data-model-toggle]") return modelCards;
+    if (selector === "[data-model-picker]") return modelPickerButtons;
+    if (selector === '[data-model-input="settingsHandSegmentationModel"]') return modelPickerButtons.filter((button) => button.dataset.modelInput === "settingsHandSegmentationModel");
     return [];
   },
   createElement: (tag) => tag === "canvas" ? canvasElement() : element(tag),
@@ -309,12 +317,12 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   source = source.replace("renderCandidates, overviewFolderOptions", "renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
   source = source.replace("runNavigationAction, setNavigation", "runNavigationAction, runSelectionAction, setNavigation");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, chooseSettingsModelFile, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
   const { runSelectionAction } = context.__mosaicTest;
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, chooseSettingsModelFile, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
   assert.equal(elements.get("#statusLine").hidden, true, "the status line starts hidden with no notification");
@@ -2453,6 +2461,12 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsHandToggle").dispatch("change");
   assert.equal(elements.get("#settingsHandSegmentationToggle").checked, false, "disabling hand detection clears its HandSegNet child");
   assert.equal(elements.get("#settingsHandSegmentationToggle").disabled, true, "HandSegNet is unavailable while hand detection is off");
+  const modelPickerRun = chooseSettingsModelFile(modelPickerButtons[0]);
+  assert.ok(modelPickerButtons.every((button) => button.disabled), "a pending model picker disables its peer controls");
+  resolvePendingFetch("/api/model-file/pick", { ok: true, json: async () => ({ cancelled: true }) });
+  await modelPickerRun;
+  assert.equal(modelPickerButtons[5].disabled, true, "a completed model picker preserves HandSegNet's disabled parent state");
+  assert.equal(modelPickerButtons[0].disabled, false, "the completed model picker restores its own control");
   assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
   elements.get("#settingsHandToggle").checked = true;
   elements.get("#settingsHandToggle").dispatch("change");

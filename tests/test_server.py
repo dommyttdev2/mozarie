@@ -300,17 +300,18 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(status["valid"])
             self.assertEqual(status["reasonCode"], "invalid_model")
 
-    def test_cuda_status_excludes_unsupported_gpu_and_keeps_cpu_fallback_valid(self):
+    def test_cuda_status_matches_pytorch_cubin_compatibility_and_keeps_cpu_fallback_valid(self):
         cuda = types.SimpleNamespace(
             is_available=lambda: True,
-            get_arch_list=lambda: ["sm_86", "sm_120"],
-            device_count=lambda: 2,
-            get_device_capability=lambda index: [(8, 6), (6, 1)][index],
-            get_device_name=lambda index: ["RTX", "GTX 1060"][index],
+            get_arch_list=lambda: ["sm_80", "sm_86", "compute_89", "sm_120"],
+            device_count=lambda: 3,
+            get_device_capability=lambda index: [(8, 9), (6, 1), (12, 1)][index],
+            get_device_name=lambda index: ["RTX 4090", "GTX 1060", "RTX 5090"][index],
         )
         self.assertEqual(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda)), [
-            {"id": 0, "name": "RTX", "architecture": "sm_86", "supported": True},
+            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "supported": True},
             {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "supported": False},
+            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "supported": True},
         ])
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
@@ -321,6 +322,26 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"]["provider"] = "cpu"
         with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
             self.assertTrue(state.settings_status()["gpuDeviceValid"])
+
+    def test_cuda_status_treats_an_empty_pytorch_arch_list_as_unchecked(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: [],
+            device_count=lambda: 1,
+            get_device_capability=lambda _index: (6, 1),
+            get_device_name=lambda _index: "GTX 1060",
+        )
+        self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
+
+    def test_cuda_status_ignores_ptx_only_arches(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["compute_61"],
+            device_count=lambda: 1,
+            get_device_capability=lambda _index: (6, 1),
+            get_device_name=lambda _index: "GTX 1060",
+        )
+        self.assertFalse(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
     def test_hand_segmentation_status_is_disabled_without_hand_detection(self):
         state = self.new_state()
