@@ -1979,8 +1979,11 @@ class MozarieTests(unittest.TestCase):
             candidates = state.list_candidates(record.image_id)
             self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude", "exclude"])
             self.assertEqual([candidate["source"] for candidate in candidates[1:]], ["hand_exclusion", "fluid_exclusion"])
+            self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, False])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
-            self.assertFalse(np.any(state.combined_candidate_mask(record.image_id)[4:8, 4:8]))
+            combined = state.combined_candidate_mask(record.image_id)
+            self.assertFalse(np.any(combined[4:6, 4:8]))
+            self.assertTrue(np.all(combined[6:8, 4:8] == 255))
 
     def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
