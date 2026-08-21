@@ -96,12 +96,15 @@ class CatalogMixin:
                 with records_lock:
                     records.append(record)
 
-        # Folder discovery is intentionally fixed at two streaming workers:
-        # do not create one Future per file in a large folder.
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            workers = [executor.submit(inspect_path) for _ in range(min(2, len(paths)))]
-            for worker in workers:
-                worker.result()
+        # Keep a fixed number of streaming workers rather than one Future per
+        # file. Folder scans follow the same import-parallelism setting as
+        # drag-and-drop imports.
+        worker_count = min(int(self.settings["importing"]["parallelism"]), len(paths))
+        if worker_count:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                workers = [executor.submit(inspect_path) for _ in range(worker_count)]
+                for worker in workers:
+                    worker.result()
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         return self._replace_catalog(root, records)
 

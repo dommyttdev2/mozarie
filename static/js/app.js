@@ -42,7 +42,10 @@ function bindEvents() {
     button.addEventListener("keydown", moveSettingsTab);
   });
   document.querySelectorAll("[data-model-toggle]").forEach((toggle) => {
-    toggle.addEventListener("change", () => setModelCardEnabled(toggle.dataset.modelToggle, toggle.checked));
+    toggle.addEventListener("change", () => {
+      setModelCardEnabled(toggle.dataset.modelToggle, toggle.checked);
+      if (toggle.dataset.modelToggle === "hand_detection") setHandSegmentationAvailable(toggle.checked);
+    });
   });
   $("#settingsPrecisionToggle").addEventListener("change", () => setPrecisionDetectionEnabled($("#settingsPrecisionToggle").checked));
   $("#settingsFluidToggle").addEventListener("change", () => setFluidExclusionEnabled($("#settingsFluidToggle").checked));

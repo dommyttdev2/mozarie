@@ -153,6 +153,19 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings["models"]["hand_segmentation_enabled"])
         self.assertTrue(Path(settings["saving"]["default_output_directory"]).is_absolute())
 
+    def test_hand_segmentation_requires_hand_detection_but_legacy_load_is_normalised(self):
+        defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+        invalid = json.loads(json.dumps(defaults))
+        invalid["models"]["hand_segmentation_enabled"] = True
+        with self.assertRaises(SettingsError):
+            validate_settings(invalid)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            (root / "config" / "local.json").write_text(json.dumps({"models": {"hand_segmentation_enabled": True}}), encoding="utf-8")
+            self.assertFalse(SettingsStore(root).load()["models"]["hand_segmentation_enabled"])
+
     def test_output_directory_must_be_an_absolute_path(self):
         legacy = {
             "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},

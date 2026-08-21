@@ -8,7 +8,7 @@ function closeBatchMoreMenus() {
 function renderModelStatus() {
   const modelStatus = Object.entries(state.settingsStatus?.models || {});
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
-  $("#settingsModelStatus").textContent = activeModels.length && activeModels.every(([, model]) => model.valid)
+  const modelMessage = activeModels.length && activeModels.every(([, model]) => model.valid)
     ? ""
     : activeModels.map(([key, model]) => {
       const labelKey = {
@@ -21,6 +21,9 @@ function renderModelStatus() {
       }[key];
       return labelKey && model.reasonCode ? `${t(labelKey)}: ${t(`settings.modelStatus.${model.reasonCode}`)}` : "";
     }).filter(Boolean).join("\n");
+  const gpuMessage = state.settingsStatus?.gpuDeviceReasonCode
+    ? `${t("settings.gpu")}: ${t(`settings.modelStatus.${state.settingsStatus.gpuDeviceReasonCode}`)}` : "";
+  $("#settingsModelStatus").textContent = [modelMessage, gpuMessage].filter(Boolean).join("\n");
 }
 
 const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle", hand_segmentation: "#settingsHandSegmentationToggle" };
@@ -33,7 +36,19 @@ function setModelCardEnabled(key, enabled) {
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
 }
 
-function modelCardEnabled(key) { return Boolean($(MODEL_TOGGLE_IDS[key]).checked); }
+function setHandSegmentationAvailable(enabled) {
+  const toggle = $(MODEL_TOGGLE_IDS.hand_segmentation);
+  if (!enabled) setModelCardEnabled("hand_segmentation", false);
+  toggle.disabled = !enabled;
+  $("#settingsHandSegmentationModel").disabled = !enabled;
+  document.querySelectorAll('[data-model-input="settingsHandSegmentationModel"]').forEach((button) => { button.disabled = !enabled; });
+}
+
+function modelCardEnabled(key) {
+  return key === "hand_segmentation"
+    ? modelCardEnabled("hand_detection") && Boolean($(MODEL_TOGGLE_IDS[key]).checked)
+    : Boolean($(MODEL_TOGGLE_IDS[key]).checked);
+}
 
 function setPrecisionDetectionEnabled(enabled) {
   const toggle = $("#settingsPrecisionToggle");
@@ -95,8 +110,12 @@ function renderSettingsStatus(status) {
   const configured = String(state.settings?.models?.gpu_device ?? 0);
   gpuSelect.textContent = "";
   const gpus = status?.gpus || [];
-  if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; gpuSelect.append(option); }
-  else for (const gpu of gpus) { const option = document.createElement("option"); option.value = String(gpu.id); option.textContent = `GPU ${gpu.id}: ${gpu.name}`; gpuSelect.append(option); }
+  if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; option.disabled = true; gpuSelect.append(option); }
+  else for (const gpu of gpus) {
+    const option = document.createElement("option"); option.value = String(gpu.id);
+    option.textContent = `GPU ${gpu.id}: ${gpu.name}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
+    option.disabled = gpu.supported === false; gpuSelect.append(option);
+  }
   if ([...gpuSelect.children].some((option) => option.value === selected)) gpuSelect.value = selected;
   renderModelStatus();
 }
@@ -120,6 +139,7 @@ function setSettingsForm(settings, status = null) {
   setModelCardEnabled("hand_detection", settings.models.hand_detection_enabled);
   $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
   setModelCardEnabled("hand_segmentation", settings.models.hand_segmentation_enabled);
+  setHandSegmentationAvailable(settings.models.hand_detection_enabled);
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);

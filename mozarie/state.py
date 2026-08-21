@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from .core import *
 from .config import validate_output_directory_ready
 from .image_io import *
@@ -50,6 +52,29 @@ def is_valid_sam_checkpoint_metadata(checkpoint: object, model_type: str) -> boo
         key in checkpoint and tuple(checkpoint[key].shape) == shape
         for key, shape in expected["shapes"].items()
     )
+
+
+def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
+    """List CUDA devices that this PyTorch build can actually execute on."""
+    cuda = torch.cuda
+    if not cuda.is_available():
+        return []
+    # PyTorch emits a process-wide warning while merely enumerating an older
+    # adapter. The Settings check reports that incompatibility itself.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"torch\.cuda")
+        supported_arches = set(cuda.get_arch_list())
+        devices = []
+        for index in range(cuda.device_count()):
+            major, minor = cuda.get_device_capability(index)
+            architecture = f"sm_{major}{minor}"
+            devices.append({
+                "id": index,
+                "name": cuda.get_device_name(index),
+                "architecture": architecture,
+                "supported": architecture in supported_arches,
+            })
+    return devices
 
 
 class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
@@ -255,18 +280,24 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         add_status("ntd11", required=False, enabled=bool(models["ntd11_enabled"]), required_suffix=".onnx")
         add_status("sensitive", required=False, enabled=bool(models["sensitive_enabled"]), required_suffix=".onnx")
         add_status("hand_detection", required=False, enabled=bool(models["hand_detection_enabled"]), required_suffix=".onnx")
-        add_status("hand_segmentation", required=False, enabled=bool(models.get("hand_segmentation_enabled")), required_suffix=".safetensors")
+        add_status(
+            "hand_segmentation",
+            required=False,
+            enabled=bool(models.get("hand_detection_enabled")) and bool(models.get("hand_segmentation_enabled")),
+            required_suffix=".safetensors",
+        )
         add_status("sam_checkpoint", required=True, enabled=True)
-        gpus = []
-        if torch_module().cuda.is_available():
-            for index in range(torch_module().cuda.device_count()):
-                gpus.append({"id": index, "name": torch_module().cuda.get_device_name(index)})
+        gpus = cuda_device_statuses(torch_module())
+        selected_gpu = next((gpu for gpu in gpus if gpu["id"] == models.get("gpu_device", 0)), None)
+        gpu_device_valid = models["provider"] != "gpu" or bool(selected_gpu and selected_gpu["supported"])
         return {
             "models": result,
             "provider": models["provider"],
             "samModelType": models["sam_model_type"],
             "gpus": gpus,
             "gpuDevice": models.get("gpu_device", 0),
+            "gpuDeviceValid": gpu_device_valid,
+            "gpuDeviceReasonCode": None if gpu_device_valid else "gpu_unsupported",
         }
 
     def preview_settings_status(self, update: dict[str, Any]) -> dict[str, Any]:

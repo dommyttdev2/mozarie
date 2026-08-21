@@ -20,7 +20,7 @@
    .\run.bat
    ```
 
-5. **設定 > 検出**で2つのモデルファイルを指定し、画像またはフォルダを読み込みます。
+5. **設定 > 検出**で各モデルパス横の**参照**からダウンロードしたファイルを指定し、画像またはフォルダを読み込みます。
 6. 自動検出、候補確認、必要な手動修正を行い、保存します。
 
 ## モデルの準備
@@ -68,6 +68,10 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 
 モデルファイルはこのリポジトリに含まれず、自動ダウンロードもしません。利用前に各配布元の利用条件とライセンスを確認してください。
 
+## CPUとGPU
+
+MozarieはCPUで動作します。GPUを使うにはCUDA対応のPyTorchと、そのPyTorchが対応するGPUアーキテクチャが必要です。**設定 > 検出**の**モデル・GPU情報を確認**ではGPUごとの対応可否を表示し、非対応GPUは選択できません。対応GPUがない場合はCPUを選んでください。この確認はモデル読込やGPUメモリ確保を行いません。
+
 ## 使い方
 
 1. 画像またはフォルダを読み込みます。
@@ -88,10 +92,8 @@ PNG、JPEG、WebPでは対応する元画像メタ情報を保持して保存し
 
 ```powershell
 python -m unittest discover -s tests -v
-node tests/test_app_js.cjs
-node tests/test_browser_save_contract.cjs
-node tests/test_browser_save_runtime.cjs
-node tests/test_import_picker_e2e.cjs
+npm ci
+npm test
 ```
 
 ## ライセンス

@@ -20,7 +20,7 @@ Mozarie is a local Windows app for reviewing multiple images and applying mosaic
    .\run.bat
    ```
 
-5. Open **Settings > Detection**, set both model paths, then load images or a folder.
+5. Open **Settings > Detection**, use **Browse** beside each model path to select the downloaded files, then load images or a folder.
 6. Run automatic detection, review the proposed ranges, make any manual corrections, and save.
 
 ## Model setup
@@ -68,6 +68,10 @@ This experimental option needs no additional model. Within a detected penis rang
 
 Model files are not included in this repository. Mozarie never downloads or bundles models. Review the terms and license at each distribution source before use.
 
+## CPU and GPU
+
+Mozarie works on CPU. GPU acceleration needs a CUDA-capable PyTorch build and a GPU architecture supported by that build. In **Settings > Detection**, **Model and GPU information** lists each GPU and marks an unsupported one as unavailable; choose CPU when no supported GPU is available. Checking this information does not load models or allocate GPU memory.
+
 ## Workflow
 
 1. Load individual images or a folder.
@@ -88,10 +92,8 @@ Before publishing a release, update `VERSION` to the same semantic version as th
 
 ```powershell
 python -m unittest discover -s tests -v
-node tests/test_app_js.cjs
-node tests/test_browser_save_contract.cjs
-node tests/test_browser_save_runtime.cjs
-node tests/test_import_picker_e2e.cjs
+npm ci
+npm test
 ```
 
 ## License

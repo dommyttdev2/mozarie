@@ -32,7 +32,7 @@ class SettingsStore:
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
         settings = defaults if not self.local_path.is_file() else _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
-        return self._set_builtin_output_directory(settings)
+        return self._normalise_hand_segmentation(self._set_builtin_output_directory(settings))
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
         return self.save_validated(self.validate_update(update))
@@ -57,6 +57,14 @@ class SettingsStore:
             output_directory.mkdir(parents=True, exist_ok=True)
         if not configured_directory:
             saving["default_output_directory"] = str(output_directory.resolve())
+        return settings
+
+    @staticmethod
+    def _normalise_hand_segmentation(settings: dict[str, Any]) -> dict[str, Any]:
+        """Keep legacy settings usable when their HandSegNet parent is off."""
+        models = settings.get("models")
+        if isinstance(models, dict) and not models.get("hand_detection_enabled", False):
+            models["hand_segmentation_enabled"] = False
         return settings
 
     def save_validated(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -149,6 +157,8 @@ def validate_settings(value: Any) -> dict[str, Any]:
         key: _expect_bool(models.get(key, False) if key == "hand_segmentation_enabled" else models.get(key), f"models.{key}")
         for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled", "hand_segmentation_enabled")
     }
+    if enabled["hand_segmentation_enabled"] and not enabled["hand_detection_enabled"]:
+        raise SettingsError("models.hand_segmentation_enabled requires models.hand_detection_enabled")
     return {
         "general": {
             "language": language,

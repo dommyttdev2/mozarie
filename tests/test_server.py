@@ -297,8 +297,36 @@ class MozarieTests(unittest.TestCase):
             settings = copy.deepcopy(state.settings)
             settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
             status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
-        self.assertFalse(status["valid"])
-        self.assertEqual(status["reasonCode"], "invalid_model")
+            self.assertFalse(status["valid"])
+            self.assertEqual(status["reasonCode"], "invalid_model")
+
+    def test_cuda_status_excludes_unsupported_gpu_and_keeps_cpu_fallback_valid(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["sm_86", "sm_120"],
+            device_count=lambda: 2,
+            get_device_capability=lambda index: [(8, 6), (6, 1)][index],
+            get_device_name=lambda index: ["RTX", "GTX 1060"][index],
+        )
+        self.assertEqual(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda)), [
+            {"id": 0, "name": "RTX", "architecture": "sm_86", "supported": True},
+            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "supported": False},
+        ])
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            status = state.settings_status()
+        self.assertFalse(status["gpuDeviceValid"])
+        self.assertEqual(status["gpuDeviceReasonCode"], "gpu_unsupported")
+        state.settings["models"]["provider"] = "cpu"
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            self.assertTrue(state.settings_status()["gpuDeviceValid"])
+
+    def test_hand_segmentation_status_is_disabled_without_hand_detection(self):
+        state = self.new_state()
+        state.settings["models"].update({"hand_detection_enabled": False, "hand_segmentation_enabled": True})
+        status = state.settings_status()["models"]["hand_segmentation"]
+        self.assertFalse(status["enabled"])
 
     def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
         from http.server import ThreadingHTTPServer
@@ -5446,7 +5474,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
             self.assertTrue(mask_path.is_file())
 
-    def test_folder_scan_is_bounded_to_two_hashers_and_sorted_deterministically(self):
+    def test_folder_scan_uses_import_parallelism_and_sorts_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ("c.png", "B.png", "a.png", "nested/d.png"):
@@ -5469,9 +5497,12 @@ class MozarieTests(unittest.TestCase):
                     with active_lock:
                         active -= 1
 
+            state = self.new_state()
+            state.settings["importing"]["parallelism"] = 3
             with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
-                records = self.new_state().set_root(directory)
-            self.assertLessEqual(peak, 2)
+                records = state.set_root(directory)
+            self.assertLessEqual(peak, 3)
+            self.assertGreaterEqual(peak, 2)
             self.assertEqual([record["relativePath"] for record in records], ["a.png", "B.png", "c.png", "nested/d.png"])
 
     def test_session_imports_store_the_digest_streamed_while_staging(self):

@@ -275,6 +275,8 @@
   "settings.modelStatus.missing": "The selected model file was not found.",
   "settings.modelStatus.invalid_format": "The selected model file has an invalid format.",
   "settings.modelStatus.invalid_model": "The selected model file is not compatible.",
+  "settings.modelStatus.gpu_unsupported": "The selected GPU is not supported by this PyTorch build.",
+  "settings.gpuUnsupported": "not supported by this PyTorch build",
   "modelHelp.samTable.model": "Model",
   "modelHelp.samTable.speed": "Speed",
   "modelHelp.samTable.accuracy": "Relative detail",

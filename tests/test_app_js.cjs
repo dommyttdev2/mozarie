@@ -2449,6 +2449,14 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsHandSegmentationToggle").checked = true;
   elements.get("#settingsHandSegmentationToggle").dispatch("change");
   assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
+  elements.get("#settingsHandToggle").checked = false;
+  elements.get("#settingsHandToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").checked, false, "disabling hand detection clears its HandSegNet child");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").disabled, true, "HandSegNet is unavailable while hand detection is off");
+  assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
+  elements.get("#settingsHandToggle").checked = true;
+  elements.get("#settingsHandToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").disabled, false, "HandSegNet becomes available when hand detection is enabled");
   assert.equal(elements.get("#settingsPrecisionToggle").checked, false);
   assert.equal(elements.get("#settingsFluidToggle").checked, true);
   selectSettingsTab("models");

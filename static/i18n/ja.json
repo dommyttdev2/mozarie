@@ -267,6 +267,8 @@
   "settings.modelStatus.missing": "指定したモデルファイルが見つかりません。",
   "settings.modelStatus.invalid_format": "指定したモデルファイルの形式が正しくありません。",
   "settings.modelStatus.invalid_model": "指定したモデルファイルは対応していません。",
+  "settings.modelStatus.gpu_unsupported": "選択したGPUはこのPyTorchでは非対応です。",
+  "settings.gpuUnsupported": "このPyTorchでは非対応",
   "modelHelp.samTable.model": "モデル",
   "modelHelp.samTable.speed": "速度",
   "modelHelp.samTable.accuracy": "輪郭の細かさ目安",
