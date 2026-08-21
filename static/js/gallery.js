@@ -41,7 +41,7 @@ function renderGallery(force = false) {
     item.dataset.id = image.id;
     const current = image.id === state.currentId;
     item.classList.toggle("current", current);
-    item.classList.remove("batch-selected");
+    item.classList.toggle("batch-selected", false);
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
     item.removeAttribute?.("aria-pressed");
     item.classList.toggle("hidden", isHidden(image));
@@ -83,7 +83,7 @@ function updateGalleryCurrent() {
   for (const item of $("#gallery").children) {
     const current = item.dataset.id === state.currentId;
     item.classList.toggle("current", current);
-    item.classList.remove("batch-selected");
+    item.classList.toggle("batch-selected", false);
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
     item.removeAttribute?.("aria-pressed");
   }
@@ -201,6 +201,7 @@ function renderOverview(force = false) {
 function renderCatalogViews() { renderGallery(); renderOverview(); }
 function setViewMode(mode, refreshGallery = true) {
   if (state.viewMode !== mode) {
+    closeBatchMoreMenus();
     state.batchMode = false;
     clearBatchSelection();
     updateSelectionActionBar();

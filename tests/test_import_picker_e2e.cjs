@@ -27,7 +27,11 @@ function startFixtureServer() {
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
-    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+    shortcuts: {
+      enabled: true,
+      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
+      actions: {},
+    }, confirmations: {},
   };
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
@@ -528,8 +532,13 @@ async function main() {
     await page.locator("#settingsResetButton").click();
     await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "初期値に戻しました。");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
+    const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
+    assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");
+    assert.equal(shortcutsAfterReset.every(Boolean) && new Set(shortcutsAfterReset).size === shortcutsAfterReset.length, true, "reset restores valid unique shortcut bindings before compact save");
+    const savesBeforeCompactSave = settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length;
     await page.locator("#settingsSaveButton").click();
     await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.equal(settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length, savesBeforeCompactSave + 1, "the compact save button posts exactly once");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings", method: "POST" }, "the compact save button reaches the settings API route");
     await page.locator("#settingsCloseButton").click();
     await page.waitForFunction(() => !document.querySelector("#settingsDialog").open);
@@ -685,6 +694,7 @@ async function main() {
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
     assert.ok(await page.locator(".help-button").first().getAttribute("aria-label"));
 
+    await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "the normal gallery owns only the current-image state");
     await page.locator("#overviewButton").click();
     await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);

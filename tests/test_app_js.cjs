@@ -26,7 +26,7 @@ function element(tagName = "") {
         if (enabled) classes.add(name); else classes.delete(name);
         return enabled;
       },
-    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
+    }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, contains(target) { return target === this || this.children.includes(target); }, addEventListener(type, listener) { listeners.set(type, listener); }, setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return this.attributes[name] ?? null; }, removeAttribute(name) { delete this.attributes[name]; }, showModal() { this.open = true; }, close() { this.open = false; listeners.get("close")?.({ currentTarget: this, target: this }); }, matches(selector) { return selector === ":popover-open" && Boolean(this.popoverOpen); }, hidePopover() { this.hidePopoverCalls = (this.hidePopoverCalls || 0) + 1; this.popoverOpen = false; listeners.get("toggle")?.({ currentTarget: this, target: this }); }, focus(options) { document.activeElement = this; this.focusOptions = options; }, click() { this.clickCalls = (this.clickCalls || 0) + 1; this.focus(); const event = { currentTarget: this, target: this }; listeners.get("click")?.(event); this.onclick?.(event); }, dispatch(type, event = {}) { listeners.get(type)?.({ currentTarget: this, target: this, ...event }); }, scrollIntoView() {},
   };
 }
 
@@ -308,10 +308,12 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__mosaicTest = { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, importDirectoryHandle, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx };\n");
   source = source.replace("renderCandidates, overviewFolderOptions", "renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
+  source = source.replace("runNavigationAction, setNavigation", "runNavigationAction, runSelectionAction, setNavigation");
   source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
+  const { runSelectionAction } = context.__mosaicTest;
   const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
@@ -1896,7 +1898,21 @@ const completionWatchdog = setTimeout(() => {
   state.overviewFilter = "unreviewed";
   assert.deepEqual(JSON.parse(JSON.stringify(overviewImages().map((image) => image.id))), ["second"]);
   assert.equal(nextUnreviewedImage()?.id, "second");
+  state.viewMode = "edit";
+  const batchMoreMenu = elements.get("#batchMoreMenu");
+  const selectionActionsMenu = elements.get("#selectionActionsMenu");
+  batchMoreMenu.hidePopoverCalls = 0; selectionActionsMenu.hidePopoverCalls = 0;
+  batchMoreMenu.popoverOpen = true; selectionActionsMenu.popoverOpen = true;
+  elements.get("#batchMoreButton").setAttribute("aria-expanded", "true");
+  elements.get("#selectionActionsButton").setAttribute("aria-expanded", "true");
   setViewMode("overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 1, "opening overview closes the gallery menu once");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 1, "opening overview closes the selection menu once");
+  assert.equal(elements.get("#batchMoreButton").getAttribute("aria-expanded"), "false");
+  assert.equal(elements.get("#selectionActionsButton").getAttribute("aria-expanded"), "false");
+  setViewMode("overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 1, "staying in overview does not close menus again");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 1, "staying in overview does not close selection menus again");
   assert.equal(overviewGrid.children.filter((item) => item.dataset.id === "second").length, 1);
   state.overviewFilter = "all";
   state.images = [
@@ -1942,7 +1958,10 @@ const completionWatchdog = setTimeout(() => {
   renderGallery(true);
   assert.equal([...state.galleryNodes.values()].some((item) => item.classList.contains("batch-selected") || item.getAttribute("aria-pressed") !== null), false, "the normal gallery never exposes batch selection state");
   state.overviewQuery = "";
+  batchMoreMenu.popoverOpen = true; selectionActionsMenu.popoverOpen = true;
   setViewMode("edit");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 2, "returning to edit closes the gallery menu once");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 2, "returning to edit closes the selection menu once");
   assert.equal(state.batchMode, false, "returning to edit exits overview batch mode");
   assert.equal(state.selectedImageIds.size, 0, "returning to edit clears overview selection");
   state.batchMode = true;
@@ -1951,9 +1970,30 @@ const completionWatchdog = setTimeout(() => {
   setViewMode("overview");
   assert.equal(state.batchMode, false, "opening the overview starts without stale batch mode");
   assert.equal(state.selectedImageIds.size, 0, "opening the overview clears stale selection");
+  selectionActionsMenu.popoverOpen = true;
   overviewGrid.children.find((item) => item.dataset.id === "first").click();
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 3, "opening an overview image closes the selection menu once");
   assert.equal(state.viewMode, "edit");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
+  state.viewMode = "overview";
+  state.batchMode = true;
+  state.selectedImageIds = new Set(["second"]);
+  state.selectionAnchorId = "second";
+  state.settings.confirmations = { ...state.settings.confirmations, removeImage: false };
+  const imagesBeforeBatchRemoval = [...state.images];
+  const reviewedPathsBeforeBatchRemoval = new Set(state.reviewedPaths);
+  renderOverview(true);
+  const removeSelection = runSelectionAction("remove");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/catalog/image/second", "batch removal deletes only the selected overview image");
+  resolveFetch({ ok: true, json: async () => ({ images: [state.images[0], state.images[2]] }) });
+  await removeSelection;
+  assert.equal(state.batchMode, false, "batch removal exits batch mode after removing a subset");
+  assert.equal(state.selectedImageIds.size, 0, "batch removal clears the selected ids after removing a subset");
+  assert.equal(overviewGrid.children.filter((item) => !item.sentinel).some((item) => item.classList.contains("batch-selected") || item.getAttribute("aria-pressed") !== null), false, "batch removal clears selection state from surviving overview cards");
+  state.images = imagesBeforeBatchRemoval;
+  state.reviewedPaths = reviewedPathsBeforeBatchRemoval;
+  setViewMode("edit");
   state.navigationShortcutsEnabled = false;
   const disabledEnter = keyEvent("Enter");
   assert.equal(handleNavigationKeydown(disabledEnter), false);
@@ -1971,11 +2011,15 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(navigationShortcutAction(keyEvent("g")), null);
   elements.get("#confirmDialog").open = false;
   const toggleOverview = keyEvent("g");
+  batchMoreMenu.popoverOpen = true;
   assert.equal(handleNavigationKeydown(toggleOverview), true);
   assert.equal(toggleOverview.prevented, true);
   assert.equal(state.viewMode, "overview");
+  assert.equal(batchMoreMenu.hidePopoverCalls, 3, "overview keyboard navigation closes the gallery menu once");
   assert.equal(document.activeElement, elements.get("#overviewPane"));
+  selectionActionsMenu.popoverOpen = true;
   setViewMode("edit");
+  assert.equal(selectionActionsMenu.hidePopoverCalls, 4, "return navigation closes the selection menu once");
   assert.equal(document.activeElement, elements.get("#editorCanvas"));
   runNavigationAction(() => {});
   assert.equal(document.activeElement, elements.get("#editorCanvas"));

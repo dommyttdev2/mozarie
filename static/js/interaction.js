@@ -218,6 +218,7 @@ async function runSelectionAction(action) {
   if (action === "remove") {
     for (const image of [...images]) await removeImageFromCatalog(image.id);
     state.batchMode = false; clearBatchSelection(); updateSelectionActionBar();
+    renderOverview();
   }
 }
 
