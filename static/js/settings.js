@@ -10,7 +10,17 @@ function renderModelStatus() {
   const activeModels = modelStatus.filter(([, model]) => model.required === true || model.enabled === true);
   $("#settingsModelStatus").textContent = activeModels.length && activeModels.every(([, model]) => model.valid)
     ? ""
-    : activeModels.map(([key, model]) => model.reasonCode ? t(`settings.modelStatus.${model.reasonCode}`) : "").filter(Boolean).join("\n");
+    : activeModels.map(([key, model]) => {
+      const labelKey = {
+        target_segmentation: "settings.targetModel",
+        ntd11: "settings.ntd11Model",
+        sensitive: "settings.sensitiveModel",
+        hand_detection: "settings.handModel",
+        hand_segmentation: "settings.handSegmentationModel",
+        sam_checkpoint: "settings.samModel",
+      }[key];
+      return labelKey && model.reasonCode ? `${t(labelKey)}: ${t(`settings.modelStatus.${model.reasonCode}`)}` : "";
+    }).filter(Boolean).join("\n");
 }
 
 const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle", hand_segmentation: "#settingsHandSegmentationToggle" };

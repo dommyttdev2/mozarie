@@ -2133,14 +2133,25 @@ const completionWatchdog = setTimeout(() => {
   await englishLoad;
   assert.equal(document.documentElement.lang, "en");
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  const invalidModelStatuses = {
+    target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "" },
+    ntd11: { required: false, enabled: true, configured: true, valid: false, reasonCode: "invalid_model" },
+    hand_detection: { required: false, enabled: true, configured: true, valid: false, reasonCode: "missing" },
+  };
+  state.settingsStatus = { models: invalidModelStatuses };
+  renderModelStatus();
+  assert.equal(elements.get("#settingsModelStatus").textContent, [
+    `${translationFixtures.en["settings.ntd11Model"]}: ${translationFixtures.en["settings.modelStatus.invalid_model"]}`,
+    `${translationFixtures.en["settings.handModel"]}: ${translationFixtures.en["settings.modelStatus.missing"]}`,
+  ].join("\n"));
   state.settingsStatus = { models: {
-    target: { required: true, enabled: true, configured: true, valid: true, detail: "" },
+    target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "" },
     ntd11: { required: false, enabled: true, configured: true, valid: false, reasonCode: "invalid_model" },
     sensitive: { required: false, enabled: false, configured: false, valid: false, detail: "" },
   } };
   renderModelStatus();
-  assert.equal(elements.get("#settingsModelStatus").textContent, translationFixtures.en["settings.modelStatus.invalid_model"]);
-  state.settingsStatus = { models: { target: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
+  assert.equal(elements.get("#settingsModelStatus").textContent, `${translationFixtures.en["settings.ntd11Model"]}: ${translationFixtures.en["settings.modelStatus.invalid_model"]}`);
+  state.settingsStatus = { models: { target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   renderModelStatus();
   assert.equal(elements.get("#imageInfo").textContent, "dynamic-name.png / 20 x 10");
   assert.equal(elements.get("#reviewStatus").textContent, translationFixtures.en["review.reviewed"]);
@@ -2179,6 +2190,13 @@ const completionWatchdog = setTimeout(() => {
   await japaneseLoad;
   assert.equal(document.documentElement.lang, "ja");
   assert.equal(elements.get("#settingsModelStatus").textContent, "");
+  state.settingsStatus = { models: invalidModelStatuses };
+  renderModelStatus();
+  assert.equal(elements.get("#settingsModelStatus").textContent, [
+    `${translationFixtures.ja["settings.ntd11Model"]}: ${translationFixtures.ja["settings.modelStatus.invalid_model"]}`,
+    `${translationFixtures.ja["settings.handModel"]}: ${translationFixtures.ja["settings.modelStatus.missing"]}`,
+  ].join("\n"));
+  state.settingsStatus = { models: { target_segmentation: { required: true, enabled: true, configured: true, valid: true, detail: "ready" } } };
   assert.equal(elements.get("#status").textContent, translationFixtures.ja["status.imagesLoaded"].replace("{count}", "3"));
 
   // Selecting a language updates immediately, while closing without Save
