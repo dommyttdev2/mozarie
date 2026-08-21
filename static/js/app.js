@@ -27,6 +27,7 @@ function bindEvents() {
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
+  document.querySelectorAll("[data-model-picker]").forEach((button) => button.addEventListener("click", () => { void chooseSettingsModelFile(button); }));
   $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
@@ -41,7 +42,10 @@ function bindEvents() {
     button.addEventListener("keydown", moveSettingsTab);
   });
   document.querySelectorAll("[data-model-toggle]").forEach((toggle) => {
-    toggle.addEventListener("change", () => setModelCardEnabled(toggle.dataset.modelToggle, toggle.checked));
+    toggle.addEventListener("change", () => {
+      setModelCardEnabled(toggle.dataset.modelToggle, toggle.checked);
+      if (toggle.dataset.modelToggle === "hand_detection") setHandSegmentationAvailable(toggle.checked);
+    });
   });
   $("#settingsPrecisionToggle").addEventListener("change", () => setPrecisionDetectionEnabled($("#settingsPrecisionToggle").checked));
   $("#settingsFluidToggle").addEventListener("change", () => setFluidExclusionEnabled($("#settingsFluidToggle").checked));
@@ -62,8 +66,7 @@ function bindEvents() {
   $("#folderPath").addEventListener("keydown", (event) => { if (event.key === "Enter") loadFolder(); });
   $("#loadFolderButton").addEventListener("click", loadFolder);
   const detectAll = () => {
-    if (activeDetection()) void cancelDetection();
-    else openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
+    if (!activeDetection()) openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
@@ -181,12 +184,16 @@ function bindEvents() {
       showProcessing({ ...processing, state: session.paused ? "paused" : "running" });
       return;
     }
-    try { await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) }); }
+    try {
+      const job = await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) });
+      state.job = job; updateProgress(job); scheduleJobPoll(true);
+    }
     catch (error) { setStatus(error.message, "error"); }
   });
   $("#processingCancelButton").addEventListener("click", async () => {
     const processing = state.processing;
-    if (!processing) return;
+    if (!processing || $("#processingCancelButton").disabled) return;
+    $("#processingCancelButton").disabled = true;
     if (processing.kind === "import") { if (state.importSession) state.importSession.cancelled = true; return; }
     await cancelDetection();
   });

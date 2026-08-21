@@ -73,6 +73,12 @@ elements.get("#statusLine").hidden = true;
 elements.get("#applyDivisor").value = "100";
 elements.get("#divisor").value = "100";
 elements.get("#detectParallelism").value = "2";
+const modelPickerButtons = [
+  ["target_segmentation", "settingsTargetModel"], ["ntd11", "settingsNtd11Model"], ["sensitive", "settingsSensitiveModel"],
+  ["sam_checkpoint", "settingsSamModel"], ["hand_detection", "settingsHandModel"], ["hand_segmentation", "settingsHandSegmentationModel"],
+].map(([modelPicker, modelInput]) => {
+  const button = element("button"); button.dataset.modelPicker = modelPicker; button.dataset.modelInput = modelInput; return button;
+});
 for (const id of ["settingsButton", "settingsStatusButton", "settingsStatusResult", "checkUpdateButton", "updateStatus", "settingsGpuDevice"]) {
   const value = element(); value.id = id; elements.set(`#${id}`, value);
 }
@@ -194,6 +200,8 @@ const document = {
     if (selector === ".settings-tab") return settingsTabs;
     if (selector === "[data-settings-panel]") return settingsPanels;
     if (selector === "[data-model-toggle]") return modelCards;
+    if (selector === "[data-model-picker]") return modelPickerButtons;
+    if (selector === '[data-model-input="settingsHandSegmentationModel"]') return modelPickerButtons.filter((button) => button.dataset.modelInput === "settingsHandSegmentationModel");
     return [];
   },
   createElement: (tag) => tag === "canvas" ? canvasElement() : element(tag),
@@ -309,12 +317,12 @@ for (const tag of markup.match(/<[^>]+>/g) || []) {
   source = source.replace("renderCandidates, overviewFolderOptions", "renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions");
   source = source.replace("deleteManualMask, saveDraft", "deleteManualMask, batchCandidateOperation, saveDraft");
   source = source.replace("runNavigationAction, setNavigation", "runNavigationAction, runSelectionAction, setNavigation");
-  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
+  source = source.replace("globalThis.__mosaicTest = {", "globalThis.__mosaicTest = { saveSettings, resetSettings, openSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, chooseSettingsModelFile, applyToolPosition, handleToolRailKeydown, render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt,");
 vm.runInNewContext(source, context, { filename: "static/app.js" });
   const { openSettings } = context.__mosaicTest;
   const { batchCandidateOperation } = context.__mosaicTest;
   const { runSelectionAction } = context.__mosaicTest;
-  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
+  const { state, t, loadTranslations, setSettingsForm, renderModelStatus, updateSelectionActionBar, clearBatchSelection, saveSettings, settingsPayload, setPrecisionDetectionEnabled, setFluidExclusionEnabled, chooseSettingsModelFile, applyToolPosition, handleToolRailKeydown, updateBoundaryActions, boundaryActionAnchor, cancelBoundary, clampPoint, roiFromPoints, boundaryDragStarted, addBoundaryCandidate, clearBoundaryInteraction, saveCurrent, saveAll, startApplyFromDialog, finishApplyJob, finishDetectionJob, pollJob, isBusy, updateActionButtons, updateProgress, isTerminalApply, isTerminalDetection, calculatedBlockSize, imageHasMask, saveTargets, rebuildMosaicPreview, paintMosaicPreview, refreshMaskStatus, renderGallery, renderOverview, renderCatalogViews, renderCandidates, selectCatalogImage, selectOverviewImage, updateGalleryCurrent, overviewFolderOptions, setViewMode, setMosaicPreviewEnabled, importFiles, importSingleFile, importFileHandles, directFilesFromDrop, loadCandidateBundle, selectImage, updateCandidate, deleteCandidate, deleteManualMask, saveDraft, restoreDraft, draftPayload, buildCombinedMask, restoreSnapshot, beginManualStroke, appendManualStrokePoint, completeManualStroke, resetHistoryToCurrentManualMask, rebuildManualMaskFromHistory, commitBrowserSaveWithRetry, setReviewed, markImagesUnreviewed, isReviewed, loadReviewedPaths, moveReviewedPathAfterApply, overviewImages, nextUnreviewedImage, reviewAndMoveNext, runNavigationAction, setNavigationShortcutsEnabled, persistNavigationShortcuts, handleReviewStorageEvent, navigationShortcutAction, handleEditorKeydown, handleNavigationKeydown, resetCatalog, loadFolder, initialise, syncApplyMode, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, ensureSaveSources, pickImageFiles, pickImageDirectory, bindEvents, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, setDetectionConfidence, pickOutputDirectory, runBrowserSave, removeImageFromCatalog, removeCompletedImagesFromCatalog, setGalleryDropOverlay, fillAt, cancelFillWork, originalCanvas, originalCtx } = context.__mosaicTest;
   const { render, setStatus, setStatusKey, clearStatus, canDetectBoundary, clearEditor, closeBoundaryModeMenu, setBoundaryModeMenuOpen, selectSettingsTab, moveSettingsTab, boundaryRequests, addBoundaryDraft, beginBoundaryBrushStroke, appendBoundaryBrushPoint, completeBoundaryBrushStroke, drawBoundaryScrim, polygonPointsValid, rectangleDraftAt } = context.__mosaicTest;
   bindEvents();
   assert.equal(elements.get("#statusLine").hidden, true, "the status line starts hidden with no notification");
@@ -475,8 +483,6 @@ const completionWatchdog = setTimeout(() => {
   state.translations["review.unreviewedBadge"] = "Unreviewed badge";
   state.translations["gallery.detectAll"] = "Detect all";
   state.translations["detectDialog.target"] = "Target: {count}";
-  state.translations["detectDialog.stop"] = "Stop detection";
-  state.translations["detectDialog.stopping"] = "Stopping...";
   state.translations["status.detectCancelling"] = "Stopping after current image";
   state.translations["status.detectCancelled"] = "Stopped. {completed} complete.";
   state.translations["candidates.count"] = "{count} candidates";
@@ -538,6 +544,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(elements.get("#galleryDropOverlay").hidden, true);
   state.images = [loadedImage];
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   state.currentId = loadedImage.id;
   state.currentImage = { width: loadedImage.width, height: loadedImage.height };
@@ -553,6 +560,7 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(requests.at(-1).path, "/api/detect");
   assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 1.00, parallelism: 1, targetClasses: ["penis", "pussy"] });
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   state.currentId = null;
   state.currentImage = null;
@@ -573,16 +581,16 @@ const completionWatchdog = setTimeout(() => {
   assert.deepEqual(JSON.parse(requests.at(-1).options.body), { imageIds: [loadedImage.id], confidence: 0.67, parallelism: 2, targetClasses: ["penis", "pussy"] });
   assert.equal(elements.get("#confidence").value, "0.67", "dialog confidence should synchronize to the right pane");
   updateActionButtons();
-  assert.equal(elements.get("#detectAllButton").disabled, false, "stop must remain available while detecting");
+  assert.equal(elements.get("#detectAllButton").disabled, true, "header detection stays unavailable while detecting");
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
   assert.equal(elements.get("#saveAllButton").disabled, true);
   const cancelDetectionRequest = cancelDetection();
-  assert.equal(elements.get("#detectAllButton").disabled, true, "stop button disables while cancellation is pending");
-  assert.equal(elements.get("#detectAllButton").textContent, "Stopping...");
+  assert.equal(elements.get("#detectAllButton").disabled, true, "header detection remains unavailable while cancellation is pending");
   resolveFetch({ ok: true, json: async () => ({ kind: "detect", state: "running" }) });
   await cancelDetectionRequest;
   assert.equal(requests.at(-1).path, "/api/job/cancel");
   state.job = null;
+  state.processing = null;
   state.detectCancelRequested = false;
   updateActionButtons();
   fetchCalls = 0;
@@ -1012,6 +1020,15 @@ const completionWatchdog = setTimeout(() => {
   updateProgress({ kind: "detect", state: "pausing", total: 3, completed: 1 });
   assert.equal(elements.get("#processingPauseButton").disabled, true);
 
+  state.job = { kind: "detect", state: "error", total: 3, completed: 1 };
+  state.processing = { kind: "detect", state: "error", total: 3, completed: 1 };
+  updateActionButtons();
+  assert.equal(isBusy(), true, "terminal detection stays locked while its image reconciliation is pending");
+  assert.equal(elements.get("#detectCurrentButton").disabled, true);
+  state.processing = null;
+  updateActionButtons();
+  assert.equal(isBusy(), false, "terminal detection releases controls after reconciliation closes processing");
+
   state.applyRunning = false;
   state.job = { kind: "detect", state: "running", total: 80, completed: 0 };
   updateProgress(state.job);
@@ -1033,6 +1050,9 @@ const completionWatchdog = setTimeout(() => {
     updateProgress({ kind: "detect", state: terminalState, total: 80, completed: 80 });
     assert.equal(elements.get("#processingDialog").open, true, `${terminalState} must not reset the active modal`);
   }
+  assert.equal(elements.get("#pickFolder").disabled, true, "terminal detection remains locked until reconciliation closes the processing modal");
+  state.processing = null;
+  updateActionButtons();
   assert.equal(elements.get("#pickFolder").disabled, false);
   setMosaicPreviewEnabled(false);
   assert.equal(state.mosaicPreviewEnabled, false);
@@ -1788,6 +1808,25 @@ const completionWatchdog = setTimeout(() => {
   assert.equal(isTerminalDetection({ kind: "detect", state: "complete", startedAt: 1001 }, { kind: "idle", state: "idle" }), false);
   state.handledDetectionStartedAt = null;
   assert.equal(isTerminalDetection({ kind: "detect", state: "complete", startedAt: 999 }, { kind: "detect", state: "running", startedAt: 999 }), true);
+  state.processing = { kind: "detect", startedAt: 999 };
+  assert.equal(isTerminalDetection({ kind: "detect", state: "error", startedAt: 999 }, { kind: "detect", state: "error", startedAt: 999 }), true, "a pending terminal reconciliation retries after its first catalog refresh fails");
+  state.job = { kind: "detect", state: "running", startedAt: 999, total: 1, completed: 0 };
+  const firstTerminalPoll = pollJob();
+  resolvePendingFetch("/api/job", { ok: true, json: async () => ({ kind: "detect", state: "error", startedAt: 999, total: 1, completed: 0, error: "failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/images", { ok: false, json: async () => ({ error: "catalog unavailable" }) });
+  await firstTerminalPoll;
+  assert.equal(state.handledDetectionStartedAt, null, "a failed terminal refresh is not marked handled");
+  assert.equal(state.processing?.kind, "detect", "the processing lock remains until a catalog refresh succeeds");
+  assert.equal(isBusy(), true, "editing remains locked during terminal reconciliation retry");
+  const retryTerminalPoll = pollJob();
+  resolvePendingFetch("/api/job", { ok: true, json: async () => ({ kind: "detect", state: "error", startedAt: 999, total: 1, completed: 0, error: "failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: [detectedTarget] }) });
+  await retryTerminalPoll;
+  assert.equal(state.handledDetectionStartedAt, 999, "the retried terminal refresh marks the old job handled only after success");
+  assert.equal(state.processing, null, "the successful retry closes processing");
+  assert.equal(isBusy(), false, "the successful retry unlocks editing");
   const crossTabDetection = finishDetectionJob({ kind: "detect", state: "complete", imageIds: ["detected"], startedAt: 777 });
   resolveFetch({ ok: true, json: async () => ({ images: [detectedTarget] }) });
   await crossTabDetection;
@@ -1804,6 +1843,9 @@ const completionWatchdog = setTimeout(() => {
   updateProgress(state.job);
   assert.equal(elements.get("#detectCurrentButton").disabled, true);
   assert.equal(elements.get("#saveButton").disabled, true);
+  assert.equal(elements.get("#folderPath").disabled, true);
+  state.processing = null;
+  updateActionButtons();
   assert.equal(elements.get("#folderPath").disabled, false);
   state.currentId = "first";
   state.currentImage = { width: 100, height: 80 };
@@ -2109,6 +2151,45 @@ const completionWatchdog = setTimeout(() => {
   assert.deepEqual(JSON.parse(JSON.stringify(state.images)), partialCatalog);
   assert.equal(state.importing, false);
 
+  // File-system handles stay as descriptors until a bounded worker is ready;
+  // cancelling while getFile is pending never starts another upload.
+  state.settings = { ...(state.settings || {}), importing: { parallelism: 2 } };
+  const lazyCalls = []; const lazyResolvers = new Map();
+  const lazyDescriptor = (name) => ({ name, relativePath: `lazy/${name}`, fileHandle: { name }, getFile: () => {
+    lazyCalls.push(name); return new Promise((resolve) => lazyResolvers.set(name, resolve));
+  } });
+  const lazyImport = importFiles([lazyDescriptor("one.png"), lazyDescriptor("two.png"), lazyDescriptor("three.png")]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(lazyCalls, ["one.png", "two.png"], "lazy descriptors call getFile only up to configured worker count");
+  lazyResolvers.get("one.png")({ name: "one.png", size: 1, lastModified: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.at(-1).path, "/api/import/file", "the first descriptor uploads without waiting for every getFile");
+  state.importSession.cancelled = true;
+  lazyResolvers.get("two.png")({ name: "two.png", size: 1, lastModified: 1 });
+  resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lazyCalls.includes("three.png"), false, "cancel prevents queued descriptor getFile calls");
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: state.images }) });
+  await lazyImport;
+
+  const partialHandle = { name: "partial-modern.png" };
+  const partialFile = { name: partialHandle.name, size: 2, lastModified: 2 };
+  const partialStart = requests.length;
+  const partialImport = importFiles([
+    { name: partialFile.name, relativePath: partialFile.name, fileHandle: partialHandle, getFile: async () => partialFile },
+    { name: "later-error.png", relativePath: "later-error.png", getFile: async () => ({ name: "later-error.png" }) },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  const partialRequest = requests.slice(partialStart).find((request) => request.path === "/api/import/file");
+  const partialKey = decodeURIComponent(partialRequest.options.headers["X-Mozarie-Client-Key"]);
+  resolvePendingFetch("/api/import/file", { ok: true, json: async () => ({ imported: [{ clientKey: partialKey, imageId: "partial-modern" }] }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/import/file", { ok: false, json: async () => ({ error: "later failed" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolvePendingFetch("/api/images", { ok: true, json: async () => ({ images: [{ id: "partial-modern", relativePath: partialFile.name, width: 1, height: 1 }] }) });
+  await partialImport;
+  assert.equal(state.sourceAccess.get("partial-modern").fileHandle, partialHandle, "a committed modern descriptor retains source access after a later worker rejection");
+
   // Import mappings bind browser-only source handles to the returned image id.
   let clientKeyCounter = 0;
   context.crypto.randomUUID = () => `mapped-${++clientKeyCounter}`;
@@ -2129,7 +2210,7 @@ const completionWatchdog = setTimeout(() => {
     items: [{ getAsFileSystemHandle: () => Promise.resolve(handledSource) }],
     files: [],
   });
-  assert.equal(dragged[0].fileHandle, handledSource, "drag-and-drop retains the file handle through import");
+  assert.equal(dragged.handleEntries[0].handle, handledSource, "drag-and-drop retains a lightweight file handle descriptor through import");
 
   let openFileOptions = null;
   let openDirectoryOptions = null;
@@ -2376,6 +2457,20 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsHandSegmentationToggle").checked = true;
   elements.get("#settingsHandSegmentationToggle").dispatch("change");
   assert.equal(elements.get("#settingsHandSegmentationCard").classList.contains("active"), true);
+  elements.get("#settingsHandToggle").checked = false;
+  elements.get("#settingsHandToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").checked, false, "disabling hand detection clears its HandSegNet child");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").disabled, true, "HandSegNet is unavailable while hand detection is off");
+  const modelPickerRun = chooseSettingsModelFile(modelPickerButtons[0]);
+  assert.ok(modelPickerButtons.every((button) => button.disabled), "a pending model picker disables its peer controls");
+  resolvePendingFetch("/api/model-file/pick", { ok: true, json: async () => ({ cancelled: true }) });
+  await modelPickerRun;
+  assert.equal(modelPickerButtons[5].disabled, true, "a completed model picker preserves HandSegNet's disabled parent state");
+  assert.equal(modelPickerButtons[0].disabled, false, "the completed model picker restores its own control");
+  assert.equal(settingsPayload().models.hand_segmentation_enabled, false);
+  elements.get("#settingsHandToggle").checked = true;
+  elements.get("#settingsHandToggle").dispatch("change");
+  assert.equal(elements.get("#settingsHandSegmentationToggle").disabled, false, "HandSegNet becomes available when hand detection is enabled");
   assert.equal(elements.get("#settingsPrecisionToggle").checked, false);
   assert.equal(elements.get("#settingsFluidToggle").checked, true);
   selectSettingsTab("models");
@@ -2449,7 +2544,7 @@ const completionWatchdog = setTimeout(() => {
   await resetSettingsRun;
   assert.equal(state.settingsStatus, null, "resetting leaves model and GPU status unverified");
   const settingsRequestsBeforeReopen = requests.filter((request) => request.path.startsWith("/api/settings")).length;
-  state.job = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
+  state.job = null; state.processing = null; state.saving = false; state.saveStarting = false; state.detectionStarting = false; state.masksClearing = false; state.catalogMutation = false; state.boundaryPending = false; state.fillPending = false;
   elements.get("#settingsVersion").textContent = "v0.2.0";
   elements.get("#settingsButton").click();
   assert.equal(elements.get("#settingsDialog").open, true, "opening settings uses the already loaded settings immediately");
@@ -2463,10 +2558,20 @@ const completionWatchdog = setTimeout(() => {
   elements.get("#settingsTargetModel").value = "unsaved.onnx";
   elements.get("#settingsStatusButton").click();
   assert.equal(elements.get("#settingsStatusButton").disabled, true, "model and GPU status button is disabled while checking");
-  resolvePendingFetch("/api/settings", { ok: true, json: async () => ({ settings: startupSettings, status: { gpus: [{ id: 2, name: "GPU" }], models: {} } }) });
+  assert.equal(JSON.parse(requests.at(-1).options.body).models.target_segmentation, "unsaved.onnx", "status confirmation snapshots the submitted form");
+  elements.get("#settingsTargetModel").value = "changed-while-checking.onnx";
+  resolvePendingFetch("/api/settings/status", { ok: true, json: async () => ({ status: { gpus: [{ id: 1, name: "stale" }], models: {} } }) });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(elements.get("#settingsTargetModel").value, "unsaved.onnx", "model status refresh does not overwrite unsaved settings");
-  assert.equal(state.settingsStatus.gpus[0].id, 2, "model status refresh updates only status state");
+  assert.equal(elements.get("#settingsTargetModel").value, "changed-while-checking.onnx", "model status refresh does not overwrite unsaved settings");
+  assert.equal(state.settingsStatus, null, "a stale status response does not render model or GPU state");
+  assert.equal(elements.get("#settingsStatusResult").textContent, translationFixtures.en["settings.statusChanged"], "a stale status response asks for an explicit recheck");
+  assert.equal(elements.get("#settingsStatusResult").classList.contains("error"), true, "a stale status response is visibly distinct from a successful check");
+  elements.get("#settingsStatusButton").click();
+  assert.equal(JSON.parse(requests.at(-1).options.body).models.target_segmentation, "changed-while-checking.onnx", "the recheck submits the current form");
+  resolvePendingFetch("/api/settings/status", { ok: true, json: async () => ({ status: { gpus: [{ id: 2, name: "current" }], models: {} } }) });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.settingsStatus.gpus[0].id, 2, "only the recheck renders model and GPU state");
+  assert.equal(elements.get("#settingsStatusResult").textContent, translationFixtures.en["settings.statusChecked"], "the recheck reports the updated status");
   elements.get("#settingsStatusButton").click();
   assert.equal(elements.get("#settingsStatusResult").textContent, translationFixtures.en["settings.statusChecking"], "model status check reports loading");
   resolvePendingFetch("/api/settings", { ok: false, json: async () => ({ error: "backend" }) });

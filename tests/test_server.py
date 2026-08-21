@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -80,15 +81,22 @@ class MozarieTests(unittest.TestCase):
     def setUp(self) -> None:
         self._cache_directory = tempfile.TemporaryDirectory()
         self.cache_dir = Path(self._cache_directory.name) / "cache"
+        self._app_directory = tempfile.TemporaryDirectory()
+        self.app_dir = Path(self._app_directory.name) / "app"
+        config_dir = self.app_dir / "config"
+        config_dir.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / "config" / "defaults.json", config_dir / "defaults.json")
         self._states: list[StudioState] = []
 
     def tearDown(self) -> None:
         for state in self._states:
             state.shutdown()
+        self._app_directory.cleanup()
         self._cache_directory.cleanup()
 
-    def new_state(self) -> StudioState:
-        state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
+    def new_state(self, app_dir: Path | None = None) -> StudioState:
+        with patch.object(state_module, "APP_DIR", app_dir or self.app_dir):
+            state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
         self._states.append(state)
         return state
 
@@ -105,8 +113,7 @@ class MozarieTests(unittest.TestCase):
             source_dir.mkdir()
             Image.new("RGB", (16, 16), "white").save(source_dir / "source.png")
 
-            with patch.object(state_module, "APP_DIR", app_dir):
-                state = self.new_state()
+            state = self.new_state(app_dir)
             self.assertEqual(state.settings["saving"]["default_output_directory"], str((app_dir / "output").resolve()))
             image_id = state.set_root(str(source_dir))[0]["id"]
             self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}, copy_to_default=True))
@@ -137,8 +144,8 @@ class MozarieTests(unittest.TestCase):
                 run.call_args.kwargs["env"]["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"],
                 state.settings["saving"]["default_output_directory"],
             )
-        self.assertTrue(state.output_picker_lock.acquire(blocking=False))
-        state.output_picker_lock.release()
+        self.assertTrue(state.native_picker_lock.acquire(blocking=False))
+        state.native_picker_lock.release()
         self.assertTrue(state.import_lock.acquire(blocking=False))
         state.import_lock.release()
 
@@ -149,6 +156,302 @@ class MozarieTests(unittest.TestCase):
         with patch.object(http_module.subprocess, "run") as run, self.assertRaisesRegex(ClientError, "処理中"):
             http_module._pick_output_directory(state)
         run.assert_not_called()
+
+    def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            selected = root / "model.onnx"; selected.touch()
+            completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
+            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), patch.object(http_module.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(http_module._pick_model_file("target_segmentation", state, str(selected)), str(selected.resolve()))
+                picker_kwargs = run.call_args.kwargs
+                command = run.call_args.args[0]
+                with self.assertRaisesRegex(ClientError, "正しくありません"):
+                    http_module._pick_model_file("sam_checkpoint", state)
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertIn("OpenFileDialog", script)
+            self.assertIn("RestoreDirectory", script)
+            self.assertFalse(picker_kwargs["shell"])
+            self.assertEqual(picker_kwargs["env"]["MOZARIE_MODEL_INITIAL_DIRECTORY"], str(root))
+            self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
+            state.native_picker_lock.acquire()
+            try:
+                with self.assertRaisesRegex(ClientError, "選択を開いています"):
+                    http_module._pick_model_file("target_segmentation", state)
+            finally:
+                state.native_picker_lock.release()
+
+    def test_import_staging_gate_allows_ten_concurrent_uploads(self):
+        state = self.new_state()
+        acquired = [state.import_staging_gate.acquire(blocking=False) for _ in range(10)]
+        try:
+            self.assertEqual(acquired, [True] * 10)
+            self.assertFalse(state.import_staging_gate.acquire(blocking=False))
+        finally:
+            for acquired_one in acquired:
+                if acquired_one: state.import_staging_gate.release()
+
+    def test_model_file_picker_releases_its_lock_after_cancel_and_bad_results(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            cases = [
+                (types.SimpleNamespace(returncode=0, stdout=b""), None),
+                (types.SimpleNamespace(returncode=1, stdout=b""), "model_picker_failed"),
+                (types.SimpleNamespace(returncode=0, stdout=b"not-base64"), "model_picker_invalid"),
+            ]
+            for completed, error_code in cases:
+                with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
+                     patch.object(http_module.subprocess, "run", return_value=completed):
+                    if error_code is None:
+                        self.assertIsNone(http_module._pick_model_file("target_segmentation", state))
+                    else:
+                        with self.assertRaises(ClientError) as raised:
+                            http_module._pick_model_file("target_segmentation", state)
+                        self.assertEqual(raised.exception.error_code, error_code)
+                self.assertTrue(state.native_picker_lock.acquire(blocking=False))
+                state.native_picker_lock.release()
+
+    def test_settings_status_preview_does_not_save_or_replace_settings(self):
+        state = self.new_state()
+        original = copy.deepcopy(state.settings)
+        preview = copy.deepcopy(state.settings)
+        preview["models"]["target_segmentation"] = "unsaved.onnx"
+        status = {"models": {"target_segmentation": {"valid": False, "reasonCode": "missing"}}}
+        with patch.object(state.settings_store, "validate_update", return_value=preview) as validate, \
+             patch.object(state.settings_store, "save") as save, \
+             patch.object(state, "settings_status", return_value=status) as settings_status:
+            self.assertEqual(state.preview_settings_status(preview), status)
+        validate.assert_called_once_with(preview)
+        settings_status.assert_called_once_with(preview, verify_sam_checkpoint=True)
+        save.assert_not_called()
+        self.assertEqual(state.settings, original)
+
+    def test_settings_status_skips_sam_loading_until_preview_and_rejects_truncated_checkpoint(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sam_vit_b.pth"
+            torch.save({"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}, checkpoint)
+            settings = copy.deepcopy(state.settings)
+            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+            with patch.object(torch, "load", wraps=torch.load) as load:
+                self.assertTrue(state.settings_status(settings)["models"]["sam_checkpoint"]["valid"])
+                load.assert_not_called()
+            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
+            self.assertFalse(status["valid"])
+            self.assertEqual(status["reasonCode"], "invalid_model")
+
+    def test_settings_status_accepts_synthetic_flat_sam_checkpoint_metadata(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            for model_type, metadata in state_module.SAM_CHECKPOINT_METADATA.items():
+                checkpoint = Path(directory) / f"sam_{model_type}.pth"
+                tensors = {
+                    key: torch.empty(shape, device="meta")
+                    for key, shape in metadata["shapes"].items()
+                }
+                tensors.update({
+                    f"placeholder.{index}": torch.empty((), device="meta")
+                    for index in range(metadata["tensor_count"] - len(tensors))
+                })
+                torch.save(tensors, checkpoint)
+                settings = copy.deepcopy(state.settings)
+                settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": model_type})
+                self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
+                for key in metadata["shapes"]:
+                    wrong_shape = dict(tensors)
+                    wrong_shape[key] = torch.empty((), device="meta")
+                    self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(wrong_shape, model_type))
+                too_few = dict(tensors)
+                too_few.pop(next(iter(too_few)))
+                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_few, model_type))
+                too_many = dict(tensors)
+                too_many["placeholder.extra"] = torch.empty((), device="meta")
+                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_many, model_type))
+
+    @unittest.skipUnless(
+        os.environ.get("MOZARIE_TEST_LOCAL_MODELS") == "1",
+        "set MOZARIE_TEST_LOCAL_MODELS=1 to verify the local official SAM model",
+    )
+    def test_local_official_vit_b_sam_checkpoint_metadata(self):
+        checkpoint = state_module.APP_DIR / "models" / "sam_vit_b_01ec64.pth"
+        if not checkpoint.is_file():
+            self.skipTest("local official SAM ViT-B checkpoint is not installed")
+        state = self.new_state()
+        settings = copy.deepcopy(state.settings)
+        settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+        self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
+
+    def test_settings_status_rejects_wrapped_sam_checkpoint(self):
+        state = self.new_state()
+        torch = state_module.torch_module()
+        if not hasattr(torch, "save"):
+            self.skipTest("PyTorch is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sam_vit_b.pth"
+            torch.save({"state_dict": {"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}}, checkpoint)
+            settings = copy.deepcopy(state.settings)
+            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
+            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
+            self.assertFalse(status["valid"])
+            self.assertEqual(status["reasonCode"], "invalid_model")
+
+    def test_cuda_status_matches_pytorch_cubin_compatibility_and_keeps_cpu_fallback_valid(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["sm_80", "sm_86", "compute_89", "sm_120"],
+            device_count=lambda: 3,
+            get_device_capability=lambda index: [(8, 9), (6, 1), (12, 1)][index],
+            get_device_name=lambda index: ["RTX 4090", "GTX 1060", "RTX 5090"][index],
+        )
+        self.assertEqual(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda)), [
+            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "supported": True},
+            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "supported": False},
+            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "supported": True},
+        ])
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            status = state.settings_status()
+        self.assertFalse(status["gpuDeviceValid"])
+        self.assertEqual(status["gpuDeviceReasonCode"], "gpu_unsupported")
+        state.settings["models"]["provider"] = "cpu"
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            self.assertTrue(state.settings_status()["gpuDeviceValid"])
+
+    def test_cuda_status_treats_an_empty_pytorch_arch_list_as_unchecked(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: [],
+            device_count=lambda: 1,
+            get_device_capability=lambda _index: (6, 1),
+            get_device_name=lambda _index: "GTX 1060",
+        )
+        self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
+
+    def test_cuda_status_ignores_ptx_only_arches(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["compute_61"],
+            device_count=lambda: 1,
+            get_device_capability=lambda _index: (6, 1),
+            get_device_name=lambda _index: "GTX 1060",
+        )
+        self.assertFalse(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
+
+    def test_hand_segmentation_status_is_disabled_without_hand_detection(self):
+        state = self.new_state()
+        state.settings["models"].update({"hand_detection_enabled": False, "hand_segmentation_enabled": True})
+        status = state.settings_status()["models"]["hand_segmentation"]
+        self.assertFalse(status["enabled"])
+
+    def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        source = state.cache_dir.parent / "source.png"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), "white").save(source)
+        record = self._record(source, 8, 8)
+        state.root = source.parent
+        state.images = {record.image_id: record}
+        state.order = [record.image_id]
+        state.candidates = {record.image_id: []}
+        state.candidate_revisions = {record.image_id: 0}
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        entered = threading.Event(); release = threading.Event(); result = {}
+        staged = state.cache_dir / "pending.upload.tmp"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+
+        def read_body(_handler):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            _handler.rfile.read(1)
+            staged.write_bytes(b"x")
+            return staged
+
+        def upload():
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                connection.request("POST", "/api/import/file", b"x", {
+                    "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
+                    "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
+                    "X-Mozarie-Token": state.session_token, "Origin": origin,
+                })
+                response = connection.getresponse(); result["status"] = response.status; response.read()
+            finally:
+                connection.close()
+
+        try:
+            with patch.object(http_module, "STATE", state), \
+                 patch.object(MosaicHandler, "_read_binary_body_to_file", read_body), \
+                 patch.object(state, "import_image_file_for_api", return_value=([], [])):
+                upload_thread = threading.Thread(target=upload)
+                upload_thread.start()
+                self.assertTrue(entered.wait(3))
+                self.assertEqual(state.import_transfer_count, 1)
+                mutations = [
+                    ("/api/catalog/clear", {}),
+                    ("/api/folder", {"path": str(source.parent)}),
+                    ("/api/settings", state.settings),
+                    ("/api/detect", {"imageIds": [record.image_id], "confidence": 0.5, "parallelism": 1}),
+                ]
+                for path, payload in mutations:
+                    mutation = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                    try:
+                        mutation.request("POST", path, json.dumps(payload).encode("utf-8"), {
+                            "Content-Type": "application/json", "X-Mozarie-Token": state.session_token, "Origin": origin,
+                        })
+                        response = mutation.getresponse(); response.read()
+                        self.assertEqual(response.status, 400, path)
+                    finally:
+                        mutation.close()
+                release.set(); upload_thread.join(5)
+                self.assertFalse(upload_thread.is_alive())
+                self.assertEqual(result["status"], 200)
+                self.assertEqual(state.import_transfer_count, 0)
+                self.assertFalse(staged.exists())
+        finally:
+            release.set()
+            httpd.shutdown(); httpd.server_close()
+
+    def test_rejected_import_transfer_closes_the_unread_request_connection(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", total=1)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        try:
+            with patch.object(http_module, "STATE", state), patch.object(MosaicHandler, "_read_binary_body_to_file") as read_body:
+                connection.request("POST", "/api/import/file", b"unread", {
+                    "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
+                    "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
+                    "X-Mozarie-Token": state.session_token, "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse(); response.read()
+            self.assertEqual(response.status, 400)
+            self.assertEqual(response.getheader("Connection"), "close")
+            read_body.assert_not_called()
+        finally:
+            connection.close()
+            httpd.shutdown(); httpd.server_close()
 
     def test_output_directory_picker_allows_folder_reload_while_open(self):
         state = self.new_state()
@@ -1701,6 +2004,31 @@ class MozarieTests(unittest.TestCase):
             model.to.assert_called_once_with(device="cpu")
             fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
 
+    def test_sam_constructor_checkpoint_error_is_a_client_error_but_device_error_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            checkpoint = Path(directory) / "sam.pth"; checkpoint.write_bytes(b"checkpoint")
+            record = self._record(image_path, 8, 8)
+            state = self.new_state()
+            state.settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b", "provider": "cpu"})
+            constructor = Mock(side_effect=RuntimeError("bad state dict"))
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}):
+                with self.assertRaises(ClientError) as raised:
+                    state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+            self.assertEqual(raised.exception.error_code, "sam_checkpoint_invalid")
+
+            model = Mock(); model.to.side_effect = RuntimeError("out of memory")
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}):
+                with self.assertRaisesRegex(RuntimeError, "out of memory"):
+                    state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+
+    def test_job_error_response_preserves_client_error_code_and_params(self):
+        state = self.new_state(); state.job = server_module.Job(kind="detect", state="running")
+        state._fail_job(ClientError("invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
+        data = state.job.as_dict()
+        self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
+        self.assertEqual(data["params"], {"model": "vit_b"})
+
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
@@ -1755,6 +2083,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_hand_segmentation_setting_keeps_onnx_sessions(self):
         state = self.new_state()
+        state.settings["models"]["hand_detection_enabled"] = True
         next_settings = copy.deepcopy(state.settings)
         next_settings["models"]["hand_segmentation_enabled"] = True
         models = object()
@@ -1821,7 +2150,11 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handsegnet.safetensors"
             path.write_bytes(b"header-only-test")
-            state.settings["models"].update({"hand_segmentation": str(path), "hand_segmentation_enabled": True})
+            state.settings["models"].update({
+                "hand_detection_enabled": True,
+                "hand_segmentation": str(path),
+                "hand_segmentation_enabled": True,
+            })
 
             class Header:
                 def __init__(self):
@@ -1933,6 +2266,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_precise_segments_receive_hand_refinement(self):
         state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = False
         precise_mask = np.zeros((16, 16), dtype=np.uint8)
         precise_mask[4:12, 4:12] = 255
         record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
@@ -5173,7 +5507,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
             self.assertTrue(mask_path.is_file())
 
-    def test_folder_scan_is_bounded_to_two_hashers_and_sorted_deterministically(self):
+    def test_folder_scan_uses_import_parallelism_and_sorts_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ("c.png", "B.png", "a.png", "nested/d.png"):
@@ -5196,9 +5530,12 @@ class MozarieTests(unittest.TestCase):
                     with active_lock:
                         active -= 1
 
+            state = self.new_state()
+            state.settings["importing"]["parallelism"] = 3
             with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
-                records = self.new_state().set_root(directory)
-            self.assertLessEqual(peak, 2)
+                records = state.set_root(directory)
+            self.assertLessEqual(peak, 3)
+            self.assertGreaterEqual(peak, 2)
             self.assertEqual([record["relativePath"] for record in records], ["a.png", "B.png", "c.png", "nested/d.png"])
 
     def test_session_imports_store_the_digest_streamed_while_staging(self):

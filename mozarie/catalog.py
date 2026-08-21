@@ -36,7 +36,7 @@ class CatalogMixin:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+        if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -96,12 +96,15 @@ class CatalogMixin:
                 with records_lock:
                     records.append(record)
 
-        # Folder discovery is intentionally fixed at two streaming workers:
-        # do not create one Future per file in a large folder.
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            workers = [executor.submit(inspect_path) for _ in range(min(2, len(paths)))]
-            for worker in workers:
-                worker.result()
+        # Keep a fixed number of streaming workers rather than one Future per
+        # file. Folder scans follow the same import-parallelism setting as
+        # drag-and-drop imports.
+        worker_count = min(int(self.settings["importing"]["parallelism"]), len(paths))
+        if worker_count:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                workers = [executor.submit(inspect_path) for _ in range(worker_count)]
+                for worker in workers:
+                    worker.result()
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         return self._replace_catalog(root, records)
 
@@ -325,7 +328,7 @@ class CatalogMixin:
             for _image_id, image_lock in sorted(locks):
                 stack.enter_context(image_lock)
             with self.lock:
-                if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中はモザイク候補をクリアできません。")
                 mask_paths = [
                     candidate.mask_path
@@ -546,7 +549,12 @@ class CatalogMixin:
                 provider = self.settings["models"]["provider"]
                 if provider == "gpu" and not torch_module().cuda.is_available():
                     raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
-                model = sam_model_registry[model_type](checkpoint=str(sam_path))
+                try:
+                    model = sam_model_registry[model_type](checkpoint=str(sam_path))
+                except RuntimeError as exc:
+                    # The constructor validates checkpoint tensors. Do not
+                    # catch model.to() failures such as device OOM below.
+                    raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
                 device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
                 model.to(device=device)
                 self.sam_predictor = SamPredictor(model)

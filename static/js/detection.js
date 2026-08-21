@@ -68,10 +68,14 @@ async function startDetectionFromDialog(event) {
 async function cancelDetection() {
   if (!activeDetection() || state.detectCancelRequested) return;
   state.detectCancelRequested = true;
+  $("#processingCancelButton").disabled = true;
   updateActionButtons();
   setStatusKey("status.detectCancelling", {}, "running");
-  try { await api("/api/job/cancel", { method: "POST", body: JSON.stringify({}) }); }
-  catch (error) { state.detectCancelRequested = false; updateActionButtons(); setStatus(error.message, "error"); }
+  try {
+    const job = await api("/api/job/cancel", { method: "POST", body: JSON.stringify({}) });
+    state.job = job; updateProgress(job); scheduleJobPoll(true);
+  }
+  catch (error) { state.detectCancelRequested = false; if (state.processing) showProcessing(state.processing); updateActionButtons(); setStatus(error.message, "error"); }
 }
 
 async function saveCurrent() {

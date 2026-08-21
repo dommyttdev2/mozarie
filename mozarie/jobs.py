@@ -126,7 +126,7 @@ class JobsMixin:
         remove_after_save: bool = False,
     ) -> None:
         with self.lock:
-            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("別の処理が進行中です。")
             if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
                 raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
@@ -231,6 +231,7 @@ class JobsMixin:
             if self._job_is_current(job_generation, catalog_generation) and image_id not in self.job.completed_image_ids:
                 completed = {*self.job.completed_image_ids, image_id}
                 self.job.completed_image_ids = tuple(item for item in self.job.image_ids if item in completed)
+                self.job.completed = len(self.job.completed_image_ids)
 
     def _record_job_success(
         self,
@@ -346,6 +347,8 @@ class JobsMixin:
             kind = self.job.kind
             self.job.state = "error"
             self.job.error = str(exc)
+            self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""
+            self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}
             self.job.current = ""
             self.job.active_count = 0
         LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind),
