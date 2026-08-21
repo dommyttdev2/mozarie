@@ -354,7 +354,7 @@ class DetectionMixin:
                 if hand_overlap and logits is not None and len(logits) > selected_index:
                     retry_masks, retry_scores, _ = predictor.predict(
                         point_coords=prompt_points, point_labels=labels, box=np.asarray(roi, dtype=np.float32),
-                        mask_input=np.asarray(logits[selected_index]), multimask_output=False,
+                        mask_input=np.asarray(logits[selected_index:selected_index + 1]), multimask_output=False,
                     )
                     retry = select_semantic_sam_mask(np.asarray([clip_mask_to_roi(mask, roi) for mask in retry_masks]), retry_scores, source_mask, hand_mask, prompt_points, labels)
                     if retry is not None and np.count_nonzero((retry[0] > 0) & (hand_mask > 0)) < hand_overlap:
