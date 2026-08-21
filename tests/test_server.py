@@ -682,9 +682,10 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(pixels).save(path, format="PNG", pnginfo=metadata)
             original = path.read_bytes()
             original_manifest = png_ancillary_manifest(original)
-            original_mtime_ns = path.stat().st_mtime_ns
+            original_stat = path.stat()
+            original_mtime_ns = original_stat.st_mtime_ns
 
-            record = ImageRecord(image_id="test", path=path, relative_path="source.png", width=16, height=16, mtime_ns=original_mtime_ns)
+            record = ImageRecord(image_id="test", path=path, relative_path="source.png", width=16, height=16, mtime_ns=original_mtime_ns, size_bytes=original_stat.st_size)
             save_with_mask(record, self._mask(16, 16), 4)
 
             saved = path.read_bytes()
@@ -5184,6 +5185,26 @@ class MozarieTests(unittest.TestCase):
             with patch.object(image_io_module, "file_sha256", side_effect=mutate_before_replace):
                 with self.assertRaisesRegex(ClientError, "外部で変更"):
                     save_with_mask(record, self._mask(16, 16), 4)
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+
+    def test_filesystem_save_rejects_change_during_source_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            record = state.image_for_id(state.set_root(directory)[0]["id"])
+            read_bytes = Path.read_bytes
+
+            def mutate_after_read(path):
+                result = read_bytes(path)
+                if path == source:
+                    Image.new("RGB", (16, 16), "blue").save(source)
+                return result
+
+            with patch.object(Path, "read_bytes", autospec=True, side_effect=mutate_after_read):
+                with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                    save_with_mask(record, self._mask(16, 16), 4)
+            self.assertEqual(raised.exception.error_code, "stale_asset")
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
     def test_copy_save_uses_the_render_digest_without_an_extra_hash(self):

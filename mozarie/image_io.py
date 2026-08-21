@@ -487,6 +487,9 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
     destination = record.path
     original_stat = record.path.stat()
     source = record.path.read_bytes()
+    source_stat = record.path.stat()
+    if source_stat.st_mtime_ns != record.mtime_ns or source_stat.st_size != record.size_bytes:
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     source_digest = hashlib.sha256(source).hexdigest()
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:

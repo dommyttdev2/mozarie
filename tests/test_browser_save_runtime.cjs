@@ -343,12 +343,50 @@ async function runRepeatedHandleOverwriteCase() {
 
 async function runHandleDeleteAfterCopyCase() {
     let removed = false;
-  const sourceHandle = { name: "source.png", async remove() { removed = true; } };
+  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; }, async remove() { removed = true; } };
   const runtime = createRuntime({ deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
   assert.equal(removed, true, "the source handle is removed only after the copy has been written");
   assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
+}
+
+async function runQueuedHandleChangeCases() {
+  const first = { id: "image-1", sourceKind: "session", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", sourceKind: "session", relativePath: "second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  for (const mode of ["overwrite", "copy"]) {
+    let secondFile = { name: "second.png", size: 12, lastModified: 34 };
+    let secondAction = false;
+    const firstHandle = {
+      async getFile() { return { name: "first.png", size: 12, lastModified: 34 }; },
+      async createWritable() { return { async write() {}, async close() {}, async abort() {} }; },
+      async remove() {},
+    };
+    const secondHandle = {
+      async getFile() { return secondFile; },
+      async createWritable() { secondAction = true; return { async write() {}, async close() {}, async abort() {} }; },
+      async remove() { secondAction = true; },
+    };
+    const runtime = createRuntime({
+      initialImages: [first, second],
+      entries: [
+        { imageId: first.id, relativePath: first.relativePath, candidateRevision: 1, deleteOriginal: mode === "copy" },
+        { imageId: second.id, relativePath: second.relativePath, candidateRevision: 1, deleteOriginal: mode === "copy" },
+      ],
+      deleteOriginal: mode === "copy",
+      commit: ({ requests }) => {
+        if (requests.filter((request) => request.path === "/api/save/commit").length === 1) {
+          secondFile = { ...secondFile, size: 13, lastModified: 35 };
+        }
+        return jsonResponse({ cleared: true, stale: false, images: [] });
+      },
+    });
+    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, name: "first.png", size: 12, lastModified: 34 });
+    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
+    await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
+    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
+    assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
+  }
 }
 
 async function runCatalogEpochGuardCase() {
@@ -464,6 +502,7 @@ async function runRemoveAfterSaveCases() {
   await runHandleOverwriteCase();
   await runRepeatedHandleOverwriteCase();
   await runHandleDeleteAfterCopyCase();
+  await runQueuedHandleChangeCases();
   await runCatalogEpochGuardCase();
   await runPartialCommitFailureReconcileCase();
   await runRemoveAfterSaveCases();

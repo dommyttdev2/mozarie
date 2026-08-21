@@ -312,7 +312,10 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
               divisor: Number($("#applyDivisor").value), draft, copyToDefault: true, suffix }),
           });
           if (deleteOriginal) {
-            if (access?.fileHandle) await removeSourceHandle(access);
+            if (access?.fileHandle) {
+              await ensureHandlePermission(access, true);
+              await removeSourceHandle(access);
+            }
             sourceAction = "deleted";
           }
           const committed = await commitBrowserSaveWithRetry({
@@ -326,6 +329,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           });
           if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
+          await ensureHandlePermission(access, true);
           await writeSourceHandle(access, await binary.arrayBuffer());
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
