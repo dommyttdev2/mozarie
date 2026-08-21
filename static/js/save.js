@@ -578,7 +578,8 @@ async function finishApplyJob(job) {
 function isTerminalDetection(job, previous) {
   if (job.kind !== "detect" || !["complete", "cancelled", "error"].includes(job.state) || job.startedAt == null || state.handledDetectionStartedAt === job.startedAt) return false;
   const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "pausing", "paused"].includes(previous.state);
-  return observedRunning || Number(job.startedAt) >= state.pageLoadedAt;
+  const reconciliationPending = state.processing?.kind === "detect" && state.processing?.startedAt === job.startedAt;
+  return observedRunning || Number(job.startedAt) >= state.pageLoadedAt || reconciliationPending;
 }
 
 function jobErrorMessage(job) {

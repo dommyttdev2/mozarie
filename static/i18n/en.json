@@ -56,8 +56,6 @@
   "detectDialog.parallelism": "Parallel workers",
   "detectDialog.rerunNote": "Re-detection replaces automatic ranges only. Boundary and manual ranges remain.",
   "detectDialog.start": "Start detection",
-  "detectDialog.stop": "Stop detection",
-  "detectDialog.stopping": "Stopping...",
   "detectDialog.target": "Detecting {count} image(s).",
   "detectDialog.title": "Automatic detection settings",
   "detection.confidence": "Detection threshold",

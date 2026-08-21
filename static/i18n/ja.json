@@ -104,8 +104,6 @@
   "detectDialog.confidenceNumber": "判定しきい値の数値",
   "detectDialog.rerunNote": "再検出では自動候補だけを置き換え、境界候補と手描きの範囲は残ります。",
   "detectDialog.start": "検出を開始",
-  "detectDialog.stop": "自動検出を停止",
-  "detectDialog.stopping": "停止中",
   "candidates.aria": "検出候補",
   "candidates.title": "検出候補",
   "candidates.unselected": "画像を選択してください",

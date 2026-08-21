@@ -299,7 +299,6 @@ async function importFiles(files) {
   try {
     session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
     showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
-    const results = new Array(supportedFiles.length);
     let nextIndex = 0;
     const worker = async () => {
       while (true) {
@@ -314,15 +313,15 @@ async function importFiles(files) {
         const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.webkitRelativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
         const data = await importSingleFile(entry, clientKey);
-        results[index] = { entry, clientKey, data };
+        const result = { entry, clientKey, data };
         // Keep source access for each committed upload, including a later
         // cancellation or an unrelated upload failure.
-        rememberImportedSource(results[index]);
+        rememberImportedSource(result);
         session.completed += 1;
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
       }
     };
-    const workerCount = Math.min(supportedFiles.length, 10, importParallelism());
+    const workerCount = Math.min(supportedFiles.length, importParallelism());
     const workers = Array.from({ length: workerCount }, worker);
     try {
       await Promise.all(workers);

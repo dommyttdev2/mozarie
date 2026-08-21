@@ -386,7 +386,6 @@ function updateActionButtons() {
   const locked = running || state.importing;
   const mutatingCandidates = state.candidateUpdateChains.size > 0;
   const switchingImages = state.candidateBatchPending.size > 0;
-  const detecting = activeDetection();
   const current = currentRecord();
   const hasImage = Boolean(state.currentId && state.currentImage && current);
   const controls = [...document.querySelectorAll("button, input, select, textarea")];
@@ -399,12 +398,9 @@ function updateActionButtons() {
     }
   }
   $("#pickFolder").disabled = running || state.importing;
-  const batchDetectButtons = [$("#detectAllButton")];
-  for (const detectAllButton of batchDetectButtons) {
-    detectAllButton.textContent = t("gallery.detectAll");
-    detectAllButton.classList.toggle("detect-stop", false);
-    detectAllButton.disabled = running || state.images.length === 0;
-  }
+  const detectAllButton = $("#detectAllButton");
+  detectAllButton.textContent = t("gallery.detectAll");
+  detectAllButton.disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
   $("#removeCurrentImageButton").disabled = running || !hasImage;
@@ -428,7 +424,6 @@ function updateActionButtons() {
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
     if (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing) continue;
     if (control.id === "selectionClearButton" && state.batchMode) continue;
-    if (control.id === "detectAllButton" && detecting && !state.detectCancelRequested) continue;
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
   }

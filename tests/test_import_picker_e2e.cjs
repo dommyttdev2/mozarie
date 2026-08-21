@@ -18,8 +18,12 @@ function startFixtureServer() {
   const detectRequests = [];
   const settingsRequests = [];
   const settingsActions = [];
+  const settingsStatusRequests = [];
   const updateRequests = [];
   const modelPickerRequests = [];
+  let cancelRequests = 0;
+  let holdDetection = false;
+  let cancelShouldFail = false;
   let releaseFullSettings = null;
   let deferFullSettings = false;
   let currentJob = { kind: "idle", state: "idle" };
@@ -52,6 +56,14 @@ function startFixtureServer() {
       reply();
       return;
     }
+    if (requestPath === "/api/settings/status" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      settingsStatusRequests.push(JSON.parse(body));
+      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus: [] } })); };
+      if (deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
+      reply();
+      return;
+    }
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
@@ -81,12 +93,20 @@ function startFixtureServer() {
       response.end(JSON.stringify(modelPickerRequests.length === 1 ? { path: "C:\\models\\sam_vit_l_0b3195.pth" } : { cancelled: true }));
       return;
     }
+    if (requestPath === "/api/job/cancel" && request.method === "POST") {
+      cancelRequests += 1;
+      if (cancelShouldFail) { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "cancel failed" })); return; }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(currentJob));
+      return;
+    }
     if (requestPath === "/api/detect" && request.method === "POST") {
       let body = "";
       for await (const chunk of request) body += chunk;
       detectRequests.push(JSON.parse(body));
       const imageIds = detectRequests.at(-1).imageIds;
-      currentJob = { kind: "detect", state: "complete", total: imageIds.length, completed: imageIds.length, current: "", startedAt: Date.now() / 1000, imageIds, completedImageIds: imageIds };
+      currentJob = holdDetection
+        ? { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "sample.png", startedAt: Date.now() / 1000, imageIds, completedImageIds: [] }
+        : { kind: "detect", state: "complete", total: imageIds.length, completed: imageIds.length, current: "", startedAt: Date.now() / 1000, imageIds, completedImageIds: imageIds };
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ ok: true }));
       return;
@@ -127,7 +147,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, updateRequests, modelPickerRequests, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => releaseFullSettings?.() });
     });
   });
 }
@@ -443,11 +463,13 @@ async function main() {
   let detectRequests, modelPickerRequests, resetJob;
   let settingsRequests;
   let settingsActions;
+  let settingsStatusRequests;
   let updateRequests;
+  let cancelRequests, holdDetection, failCancel;
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, updateRequests, modelPickerRequests, resetJob, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests, holdDetection, failCancel, resetJob, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -492,7 +514,7 @@ async function main() {
     await page.locator("#settingsTabModels").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
-    assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint" }, "SAM browse posts only its model key");
+    assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
     const targetBeforeCancel = await page.locator("#settingsTargetModel").inputValue();
     const statusBeforeCancel = await page.locator("#settingsResult").textContent();
@@ -504,7 +526,8 @@ async function main() {
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
     await page.locator("#settingsStatusButton").click();
-    assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen + 1, "model confirmation starts exactly one full settings request");
+    assert.equal(settingsStatusRequests.length, 1, "model confirmation starts exactly one form-status request");
+    assert.equal(settingsStatusRequests[0].models.target_segmentation, "unsaved.onnx", "model confirmation validates the unsaved form value");
     assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
     assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
     releaseFullSettings();
@@ -527,6 +550,7 @@ async function main() {
     assert.equal(versionRow.sameRow, true, "the update button shares the version row");
     assert.ok(versionRow.buttonWidth > 0 && versionRow.buttonWidth < 180, "the update button remains compact and clickable");
     assert.equal(await page.locator("#checkUpdateButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the version update button owns its hit target");
+    await page.waitForFunction(() => document.querySelector("#checkUpdateButton").dataset.available === "false");
     const updatesBeforeClick = updateRequests.length;
     await page.locator("#checkUpdateButton").click();
     assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
@@ -658,6 +682,24 @@ async function main() {
     assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
+    holdDetection(true);
+    await page.locator("#detectAllButton").click();
+    await page.locator("#detectStartButton").click();
+    await page.waitForFunction(() => document.querySelector("#processingDialog").open);
+    assert.equal(await page.locator("#processingCancelButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the processing cancel button owns its physical hit target");
+    failCancel(true);
+    await page.locator("#processingCancelButton").click();
+    await page.waitForFunction(() => !document.querySelector("#processingCancelButton").disabled);
+    assert.equal(cancelRequests(), 1, "a failed processing cancel sends one request and re-enables the button");
+    assert.match(await page.locator("#status").textContent(), /cancel failed/, "a failed cancel is shown as an error without leaving the modal locked");
+    failCancel(false);
+    await page.locator("#processingCancelButton").click();
+    await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
+    await page.locator("#processingCancelButton").evaluate((button) => button.click());
+    assert.equal(cancelRequests(), 2, "a processing cancel cannot be sent twice");
+    holdDetection(false);
+    resetJob();
+    await page.evaluate(async () => { await pollJob(); closeProcessing(); });
     const menu = page.locator("#pickerMenu");
     assert.equal(await menu.isVisible(), false, "the picker menu should be initially hidden");
     assert.equal(await menu.evaluate((element) => element.matches(":popover-open")), false, "the picker menu should initially be closed");
@@ -753,9 +795,9 @@ async function main() {
       await page.locator("#selectionActionsButton").click();
       const geometry = await page.locator("#selectionActionsMenu").evaluate((menu) => {
         const button = document.querySelector("#selectionActionsButton").getBoundingClientRect(); const rect = menu.getBoundingClientRect();
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonLeft: button.left, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollWidth: document.documentElement.scrollWidth };
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonRight: button.right, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollWidth: document.documentElement.scrollWidth };
       });
-      assert.equal(geometry.left, geometry.buttonLeft, `selection menu left aligns with its button at ${width}x${height} (${language})`);
+      assert.equal(geometry.right, geometry.buttonRight, `selection menu right aligns with its button at ${width}x${height} (${language})`);
       assert.ok(geometry.top >= geometry.buttonBottom + 4 && geometry.top <= geometry.buttonBottom + 6 && geometry.right <= geometry.viewportWidth && geometry.bottom <= geometry.viewportHeight && geometry.scrollWidth <= geometry.viewportWidth, `selection menu stays in the viewport without horizontal overflow at ${width}x${height} (${language})`);
       await page.locator("#selectionActionsMenu").evaluate((menu) => menu.hidePopover());
     }
@@ -765,9 +807,9 @@ async function main() {
     await page.locator("#selectionActionsButton").click();
     const selectionMenu = await page.locator("#selectionActionsMenu").evaluate((menu) => {
       const button = document.querySelector("#selectionActionsButton").getBoundingClientRect(); const rect = menu.getBoundingClientRect();
-      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonLeft: button.left, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight };
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, buttonRight: button.right, buttonBottom: button.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight };
     });
-    assert.equal(selectionMenu.left, selectionMenu.buttonLeft, "selection menu left edge anchors to its button");
+    assert.equal(selectionMenu.right, selectionMenu.buttonRight, "selection menu right edge anchors to its button");
     assert.ok(selectionMenu.top >= selectionMenu.buttonBottom && selectionMenu.right <= selectionMenu.viewportWidth && selectionMenu.bottom <= selectionMenu.viewportHeight, `selection menu is visibly anchored below its button: ${JSON.stringify(selectionMenu)}`);
     await page.locator('[data-selection-action="detect"]').click();
     await page.locator("#detectStartButton").click();
@@ -787,7 +829,7 @@ async function main() {
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
-    assert.deepEqual(consoleErrors, [], `unexpected console errors: ${consoleErrors.join("; ")}`);
+    assert.deepEqual(consoleErrors, ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)"], `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
     await browser?.close();
     if (server) await closeServer(server);
