@@ -10,7 +10,7 @@ def _pick_output_directory(state: StudioState = STATE) -> str | None:
     try:
         with state.lock:
             default_output_directory = state.settings["saving"]["default_output_directory"]
-            if state.importing_count or state.import_transfer_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
                 raise ClientError("処理中は保存先を変更できません。")
         system_root = Path(os.environ.get("SystemRoot", r"C:\\Windows"))
         executable = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
@@ -68,7 +68,7 @@ def _pick_model_file(model_key: str, state: StudioState = STATE, current_path: s
         raise ClientError("ファイルの選択を開いています。", "model_picker_busy")
     try:
         with state.lock:
-            if state.importing_count or state.import_transfer_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
                 raise ClientError("処理中はモデルを選択できません。", "job_running")
         executable = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         if not executable.is_file():
@@ -234,6 +234,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                 relative_path=relative_path,
                                 client_key=client_key,
                                 include_images=False,
+                                transfer_active=True,
                             )
                         finally:
                             staged_path.unlink(missing_ok=True)
@@ -251,9 +252,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"images": []})
             elif path == "/api/catalog/remove":
                 self._json(STATE.remove_images_from_catalog(payload.get("imageIds", [])))
-            elif path == "/api/import":
-                images, imported = STATE.import_images_for_api(payload.get("files", []))
-                self._json({"images": images, "imported": imported})
             elif path == "/api/masks/clear":
                 self._json({"cleared": STATE.clear_masks(payload.get("imageIds", []))})
             elif path == "/api/detect":
@@ -420,7 +418,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     handle.write(chunk)
                     remaining -= len(chunk)
                 handle.flush()
-                os.fsync(handle.fileno())
             result = temporary_path
             temporary_path = None
             return result
@@ -467,7 +464,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                 temporary_path = Path(handle.name)
                                 handle.write(output.getvalue())
                                 handle.flush()
-                                os.fsync(handle.fileno())
                             with STATE.lock:
                                 current = STATE.images.get(image_id)
                                 if current is None or STATE.asset_version(current) != asset_version:

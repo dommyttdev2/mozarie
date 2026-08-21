@@ -36,7 +36,7 @@ class CatalogMixin:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
     def _assert_catalog_mutable(self) -> None:
-        if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+        if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
             raise ClientError("処理が終了するまで画像一覧を変更できません。")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -77,7 +77,6 @@ class CatalogMixin:
                     relative_path = resolved.relative_to(root).as_posix()
                     before = resolved.stat()
                     width, height = inspect_import_image(resolved, resolved.suffix)
-                    digest = file_sha256(resolved)
                     after = resolved.stat()
                     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
                         continue
@@ -89,7 +88,6 @@ class CatalogMixin:
                         height=height,
                         mtime_ns=after.st_mtime_ns,
                         size_bytes=after.st_size,
-                        content_digest=digest,
                     )
                 except (OSError, UnidentifiedImageError, ValueError, ClientError):
                     continue
@@ -328,7 +326,7 @@ class CatalogMixin:
             for _image_id, image_lock in sorted(locks):
                 stack.enter_context(image_lock)
             with self.lock:
-                if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中はモザイク候補をクリアできません。")
                 mask_paths = [
                     candidate.mask_path
@@ -357,20 +355,12 @@ class CatalogMixin:
             except OSError as exc:
                 LOGGER.warning("Could not clear stale mask directory %s: %s", candidate_dir, exc)
 
-    def import_images(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        images, _imported = self._import_images(files)
-        return images
-
-    def import_images_for_api(self, files: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-        if not isinstance(files, list) or any(not isinstance(item, dict) or not isinstance(item.get("clientKey"), str) or not item["clientKey"] for item in files):
-            raise ClientError("追加画像のclientKeyが不正です。")
-        return self._import_images(files)
-
     def _import_images(
         self,
         files: list[dict[str, Any]],
         *,
         include_images: bool = True,
+        transfer_active: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
@@ -381,9 +371,10 @@ class CatalogMixin:
             if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は画像を追加できません。")
             destination_dir = self._ensure_session()
-            self.importing_count += 1
+            if not transfer_active:
+                self.active_import_count += 1
 
-        pending: list[tuple[Path, str, int, int, str, str]] = []
+        pending: list[tuple[Path, str, int, int, str]] = []
         try:
             # Decoding and staging can overlap across request threads. The short
             # catalogue commit below remains serialized.
@@ -396,33 +387,15 @@ class CatalogMixin:
                     continue
                 temporary = destination_dir / f".mozarie-import-{uuid.uuid4().hex}.tmp"
                 try:
-                    digest = hashlib.sha256()
                     staged_path = file_data.get("stagedPath")
-                    if isinstance(staged_path, Path):
-                        with staged_path.open("rb") as source, temporary.open("xb") as destination:
-                            while chunk := source.read(IO_CHUNK_BYTES):
-                                digest.update(chunk)
-                                destination.write(chunk)
-                            destination.flush()
-                            os.fsync(destination.fileno())
-                    else:
-                        raw_value = file_data.get("raw")
-                        if isinstance(raw_value, bytes):
-                            raw = raw_value
-                        else:
-                            try:
-                                raw = base64.b64decode(str(file_data.get("data", "")), validate=True)
-                            except (binascii.Error, ValueError) as exc:
-                                raise ClientError("追加画像を読み込めません。") from exc
-                        if not raw:
-                            continue
-                        with temporary.open("xb") as destination:
-                            digest.update(raw)
-                            destination.write(raw)
-                            destination.flush()
-                            os.fsync(destination.fileno())
+                    if not isinstance(staged_path, Path):
+                        raise ClientError("追加画像を読み込めません。")
+                    with staged_path.open("rb") as source, temporary.open("xb") as destination:
+                        while chunk := source.read(IO_CHUNK_BYTES):
+                            destination.write(chunk)
+                        destination.flush()
                     width, height = inspect_import_image(temporary, relative_path.suffix)
-                    pending.append((temporary, relative_path.as_posix(), width, height, client_key, digest.hexdigest()))
+                    pending.append((temporary, relative_path.as_posix(), width, height, client_key))
                 except Exception:
                     temporary.unlink(missing_ok=True)
                     raise
@@ -439,7 +412,7 @@ class CatalogMixin:
                 final_paths: list[Path] = []
                 try:
                     imported: list[dict[str, str]] = []
-                    for temporary, name, width, height, client_key, digest in pending:
+                    for temporary, name, width, height, client_key in pending:
                         destination = unique_session_import_destination(destination_dir / name)
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(temporary, destination)
@@ -455,7 +428,6 @@ class CatalogMixin:
                             mtime_ns=stat.st_mtime_ns,
                             size_bytes=stat.st_size,
                             source_kind="session",
-                            content_digest=digest,
                         ))
                         imported.append({"clientKey": client_key, "imageId": image_id})
                 except Exception:
@@ -469,28 +441,11 @@ class CatalogMixin:
                 images = self.list_images() if include_images else []
                 return images, imported
         finally:
-            for temporary, _name, _width, _height, _client_key, _digest in pending:
+            for temporary, _name, _width, _height, _client_key in pending:
                 temporary.unlink(missing_ok=True)
-            with self.lock:
-                self.importing_count -= 1
-
-    def import_image_bytes_for_api(
-        self,
-        raw: bytes,
-        *,
-        name: str,
-        relative_path: str,
-        client_key: str,
-        include_images: bool = True,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-        if not isinstance(client_key, str) or not client_key:
-            raise ClientError("追加画像のclientKeyが不正です。")
-        return self._import_images([{
-            "clientKey": client_key,
-            "name": name,
-            "relativePath": relative_path,
-            "raw": raw,
-        }], include_images=include_images)
+            if not transfer_active:
+                with self.lock:
+                    self.active_import_count -= 1
 
     def import_image_file_for_api(
         self,
@@ -500,6 +455,7 @@ class CatalogMixin:
         relative_path: str,
         client_key: str,
         include_images: bool = True,
+        transfer_active: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(client_key, str) or not client_key:
             raise ClientError("追加画像のclientKeyが不正です。")
@@ -508,7 +464,7 @@ class CatalogMixin:
             "name": name,
             "relativePath": relative_path,
             "stagedPath": staged_path,
-        }], include_images=include_images)
+        }], include_images=include_images, transfer_active=transfer_active)
 
     def _clear_cache(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -710,8 +666,8 @@ class CatalogMixin:
 
     @staticmethod
     def asset_version(record: ImageRecord) -> str:
-        """The content-addressed HTTP version for an image response."""
-        return record.content_digest
+        """The inexpensive HTTP version based on the catalogued file stat."""
+        return f"{record.mtime_ns}-{record.size_bytes}"
 
     def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
         candidates = self.candidates.get(image_id, [])

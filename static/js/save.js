@@ -419,18 +419,15 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
 }
 
 async function commitBrowserSaveWithRetry(payload) {
-  const delays = [0, 150, 500];
-  let lastError;
-  for (const delay of delays) {
-    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 150));
     try {
       return await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
     } catch (error) {
-      lastError = error;
-      if (error?.status && ![408, 429].includes(error.status) && error.status < 500) throw error;
+      const retryable = !error?.status || [408, 429, 502, 503, 504].includes(error.status);
+      if (!retryable || attempt) throw error;
     }
   }
-  throw lastError || new Error(t("error.requestFailed"));
 }
 
 async function startApplyFromDialog(event) {

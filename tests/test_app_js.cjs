@@ -1532,8 +1532,7 @@ const completionWatchdog = setTimeout(() => {
   resolveFetch({ ok: true, status: 200, json: async () => ({ cleared: true }) });
   assert.equal((await retryPromise).cleared, true);
 
-  // Retry only twice after the initial request: 150ms, then 500ms. Each
-  // retry keeps the original token and a final transient failure is surfaced.
+  // A single retry keeps the original token and then surfaces the failure.
   const requestCountBeforeExhaustion = requests.length;
   const timersBeforeExhaustion = new Set(scheduledTimers.keys());
   const exhaustedRetry = commitBrowserSaveWithRetry({ imageId: "first", candidateRevision: 1, saveToken: "same-token", sourceAction: "keep" });
@@ -1543,16 +1542,11 @@ const completionWatchdog = setTimeout(() => {
   assert.ok(firstExhaustionTimer);
   scheduledTimers.delete(firstExhaustionTimer[0]); firstExhaustionTimer[1].callback();
   await new Promise((resolve) => setImmediate(resolve));
+  const rejectedCommit = assert.rejects(exhaustedRetry);
   resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
-  await new Promise((resolve) => setImmediate(resolve));
-  const secondExhaustionTimer = [...scheduledTimers].find(([, timer]) => timer.delay === 500);
-  assert.ok(secondExhaustionTimer);
-  scheduledTimers.delete(secondExhaustionTimer[0]); secondExhaustionTimer[1].callback();
-  await new Promise((resolve) => setImmediate(resolve));
-  resolveFetch({ ok: false, status: 503, json: async () => ({ error: "temporary" }) });
-  await assert.rejects(exhaustedRetry);
+  await rejectedCommit;
   const exhaustedRequests = requests.slice(requestCountBeforeExhaustion);
-  assert.equal(exhaustedRequests.length, 3);
+  assert.equal(exhaustedRequests.length, 2);
   assert.ok(exhaustedRequests.every((request) => request.path === "/api/save/commit" && request.options.body.includes("same-token")));
 
   const requestCountBeforeClientError = requests.length;

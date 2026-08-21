@@ -51,13 +51,6 @@ from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
 from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter
-from mozarie.inference.profiles import (
-    ModelProfileError,
-    profile_summary,
-    validate_generic_yolo_segment_profile,
-    validate_hand_profile,
-    validate_target_profile,
-)
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -80,11 +73,6 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
-HAND_SEGMENTATION_VIT_B_TENSORS = {
-    "image_encoder.patch_embed.proj.weight": (768, 3, 16, 16),
-    "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
-    "mask_decoder.mask_tokens.weight": (4, 256),
-}
 FLUID_MAX_COMPONENTS = 8
 FLUID_MAX_COMPONENT_RATIO = 0.15
 FLUID_MAX_TOTAL_RATIO = 0.20
@@ -177,13 +165,8 @@ class ImageRecord:
     width: int
     height: int
     mtime_ns: int
-    content_digest: str
     size_bytes: int = 0
     source_kind: str = "filesystem"
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.content_digest, str) or len(self.content_digest) != 64 or any(char not in "0123456789abcdef" for char in self.content_digest):
-            raise ValueError("content_digest must be a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True)
@@ -344,21 +327,6 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def assert_onnx_cuda_available() -> None:
-    """Fail early instead of allowing an ONNX model to take an accidental CPU path."""
-    try:
-        import onnxruntime as ort
-    except ImportError as exc:
-        raise ClientError("ONNX Runtimeを読み込めません。onnxruntime-gpu を確認してください。") from exc
-    if "CUDAExecutionProvider" not in ort.get_available_providers():
-        raise ClientError(
-            "ONNX RuntimeのCUDAExecutionProviderが利用できません。"
-            "GPU版ONNX RuntimeとNVIDIAドライバを確認してください。"
-        )
-    if not torch_module().cuda.is_available():
-        raise ClientError("PyTorchがCUDA GPUを利用できません。NVIDIAドライバとCUDA環境を確認してください。")
 
 
 def segment_overlaps(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:

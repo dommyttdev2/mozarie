@@ -101,7 +101,7 @@ class SavingMixin:
         image_lock = self.image_io_lock(image_id)
         try:
             # The per-image lock comes first.  The state lock only captures an
-            # immutable epoch; PNG decode, source hashing, rendering and fsync do
+            # immutable epoch; PNG decode, source reads, rendering and fsync do
             # not block requests for other images.
             with image_lock:
                 with self.lock:
@@ -143,8 +143,8 @@ class SavingMixin:
                 mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
-                source_fingerprint = (record.mtime_ns, record.size_bytes, record.content_digest)
-                output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                output, source_digest = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                source_fingerprint = (record.mtime_ns, record.size_bytes, source_digest)
                 self._assert_record_stat_matches(record)
                 if copy_to_default:
                     if not configured_output_directory.is_dir():
@@ -165,7 +165,6 @@ class SavingMixin:
                         rendered_path = Path(handle.name)
                         handle.write(output)
                         handle.flush()
-                        os.fsync(handle.fileno())
 
                 with self.lock:
                     if (
@@ -287,7 +286,6 @@ class SavingMixin:
                     if source_action == "overwrite":
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
-                        record.content_digest = record_snapshot.content_digest
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -354,13 +352,13 @@ class SavingMixin:
                     output_path = self._reserve_output_destination(record, suffix, output_directory) if copy_to_default else record.path
                     if copy_to_default:
                         try:
-                            output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                            output, _source_digest = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                             self._assert_record_stat_matches(record)
                             write_rendered_copy(output_path, output)
                         finally:
                             self._release_output_destination(output_path)
                     else:
-                        output_digest = save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed
                     # record therefore keeps its masks, while successful records clear once.
@@ -370,7 +368,6 @@ class SavingMixin:
                         if not copy_to_default:
                             record.mtime_ns = output_stat.st_mtime_ns
                             record.size_bytes = output_stat.st_size
-                            record.content_digest = output_digest
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)

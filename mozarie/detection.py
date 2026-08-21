@@ -32,8 +32,6 @@ class DetectionMixin:
         model_path = self._configured_model_path("target_segmentation", "対象セグメンテーション")
         provider = str(self.settings["models"].get("provider", "gpu"))
         gpu_device = int(self.settings["models"].get("gpu_device", 0))
-        if provider == "gpu":
-            assert_onnx_cuda_available()
         target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
         auxiliaries: list[tuple[str, GenericYoloSegmenter]] = []
         for key, label in (("ntd11", "NTD11補助モデル"), ("sensitive", "Sensitive補助モデル")):
@@ -51,15 +49,6 @@ class DetectionMixin:
             raise ClientError(f"{label}モデルが見つかりません: {path}")
         if path.suffix.lower() != ".onnx":
             raise ClientError(f"{label}モデルにはONNXファイルを指定してください。")
-        try:
-            {
-                "target_segmentation": validate_target_profile,
-                "ntd11": validate_generic_yolo_segment_profile,
-                "sensitive": validate_generic_yolo_segment_profile,
-                "hand_detection": validate_hand_profile,
-            }[key](path)
-        except ModelProfileError as exc:
-            raise ClientError(f"{label}モデルの互換プロファイルが一致しません: {exc}", "model_profile_invalid") from exc
         return path
 
     def _configured_sam_path(self) -> Path:
@@ -87,8 +76,6 @@ class DetectionMixin:
             return models.hand
         model_path = self._configured_model_path("hand_detection", "手の検出")
         provider = str(self.settings["models"].get("provider", "gpu"))
-        if provider == "gpu":
-            assert_onnx_cuda_available()
         models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
         return models.hand
 

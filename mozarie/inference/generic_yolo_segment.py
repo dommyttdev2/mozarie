@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .onnx import BaseOnnxModel, Letterbox, class_aware_nms_indices, letterbox_bgr, restore_box, sigmoid
-from .profiles import yolo_class_names
+
+
+def _class_names(metadata: dict[str, str]) -> tuple[str, ...]:
+    """Read the class names the optional Ultralytics export needs at runtime."""
+    try:
+        raw = ast.literal_eval(metadata["names"])
+    except (KeyError, SyntaxError, ValueError, TypeError) as exc:
+        raise ValueError("Segmentation model needs names metadata") from exc
+    if isinstance(raw, dict):
+        try:
+            values = [raw[index] for index in range(len(raw))]
+        except KeyError as exc:
+            raise ValueError("Segmentation names metadata is invalid") from exc
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        raise ValueError("Segmentation names metadata is invalid")
+    if not values or any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError("Segmentation names metadata is invalid")
+    return tuple(" ".join(value.strip().lower().replace("_", " ").replace("-", " ").split()) for value in values)
 
 
 class GenericYoloSegmenter(BaseOnnxModel):
@@ -17,7 +37,7 @@ class GenericYoloSegmenter(BaseOnnxModel):
     def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0, input_size: int = 1024) -> None:
         super().__init__(path, device=device, gpu_device=gpu_device)
         self.input_size = input_size
-        self.class_names = yolo_class_names(dict(self.session.get_modelmeta().custom_metadata_map))
+        self.class_names = _class_names(dict(self.session.get_modelmeta().custom_metadata_map))
 
     def _prediction_rows(self, output: np.ndarray) -> np.ndarray:
         rows = np.asarray(output)

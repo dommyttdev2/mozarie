@@ -70,7 +70,7 @@ Model files are not included in this repository. Mozarie never downloads or bund
 
 ## CPU and GPU
 
-Mozarie works on CPU. GPU acceleration needs a CUDA-capable PyTorch build and a GPU architecture supported by that build. In **Settings > Detection**, **Model and GPU information** lists each GPU and marks an unsupported one as unavailable; choose CPU when no supported GPU is available. Checking this information does not construct inference models or allocate GPU memory; SAM is inspected only as checkpoint metadata.
+Mozarie works on CPU. ONNX detection uses ONNX Runtime's CUDA provider when GPU is selected; SAM and HandSegNet use PyTorch only when those features run. In **Settings > Detection**, **Model and GPU information** lists the GPUs supported by the installed PyTorch build. The check only confirms configured file paths and extensions—it does not open model files or allocate GPU memory. Models are loaded when the feature actually runs, and any incompatible model is reported there.
 
 ## Workflow
 
