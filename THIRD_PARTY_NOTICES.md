@@ -8,7 +8,6 @@ Mozarie is distributed under the [MIT License](LICENSE). The following direct ru
 | NumPy | Array operations | [numpy/numpy](https://github.com/numpy/numpy) | [BSD-3-Clause](https://github.com/numpy/numpy/blob/main/LICENSE.txt) |
 | Pillow | Image decoding and metadata handling | [python-pillow/Pillow](https://github.com/python-pillow/Pillow) | [HPND](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
 | OpenCV | Image processing | [opencv/opencv](https://github.com/opencv/opencv) | [Apache-2.0](https://github.com/opencv/opencv/blob/4.x/LICENSE) |
-| ONNX | ONNX graph validation | [onnx/onnx](https://github.com/onnx/onnx) | [Apache-2.0](https://github.com/onnx/onnx/blob/main/LICENSE) |
 | ONNX Runtime | ONNX model execution | [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) | [MIT](https://github.com/microsoft/onnxruntime/blob/main/LICENSE) |
 | PyTorch | SAM runtime | [pytorch/pytorch](https://github.com/pytorch/pytorch) | [BSD-3-Clause](https://github.com/pytorch/pytorch/blob/main/LICENSE) |
 | Torchvision | SAM image helpers | [pytorch/vision](https://github.com/pytorch/vision) | [BSD-3-Clause](https://github.com/pytorch/vision/blob/main/LICENSE) |

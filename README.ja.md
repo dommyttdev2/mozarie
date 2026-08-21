@@ -70,7 +70,7 @@ yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 
 ## CPUとGPU
 
-MozarieはCPUで動作します。GPUを使うにはCUDA対応のPyTorchと、そのPyTorchが対応するGPUアーキテクチャが必要です。**設定 > 検出**の**モデル・GPU情報を確認**ではGPUごとの対応可否を表示し、非対応GPUは選択できません。対応GPUがない場合はCPUを選んでください。この確認では推論モデルを構築せず、GPUメモリも確保しません。SAMはチェックポイントのメタデータだけを確認します。
+MozarieはCPUで動作します。GPUを選んだ場合、ONNX検出はONNX RuntimeのCUDA providerを使い、SAMとHandSegNetは実際にその機能を使うときだけPyTorchを使います。**設定 > 検出**の**モデル・GPU情報を確認**では、インストール済みPyTorchが対応するGPUを表示します。この確認で行うのは設定済みパスと拡張子の確認だけで、モデルファイルを開いたりGPUメモリを確保したりしません。モデルの互換性は実際に機能を実行したときに確認し、問題があればその場で表示します。
 
 ## 使い方
 

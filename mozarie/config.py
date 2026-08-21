@@ -221,26 +221,14 @@ def _validate_output_directory(value: Any) -> str:
 
 
 def validate_output_directory_ready(value: str | Path) -> Path:
-    """Require an existing writable output folder without creating it."""
-    temporary_path: Path | None = None
-    try:
-        raw = os.fspath(value)
-        if "\x00" in raw:
-            raise SettingsError("saving.default_output_directory must not contain NUL")
-        path = Path(raw).expanduser()
-        if not path.is_absolute() or not path.is_dir():
-            raise SettingsError("saving.default_output_directory must be an existing directory")
-        with tempfile.NamedTemporaryFile(dir=path, prefix=".mozarie-write-check-", delete=False) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(b"1")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return path.resolve()
-    except (OSError, ValueError) as exc:
-        raise SettingsError("saving.default_output_directory must be writable") from exc
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+    """Require an existing output folder; the actual save reports write errors."""
+    raw = os.fspath(value)
+    if "\x00" in raw:
+        raise SettingsError("saving.default_output_directory must not contain NUL")
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or not path.is_dir():
+        raise SettingsError("saving.default_output_directory must be an existing directory")
+    return path.resolve()
 
 
 def _validate_targets(value: Any) -> list[str]:

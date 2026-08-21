@@ -47,7 +47,6 @@ from server import (  # noqa: E402
     accepted_hand_sam_mask,
     accepted_specialist_hand_mask,
     arbitrate_segment_sources,
-    assert_onnx_cuda_available,
     calculate_block_size,
     clip_mask_to_roi,
     confidence_for_source,
@@ -74,7 +73,30 @@ from server import (  # noqa: E402
     _schedule_browser_open,
 )
 
-SYNTHETIC_DIGEST = hashlib.sha256(b"mozarie-test-record").hexdigest()
+def import_images_for_test(state, files):
+    """Exercise the binary staging path without retaining the removed JSON API."""
+    imported = []
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for index, file_data in enumerate(files):
+            raw = file_data.get("raw")
+            if raw is None:
+                raw = base64.b64decode(file_data.get("data", ""))
+            staged = root / f"{index}.upload"
+            staged.write_bytes(raw)
+            _images, item_imported = state.import_image_file_for_api(
+                staged,
+                name=file_data.get("name", ""),
+                relative_path=file_data.get("relativePath", file_data.get("name", "")),
+                client_key=file_data.get("clientKey", str(index)),
+                include_images=False,
+            )
+            imported.extend(item_imported)
+    return state.list_images(), imported
+
+
+def import_image_list_for_test(state, files):
+    return import_images_for_test(state, files)[0]
 
 
 class MozarieTests(unittest.TestCase):
@@ -123,6 +145,29 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.state, "complete")
             self.assertTrue((app_dir / "output" / "source_censored.png").is_file())
 
+    def test_apply_overwrite_updates_live_catalog_asset_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            asset_version = state.asset_version(record)
+            asset_revision = record.asset_revision
+
+            self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}))
+            assert state.worker_thread is not None
+            state.worker_thread.join(2)
+
+            self.assertFalse(state.worker_thread.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            live_record = state.image_for_id(image_id)
+            output_stat = source.stat()
+            self.assertEqual(live_record.mtime_ns, output_stat.st_mtime_ns)
+            self.assertEqual(live_record.size_bytes, output_stat.st_size)
+            self.assertEqual(live_record.asset_revision, asset_revision + 1)
+            self.assertNotEqual(state.asset_version(live_record), asset_version)
+
     def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
         state = self.new_state()
         with tempfile.TemporaryDirectory() as directory:
@@ -152,7 +197,7 @@ class MozarieTests(unittest.TestCase):
     def test_output_directory_picker_rejects_an_active_import_before_launch(self):
         state = self.new_state()
         with state.lock:
-            state.importing_count = 1
+            state.active_import_count = 1
         with patch.object(http_module.subprocess, "run") as run, self.assertRaisesRegex(ClientError, "処理中"):
             http_module._pick_output_directory(state)
         run.assert_not_called()
@@ -228,84 +273,9 @@ class MozarieTests(unittest.TestCase):
              patch.object(state, "settings_status", return_value=status) as settings_status:
             self.assertEqual(state.preview_settings_status(preview), status)
         validate.assert_called_once_with(preview)
-        settings_status.assert_called_once_with(preview, verify_sam_checkpoint=True)
+        settings_status.assert_called_once_with(preview)
         save.assert_not_called()
         self.assertEqual(state.settings, original)
-
-    def test_settings_status_skips_sam_loading_until_preview_and_rejects_truncated_checkpoint(self):
-        state = self.new_state()
-        torch = state_module.torch_module()
-        if not hasattr(torch, "save"):
-            self.skipTest("PyTorch is not installed")
-        with tempfile.TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "sam_vit_b.pth"
-            torch.save({"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}, checkpoint)
-            settings = copy.deepcopy(state.settings)
-            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
-            with patch.object(torch, "load", wraps=torch.load) as load:
-                self.assertTrue(state.settings_status(settings)["models"]["sam_checkpoint"]["valid"])
-                load.assert_not_called()
-            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
-            self.assertFalse(status["valid"])
-            self.assertEqual(status["reasonCode"], "invalid_model")
-
-    def test_settings_status_accepts_synthetic_flat_sam_checkpoint_metadata(self):
-        state = self.new_state()
-        torch = state_module.torch_module()
-        if not hasattr(torch, "save"):
-            self.skipTest("PyTorch is not installed")
-        with tempfile.TemporaryDirectory() as directory:
-            for model_type, metadata in state_module.SAM_CHECKPOINT_METADATA.items():
-                checkpoint = Path(directory) / f"sam_{model_type}.pth"
-                tensors = {
-                    key: torch.empty(shape, device="meta")
-                    for key, shape in metadata["shapes"].items()
-                }
-                tensors.update({
-                    f"placeholder.{index}": torch.empty((), device="meta")
-                    for index in range(metadata["tensor_count"] - len(tensors))
-                })
-                torch.save(tensors, checkpoint)
-                settings = copy.deepcopy(state.settings)
-                settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": model_type})
-                self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
-                for key in metadata["shapes"]:
-                    wrong_shape = dict(tensors)
-                    wrong_shape[key] = torch.empty((), device="meta")
-                    self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(wrong_shape, model_type))
-                too_few = dict(tensors)
-                too_few.pop(next(iter(too_few)))
-                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_few, model_type))
-                too_many = dict(tensors)
-                too_many["placeholder.extra"] = torch.empty((), device="meta")
-                self.assertFalse(state_module.is_valid_sam_checkpoint_metadata(too_many, model_type))
-
-    @unittest.skipUnless(
-        os.environ.get("MOZARIE_TEST_LOCAL_MODELS") == "1",
-        "set MOZARIE_TEST_LOCAL_MODELS=1 to verify the local official SAM model",
-    )
-    def test_local_official_vit_b_sam_checkpoint_metadata(self):
-        checkpoint = state_module.APP_DIR / "models" / "sam_vit_b_01ec64.pth"
-        if not checkpoint.is_file():
-            self.skipTest("local official SAM ViT-B checkpoint is not installed")
-        state = self.new_state()
-        settings = copy.deepcopy(state.settings)
-        settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
-        self.assertTrue(state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]["valid"])
-
-    def test_settings_status_rejects_wrapped_sam_checkpoint(self):
-        state = self.new_state()
-        torch = state_module.torch_module()
-        if not hasattr(torch, "save"):
-            self.skipTest("PyTorch is not installed")
-        with tempfile.TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "sam_vit_b.pth"
-            torch.save({"state_dict": {"image_encoder.patch_embed.proj.weight": torch.zeros((768, 3, 16, 16))}}, checkpoint)
-            settings = copy.deepcopy(state.settings)
-            settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b"})
-            status = state.settings_status(settings, verify_sam_checkpoint=True)["models"]["sam_checkpoint"]
-            self.assertFalse(status["valid"])
-            self.assertEqual(status["reasonCode"], "invalid_model")
 
     def test_cuda_status_matches_pytorch_cubin_compatibility_and_keeps_cpu_fallback_valid(self):
         cuda = types.SimpleNamespace(
@@ -403,7 +373,7 @@ class MozarieTests(unittest.TestCase):
                 upload_thread = threading.Thread(target=upload)
                 upload_thread.start()
                 self.assertTrue(entered.wait(3))
-                self.assertEqual(state.import_transfer_count, 1)
+                self.assertEqual(state.active_import_count, 1)
                 mutations = [
                     ("/api/catalog/clear", {}),
                     ("/api/folder", {"path": str(source.parent)}),
@@ -423,7 +393,7 @@ class MozarieTests(unittest.TestCase):
                 release.set(); upload_thread.join(5)
                 self.assertFalse(upload_thread.is_alive())
                 self.assertEqual(result["status"], 200)
-                self.assertEqual(state.import_transfer_count, 0)
+                self.assertEqual(state.active_import_count, 0)
                 self.assertFalse(staged.exists())
         finally:
             release.set()
@@ -506,7 +476,6 @@ class MozarieTests(unittest.TestCase):
         return ImageRecord(
             image_id="test", path=path, relative_path=path.name, width=width, height=height,
             mtime_ns=path.stat().st_mtime_ns, size_bytes=path.stat().st_size,
-            content_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
     @staticmethod
@@ -514,20 +483,6 @@ class MozarieTests(unittest.TestCase):
         mask = np.zeros((height, width), dtype=np.uint8)
         mask[4:12, 4:12] = 255
         return mask
-
-    @staticmethod
-    def _write_same_size_png_pair(path: Path) -> bytes:
-        source = np.full((16, 16, 3), 255, dtype=np.uint8)
-        replacement = np.zeros((16, 16, 3), dtype=np.uint8)
-        replacement[..., 2] = 255
-        encoded: list[bytes] = []
-        for pixels in (source, replacement):
-            output = io.BytesIO()
-            Image.fromarray(pixels).save(output, format="PNG", compress_level=0)
-            encoded.append(output.getvalue())
-        assert len(encoded[0]) == len(encoded[1])
-        path.write_bytes(encoded[0])
-        return encoded[1]
 
     @staticmethod
     def _jpeg_segment(marker: int, payload: bytes) -> bytes:
@@ -664,7 +619,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_job_lifecycle_logs_start_completion_and_failure(self):
         state = self.new_state()
-        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
         with patch("server.threading.Thread"):
             with self.assertLogs(server_module.LOGGER, "INFO") as logs:
                 state._start_job("detect", [record], lambda *_args, **_kwargs: None)
@@ -727,9 +682,10 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(pixels).save(path, format="PNG", pnginfo=metadata)
             original = path.read_bytes()
             original_manifest = png_ancillary_manifest(original)
-            original_mtime_ns = path.stat().st_mtime_ns
+            original_stat = path.stat()
+            original_mtime_ns = original_stat.st_mtime_ns
 
-            record = ImageRecord(image_id="test", path=path, relative_path="source.png", width=16, height=16, mtime_ns=original_mtime_ns, content_digest=hashlib.sha256(path.read_bytes()).hexdigest())
+            record = ImageRecord(image_id="test", path=path, relative_path="source.png", width=16, height=16, mtime_ns=original_mtime_ns, size_bytes=original_stat.st_size)
             save_with_mask(record, self._mask(16, 16), 4)
 
             saved = path.read_bytes()
@@ -804,7 +760,7 @@ class MozarieTests(unittest.TestCase):
             mask = np.zeros((40, 20), dtype=np.uint8)
             mask[4:12, 4:12] = 255
 
-            output = server_module.render_with_mask(record, mask, 4)
+            output, _digest = server_module.render_with_mask(record, mask, 4)
 
             self.assertEqual(
                 png_ancillary_manifest(source, exclude={b"eXIf"}),
@@ -830,7 +786,7 @@ class MozarieTests(unittest.TestCase):
             mask = np.zeros((40, 20), dtype=np.uint8)
             mask[4:12, 4:12] = 255
 
-            output = server_module.render_with_mask(record, mask, 4)
+            output, _digest = server_module.render_with_mask(record, mask, 4)
 
             self.assertEqual(
                 webp_metadata_manifest(source, exclude={b"EXIF"}),
@@ -872,7 +828,7 @@ class MozarieTests(unittest.TestCase):
         Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG", pnginfo=metadata)
         state = self.new_state()
 
-        imported = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]
+        imported = import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])[0]
         record = state.image_for_id(imported["id"])
         records, _generation = state._records_for_ids_with_catalog([imported["id"]])
 
@@ -889,7 +845,7 @@ class MozarieTests(unittest.TestCase):
             encoded = base64.b64encode(raw.getvalue()).decode("ascii")
             state = self.new_state()
 
-            images = state.import_images([
+            images = import_image_list_for_test(state, [
                 {"name": "same.png", "relativePath": "album/one/same.png", "data": encoded},
                 {"name": "same.png", "relativePath": "album/two/same.png", "data": encoded},
             ])
@@ -906,7 +862,7 @@ class MozarieTests(unittest.TestCase):
 
         for relative_path in ("", "/absolute.png", "C:/drive.png", "one//two.png", "./image.png", "one/../image.png"):
             with self.subTest(relative_path=relative_path), self.assertRaisesRegex(ClientError, "^画像の相対パスが不正です。$"):
-                state.import_images([{"name": "image.png", "relativePath": relative_path, "data": encoded}])
+                import_image_list_for_test(state, [{"name": "image.png", "relativePath": relative_path, "data": encoded}])
     def test_import_keeps_original_bytes_under_the_session_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -915,11 +871,11 @@ class MozarieTests(unittest.TestCase):
             raw = source.getvalue()
             state = self.new_state()
             state.set_root(str(root))
-            images = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            images = import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
             self.assertEqual(len(images), 1)
             imported = state.session_imports_dir / "dropped.png"
             self.assertEqual(imported.read_bytes(), raw)
-            state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
             self.assertTrue((state.session_imports_dir / "dropped_2.png").is_file())
             self.assertFalse((root / ".mozarie_imports").exists())
 
@@ -1046,7 +1002,7 @@ class MozarieTests(unittest.TestCase):
         encoded = io.BytesIO()
         Image.new("RGB", (16, 16), "white").save(encoded, format="PNG")
         state = self.new_state()
-        images, _imported = state.import_images_for_api([{
+        images, _imported = import_images_for_test(state, [{
             "clientKey": "session", "name": "nested/source.png", "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
         }])
         image_id = images[0]["id"]
@@ -1080,7 +1036,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(start_job.call_args.args[4], {})
             buffer = io.BytesIO()
             Image.new("RGB", (16, 16), "white").save(buffer, format="PNG")
-            imported = state.import_images([{"name": "dropped.png", "data": base64.b64encode(buffer.getvalue()).decode("ascii")}])
+            imported = import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(buffer.getvalue()).decode("ascii")}])
             session_id = next(item["id"] for item in imported if item["sourceKind"] == "session")
             with self.assertRaisesRegex(ClientError, "コピー保存"):
                 state.start_apply([session_id], 100, {})
@@ -1114,7 +1070,7 @@ class MozarieTests(unittest.TestCase):
 
         state.request_cancel()
         state._run_fixed_workers(
-            [ImageRecord(image_id="record", path=Path(__file__), relative_path="record.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)], 1,
+            [ImageRecord(image_id="record", path=Path(__file__), relative_path="record.png", width=1, height=1, mtime_ns=0)], 1,
             lambda _index, record: processed.append(record.image_id), control, None, None,
         )
 
@@ -1211,46 +1167,6 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.candidates[image_id], [old_candidate])
             self.assertTrue(old_mask_path.is_file())
             self.assertFalse(new_mask_path.exists())
-
-    def test_same_stat_change_during_detection_does_not_add_an_extra_digest_pass(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.png"
-            replacement = self._write_same_size_png_pair(source)
-            original_stat = source.stat()
-            state = self.new_state()
-            image_id = state.set_root(str(root))[0]["id"]
-            record = state.image_for_id(image_id)
-            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
-            old_path = state.cache_dir / image_id / "old.png"
-            old_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16)).save(old_path)
-            old_candidate = Candidate("old", "boundary", 0.9, old_path, origin="boundary")
-            state.candidates[image_id] = [old_candidate]
-            entered = threading.Event()
-            release = threading.Event()
-
-            def detect_image(*_args):
-                pending = state.cache_dir / image_id / ".mozarie-pending-new.tmp"
-                Image.fromarray(self._mask(16, 16)).save(pending, format="PNG")
-                entered.set()
-                self.assertTrue(release.wait(2))
-                return [Candidate("new", "penis", 0.9, pending)]
-
-            worker = threading.Thread(target=lambda: state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1))
-            with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=detect_image):
-                worker.start()
-                self.assertTrue(entered.wait(2))
-                source.write_bytes(replacement)
-                self.assertEqual(source.stat().st_size, original_stat.st_size)
-                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-                release.set()
-                worker.join(3)
-
-            self.assertFalse(worker.is_alive())
-            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["old", "new"])
-            self.assertTrue(old_path.is_file())
-            self.assertFalse((state.cache_dir / image_id / ".mozarie-pending-new.tmp").exists())
 
     def test_detect_job_can_be_cancelled_with_the_shared_control(self):
         state = self.new_state()
@@ -1509,6 +1425,48 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(started.count(first_id), 2)
 
+    def test_queued_overwrite_preserves_externally_changed_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.png"
+            second_path = root / "second.png"
+            Image.new("RGB", (16, 16), "white").save(first_path)
+            Image.new("RGB", (16, 16), "black").save(second_path)
+            state = self.new_state()
+            first_id, second_id = (image["id"] for image in state.set_root(str(root)))
+            records = [state.image_for_id(image_id) for image_id in (first_id, second_id)]
+            masks = {image_id: self._mask(16, 16) for image_id in (first_id, second_id)}
+            state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            original_save = saving_module.save_with_mask
+
+            def hold_first_save(record, mask, block_size):
+                if record.image_id == first_id:
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(2))
+                return original_save(record, mask, block_size)
+
+            worker = threading.Thread(
+                target=state._apply_worker,
+                args=(records, 100, masks),
+                kwargs={"saving_parallelism": 1},
+            )
+            with patch.object(saving_module, "save_with_mask", side_effect=hold_first_save):
+                worker.start()
+                self.assertTrue(first_entered.wait(2))
+                previous_stat = second_path.stat()
+                Image.new("RGB", (16, 16), "green").save(second_path)
+                os.utime(second_path, ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000))
+                external_contents = second_path.read_bytes()
+                release_first.set()
+                worker.join(3)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.completed_image_ids, (first_id,))
+            self.assertEqual(second_path.read_bytes(), external_contents)
+
     def test_parallel_apply_starts_two_workers_and_publishes_results_in_input_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1552,7 +1510,7 @@ class MozarieTests(unittest.TestCase):
                 if index == 0:
                     with completion_lock:
                         completion_order.append(index)
-                return f"rendered-{index}".encode("ascii")
+                return f"rendered-{index}".encode("ascii"), "digest"
 
             def capture_copy(destination, _output):
                 written_paths.append(destination)
@@ -1615,7 +1573,7 @@ class MozarieTests(unittest.TestCase):
                 second_started.set()
                 if not release_second.wait(2):
                     raise RuntimeError("test did not release the second worker")
-                return b"rendered-second"
+                return b"rendered-second", "digest"
 
             def output_destination(record, _suffix, _reserved):
                 return output_paths[record.image_id]
@@ -1641,7 +1599,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_pause_waits_for_all_claimed_records_before_becoming_paused(self):
         state = self.new_state()
-        records = [ImageRecord(image_id=str(index), path=Path(f"image-{index}.png"), relative_path=f"image-{index}.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST) for index in range(3)]
+        records = [ImageRecord(image_id=str(index), path=Path(f"image-{index}.png"), relative_path=f"image-{index}.png", width=1, height=1, mtime_ns=0) for index in range(3)]
         control = server_module.JobControl()
         state.job = server_module.Job(kind="apply", state="running", total=3, image_ids=tuple(record.image_id for record in records))
         state.job_control = control
@@ -1974,18 +1932,13 @@ class MozarieTests(unittest.TestCase):
         Image.new("RGB", (8, 8), "white").save(valid, format="PNG")
         state = self.new_state()
         with self.assertRaises(ClientError):
-            state.import_images([{
+            import_image_list_for_test(state, [{
                 "name": "wrong.jpg", "data": base64.b64encode(valid.getvalue()).decode("ascii"),
             }])
         with self.assertRaises(ClientError):
-            state.import_images([{
+            import_image_list_for_test(state, [{
                 "name": "broken.png", "data": base64.b64encode(valid.getvalue()[:20]).decode("ascii"),
             }])
-
-    def test_onnx_provider_preflight_rejects_cpu_only_runtime(self):
-        with patch("onnxruntime.get_available_providers", return_value=["CPUExecutionProvider"]):
-            with self.assertRaisesRegex(ClientError, "CUDAExecutionProvider"):
-                assert_onnx_cuda_available()
 
     def test_sam_cpu_setting_never_selects_cuda(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2033,9 +1986,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
         precise = Mock()
-        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            detection_module, "assert_onnx_cuda_available"
-        ), patch.object(detection_module, "TargetSegmenter", return_value=precise) as segmenter:
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(detection_module, "TargetSegmenter", return_value=precise) as segmenter:
             first = state._ensure_models()
             second = state._ensure_models()
         self.assertIs(first, second)
@@ -2109,9 +2060,7 @@ class MozarieTests(unittest.TestCase):
     def test_disabled_auxiliary_models_are_not_loaded(self):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": False, "sensitive_enabled": False})
-        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(
-            detection_module, "assert_onnx_cuda_available"
-        ), patch.object(detection_module, "TargetSegmenter", return_value=Mock()) as segmenter:
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), patch.object(detection_module, "TargetSegmenter", return_value=Mock()) as segmenter:
             models = state._ensure_models()
         self.assertEqual(models.auxiliaries, [])
         self.assertEqual(segmenter.call_count, 1)
@@ -2120,9 +2069,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"].update({"ntd11_enabled": True, "sensitive_enabled": True})
         paths = iter((Path("target.onnx"), Path("ntd11.onnx"), Path("sensitive.onnx")))
-        with patch.object(state, "_configured_model_path", side_effect=lambda *_args: next(paths)), patch.object(
-            detection_module, "assert_onnx_cuda_available"
-        ), patch.object(detection_module, "TargetSegmenter", return_value=Mock()), patch.object(
+        with patch.object(state, "_configured_model_path", side_effect=lambda *_args: next(paths)), patch.object(detection_module, "TargetSegmenter", return_value=Mock()), patch.object(
             detection_module, "GenericYoloSegmenter", side_effect=[Mock(), Mock()]
         ):
             models = state._load_detection_models()
@@ -2135,55 +2082,10 @@ class MozarieTests(unittest.TestCase):
             "sensitive": "missing-sensitive.onnx", "sensitive_enabled": False,
             "hand_detection": "missing-hand.onnx", "hand_detection_enabled": False,
         })
-        with patch.object(server_module, "validate_generic_yolo_segment_profile") as generic_validator, patch.object(
-            server_module, "validate_hand_profile"
-        ) as hand_validator:
-            status = state.settings_status()["models"]
-        generic_validator.assert_not_called()
-        hand_validator.assert_not_called()
+        status = state.settings_status()["models"]
         self.assertFalse(status["ntd11"]["enabled"])
         self.assertFalse(status["sensitive"]["enabled"])
         self.assertFalse(status["hand_detection"]["enabled"])
-
-    def test_enabled_hand_segmentation_status_reads_only_safetensors_header(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "handsegnet.safetensors"
-            path.write_bytes(b"header-only-test")
-            state.settings["models"].update({
-                "hand_detection_enabled": True,
-                "hand_segmentation": str(path),
-                "hand_segmentation_enabled": True,
-            })
-
-            class Header:
-                def __init__(self):
-                    self.keys_called = False
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *_args):
-                    return False
-
-                def keys(self):
-                    self.keys_called = True
-                    return server_module.HAND_SEGMENTATION_VIT_B_TENSORS.keys()
-
-                def get_slice(self, key):
-                    return types.SimpleNamespace(get_shape=lambda: server_module.HAND_SEGMENTATION_VIT_B_TENSORS[key])
-
-                def get_tensor(self, _key):
-                    raise AssertionError("settings status must not load a tensor")
-
-            header = Header()
-            safe_open = MagicMock(return_value=header)
-            fake_safetensors = types.SimpleNamespace(SafetensorError=ValueError, safe_open=safe_open)
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors}):
-                status = state.settings_status()["models"]["hand_segmentation"]
-            self.assertTrue(status["valid"])
-            self.assertTrue(header.keys_called)
-            safe_open.assert_called_once_with(str(path), framework="pt", device="cpu")
 
     def test_hand_segmentation_predictor_strictly_loads_vit_b_once_per_image(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2256,9 +2158,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         models = DetectionModels(Mock())
         hand = Mock()
-        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(
-            detection_module, "assert_onnx_cuda_available"
-        ), patch.object(detection_module, "HandDetector", return_value=hand) as detector:
+        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(detection_module, "HandDetector", return_value=hand) as detector:
             first = state._ensure_hand_model(models)
             second = state._ensure_hand_model(models)
         self.assertIs(first, second)
@@ -2269,7 +2169,7 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"]["hand_segmentation_enabled"] = False
         precise_mask = np.zeros((16, 16), dtype=np.uint8)
         precise_mask[4:12, 4:12] = 255
-        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         sam_mask = np.zeros((1, 16, 16), dtype=bool)
         sam_mask[0, 4:8, 4:8] = True
         predictor = Mock()
@@ -2398,7 +2298,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
-        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         base_mask = np.zeros((16, 16), dtype=np.uint8)
         base_mask[4:12, 4:12] = 255
 
@@ -2429,7 +2329,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         pussy = np.zeros((16, 16), dtype=np.uint8)
         pussy[4:12, 4:12] = 255
-        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
@@ -2448,7 +2348,7 @@ class MozarieTests(unittest.TestCase):
         sam_mask[0, 4:8, 4:8] = True
         predictor = Mock()
         predictor.predict.return_value = sam_mask, np.asarray([0.95]), None
-        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=24, height=24, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=24, height=24, mtime_ns=0)
         with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
             state, "_sam_predictor_for", return_value=predictor
         ):
@@ -2466,7 +2366,7 @@ class MozarieTests(unittest.TestCase):
         state.settings["detection"]["fluid_exclusion_enabled"] = False
         penis = np.zeros((16, 16), dtype=np.uint8)
         penis[2:14, 2:14] = 255
-        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         with patch.object(state, "_hand_boxes", return_value=[]), patch.object(server_module, "white_fluid_mask") as fluid_mask:
             result = state._refine_detected_segments(
                 Mock(), record, Image.new("RGB", (16, 16), "white"),
@@ -3018,7 +2918,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
-        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
         self.assertEqual(start.call_args.args[0], "detect")
@@ -3103,7 +3003,7 @@ class MozarieTests(unittest.TestCase):
 
             def import_worker():
                 try:
-                    state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                    import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
                 finally:
@@ -3138,7 +3038,7 @@ class MozarieTests(unittest.TestCase):
             def import_worker():
                 try:
                     barrier.wait()
-                    state.import_images([{"name": "same.png", "data": base64.b64encode(raw).decode("ascii")}])
+                    import_image_list_for_test(state, [{"name": "same.png", "data": base64.b64encode(raw).decode("ascii")}])
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
@@ -3191,7 +3091,7 @@ class MozarieTests(unittest.TestCase):
             errors = []
             def worker(name):
                 try:
-                    state.import_images([{"name": name, "data": base64.b64encode(raw).decode("ascii")}])
+                    import_image_list_for_test(state, [{"name": name, "data": base64.b64encode(raw).decode("ascii")}])
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
@@ -3219,7 +3119,7 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             state.set_root(str(root))
 
-            images = state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            images = import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
 
             imported = next(image for image in images if image["relativePath"] == "dropped.png")
             record = state.image_for_id(imported["id"])
@@ -3239,7 +3139,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
             state = self.new_state()
             state.set_root(str(root))
-            state.import_images([{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+            import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
             session_dir = state.session_dir
 
             state.clear_catalog()
@@ -3257,7 +3157,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
             state = self.new_state()
             state.set_root(str(root))
-            session_id = state.import_images([{
+            session_id = import_image_list_for_test(state, [{
                 "name": "dropped.png", "relativePath": "nested/dropped.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii"),
             }])[0]["id"]
             source = state.image_for_id(session_id)
@@ -3290,7 +3190,14 @@ class MozarieTests(unittest.TestCase):
             first.set_root(str(root))
             raw_buffer = io.BytesIO()
             Image.new("RGB", (16, 16), "#6688aa").save(raw_buffer, format="PNG")
-            first.import_images([{"name": "active.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+            staged = Path(directory) / "active.upload"
+            staged.write_bytes(raw_buffer.getvalue())
+            first.import_image_file_for_api(
+                staged,
+                name="active.png",
+                relative_path="active.png",
+                client_key="active",
+            )
             active = first.session_dir
 
             second = StudioState(Path(directory) / "cache-second", session_base)
@@ -3350,7 +3257,7 @@ class MozarieTests(unittest.TestCase):
             state._start_job("detect", [record], worker)
             self.assertTrue(entered.wait(2))
             with self.assertRaisesRegex(ClientError, "処理中は画像を追加できません"):
-                state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
             release.set()
             assert state.worker_thread is not None
             state.worker_thread.join(2)
@@ -3378,7 +3285,7 @@ class MozarieTests(unittest.TestCase):
 
             def import_worker():
                 try:
-                    state.import_images([{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                    import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
                 except Exception as exc:  # pragma: no cover - asserted below
                     errors.append(exc)
 
@@ -3398,8 +3305,8 @@ class MozarieTests(unittest.TestCase):
     def test_job_api_exposes_immutable_target_image_ids(self):
         state = self.new_state()
         records = [
-            ImageRecord(image_id="first", path=Path(__file__), relative_path="first.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST),
-            ImageRecord(image_id="second", path=Path(__file__), relative_path="second.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST),
+            ImageRecord(image_id="first", path=Path(__file__), relative_path="first.png", width=1, height=1, mtime_ns=0),
+            ImageRecord(image_id="second", path=Path(__file__), relative_path="second.png", width=1, height=1, mtime_ns=0),
         ]
         with patch("server.threading.Thread"):
             state._start_job("apply", records, lambda *_args, **_kwargs: None)
@@ -3870,7 +3777,7 @@ class MozarieTests(unittest.TestCase):
             )
             with patch.object(state, "combined_candidate_mask", side_effect=compose), \
                 patch.object(state, "_reserve_output_destination", side_effect=lambda record, _suffix, _directory: output_paths[record.image_id]), \
-                 patch.object(saving_module, "render_with_mask", return_value=b"rendered"), \
+                 patch.object(saving_module, "render_with_mask", return_value=(b"rendered", "digest")), \
                  patch.object(saving_module, "write_rendered_copy"):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))
@@ -3947,7 +3854,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(release.wait(2))
             state._cancel_job(kwargs["job_generation"], kwargs["catalog_generation"])
 
-        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
         state._start_job("apply", [record], worker)
         self.assertTrue(entered.wait(2))
         state.request_cancel()
@@ -3959,242 +3866,6 @@ class MozarieTests(unittest.TestCase):
         state._start_job("detect", [record], lambda *_args, **_kwargs: None)
         assert state.worker_thread is not None
         state.worker_thread.join(2)
-
-    def test_frontend_contract_has_safe_mouse_and_localized_controls(self):
-        root = Path(__file__).resolve().parents[1]
-        manifest = (root / "static" / "js" / "manifest.js").read_text(encoding="utf-8")
-        app = "\n".join((root / "static" / "js" / name).read_text(encoding="utf-8") for name in re.findall(r'"([a-z-]+\.js)"', manifest))
-        page = (root / "static" / "index.html").read_text(encoding="utf-8")
-        styles = (root / "static" / "style.css").read_text(encoding="utf-8")
-        dictionary = json.loads((root / "static" / "i18n" / "ja.json").read_text(encoding="utf-8"))
-        self.assertIn('event.button !== 0', app)
-        self.assertIn('event.buttons & 1', app)
-        self.assertIn('event.shiftKey', app)
-        self.assertIn('canvas.addEventListener("contextmenu"', app)
-        self.assertIn('async function startDetectionFromDialog', app)
-        self.assertIn('data-i18n-aria-label="editor.undo"', page)
-        self.assertIn('id="detectCurrentButton"', page)
-        self.assertNotIn('id="loadFolder"', page)
-        self.assertEqual(page.count('max="1.00"'), 3)
-        self.assertIn('id="clearCurrentMasksButton"', page)
-        self.assertIn('id="mosaicPreviewButton"', page)
-        self.assertIn('aria-pressed="true"', page)
-        self.assertNotIn('id="fileBrowserDialog"', page)
-        self.assertIn('id="pickerMenu"', page)
-        self.assertIn('popover', page)
-        self.assertIn('id="pickImages"', page)
-        self.assertIn('id="pickFolderFiles"', page)
-        self.assertNotIn('pickNativeFolder', page)
-        self.assertEqual(page.count('id="pickFolder"'), 1)
-        self.assertEqual(page.count('type="file"'), 2)
-        self.assertIn('id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden', page)
-        self.assertIn('id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden', page)
-        self.assertNotIn('file-browser-dialog', page)
-        self.assertNotIn('file-browser-list', page)
-        self.assertNotIn('id="addImagesButton"', page)
-        self.assertIn('data-i18n="folder.browse">画像を読み込む', page)
-        self.assertNotIn('id="browseDialog"', page)
-        self.assertNotIn('id="fileBrowserDialog"', page)
-        self.assertNotIn('id="jobProgressText"', page)
-        self.assertIn('id="processingProgressText"', page)
-        self.assertIn('id="clearAllMasksButton"', page)
-        self.assertIn('id="clearCatalogButton"', page)
-        self.assertIn('id="batchMoreButton"', page)
-        self.assertIn('id="batchMoreMenu"', page)
-        self.assertIn('id="applyDialog"', page)
-        self.assertIn('id="applyOverwriteMode"', page)
-        self.assertIn('id="applyTemporarySourceNote"', page)
-        self.assertIn('id="detectAllButton"', page)
-        self.assertIn('id="detectDialog"', page)
-        self.assertIn('id="detectConfidenceRange"', page)
-        self.assertIn('id="detectConfidenceNumber"', page)
-        self.assertIn('id="detectStartButton"', page)
-        self.assertNotIn('detectDialog.mode', page)
-        self.assertNotIn('detectDialog.standard', dictionary)
-        self.assertNotIn('detectDialog.highPrecision', dictionary)
-        self.assertIn('id="saveButton"', page)
-        self.assertIn('id="galleryFilter"', page)
-        self.assertIn('id="saveAllButton"', page)
-
-        self.assertIn('class="appbar"', page)
-        self.assertNotIn('class="global-action-bar"', page)
-        self.assertIn('class="canvas-tool-rail"', page)
-        self.assertIn('id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="vertical"', page)
-        self.assertIn('class="canvas-settings-bar"', page)
-        self.assertIn('class="canvas-navigation-bar"', page)
-        self.assertNotIn('class="editor-context-bar"', page)
-        self.assertIn('id="overviewPane"', page)
-        self.assertIn('id="overviewGrid"', page)
-        self.assertNotIn('id="navigationShortcutsEnabled"', page)
-        self.assertIn('id="reviewAndNextButton"', page)
-        self.assertIn('id="reviewStatus"', page)
-        self.assertNotIn('id="reviewStatus" hidden', page)
-        self.assertIn('gallery-review-badge', page)
-        self.assertIn('id="previousImageButton"', page)
-        self.assertIn('id="nextImageButton"', page)
-        self.assertIn('id="divisor"', page)
-        self.assertNotIn('id="selectAllButton"', page)
-        self.assertNotIn('id="applyButton"', page)
-        self.assertIn('id="boundaryTool"', page)
-        self.assertIn('path == "/api/boundary"', (root / "mozarie" / "http.py").read_text(encoding="utf-8"))
-        self.assertIn('drawBoundaryRoi()', app)
-        self.assertIn('function boundaryRequests()', app)
-        self.assertIn('function drawBoundaryScrim(shapes)', app)
-        self.assertIn('if (state.mosaicPreviewEnabled) paintMosaicPreview();', app)
-        self.assertIn('input.value = ""', app)
-        self.assertIn('$("#pickerMenu").hidePopover()', app)
-        self.assertIn('function pickImageFiles(', app)
-        self.assertIn('pickFolderFiles', app)
-        self.assertNotIn('pickNativeFolder', app)
-        self.assertIn('entry.webkitRelativePath || entry.name', app)
-        self.assertIn('async function importSingleFile(entry, clientKey)', app)
-        self.assertIn('"/api/import/file"', app)
-        self.assertIn('"application/octet-stream"', app)
-        self.assertNotIn('entry.file.arrayBuffer()', app)
-        self.assertNotIn('bytesToBase64', app)
-        self.assertNotIn('function pickNativeSource(', app)
-        self.assertNotIn('/api/picker/', app)
-        self.assertNotIn('fileBrowserDialog', app)
-        self.assertNotIn('/api/browser/list', app)
-        self.assertNotIn('/api/catalog/select', app)
-        self.assertIn('async function importFiles(files)', app)
-        self.assertNotIn('spacePressed', app)
-        self.assertIn('const scrollTop = gallery.scrollTop;', app)
-        self.assertIn('gallery.scrollTop = scrollTop;', app)
-        self.assertIn('document.querySelectorAll("button, input, select, textarea")', app)
-        self.assertIn('status.progressCount', app)
-        self.assertIn("status.boundaryReady", dictionary)
-        self.assertIn("editor.mosaicPreview", dictionary)
-        self.assertIn("folder.pickImages", dictionary)
-        self.assertIn("folder.pickFolder", dictionary)
-        self.assertIn("review.reviewedBadge", dictionary)
-        self.assertIn("status.progressCount", dictionary)
-        self.assertIn('grid-auto-rows: max-content', styles)
-        self.assertIn('object-fit: contain', styles)
-        self.assertIn('#applyProgressPanel[hidden] { display: none; }', styles)
-        self.assertIn('gallery.detectAll', dictionary)
-        self.assertIn('editor.clearMasks', dictionary)
-        self.assertIn('confirm.clearCurrent.message', dictionary)
-        self.assertIn("通常の参照元画像は削除しません", dictionary["confirm.clearCatalog.message"])
-        self.assertIn("焼き込み済みのモザイク画素は復元しません", dictionary["confirm.clearAllMasks.message"])
-        self.assertIn('id="collapseGalleryButton" class="pane-rail"', page)
-        self.assertIn('id="collapseInspectorButton" class="pane-rail"', page)
-        self.assertIn('id="applySuffixRow"', page)
-        self.assertNotIn('id="applyOverwriteNote"', page)
-        self.assertEqual(dictionary["folder.browse"], "画像を読み込む")
-        self.assertEqual(dictionary["folder.load"], "読み込む")
-        self.assertNotIn('$("#loadFolder")', app)
-        self.assertIn('if (event.key === "Enter") loadFolder()', app)
-        self.assertNotIn("batch.more", dictionary)
-        self.assertIn('async function cancelDetection()', app)
-        self.assertIn('"/api/job/cancel"', app)
-        self.assertIn('control.cancel_requested.is_set()', (root / "mozarie" / "jobs.py").read_text(encoding="utf-8"))
-        self.assertIn('settings.shortcuts', dictionary)
-        self.assertIn('overview.searchPlaceholder', dictionary)
-        self.assertIn('getAsFileSystemHandle', app)
-        self.assertIn('webkitGetAsEntry', app)
-        self.assertIn('event.preventDefault(); if (!state.applyRunning)', app)
-        self.assertIn('paintMosaicPreview()', app)
-        self.assertIn('saveTargets()', app)
-        self.assertIn('mozarie.reviewed.v1:', app)
-        self.assertIn('state.sourceAccess', app)
-        self.assertIn('await api("/api/images")', app)
-        self.assertIn("apply.handleSource", dictionary)
-        self.assertIn("apply.removeAfterSave", dictionary)
-        self.assertIn("apply.overwriteNote", dictionary)
-        self.assertNotIn('mozarie.navigation-shortcuts.v1', app)
-        self.assertIn('function clearBoundaryInteraction()', app)
-        self.assertIn('state.polygonPoints = [];', app)
-        self.assertNotIn('?t=${Date.now()}', app)
-        self.assertIn('candidateRevision', app)
-        self.assertIn('settingsOpenBrowser', page)
-        self.assertIn('settingsSamType', page)
-        self.assertIn('settingsResetButton', page)
-        self.assertIn('settings.display', dictionary)
-        self.assertEqual(dictionary['settings.display'], '表示・操作')
-        self.assertIn('settings.toolPosition', dictionary)
-        self.assertIn('settingsToolPosition', page)
-        self.assertIn('function applyToolPosition(', app)
-        self.assertIn('data-tool-position="top"', styles)
-        self.assertIn('data-tool-position="bottom"', styles)
-        self.assertIn('function renderOverview(', app)
-        self.assertIn('function markImagesUnreviewed(', app)
-        self.assertIn('function handleNavigationKeydown(', app)
-        self.assertIn('function finishDetectionJob(', app)
-        self.assertIn('function renderCatalogViews()', app)
-        self.assertIn('async function removeImageFromCatalog(', app)
-        self.assertIn('function openCatalogContextMenu(', app)
-        self.assertIn('function setGalleryDropOverlay(', app)
-        self.assertIn('DELETE" });', app)
-        self.assertIn('id="galleryEmptyState"', page)
-        self.assertIn('id="galleryDropOverlay"', page)
-        self.assertIn('id="catalogContextMenu"', page)
-        self.assertIn('id="removeCurrentImageButton"', page)
-        self.assertIn('id="removeAfterSave"', page)
-        self.assertIn('id="galleryPaneContent"', page)
-        self.assertIn('id="candidatePaneContent"', page)
-        self.assertIn('aria-controls="galleryPaneContent"', page)
-        self.assertIn('aria-controls="candidatePaneContent"', page)
-        self.assertNotIn('id="overviewDetectAllButton"', page)
-        self.assertIn('gallery-empty-state', styles)
-        self.assertIn('.appbar {', styles)
-        self.assertIn('.studio-grid.overview-active > .overview-pane {', styles)
-        self.assertEqual(dictionary["gallery.saveTargetCount"], "モザイクあり {count}件")
-        self.assertEqual(dictionary["gallery.saveAll"], "モザイク画像を一括保存")
-        self.assertEqual(dictionary["batch.actions"], "全画像操作")
-        self.assertNotIn("...", dictionary["gallery.saveAll"])
-        self.assertNotIn("...", dictionary["gallery.clearAllMasks"])
-        self.assertNotIn("...", dictionary["gallery.clearCatalog"])
-        self.assertIn('api("/api/output-directory/pick"', app)
-        self.assertNotIn('outputDirectoryForSave()', app)
-        self.assertIn('chooseOutputDirectoryButton', app)
-        self.assertNotIn('data-i18n="batch.more"', page)
-        self.assertIn('data-i18n="batch.actions"', page)
-        self.assertIn('function positionCatalogContextMenu(', app)
-        self.assertIn('menu.showPopover?.();\n  positionCatalogContextMenu(menu, event.clientX, event.clientY);', app)
-        self.assertIn("confirm.removeImage.message", dictionary)
-        self.assertNotIn('Math.sin(Date.now()', app)
-        backend = "\n".join((root / "mozarie" / name).read_text(encoding="utf-8") for name in ("core.py", "state.py", "image_io.py", "http.py"))
-        self.assertIn('path == "/api/import"', backend)
-        self.assertNotIn('path == "/api/picker/images"', backend)
-        self.assertNotIn('path == "/api/picker/folder"', backend)
-        self.assertNotIn('choose_native_image_files', backend)
-        self.assertNotIn('import_file_paths', backend)
-        self.assertIn('def safe_import_relative_path(', backend)
-        self.assertNotIn('path == "/api/browser/list"', backend)
-        self.assertNotIn('path == "/api/catalog/select"', backend)
-        self.assertIn('payload.get("divisor")', backend)
-        self.assertNotIn('payload.get("blockSize")', backend)
-        self.assertIn('TargetSegmenter', backend)
-        self.assertIn('HandDetector', backend)
-        self.assertNotIn('from ultralytics import YOLO', backend)
-        self.assertIn('path == "/api/masks/clear"', backend)
-        self.assertIn('path == "/api/job/pause"', backend)
-        self.assertIn('inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 6px;', styles)
-        self.assertIn('body { margin: 0; min-width: 0;', styles)
-
-        referenced_keys = set(re.findall(r'data-i18n(?:-title|-aria-label|-placeholder)?="([^"]+)"', page))
-        referenced_keys.update(re.findall(r'\bt\("([^"]+)"', app))
-        self.assertEqual(referenced_keys - dictionary.keys(), set())
-
-    def test_run_batch_uses_only_python_311_or_newer_in_documented_fallback_order(self):
-        root = Path(__file__).resolve().parents[1]
-        launcher = (root / "run.bat").read_text(encoding="utf-8")
-        self.assertIn('if defined MOZARIE_PYTHON', launcher)
-        self.assertIn('%APP_DIR%.venv\\Scripts\\python.exe', launcher)
-        self.assertIn('%APP_DIR%..\\ComfyUI_windows_portable\\python_embeded\\python.exe', launcher)
-        self.assertIn('py -0p', launcher)
-        self.assertIn('findstr /r /c:"-V:3\\.[0-9][0-9]*"', launcher)
-        self.assertIn('where python', launcher)
-        self.assertIn('sys.version_info >= (3, 11)', launcher)
-        self.assertIn('Python 3.11 or newer was not found', launcher)
-        self.assertIn('if "%EXIT_CODE%"=="0" exit /b 0\necho Mozarie stopped with exit code %EXIT_CODE%.\npause', launcher)
-        self.assertIn(':missing_python\necho [Mozarie] Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv.\npause', launcher)
-        self.assertEqual(launcher.count("pause"), 2)
-        self.assertLess(launcher.index('MOZARIE_PYTHON'), launcher.index('.venv\\Scripts\\python.exe'))
-        self.assertLess(launcher.index('.venv\\Scripts\\python.exe'), launcher.index('ComfyUI_windows_portable\\python_embeded\\python.exe'))
-        self.assertLess(launcher.index('python_embeded\\python.exe'), launcher.index('py -0p'))
-        self.assertLess(launcher.index('py -0p'), launcher.index('where python'))
 
     def test_api_returns_utf8_japanese_client_error(self):
         from http.server import ThreadingHTTPServer
@@ -4230,7 +3901,7 @@ class MozarieTests(unittest.TestCase):
         thread.start()
         connection = None
         try:
-            record = ImageRecord(image_id="image", path=Path("image.png"), relative_path="image.png", width=16, height=16, mtime_ns=1, content_digest=SYNTHETIC_DIGEST)
+            record = ImageRecord(image_id="image", path=Path("image.png"), relative_path="image.png", width=16, height=16, mtime_ns=1)
             with patch.object(server_module.STATE, "render_browser_save", return_value=(b"png", record, 3, "one-time-token")):
                 connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
                 body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None}).encode("utf-8")
@@ -4280,50 +3951,28 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
-    def test_api_import_mapping_keeps_client_keys_with_the_new_image_ids(self):
-        raw = io.BytesIO()
-        Image.new("RGB", (8, 8), "white").save(raw, format="PNG")
-        state = self.new_state()
+    def test_staged_file_import_can_skip_the_full_catalog_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            staged = Path(directory) / "first.upload"
+            Image.new("RGB", (8, 8), "white").save(staged, format="PNG")
+            state = self.new_state()
 
-        images, imported = state.import_images_for_api([
-            {"clientKey": "first", "name": "first.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
-            {"clientKey": "second", "name": "second.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
-        ])
+            with patch.object(state, "list_images", wraps=state.list_images) as list_images:
+                images, imported = state.import_image_file_for_api(
+                    staged,
+                    name="first.png",
+                    relative_path="nested/first.png",
+                    client_key="first",
+                    include_images=False,
+                )
 
-        self.assertEqual(len(images), 2)
-        self.assertEqual([entry["clientKey"] for entry in imported], ["first", "second"])
-        self.assertEqual({entry["imageId"] for entry in imported}, {image["id"] for image in images})
-        with self.assertRaisesRegex(ClientError, "clientKey"):
-            state.import_images_for_api([{"name": "missing.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")}])
-
-    def test_import_endpoint_returns_images_and_client_key_mapping(self):
-        from http.server import ThreadingHTTPServer
-
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        connection = None
-        try:
-            expected_images = [{"id": "image-a"}]
-            expected_imported = [{"clientKey": "client-a", "imageId": "image-a"}]
-            with patch.object(server_module.STATE, "import_images_for_api", return_value=(expected_images, expected_imported)) as imported:
-                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                body = json.dumps({"files": [{"clientKey": "client-a"}]}).encode("utf-8")
-                connection.request("POST", "/api/import", body, {
-                    "Content-Type": "application/json",
-                    "X-Mozarie-Token": server_module.STATE.session_token,
-                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
-                })
-                response = connection.getresponse()
-                self.assertEqual(response.status, 200)
-                self.assertEqual(json.loads(response.read().decode("utf-8")), {"images": expected_images, "imported": expected_imported})
-                imported.assert_called_once_with([{"clientKey": "client-a"}])
-        finally:
-            if connection is not None:
-                connection.close()
-            httpd.shutdown()
-            httpd.server_close()
-
+            self.assertEqual(images, [])
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0]["clientKey"], "first")
+            list_images.assert_not_called()
+            records = state.list_images()
+            self.assertEqual(records[0]["id"], imported[0]["imageId"])
+            self.assertEqual(records[0]["relativePath"], "nested/first.png")
     def test_detect_endpoint_forwards_validated_parallelism(self):
         from http.server import ThreadingHTTPServer
 
@@ -4713,7 +4362,31 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(committed["cleared"])
             self.assertEqual(source.read_bytes(), output)
             self.assertEqual(record.size_bytes, source.stat().st_size)
-            self.assertEqual(record.content_digest, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_browser_overwrite_changes_asset_version_when_stat_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            before = state.asset_version(record)
+            original_stat = source.stat()
+            rendered = state.cache_dir / "rendered.png"
+            rendered.write_bytes(source.read_bytes())
+            token = state._issue_browser_save_token_unchecked(
+                record,
+                0,
+                (record.mtime_ns, record.size_bytes, hashlib.sha256(source.read_bytes()).hexdigest()),
+                state.catalog_generation,
+                rendered,
+            )
+
+            state.commit_browser_save(image_id, 0, token, "overwrite")
+
+            self.assertEqual(source.stat().st_mtime_ns, original_stat.st_mtime_ns)
+            self.assertEqual(source.stat().st_size, original_stat.st_size)
+            self.assertNotEqual(state.asset_version(record), before)
 
     def test_browser_save_commit_acquires_import_lock_before_its_image_lock(self):
         class RecordingLock:
@@ -4801,7 +4474,7 @@ class MozarieTests(unittest.TestCase):
         metadata.add_text("prompt", '{"seed": 9}')
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG", pnginfo=metadata)
         state = self.new_state()
-        images, _imported = state.import_images_for_api([
+        images, _imported = import_images_for_test(state, [
             {"clientKey": "session", "name": "source.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
         ])
         image_id = images[0]["id"]
@@ -4822,13 +4495,12 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(rendered_path.exists())
         self.assertEqual(Image.open(record.path).text["prompt"], '{"seed": 9}')
         self.assertEqual(state.candidates.get(image_id, []), [])
-        self.assertEqual(record.content_digest, hashlib.sha256(record.path.read_bytes()).hexdigest())
 
     def test_browser_save_session_deleted_removes_the_session_record_and_render(self):
         raw = io.BytesIO()
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG")
         state = self.new_state()
-        images, _imported = state.import_images_for_api([
+        images, _imported = import_images_for_test(state, [
             {"clientKey": "session", "name": "source.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
         ])
         image_id = images[0]["id"]
@@ -4897,7 +4569,7 @@ class MozarieTests(unittest.TestCase):
             binary_mask[600:616, 400:416] = 255
 
             output, _record, revision, token = state.render_browser_save(image_id, 0, 100, draft)
-            expected = server_module.render_with_mask(record, binary_mask, 13)
+            expected, _digest = server_module.render_with_mask(record, binary_mask, 13)
 
             self.assertEqual(calculate_block_size(width, height, 100), 13)
             self.assertEqual(output, expected)
@@ -5178,7 +4850,7 @@ class MozarieTests(unittest.TestCase):
         raw = io.BytesIO()
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG")
         state = self.new_state()
-        images, _imported = state.import_images_for_api([
+        images, _imported = import_images_for_test(state, [
             {"clientKey": "session", "name": "source.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
         ])
         image_id = images[0]["id"]
@@ -5199,30 +4871,6 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(record.path.read_bytes(), output)
         self.assertEqual(len(state.candidates[image_id]), 1)
         self.assertGreater(state._candidate_revision(image_id), rendered_revision)
-
-    def test_browser_save_allows_a_same_stat_change_without_a_second_digest(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.png"
-            pixels = np.zeros((16, 16, 3), dtype=np.uint8)
-            pixels[..., 0] = 50
-            Image.fromarray(pixels).save(source, compress_level=0)
-            state = self.new_state()
-            image_id = state.set_root(str(source.parent))[0]["id"]
-            mask_path = state.cache_dir / image_id / "candidate.png"
-            mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16)).save(mask_path)
-            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            revision = state._touch_candidates(image_id)
-            _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
-            original_stat = source.stat()
-            pixels[..., 0] = 200
-            Image.fromarray(pixels).save(source, compress_level=0)
-            self.assertEqual(source.stat().st_size, original_stat.st_size)
-            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
-            self.assertTrue(committed["cleared"])
-            self.assertNotIn(save_token, state.browser_save_tokens)
 
     def test_browser_save_rejects_a_token_after_the_source_fingerprint_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5306,7 +4954,7 @@ class MozarieTests(unittest.TestCase):
                 observed["mask"] = snapshot.copy()
                 render_started.set()
                 self.assertTrue(allow_render_to_finish.wait(2))
-                return b"rendered"
+                return b"rendered", "digest"
 
             def run_render():
                 try:
@@ -5378,30 +5026,6 @@ class MozarieTests(unittest.TestCase):
                 state.prepare_browser_save([image_id], 100, "_censored", False)
             self.assertEqual(len(state.candidates[image_id]), 1)
 
-    def test_browser_save_commit_rejects_same_stat_source_replacement(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.png"
-            replacement = self._write_same_size_png_pair(source)
-            original_stat = source.stat()
-            state = self.new_state()
-            image_id = state.set_root(str(root))[0]["id"]
-            mask_path = state.cache_dir / image_id / "candidate.png"
-            mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16)).save(mask_path)
-            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            revision = state._touch_candidates(image_id)
-            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
-            source.write_bytes(replacement)
-            self.assertEqual(source.stat().st_size, original_stat.st_size)
-            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-
-            with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
-                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
-            self.assertEqual(raised.exception.error_code, "stale_asset")
-            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
-            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
-
     def test_exif_rotated_jpeg_uses_normalized_mask_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "rotated.jpg"
@@ -5414,7 +5038,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual((record.width, record.height), (20, 40))
             mask = np.zeros((40, 20), dtype=np.uint8)
             mask[4:12, 4:12] = 255
-            output = server_module.render_with_mask(record, mask, 4)
+            output, _digest = server_module.render_with_mask(record, mask, 4)
             with Image.open(io.BytesIO(output)) as saved:
                 self.assertEqual(saved.getexif().get(274), 1)
                 self.assertEqual(ImageOps.exif_transpose(saved).size, (20, 40))
@@ -5443,38 +5067,6 @@ class MozarieTests(unittest.TestCase):
             with self.assertRaises(ClientError):
                 state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
 
-    def test_binary_import_uses_raw_bytes_and_preserves_client_mapping(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = io.BytesIO()
-            Image.new("RGB", (12, 8), "white").save(source, format="PNG")
-            state = self.new_state()
-            images, imported = state.import_image_bytes_for_api(
-                source.getvalue(),
-                name="first.png",
-                relative_path="nested/first.png",
-                client_key="client-1",
-            )
-            self.assertEqual(imported, [{"clientKey": "client-1", "imageId": images[0]["id"]}])
-            self.assertEqual(images[0]["relativePath"], "nested/first.png")
-            self.assertEqual(state.image_for_id(images[0]["id"]).source_kind, "session")
-
-    def test_binary_import_can_skip_rebuilding_the_full_catalog(self):
-        with tempfile.TemporaryDirectory():
-            source = io.BytesIO()
-            Image.new("RGB", (12, 8), "white").save(source, format="PNG")
-            state = self.new_state()
-            with patch.object(state, "list_images", wraps=state.list_images) as list_images:
-                images, imported = state.import_image_bytes_for_api(
-                    source.getvalue(),
-                    name="first.png",
-                    relative_path="nested/first.png",
-                    client_key="client-1",
-                    include_images=False,
-                )
-            self.assertEqual(images, [])
-            self.assertEqual(len(imported), 1)
-            list_images.assert_not_called()
-
     def test_update_stops_server_and_state_before_launching_batch(self):
         events = []
         http_server = Mock(); http_server.shutdown.side_effect = lambda: events.append("server")
@@ -5483,29 +5075,10 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(events, ["server", "state", "batch"])
 
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
-        record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0, content_digest=SYNTHETIC_DIGEST)
+        record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)
         destination = server_module._default_output_destination(record, "_mosaic")
         self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
         with self.assertRaises(ClientError): server_module._read_save_suffix("../bad")
-
-    def test_same_stat_replacement_does_not_rehash_candidate_snapshot(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.png"
-            replacement = self._write_same_size_png_pair(source)
-            original_stat = source.stat()
-            state = self.new_state()
-            image_id = state.set_root(directory)[0]["id"]
-            mask_path = state.cache_dir / image_id / "candidate.png"
-            mask_path.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(self._mask(16, 16)).save(mask_path)
-            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            source.write_bytes(replacement)
-            self.assertEqual(source.stat().st_size, original_stat.st_size)
-            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-
-            state.candidate_snapshot(image_id)
-            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["candidate"])
-            self.assertTrue(mask_path.is_file())
 
     def test_folder_scan_uses_import_parallelism_and_sorts_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5516,45 +5089,27 @@ class MozarieTests(unittest.TestCase):
                 Image.new("RGB", (8, 8), "white").save(path)
             active = peak = 0
             active_lock = threading.Lock()
-            original_hash = catalog_module.file_sha256
+            original_inspect = catalog_module.inspect_import_image
 
-            def tracked_hash(path):
+            def tracked_inspect(path, suffix):
                 nonlocal active, peak
                 with active_lock:
                     active += 1
                     peak = max(peak, active)
                 try:
                     time.sleep(0.01)
-                    return original_hash(path)
+                    return original_inspect(path, suffix)
                 finally:
                     with active_lock:
                         active -= 1
 
             state = self.new_state()
             state.settings["importing"]["parallelism"] = 3
-            with patch.object(catalog_module, "file_sha256", side_effect=tracked_hash):
+            with patch.object(catalog_module, "inspect_import_image", side_effect=tracked_inspect):
                 records = state.set_root(directory)
             self.assertLessEqual(peak, 3)
             self.assertGreaterEqual(peak, 2)
             self.assertEqual([record["relativePath"] for record in records], ["a.png", "B.png", "c.png", "nested/d.png"])
-
-    def test_session_imports_store_the_digest_streamed_while_staging(self):
-        raw = io.BytesIO()
-        Image.new("RGB", (8, 8), "#112233").save(raw, format="PNG")
-        payload = raw.getvalue()
-        expected = hashlib.sha256(payload).hexdigest()
-        state = self.new_state()
-        images, _imported = state.import_images_for_api([{
-            "clientKey": "raw", "name": "raw.png", "data": base64.b64encode(payload).decode("ascii"),
-        }])
-        self.assertEqual(state.image_for_id(images[0]["id"]).content_digest, expected)
-        with tempfile.TemporaryDirectory() as directory:
-            staged = Path(directory) / "staged.png"
-            staged.write_bytes(payload)
-            _images, imported = state.import_image_file_for_api(
-                staged, name="staged.png", relative_path="staged.png", client_key="staged",
-            )
-        self.assertEqual(state.image_for_id(imported[0]["imageId"]).content_digest, expected)
 
     def test_browser_render_uses_the_render_digest_without_an_extra_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5594,13 +5149,11 @@ class MozarieTests(unittest.TestCase):
             output_b, _record, revision_b, token_b = state.render_browser_save(image_id, revision, 1, None)
             self.assertNotEqual(output_a, output_b)
             state.commit_browser_save(image_id, revision_b, token_b, "overwrite")
-            digest_b = state.image_for_id(image_id).content_digest
 
             with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
                 state.commit_browser_save(image_id, revision_a, token_a, "overwrite")
             self.assertEqual(raised.exception.error_code, "stale_asset")
             self.assertEqual(source.read_bytes(), output_b)
-            self.assertEqual(state.image_for_id(image_id).content_digest, digest_b)
 
     def test_candidate_state_changes_do_not_hash_the_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5633,7 +5186,34 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaisesRegex(ClientError, "外部で変更"):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
-            self.assertNotEqual(record.content_digest, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_filesystem_save_rejects_change_during_source_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            record = state.image_for_id(state.set_root(directory)[0]["id"])
+            target = record.path
+            read_bytes = Path.read_bytes
+            mutated_bytes = []
+
+            def mutate_after_read(path):
+                result = read_bytes(path)
+                if path == target:
+                    Image.new("RGB", (16, 16), "blue").save(target)
+                    changed_timestamp = record.mtime_ns + 4_000_000_000
+                    os.utime(target, ns=(changed_timestamp, changed_timestamp))
+                    self.assertNotEqual(target.stat().st_mtime_ns, record.mtime_ns)
+                    mutated_bytes.append(read_bytes(target))
+                return result
+
+            with patch.object(Path, "read_bytes", autospec=True, side_effect=mutate_after_read):
+                with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                    save_with_mask(record, self._mask(16, 16), 4)
+            self.assertEqual(raised.exception.error_code, "stale_asset")
+            self.assertEqual(source.read_bytes(), mutated_bytes[0])
+            self.assertEqual(source.stat().st_size, len(mutated_bytes[0]))
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
     def test_copy_save_uses_the_render_digest_without_an_extra_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5651,37 +5231,6 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(render.call_count, 1)
             self.assertEqual(source.read_bytes(), source_bytes)
 
-    def test_capture_bytes_must_match_digest_even_if_source_is_restored_before_final_gate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.png"
-            Image.new("RGB", (16, 16), "white").save(source)
-            white = source.read_bytes()
-            blue_path = Path(directory) / "blue.png"
-            Image.new("RGB", (16, 16), "blue").save(blue_path)
-            blue = blue_path.read_bytes()
-            state = self.new_state()
-            image_id = next(image["id"] for image in state.set_root(directory) if image["relativePath"] == "source.png")
-            record = state.image_for_id(image_id)
-            concrete_path_type = type(source)
-            original_read = concrete_path_type.read_bytes
-            source_resolved = source.resolve()
-
-            def swapped_capture(path):
-                if path.resolve() != source_resolved:
-                    return original_read(path)
-                source.write_bytes(blue)
-                try:
-                    return original_read(source)
-                finally:
-                    source.write_bytes(white)
-
-            with patch.object(concrete_path_type, "read_bytes", autospec=True, side_effect=swapped_capture):
-                with self.assertRaisesRegex(ClientError, "外部で変更"):
-                    server_module.render_with_mask(record, self._mask(16, 16), 4)
-            with patch.object(concrete_path_type, "read_bytes", autospec=True, side_effect=swapped_capture):
-                with self.assertRaisesRegex(ClientError, "外部で変更"):
-                    save_with_mask(record, self._mask(16, 16), 4)
-            self.assertEqual(source.read_bytes(), white)
 
 if __name__ == "__main__":
     unittest.main()

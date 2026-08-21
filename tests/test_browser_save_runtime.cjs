@@ -26,17 +26,20 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function binaryResponse(bytes, saveToken = "runtime-render-token") {
+function binaryResponse(bytes, saveToken = "runtime-render-token", beforeArrayBuffer = null) {
   return {
     ok: true,
     status: 200,
     headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : null },
-    arrayBuffer: async () => Uint8Array.from(bytes).buffer,
+    arrayBuffer: async () => {
+      await beforeArrayBuffer?.();
+      return Uint8Array.from(bytes).buffer;
+    },
     json: async () => ({}),
   };
 }
 
-function createRuntime({ commit, copy = null, deleteOriginal = false, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
+function createRuntime({ commit, copy = null, deleteOriginal = false, renderBinary = null, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   let catalogImages = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   const elements = new Map();
@@ -116,7 +119,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderToke
           if (!response.ok) return response;
           return jsonResponse({ ...await response.json(), candidateRevision: payload.candidateRevision, saveToken: renderToken });
         }
-        return binaryResponse([4, 5, 6], renderToken);
+        return renderBinary ? await renderBinary({ options, requests }) : binaryResponse([4, 5, 6], renderToken);
       }
       if (requestPath === "/api/save/commit") {
         const response = await commit({ options, requests });
@@ -242,14 +245,30 @@ async function runCopyFailureCase() {
 }
 
 async function runCommitFailureCase() {
-    const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, 500) });
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /commit failed/);
+  for (const status of [500, 400]) {
+    const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, status) });
+    await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /commit failed/);
+    assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `${status} is not retried`);
+    assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
+  }
+}
 
-  assert.equal(runtime.state.images.length, 1);
-  const paths = runtime.requests.map((request) => request.path);
-  assert.deepEqual(paths.slice(0, 2), ["/api/save/prepare", "/api/save/render"]);
-  assert.equal(paths.filter((path) => path === "/api/save/commit").length, 3);
-  assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
+async function runRetryableCommitCase() {
+  let commits = 0;
+  const runtime = createRuntime({
+    commit: () => {
+      commits += 1;
+      return commits === 1
+        ? jsonResponse({ error: "temporarily unavailable" }, 503)
+        : jsonResponse({ cleared: true, stale: false, images: [] });
+    },
+  });
+
+  await runtime.runBrowserSave(["image-1"], "_censored", false);
+  const requests = runtime.requests.filter((request) => request.path === "/api/save/commit");
+  assert.equal(requests.length, 2, "503 is retried once");
+  assert.equal(requests[0].options.body, requests[1].options.body, "retry keeps the same save token and payload");
+  assert.equal(JSON.parse(requests[0].options.body).saveToken, "runtime-render-token");
 }
 
 async function runCancelCase() {
@@ -298,6 +317,29 @@ async function runHandleOverwriteCase() {
   assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "overwrite");
 }
 
+async function runHandleOverwriteChangedDuringRenderCase() {
+  let writes = 0;
+  let sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  const sourceHandle = {
+    async getFile() { return sourceFile; },
+    async createWritable() {
+      writes += 1;
+      return { async write() {}, async close() {}, async abort() {} };
+    },
+  };
+  const runtime = createRuntime({
+    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => {
+      sourceFile = { ...sourceFile, size: 13, lastModified: 35 };
+    }),
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+  });
+  runtime.state.images = [{ id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
+  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
+
+  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite"), /sourceChanged|変更/);
+  assert.equal(writes, 0, "the final source check rejects a changed handle before createWritable");
+}
+
 async function runRepeatedHandleOverwriteCase() {
   const image = { id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   let sourceFile = { name: "source.png", size: 12, lastModified: 34 };
@@ -327,12 +369,50 @@ async function runRepeatedHandleOverwriteCase() {
 
 async function runHandleDeleteAfterCopyCase() {
     let removed = false;
-  const sourceHandle = { name: "source.png", async remove() { removed = true; } };
+  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; }, async remove() { removed = true; } };
   const runtime = createRuntime({ deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
   assert.equal(removed, true, "the source handle is removed only after the copy has been written");
   assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
+}
+
+async function runQueuedHandleChangeCases() {
+  const first = { id: "image-1", sourceKind: "session", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", sourceKind: "session", relativePath: "second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  for (const mode of ["overwrite", "copy"]) {
+    let secondFile = { name: "second.png", size: 12, lastModified: 34 };
+    let secondAction = false;
+    const firstHandle = {
+      async getFile() { return { name: "first.png", size: 12, lastModified: 34 }; },
+      async createWritable() { return { async write() {}, async close() {}, async abort() {} }; },
+      async remove() {},
+    };
+    const secondHandle = {
+      async getFile() { return secondFile; },
+      async createWritable() { secondAction = true; return { async write() {}, async close() {}, async abort() {} }; },
+      async remove() { secondAction = true; },
+    };
+    const runtime = createRuntime({
+      initialImages: [first, second],
+      entries: [
+        { imageId: first.id, relativePath: first.relativePath, candidateRevision: 1, deleteOriginal: mode === "copy" },
+        { imageId: second.id, relativePath: second.relativePath, candidateRevision: 1, deleteOriginal: mode === "copy" },
+      ],
+      deleteOriginal: mode === "copy",
+      commit: ({ requests }) => {
+        if (requests.filter((request) => request.path === "/api/save/commit").length === 1) {
+          secondFile = { ...secondFile, size: 13, lastModified: 35 };
+        }
+        return jsonResponse({ cleared: true, stale: false, images: [] });
+      },
+    });
+    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, name: "first.png", size: 12, lastModified: 34 });
+    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
+    await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
+    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
+    assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
+  }
 }
 
 async function runCatalogEpochGuardCase() {
@@ -442,11 +522,14 @@ async function runRemoveAfterSaveCases() {
   await runRemoveAfterSavePartialAndStaleCase();
   await runCopyFailureCase();
   await runCommitFailureCase();
+  await runRetryableCommitCase();
   await runCancelCase();
   await runDeleteOriginalCase();
   await runHandleOverwriteCase();
+  await runHandleOverwriteChangedDuringRenderCase();
   await runRepeatedHandleOverwriteCase();
   await runHandleDeleteAfterCopyCase();
+  await runQueuedHandleChangeCases();
   await runCatalogEpochGuardCase();
   await runPartialCommitFailureReconcileCase();
   await runRemoveAfterSaveCases();

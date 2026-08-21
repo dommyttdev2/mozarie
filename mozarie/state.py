@@ -13,48 +13,6 @@ from .detection import DetectionMixin
 from .jobs import JobsMixin
 
 
-SAM_CHECKPOINT_METADATA = {
-    "vit_b": {
-        "tensor_count": 314,
-        "shapes": {
-            "image_encoder.patch_embed.proj.weight": (768, 3, 16, 16),
-            "image_encoder.blocks.11.attn.qkv.weight": (2304, 768),
-            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
-            "mask_decoder.mask_tokens.weight": (4, 256),
-        },
-    },
-    "vit_l": {
-        "tensor_count": 482,
-        "shapes": {
-            "image_encoder.patch_embed.proj.weight": (1024, 3, 16, 16),
-            "image_encoder.blocks.23.attn.qkv.weight": (3072, 1024),
-            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
-            "mask_decoder.mask_tokens.weight": (4, 256),
-        },
-    },
-    "vit_h": {
-        "tensor_count": 594,
-        "shapes": {
-            "image_encoder.patch_embed.proj.weight": (1280, 3, 16, 16),
-            "image_encoder.blocks.31.attn.qkv.weight": (3840, 1280),
-            "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix": (2, 128),
-            "mask_decoder.mask_tokens.weight": (4, 256),
-        },
-    },
-}
-
-
-def is_valid_sam_checkpoint_metadata(checkpoint: object, model_type: str) -> bool:
-    """Recognize official flat SAM checkpoints from their loaded metadata."""
-    expected = SAM_CHECKPOINT_METADATA.get(model_type)
-    if not isinstance(checkpoint, dict) or expected is None or len(checkpoint) != expected["tensor_count"]:
-        return False
-    return all(
-        key in checkpoint and tuple(checkpoint[key].shape) == shape
-        for key, shape in expected["shapes"].items()
-    )
-
-
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     """List CUDA devices that this PyTorch build can actually execute on."""
     cuda = torch.cuda
@@ -92,8 +50,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()
-        self.importing_count = 0
-        self.import_transfer_count = 0
+        self.active_import_count = 0
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -147,7 +104,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not isinstance(update, dict):
             raise ClientError("設定の形式が正しくありません。", "invalid_settings")
         with self.inference_lock, self.lock:
-            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
             previous_output_directory = self.settings["saving"]["default_output_directory"]
@@ -176,7 +133,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
-            if self.importing_count or self.import_transfer_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+            if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             try:
                 settings = self.settings_store.default_settings()
@@ -196,24 +153,17 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         with self.lock:
             if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は画像を追加できません。")
-            self.import_transfer_count += 1
+            self.active_import_count += 1
 
     def end_import_transfer(self) -> None:
         with self.lock:
-            if self.import_transfer_count:
-                self.import_transfer_count -= 1
+            if self.active_import_count:
+                self.active_import_count -= 1
 
-    def settings_status(self, settings: dict[str, Any] | None = None, *, verify_sam_checkpoint: bool = False) -> dict[str, Any]:
-        """Report model compatibility without constructing inference sessions."""
+    def settings_status(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Report configured model files without loading model data."""
         models = (settings or self.settings)["models"]
         result: dict[str, dict[str, Any]] = {}
-        validators = {
-            "target_segmentation": validate_target_profile,
-            "ntd11": validate_generic_yolo_segment_profile,
-            "sensitive": validate_generic_yolo_segment_profile,
-            "hand_detection": validate_hand_profile,
-        }
-
         def add_status(key: str, *, required: bool, enabled: bool, required_suffix: str | None = None) -> None:
             raw = str(models.get(key, "")).strip()
             if not required and not enabled:
@@ -224,57 +174,21 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     "exists": False,
                     "valid": False,
                     "reasonCode": None,
-                    "profile": None,
                 }
                 return
             path = Path(raw).expanduser() if raw else None
             exists = bool(path and path.is_file())
             valid = exists and (required_suffix is None or path.suffix.lower() == required_suffix)
             reason_code: str | None = None
-            profile: dict[str, object] | None = None
             if not raw:
                 reason_code = "not_configured"
             elif not exists:
                 reason_code = "missing"
             elif not valid:
                 reason_code = "invalid_format"
-            if valid and key in validators:
-                try:
-                    profile = profile_summary(validators[key](path))
-                except ModelProfileError:
-                    valid = False
-                    reason_code = "invalid_model"
-            if valid and key == "hand_segmentation":
-                try:
-                    from safetensors import SafetensorError, safe_open
-                except ImportError:
-                    valid = False
-                    reason_code = "invalid_model"
-                else:
-                    try:
-                        with safe_open(str(path), framework="pt", device="cpu") as checkpoint:
-                            valid = all(
-                                key in checkpoint.keys() and tuple(checkpoint.get_slice(key).get_shape()) == shape
-                                for key, shape in HAND_SEGMENTATION_VIT_B_TENSORS.items()
-                            )
-                        if not valid:
-                            reason_code = "invalid_model"
-                    except (OSError, ValueError, SafetensorError):
-                        valid = False
-                        reason_code = "invalid_model"
             if valid and key == "sam_checkpoint" and path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
                 valid = False
                 reason_code = "invalid_format"
-            if valid and key == "sam_checkpoint" and verify_sam_checkpoint:
-                try:
-                    torch = torch_module()
-                    checkpoint = torch.load(str(path), map_location="cpu", weights_only=True, mmap=True)
-                    valid = is_valid_sam_checkpoint_metadata(checkpoint, models["sam_model_type"])
-                    if not valid:
-                        reason_code = "invalid_model"
-                except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
-                    valid = False
-                    reason_code = "invalid_model"
             result[key] = {
                 "required": required,
                 "enabled": enabled,
@@ -282,7 +196,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "exists": exists,
                 "valid": valid,
                 "reasonCode": reason_code,
-                "profile": profile,
             }
 
         add_status("target_segmentation", required=True, enabled=True, required_suffix=".onnx")
@@ -314,7 +227,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             settings = self.settings_store.validate_update(update)
         except SettingsError as exc:
             raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
-        return self.settings_status(settings, verify_sam_checkpoint=True)
+        return self.settings_status(settings)
 
     @staticmethod
     def _lock_directory(directory: Path) -> Any:
