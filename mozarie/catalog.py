@@ -296,7 +296,6 @@ class CatalogMixin:
         source_fingerprint: tuple[int, int, str],
         catalog_generation: int,
         rendered_path: Path,
-        output_path: Path | None = None,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
@@ -307,7 +306,6 @@ class CatalogMixin:
             catalog_generation=catalog_generation,
             issued_at=time.monotonic(),
             rendered_path=rendered_path,
-            output_path=output_path,
         )
         return token
 

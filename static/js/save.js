@@ -37,7 +37,7 @@ function syncApplyMode() {
   $("#deleteOriginalRow").hidden = !copying;
   $("#applyOutputDirectoryRow").hidden = !copying;
   $("#applySuffix").disabled = state.applyRunning;
-  $("#chooseOutputDirectoryButton").disabled = state.applyRunning || state.saveStarting;
+  $("#chooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
   $("#applyOutputDirectoryStatus").value = state.settings?.saving?.default_output_directory || "";
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
@@ -91,9 +91,25 @@ function renderOutputDirectory() {
   syncApplyMode();
 }
 
+let outputDirectoryPickRequest = null;
+
+function setOutputDirectoryPickerBusy(picking) {
+  state.outputDirectoryPicking = picking;
+  $("#settingsChooseOutputDirectory").disabled = picking;
+  syncApplyMode();
+}
+
 async function pickOutputDirectory() {
-  const selected = await api("/api/output-directory/pick", { method: "POST", body: JSON.stringify({}) });
-  return selected.path || null;
+  if (!outputDirectoryPickRequest) {
+    setOutputDirectoryPickerBusy(true);
+    outputDirectoryPickRequest = api("/api/output-directory/pick", { method: "POST", body: JSON.stringify({}) })
+      .then((selected) => selected.path || null)
+      .finally(() => {
+        outputDirectoryPickRequest = null;
+        setOutputDirectoryPickerBusy(false);
+      });
+  }
+  return outputDirectoryPickRequest;
 }
 
 async function chooseOutputDirectory() {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .core import *
 from .core import _read_mosaic_divisor, _read_save_suffix
+from .config import validate_output_directory_ready
 from .image_io import *
 from . import image_io as _image_io
 
@@ -23,25 +24,33 @@ class SavingMixin:
         if not isinstance(drafts, dict):
             raise ClientError("手描きマスクの形式が正しくありません。")
         suffix = _read_save_suffix(suffix)
-        output_directory = Path(self.settings["saving"]["default_output_directory"])
+        with self.lock:
+            if self.catalog_generation != catalog_generation or any(self.images.get(record.image_id) is not record for record in records):
+                raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
+            records = [replace(record) for record in records]
+            output_directory = Path(self.settings["saving"]["default_output_directory"])
+            saving_parallelism = int(self.settings.get("saving", {}).get("parallelism", 2))
+        if copy_to_default:
+            try:
+                output_directory = validate_output_directory_ready(output_directory)
+            except SettingsError as exc:
+                raise ClientError("保存先フォルダを使用できません。設定で変更してください。") from exc
+        drafts = {str(image_id): (dict(draft) if isinstance(draft, dict) else draft) for image_id, draft in drafts.items()}
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
-            int(self.settings.get("saving", {}).get("parallelism", 2)), output_directory,
+            saving_parallelism, output_directory,
             expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
         )
         return True
 
     def _reserve_output_destination(self, record: ImageRecord, suffix: str, output_directory: Path) -> Path:
-        """Reserve a name briefly; rendering and writes deliberately happen unlocked."""
+        """Reserve a copy name while another worker may be choosing one."""
         with self.output_destination_lock:
-            if output_directory.resolve() == (APP_DIR / "output").resolve():
-                destination = _default_output_destination(record, suffix, self.reserved_output_paths)
-            else:
-                relative = safe_import_relative_path(record.relative_path)
-                target = output_directory / relative
-                destination = unique_session_import_destination(
-                    target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"), self.reserved_output_paths,
-                )
+            relative = safe_import_relative_path(record.relative_path)
+            target = output_directory / relative
+            destination = unique_session_import_destination(
+                target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"), self.reserved_output_paths,
+            )
             self.reserved_output_paths.add(destination)
             return destination
 
@@ -82,12 +91,13 @@ class SavingMixin:
         *,
         copy_to_default: bool = False,
         suffix: str = "_censored",
-    ) -> tuple[bytes, ImageRecord, int, str]:
+    ) -> BrowserSaveRender:
         record = self.image_snapshot(image_id)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
         output_path: Path | None = None
+        configured_output_directory: Path | None = None
         image_lock = self.image_io_lock(image_id)
         try:
             # The per-image lock comes first.  The state lock only captures an
@@ -106,6 +116,13 @@ class SavingMixin:
                         raise ClientError("候補が変更されました。保存をやり直してください。")
                     catalog_generation = self.catalog_generation
                     candidates = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+                    if copy_to_default:
+                        configured_output_directory = Path(self.settings["saving"]["default_output_directory"])
+                if configured_output_directory is not None:
+                    try:
+                        configured_output_directory = validate_output_directory_ready(configured_output_directory)
+                    except SettingsError as exc:
+                        raise ClientError("保存先フォルダを使用できません。設定で変更してください。") from exc
                 # A candidate can disappear between the metadata snapshot and the
                 # disk read.  Do not compose a silently reduced mask.
                 apply_masks: list[np.ndarray] = []
@@ -137,7 +154,7 @@ class SavingMixin:
                     raise ClientError("元画像が変更されました。保存をやり直してください。")
                 if copy_to_default:
                     output_path = self._reserve_output_destination(
-                        record, _read_save_suffix(suffix), Path(self.settings["saving"]["default_output_directory"]),
+                        record, _read_save_suffix(suffix), configured_output_directory,
                     )
                     try:
                         write_rendered_copy(output_path, output)
@@ -152,18 +169,25 @@ class SavingMixin:
                     os.fsync(handle.fileno())
 
                 with self.lock:
-                    if self.images.get(image_id) is None or self.catalog_generation != catalog_generation:
+                    if (
+                        self.images.get(image_id) is None
+                        or self.catalog_generation != catalog_generation
+                        or (configured_output_directory is not None
+                            and Path(self.settings["saving"]["default_output_directory"]).resolve() != configured_output_directory)
+                    ):
                         raise ClientError("画像一覧が変更されました。保存をやり直してください。")
                     if self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
                     save_token = self._issue_browser_save_token_unchecked(
-                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path,
+                        record, current_revision, source_fingerprint, catalog_generation, rendered_path,
                     )
                     rendered_path = None
-            return output, record, current_revision, save_token
+            return BrowserSaveRender(output, record, current_revision, save_token, output_path)
         finally:
             if rendered_path is not None:
                 rendered_path.unlink(missing_ok=True)
+            if output_path is not None and 'save_token' not in locals():
+                output_path.unlink(missing_ok=True)
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:

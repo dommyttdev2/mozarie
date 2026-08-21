@@ -6,10 +6,23 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mozarie.config import SettingsError, SettingsStore, validate_settings
+from mozarie.config import SettingsError, SettingsStore, validate_output_directory_ready, validate_settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_output_directory_ready_requires_an_existing_writable_directory_without_creating_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "保存先"
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(target)
+            self.assertFalse(target.exists())
+            target.mkdir()
+            self.assertEqual(validate_output_directory_ready(target), target.resolve())
+            self.assertEqual(list(target.iterdir()), [])
+            with self.assertRaises(SettingsError):
+                validate_output_directory_ready(str(target) + "\x00bad")
+
     def test_valid_settings_are_persisted_only_to_local_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -89,6 +102,9 @@ class SettingsTests(unittest.TestCase):
             "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
             "saving": {"parallelism": 2, "default_output_directory": "relative-output"},
         }
+        with self.assertRaises(SettingsError):
+            validate_settings(legacy)
+        legacy["saving"]["default_output_directory"] = "C:\\output\x00bad"
         with self.assertRaises(SettingsError):
             validate_settings(legacy)
 

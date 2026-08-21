@@ -194,7 +194,23 @@ class BrowserSaveToken:
     catalog_generation: int
     issued_at: float
     rendered_path: Path
-    output_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class BrowserSaveRender:
+    """Rendered output and the opaque confirmation token for one browser save."""
+
+    output: bytes
+    record: ImageRecord
+    candidate_revision: int
+    save_token: str
+    output_path: Path | None
+
+    def __iter__(self):
+        yield self.output
+        yield self.record
+        yield self.candidate_revision
+        yield self.save_token
 
 
 @dataclass(frozen=True)

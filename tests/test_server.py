@@ -92,6 +92,40 @@ class MozarieTests(unittest.TestCase):
         self._states.append(state)
         return state
 
+    def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            selected = root / "保存先"; selected.mkdir()
+            completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
+            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
+                 patch.object(http_module.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(http_module._pick_output_directory(state), str(selected.resolve()))
+            command = run.call_args.args[0]
+            self.assertEqual(command[:-1], [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand"])
+            self.assertIn("FolderBrowserDialog", base64.b64decode(command[-1]).decode("utf-16le"))
+            self.assertFalse(run.call_args.kwargs["shell"])
+            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(
+                run.call_args.kwargs["env"]["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"],
+                state.settings["saving"]["default_output_directory"],
+            )
+        self.assertTrue(state.output_picker_lock.acquire(blocking=False))
+        state.output_picker_lock.release()
+        self.assertTrue(state.import_lock.acquire(blocking=False))
+        state.import_lock.release()
+
+    def test_output_directory_picker_rejects_busy_import_without_spawning(self):
+        state = self.new_state()
+        with state.lock:
+            state.importing_count = 1
+        with patch.object(http_module.subprocess, "run") as run, self.assertRaisesRegex(ClientError, "処理中"):
+            http_module._pick_output_directory(state)
+        run.assert_not_called()
+
     @staticmethod
     def _record(path: Path, width: int, height: int) -> ImageRecord:
         return ImageRecord(
@@ -1156,7 +1190,7 @@ class MozarieTests(unittest.TestCase):
                 args=(records, 100, masks),
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
-            with patch.object(saving_module, "_default_output_destination", side_effect=output_destination), \
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
                  patch.object(saving_module, "render_with_mask", side_effect=render_in_inverse_order), \
                  patch.object(saving_module, "write_rendered_copy", side_effect=capture_copy):
                 thread.start()
@@ -1216,7 +1250,7 @@ class MozarieTests(unittest.TestCase):
                 args=(records, 100, masks),
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
-            with patch.object(saving_module, "_default_output_destination", side_effect=output_destination), \
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
                  patch.object(saving_module, "render_with_mask", side_effect=fail_first_render), \
                  patch.object(saving_module, "write_rendered_copy"):
                 thread.start()
@@ -1634,7 +1668,7 @@ class MozarieTests(unittest.TestCase):
     def test_sam_setting_change_keeps_detection_model_cache(self):
         state = self.new_state()
         next_settings = copy.deepcopy(state.settings)
-        next_settings["models"]["sam_model_type"] = "vit_l"
+        next_settings["models"]["sam_model_type"] = "vit_b" if next_settings["models"]["sam_model_type"] == "vit_l" else "vit_l"
         models = object()
         state.models = models
         state.sam_predictor = object()
@@ -3277,7 +3311,7 @@ class MozarieTests(unittest.TestCase):
             def colliding_destination(_record, _suffix, reserved):
                 return output if output not in reserved else root / "output_2.png"
 
-            with patch.object(saving_module, "_default_output_destination", side_effect=colliding_destination), \
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: colliding_destination(record, suffix, state.reserved_output_paths)), \
                  patch.object(saving_module, "write_rendered_copy", side_effect=lambda path, _data: written.append(path)):
                 state._apply_worker(
                     records, 100, {first_id: np.zeros((16, 16), dtype=np.uint8), second_id: self._mask(16, 16)},
@@ -3303,7 +3337,7 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
 
-            with patch.object(saving_module, "_default_output_destination", return_value=root / "output.png"), \
+            with patch.object(state, "_reserve_output_destination", return_value=root / "output.png"), \
                  patch.object(saving_module, "write_rendered_copy"):
                 worker.start()
                 worker.join(2)
@@ -3343,7 +3377,7 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 3},
             )
             with patch.object(state, "combined_candidate_mask", side_effect=compose), \
-                 patch.object(saving_module, "_default_output_destination", side_effect=lambda record, _suffix, _reserved: output_paths[record.image_id]), \
+                patch.object(state, "_reserve_output_destination", side_effect=lambda record, _suffix, _directory: output_paths[record.image_id]), \
                  patch.object(saving_module, "render_with_mask", return_value=b"rendered"), \
                  patch.object(saving_module, "write_rendered_copy"):
                 worker.start()
@@ -4391,6 +4425,7 @@ class MozarieTests(unittest.TestCase):
             root = Path(directory)
             source = root / "入力.png"
             Image.new("RGB", (16, 16), "white").save(source)
+            (root / "出力先").mkdir()
             state = self.new_state()
             state.settings["saving"]["default_output_directory"] = str(root / "出力先")
             image_id = state.set_root(str(root))[0]["id"]
@@ -4400,13 +4435,14 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
 
-            _output, _record, rendered_revision, token = state.render_browser_save(
+            rendered = state.render_browser_save(
                 image_id, revision, 100, None, copy_to_default=True, suffix="_モザイク",
             )
+            _output, _record, rendered_revision, token = rendered
 
             destination = root / "出力先" / "入力_モザイク.png"
             self.assertTrue(destination.is_file())
-            self.assertEqual(state.browser_save_tokens[token].output_path, destination)
+            self.assertEqual(rendered.output_path, destination)
             self.assertEqual(len(state.candidates[image_id]), 1, "rendering a copy must not clear candidates")
             committed = state.commit_browser_save(image_id, rendered_revision, token, "keep")
             self.assertTrue(committed["cleared"])
@@ -4692,16 +4728,18 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
             state.settings["saving"]["default_output_directory"] = str(root / "output")
+            (root / "output").mkdir()
             image_id = state.set_root(str(root))[0]["id"]
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
-            _output, record, rendered_revision, save_token = state.render_browser_save(
+            rendered = state.render_browser_save(
                 image_id, revision, 100, None, copy_to_default=True,
             )
-            output_path = state.browser_save_tokens[save_token].output_path
+            _output, record, rendered_revision, save_token = rendered
+            output_path = rendered.output_path
 
             original_unlink = Path.unlink
 

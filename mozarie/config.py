@@ -38,7 +38,19 @@ class SettingsStore:
         return settings
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
-        settings = validate_settings(_merge(self.load(), update))
+        return self.save_validated(self.validate_update(update))
+
+    def validate_update(self, update: dict[str, Any]) -> dict[str, Any]:
+        return validate_settings(_merge(self.load(), update))
+
+    def default_settings(self) -> dict[str, Any]:
+        defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
+        saving = defaults.setdefault("saving", {})
+        if not str(saving.get("default_output_directory", "")).strip():
+            saving["default_output_directory"] = str((self.defaults_path.parent.parent / "output").resolve())
+        return validate_settings(defaults)
+
+    def save_validated(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -180,10 +192,36 @@ def validate_settings(value: Any) -> dict[str, Any]:
 def _validate_output_directory(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SettingsError("saving.default_output_directory must be an absolute path")
-    path = Path(value.strip())
+    raw = value.strip()
+    if "\x00" in raw:
+        raise SettingsError("saving.default_output_directory must not contain NUL")
+    path = Path(raw)
     if not path.is_absolute():
         raise SettingsError("saving.default_output_directory must be an absolute path")
     return str(path)
+
+
+def validate_output_directory_ready(value: str | Path) -> Path:
+    """Require an existing writable output folder without creating it."""
+    temporary_path: Path | None = None
+    try:
+        raw = os.fspath(value)
+        if "\x00" in raw:
+            raise SettingsError("saving.default_output_directory must not contain NUL")
+        path = Path(raw).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise SettingsError("saving.default_output_directory must be an existing directory")
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".mozarie-write-check-", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(b"1")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return path.resolve()
+    except (OSError, ValueError) as exc:
+        raise SettingsError("saving.default_output_directory must be writable") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _validate_targets(value: Any) -> list[str]:

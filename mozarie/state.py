@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from .core import *
+from .config import validate_output_directory_ready
 from .image_io import *
-from .image_io import _default_output_destination
 from .runtime_types import DetectionModels
 from .catalog import CatalogMixin
 from .saving import SavingMixin
@@ -45,6 +45,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self._pending_browser_save_cleanup: list[Path] = []
         self.output_destination_lock = threading.Lock()
+        self.output_picker_lock = threading.Lock()
         self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
@@ -67,11 +68,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not isinstance(update, dict):
             raise ClientError("設定の形式が正しくありません。", "invalid_settings")
         with self.inference_lock, self.lock:
-            if self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
             try:
-                settings = self.settings_store.save(update)
+                settings = self.settings_store.validate_update(update)
+                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+                settings = self.settings_store.save(settings)
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = settings
@@ -92,8 +95,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
-            if self._has_active_worker():
+            if self.importing_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
+            try:
+                settings = self.settings_store.default_settings()
+                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+            except SettingsError as exc:
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = self.settings_store.reset()
             self.models = None
             self.sam_predictor = None
