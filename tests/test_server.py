@@ -145,6 +145,29 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.state, "complete")
             self.assertTrue((app_dir / "output" / "source_censored.png").is_file())
 
+    def test_apply_overwrite_updates_live_catalog_asset_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            asset_version = state.asset_version(record)
+            asset_revision = record.asset_revision
+
+            self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}))
+            assert state.worker_thread is not None
+            state.worker_thread.join(2)
+
+            self.assertFalse(state.worker_thread.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            live_record = state.image_for_id(image_id)
+            output_stat = source.stat()
+            self.assertEqual(live_record.mtime_ns, output_stat.st_mtime_ns)
+            self.assertEqual(live_record.size_bytes, output_stat.st_size)
+            self.assertEqual(live_record.asset_revision, asset_revision + 1)
+            self.assertNotEqual(state.asset_version(live_record), asset_version)
+
     def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
         state = self.new_state()
         with tempfile.TemporaryDirectory() as directory:

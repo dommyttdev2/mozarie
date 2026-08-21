@@ -367,9 +367,10 @@ class SavingMixin:
                         if not self._job_is_current(job_generation, catalog_generation):
                             return
                         if not copy_to_default:
-                            record.mtime_ns = output_stat.st_mtime_ns
-                            record.size_bytes = output_stat.st_size
-                            record.asset_revision += 1
+                            live_record = self.images[record.image_id]
+                            live_record.mtime_ns = output_stat.st_mtime_ns
+                            live_record.size_bytes = output_stat.st_size
+                            live_record.asset_revision += 1
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)
