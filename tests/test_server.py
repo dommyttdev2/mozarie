@@ -5194,17 +5194,24 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
             read_bytes = Path.read_bytes
+            mutated_bytes = []
 
             def mutate_after_read(path):
                 result = read_bytes(path)
                 if path == source:
                     Image.new("RGB", (16, 16), "blue").save(source)
+                    changed_timestamp = record.mtime_ns + 4_000_000_000
+                    os.utime(source, ns=(changed_timestamp, changed_timestamp))
+                    self.assertNotEqual(source.stat().st_mtime_ns, record.mtime_ns)
+                    mutated_bytes.append(read_bytes(source))
                 return result
 
             with patch.object(Path, "read_bytes", autospec=True, side_effect=mutate_after_read):
                 with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(raised.exception.error_code, "stale_asset")
+            self.assertEqual(source.read_bytes(), mutated_bytes[0])
+            self.assertEqual(source.stat().st_size, len(mutated_bytes[0]))
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
     def test_copy_save_uses_the_render_digest_without_an_extra_hash(self):
