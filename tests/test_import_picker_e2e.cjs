@@ -193,28 +193,74 @@ async function assertDesktopLayout(page, width, height) {
 async function assertSettingsDialogLayout(page, width, height) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
-  await page.locator("#settingsTabGeneral").click();
-  const alignment = await page.locator("#settingsPanelGeneral .form-row").evaluateAll((rows) => {
-    const starts = rows.map((row) => row.lastElementChild.getBoundingClientRect().left);
-    const gaps = rows.map((row) => row.lastElementChild.getBoundingClientRect().left - row.firstElementChild.getBoundingClientRect().right);
-    return { starts, gaps };
-  });
-  assert.equal(alignment.starts.every((start) => Math.abs(start - alignment.starts[0]) <= 2) && alignment.gaps.every((gap) => gap >= 12 && gap <= 20), true, `settings labels and inputs keep one compact aligned column at ${width}x${height}: ${JSON.stringify(alignment)}`);
-  assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
-    const rect = input.getBoundingClientRect();
-    return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === input;
-  }), true, `the startup-browser checkbox owns its hit target at ${width}x${height}`);
-  const openBrowser = page.locator("#settingsOpenBrowser");
-  const checked = await openBrowser.isChecked();
-  await openBrowser.click();
-  assert.equal(await openBrowser.isChecked(), !checked, `the startup-browser checkbox accepts a physical click at ${width}x${height}`);
-  await openBrowser.click();
-  await page.locator("#settingsTabShortcuts").click();
-  assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
-    const children = [...row.children]; const rowRect = row.getBoundingClientRect(); return children.length === 3 && children.every((child) => { const rect = child.getBoundingClientRect(); return Math.abs((rect.y + rect.height / 2) - (rowRect.y + rowRect.height / 2)) <= 2; });
-  })), true, `shortcut bindings stay single-row at ${width}x${height}`);
+  for (const language of ["ja", "en"]) {
+    await page.locator("#settingsTabGeneral").click();
+    await page.locator("#settingsLanguage").selectOption(language);
+    await page.waitForFunction((selectedLanguage) => document.documentElement.lang === selectedLanguage, language);
+    for (const [panelSelector, tabSelector] of [["#settingsPanelGeneral", "#settingsTabGeneral"], ["#settingsPanelModels", "#settingsTabModels"], ["#settingsPanelDisplay", "#settingsTabDisplay"]]) {
+      await page.locator(tabSelector).click();
+      const layout = await page.locator(`${panelSelector} .form-row`).evaluateAll((rows) => {
+        const panel = rows[0]?.parentElement.getBoundingClientRect();
+        return {
+          panelLeft: panel?.left,
+          rows: rows.map((row) => {
+            const [label, control] = row.children;
+            const labelRect = label.getBoundingClientRect();
+            const controlRect = control.getBoundingClientRect();
+            const rowRect = row.getBoundingClientRect();
+            return {
+              rowLeft: rowRect.left, rowRight: rowRect.right, rowWidth: rowRect.width, rowScrollWidth: row.scrollWidth,
+              labelLeft: labelRect.left, labelRight: labelRect.right, labelBottom: labelRect.bottom,
+              controlLeft: controlRect.left, controlTop: controlRect.top, controlRight: controlRect.right,
+              labelTextAlign: getComputedStyle(label).textAlign,
+            };
+          }),
+        };
+      });
+      assert.ok(layout.rows.length > 0, `${panelSelector} has settings rows at ${width}x${height} (${language})`);
+      for (const row of layout.rows) {
+        assert.ok(Math.abs(row.rowLeft - layout.panelLeft) <= 2 && Math.abs(row.labelLeft - layout.panelLeft) <= 2 && Math.abs(row.controlLeft - layout.panelLeft) <= 2, `${panelSelector} labels and controls start at the panel left edge at ${width}x${height} (${language})`);
+        assert.equal(row.labelTextAlign, "left", `${panelSelector} labels are never right-aligned at ${width}x${height} (${language})`);
+        assert.ok(row.controlTop - row.labelBottom >= 4 && row.controlTop - row.labelBottom <= 8, `${panelSelector} keeps a compact vertical label-to-control gap at ${width}x${height} (${language})`);
+        assert.ok(row.controlRight <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `${panelSelector} controls do not overflow or overlap at ${width}x${height} (${language})`);
+      }
+    }
+    await page.locator("#settingsTabGeneral").click();
+    assert.equal(await page.locator("#settingsOpenBrowser").evaluate((input) => {
+      const rect = input.getBoundingClientRect();
+      return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === input;
+    }), true, `the startup-browser checkbox owns its left-side hit target at ${width}x${height} (${language})`);
+    const openBrowser = page.locator("#settingsOpenBrowser");
+    const checked = await openBrowser.isChecked();
+    await openBrowser.click();
+    assert.equal(await openBrowser.isChecked(), !checked, `the startup-browser checkbox accepts a physical click at ${width}x${height} (${language})`);
+    await openBrowser.click();
+    await page.locator("#settingsTabShortcuts").click();
+    assert.equal(await page.locator("#shortcutBindings > .form-row").first().locator("span").textContent(), language === "en" ? "Previous image" : "前の画像", `shortcut labels follow the selected language at ${width}x${height} (${language})`);
+    const shortcuts = await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => {
+      const panelLeft = rows[0]?.parentElement.parentElement.getBoundingClientRect().left;
+      return { panelLeft, rows: rows.map((row) => {
+        const children = [...row.children]; const rowRect = row.getBoundingClientRect();
+        return { children: children.map((child) => { const rect = child.getBoundingClientRect(); return { left: rect.left, right: rect.right, centerY: rect.y + rect.height / 2 }; }), rowLeft: rowRect.left, rowRight: rowRect.right, rowWidth: rowRect.width, rowScrollWidth: row.scrollWidth, rowCenterY: rowRect.y + rowRect.height / 2 };
+      }) };
+    });
+    assert.equal(shortcuts.rows.length, 11, `all shortcut bindings render at ${width}x${height} (${language})`);
+    for (const row of shortcuts.rows) {
+      assert.equal(row.children.length, 3, `each shortcut has label, enabled checkbox, and key input at ${width}x${height} (${language})`);
+      assert.ok(Math.abs(row.rowLeft - shortcuts.panelLeft) <= 2 && Math.abs(row.children[0].left - shortcuts.panelLeft) <= 2, `shortcut rows stay grouped on the settings panel left at ${width}x${height} (${language})`);
+      assert.ok(row.children.every((child) => Math.abs(child.centerY - row.rowCenterY) <= 2), `shortcut controls stay on one row at ${width}x${height} (${language})`);
+      assert.ok(row.children[1].left - row.children[0].left >= 220 && row.children[1].left - row.children[0].left <= 250 && row.children[2].left - row.children[1].right >= 8 && row.children[2].left - row.children[1].right <= 14, `shortcut columns keep their local left-side positions at ${width}x${height} (${language}): ${JSON.stringify(row)}`);
+      assert.ok(row.children[2].right <= row.rowRight + 1 && row.rowScrollWidth <= row.rowWidth + 1, `shortcut rows do not overflow at ${width}x${height} (${language})`);
+    }
+  }
   await page.locator("#settingsTabModels").click();
   assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => { const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28; })), true, `all help buttons stay 28px at ${width}x${height}`);
+  await page.locator('[data-model-help="samType"]').click();
+  assert.equal(await page.locator("#modelHelpDialog").isVisible(), true, `SAM type help opens from its physical button at ${width}x${height}`);
+  await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.close());
+  await page.locator("#settingsTabGeneral").click();
+  await page.locator("#settingsLanguage").selectOption("ja");
+  await page.waitForFunction(() => document.documentElement.lang === "ja");
   await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
 }
 

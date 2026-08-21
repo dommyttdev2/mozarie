@@ -86,7 +86,12 @@ function bindEvents() {
   $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
   $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderCatalogViews(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
-  $("#settingsLanguage").addEventListener("change", (event) => { void loadTranslations(event.target.value); });
+  $("#settingsLanguage").addEventListener("change", async (event) => {
+    const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
+    const actions = Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked]));
+    await loadTranslations(event.target.value);
+    renderShortcutBindings(bindings, actions);
+  });
   document.querySelectorAll(".overview-filter").forEach((button) => button.addEventListener("click", () => {
     if (isBusy() || state.importing) return;
     state.overviewFilter = button.dataset.overviewFilter; renderOverview();
