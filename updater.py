@@ -20,6 +20,14 @@ RELEASE_API = "https://api.github.com/repos/norqis/mozarie/releases/latest"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 10_000
 
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "COM¹", "COM²", "COM³",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "LPT¹", "LPT²", "LPT³",
+})
+
 MANAGED_DIRECTORIES = ("mozarie", "static", "tests")
 MANAGED_FILES = (
     ".gitattributes",
@@ -223,6 +231,10 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
+    for part in path.parts:
+        basename = part.split(".", maxsplit=1)[0].rstrip(" ")
+        if part.endswith((" ", ".")) or basename.upper() in _WINDOWS_RESERVED_NAMES:
+            raise UpdateError(tr("archive_invalid_path"))
     mode = info.external_attr >> 16
     if stat.S_ISLNK(mode):
         raise UpdateError(tr("archive_symlink"))

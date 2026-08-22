@@ -7,7 +7,7 @@ import string
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 import sys
 
@@ -123,6 +123,32 @@ class UpdaterTests(unittest.TestCase):
                     self.assertFalse((root / "outside.txt").exists())
                     self.assertEqual(list(root.iterdir()), [archive])
                     archive.unlink()
+
+    def test_safe_member_path_rejects_windows_reserved_names(self):
+        for name in (
+            "CON",
+            "con.txt",
+            "AUX.tar.gz",
+            "nul ",
+            "PRN.",
+            "clock$.txt",
+            "CONIN$",
+            "conout$.log",
+            "COM1",
+            "com².txt",
+            "LPT9",
+            "lpt³.tar.gz",
+            "COM1 .txt",
+            "LPT9. ",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                    updater._safe_member_path(zipfile.ZipInfo(f"root/{name}"))
+
+    def test_safe_member_path_accepts_non_reserved_windows_names(self):
+        for name in ("COM0", "COM10", "LPT0", "LPT10", "COM4work", ".config"):
+            with self.subTest(name=name):
+                self.assertEqual(updater._safe_member_path(zipfile.ZipInfo(f"root/{name}")), PurePosixPath(f"root/{name}"))
 
     def test_safe_extract_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
