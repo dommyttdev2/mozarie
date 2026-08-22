@@ -194,11 +194,33 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / ".git/HEAD").read_text(encoding="utf-8"), "main")
             self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
 
-    def test_apply_rolls_back_all_managed_files_on_failure(self):
+    def test_apply_backup_failure_leaves_install_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install = make_install(root / "install")
             source = make_source(root / "source")
+            original_copy = updater._copy_path
+
+            def fail_backing_up_server(source_path: Path, destination: Path):
+                if source_path == install / "server.py":
+                    raise OSError("simulated backup failure")
+                original_copy(source_path, destination)
+
+            with patch("updater._copy_path", side_effect=fail_backing_up_server):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_rollback"))):
+                    updater.apply_update(source, install)
+            self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
+            self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
+            self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
+
+    def test_apply_rolls_back_only_mutated_files_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = make_install(root / "install")
+            source = make_source(root / "source")
+            (install / "updater.py").write_text("old updater", encoding="utf-8")
+            (source / "updater.py").write_text("new updater", encoding="utf-8")
+            (source / "README.md").write_text("new readme", encoding="utf-8")
             original_copy = updater._copy_path
 
             def fail_on_static(source_path: Path, destination: Path):
@@ -212,6 +234,8 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
             self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
+            self.assertEqual((install / "updater.py").read_text(encoding="utf-8"), "old updater")
+            self.assertFalse((install / "README.md").exists())
 
     def test_running_lock_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:

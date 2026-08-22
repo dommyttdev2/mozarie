@@ -344,23 +344,25 @@ def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
                 if current.exists():
                     _copy_path(current, backup_root / relative)
                     backed_up.append(relative)
+        except Exception as exc:
+            raise UpdateError(tr("update_rollback")) from exc
+
+        mutated: list[str] = []
+        try:
             for relative in incoming:
+                mutated.append(relative)
                 current = app_dir / relative
                 if current.exists():
                     _remove_path(current)
                 _copy_path(source_root / relative, current)
         except Exception as exc:
-            for relative in reversed(incoming):
+            for relative in reversed(mutated):
                 current = app_dir / relative
                 if current.exists():
                     _remove_path(current)
-            for relative in backed_up:
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-                _copy_path(backup_root / relative, current)
-            if isinstance(exc, UpdateError):
-                raise
+            for relative in reversed(mutated):
+                if relative in backed_up:
+                    _copy_path(backup_root / relative, app_dir / relative)
             raise UpdateError(tr("update_rollback")) from exc
 
 
