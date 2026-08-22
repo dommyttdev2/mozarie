@@ -116,8 +116,15 @@ function renderSettingsStatus(status) {
     option.textContent = `GPU ${gpu.id}: ${gpu.name}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
-  if ([...gpuSelect.children].some((option) => option.value === selected)) gpuSelect.value = selected;
+  if (![...gpuSelect.children].some((option) => option.value === selected)) {
+    const option = document.createElement("option"); option.value = selected; option.textContent = `GPU ${selected}: ${t("settings.gpuUnavailable")}`; option.disabled = true; gpuSelect.append(option);
+  }
+  gpuSelect.value = selected;
   renderModelStatus();
+}
+
+function syncProviderSelection() {
+  $("#settingsGpuDevice").disabled = $("#settingsProvider").value === "cpu";
 }
 
 function setSettingsForm(settings, status = null) {
@@ -145,6 +152,7 @@ function setSettingsForm(settings, status = null) {
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
+  syncProviderSelection();
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
@@ -257,6 +265,7 @@ async function openSettings() {
   }
   setSettingsForm(state.settings, state.settingsStatus);
   selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
+  void refreshSettingsStatus();
 }
 
 async function saveSettings(event) {

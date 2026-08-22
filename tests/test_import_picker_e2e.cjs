@@ -61,7 +61,12 @@ function startFixtureServer() {
       let body = ""; for await (const chunk of request) body += chunk;
       const submittedSettings = JSON.parse(body);
       settingsStatusRequests.push(submittedSettings);
-      const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus: [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default" }] } })); };
+      const reply = () => {
+        const gpus = submittedSettings.models.target_segmentation === "gpu-options.onnx"
+          ? [{ id: 3, name: "RTX Test", supported: true }, { id: 4, name: "Legacy Test", supported: false }]
+          : [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default" }];
+        response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus } }));
+      };
       if (deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
       reply();
       return;
@@ -365,11 +370,28 @@ async function main() {
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
     assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, activeElapsed: 10 }));
+    assert.match(await page.locator("#processingProgressText").textContent(), /残り約 20秒/, "detection ETA uses active elapsed time after the first completion");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "paused", total: 3, completed: 1, activeElapsed: 10 }));
+    assert.doesNotMatch(await page.locator("#processingProgressText").textContent(), /残り約/, "paused detection hides ETA");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "complete", total: 3, completed: 1, activeElapsed: 10 }));
+    assert.doesNotMatch(await page.locator("#processingProgressText").textContent(), /残り約/, "terminal detection hides ETA");
+    await page.evaluate(() => showProcessing({ kind: "import", state: "running", total: 3, completed: 1, activeElapsed: 10 }));
+    assert.doesNotMatch(await page.locator("#processingProgressText").textContent(), /残り約/, "imports never show a detection ETA");
+    await page.evaluate(() => closeProcessing());
     const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
+    await page.waitForFunction(() => document.querySelector("#settingsStatusButton").disabled === false);
+    assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
     await page.locator("#settingsTabModels").click();
+    await page.locator("#settingsProvider").selectOption("cpu");
+    assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
+    await page.locator("#settingsProvider").selectOption("gpu");
+    assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), false, "GPU re-enables the GPU selector");
+    assert.match(await page.locator('#settingsHandSegmentationCard a[data-i18n="settings.handSegmentationDownload"]').getAttribute("href"), /handsegnet_vit_b_best\.safetensors$/, "HandSeg points directly to the fixed checkpoint");
+    assert.match(await page.locator("#settingsHandSegmentationCard").textContent(), /handsegnet_vit_b_best\.safetensors/, "HandSeg explains the exact file to select");
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
@@ -384,8 +406,8 @@ async function main() {
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
     await page.locator("#settingsStatusButton").click();
-    assert.equal(settingsStatusRequests.length, 1, "model confirmation starts exactly one form-status request");
-    assert.equal(settingsStatusRequests[0].models.target_segmentation, "unsaved.onnx", "model confirmation validates the unsaved form value");
+    assert.equal(settingsStatusRequests.length, 2, "model confirmation starts one additional form-status request");
+    assert.equal(settingsStatusRequests[1].models.target_segmentation, "unsaved.onnx", "model confirmation validates the unsaved form value");
     assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
     assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
     await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
@@ -393,12 +415,17 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator("#settingsStatusResult").textContent(), "設定が変更されたため、もう一度確認してください。", "a stale form-status response requires an explicit recheck");
-    assert.equal(await page.locator("#settingsGpuDevice").textContent(), "GPU 0", "a stale form-status response does not render its GPU state");
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 1: defaultGPU 0:/, "a stale form-status response does not render its GPU state");
     await page.locator("#settingsStatusButton").click();
     await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
-    assert.equal(settingsStatusRequests.length, 2, "the changed form requires a second explicit status check");
-    assert.equal(settingsStatusRequests[1].models.target_segmentation, "changed-while-checking.onnx", "the recheck sends the changed form");
-    assert.equal(await page.locator("#settingsGpuDevice").textContent(), "GPU 2: changed-while-checking.onnx", "only the recheck renders model and GPU state");
+    assert.equal(settingsStatusRequests.length, 3, "the changed form requires a second explicit status check");
+    assert.equal(settingsStatusRequests[2].models.target_segmentation, "changed-while-checking.onnx", "the recheck sends the changed form");
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: changed-while-checking\.onnxGPU 0:/, "only the recheck renders model and GPU state");
+    await page.locator("#settingsTargetModel").fill("gpu-options.onnx");
+    await page.locator("#settingsStatusButton").click();
+    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX TestGPU 4: Legacy Test.*GPU 0:/, "status shows actual GPU names and preserves the configured missing device");
+    assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
@@ -444,6 +471,8 @@ async function main() {
     const actionsBeforeSettingsFooter = settingsActions.length;
     await page.locator("#settingsResetButton").click();
     await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "初期値に戻しました。");
+    const settingsResultBox = await page.locator("#settingsResult").boundingBox(); const resetBox = await page.locator("#settingsResetButton").boundingBox();
+    assert.ok(settingsResultBox && resetBox && resetBox.x - (settingsResultBox.x + settingsResultBox.width) <= 12, "settings result stays beside Reset");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
     const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
     assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");

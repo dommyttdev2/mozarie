@@ -7,6 +7,15 @@ from . import image_io as _image_io
 globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
 
 class JobsMixin:
+    def _pause_job_clock(self) -> None:
+        if self.job.paused_at is None:
+            self.job.paused_at = time.time()
+
+    def _resume_job_clock(self) -> None:
+        if self.job.paused_at is not None:
+            self.job.paused_seconds += max(0.0, time.time() - self.job.paused_at)
+            self.job.paused_at = None
+
     def request_pause(self) -> Job:
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state != "running":
@@ -23,6 +32,7 @@ class JobsMixin:
                 self.job.state = "paused" if self.job.active_count == 0 else "pausing"
                 if self.job.state == "paused":
                     self.job.current = ""
+                    self._pause_job_clock()
         return self.job
 
     def resume_job(self) -> Job:
@@ -31,6 +41,7 @@ class JobsMixin:
                 raise ClientError("再開できる処理はありません。")
             assert self.job_control is not None
             self.job_control.pause_requested.clear()
+            self._resume_job_clock()
             self.job.state = "running"
             return self.job
 
@@ -50,7 +61,9 @@ class JobsMixin:
                 control.cancel_requested.set()
                 control.pause_requested.clear()
                 if self.job.state == "paused":
+                    self._resume_job_clock()
                     self.job.state = "cancelled"
+                    self.job.ended_at = time.time()
                     self.job.current = ""
                 return self.job
 
@@ -164,12 +177,15 @@ class JobsMixin:
                         and control.pause_requested.is_set() and self.job.active_count == 0):
                     self.job.state = "paused"
                     self.job.current = ""
+                    self._pause_job_clock()
             time.sleep(0.1)
 
     def _cancel_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation):
+                self._resume_job_clock()
                 self.job.state = "cancelled"
+                self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
 
@@ -267,6 +283,7 @@ class JobsMixin:
                     and not control.failed.is_set() and self.job.active_count == 0):
                 self.job.state = "paused"
                 self.job.current = ""
+                self._pause_job_clock()
             return self.job.active_count
 
     def _run_fixed_workers(
@@ -332,7 +349,9 @@ class JobsMixin:
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
+            self._resume_job_clock()
             self.job.state = "complete"
+            self.job.ended_at = time.time()
             self.job.completed = self.job.total
             self.job.current = ""
             self.job.active_count = 0
@@ -345,7 +364,9 @@ class JobsMixin:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
             kind = self.job.kind
+            self._resume_job_clock()
             self.job.state = "error"
+            self.job.ended_at = time.time()
             self.job.error = str(exc)
             self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""
             self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}

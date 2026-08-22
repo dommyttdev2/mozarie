@@ -1266,6 +1266,27 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(observed_progress, sorted(observed_progress))
             self.assertEqual(state.job.completed, 2)
 
+    def test_parallel_detection_completes_empty_results_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "first.png")
+            Image.new("RGB", (16, 16), "black").save(root / "second.png")
+            state = self.new_state()
+            records = [state.image_for_id(image["id"]) for image in state.set_root(directory)]
+            state.job = server_module.Job(kind="detect", state="running", total=2, image_ids=tuple(record.image_id for record in records))
+            completed: list[int] = []
+            original = state._record_job_success
+
+            def record_success(*args, **kwargs):
+                original(*args, **kwargs)
+                completed.append(state.job.completed)
+
+            with patch.object(state, "_ensure_models", return_value=object()), patch.object(state, "_detect_image", return_value=[]), patch.object(state, "_record_job_success", side_effect=record_success):
+                state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, 2)
+            self.assertEqual(completed, sorted(completed))
+            self.assertEqual(completed[-1], 2)
+            self.assertEqual(state.job.state, "complete")
+
     def test_parallel_detection_cancellation_discards_all_inflight_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1937,6 +1958,29 @@ class MozarieTests(unittest.TestCase):
         data = state.job.as_dict()
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
         self.assertEqual(data["params"], {"model": "vit_b"})
+
+    def test_job_active_elapsed_excludes_paused_time(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", started_at=100.0)
+        state.job_control = server_module.JobControl()
+        with patch("mozarie.jobs.time.time", return_value=110.0):
+            state.request_pause()
+        with patch("mozarie.core.time.time", return_value=150.0):
+            self.assertEqual(state.job.as_dict()["activeElapsed"], 10.0)
+        with patch("mozarie.jobs.time.time", return_value=160.0):
+            state.resume_job()
+        with patch("mozarie.core.time.time", return_value=180.0):
+            self.assertEqual(state.job.as_dict()["activeElapsed"], 30.0)
+
+    def test_detection_maps_common_gpu_memory_errors(self):
+        for message in ("out of memory", "failed to allocate memory", "bfcarena exhausted"):
+            with self.subTest(message=message):
+                state = self.new_state()
+                state.job = server_module.Job(kind="detect", state="running")
+                with patch.object(state, "_ensure_models", side_effect=RuntimeError(message)):
+                    state._detect_worker([], DEFAULT_DETECTION_CONFIDENCE)
+                self.assertEqual(state.job.state, "error")
+                self.assertEqual(state.job.error_code, "gpu_out_of_memory")
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()

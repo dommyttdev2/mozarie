@@ -140,6 +140,21 @@ function processingTitle(kind) {
   return t(kind === "detect" ? "processing.detect" : "processing.import");
 }
 
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const remainder = total % 60;
+  if (hours) return `${t("duration.hour", { count: hours })} ${t("duration.minute", { count: minutes })}`;
+  if (minutes) return `${t("duration.minute", { count: minutes })} ${t("duration.second", { count: remainder })}`;
+  return t("duration.second", { count: remainder });
+}
+
+function progressText(job) {
+  const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
+  if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
+  const remaining = (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed));
+  return `${count} · ${t("status.eta", { duration: formatDuration(remaining) })}`;
+}
+
 function showProcessing(processing) {
   state.processing = { ...state.processing, ...processing };
   const current = state.processing;
@@ -148,7 +163,7 @@ function showProcessing(processing) {
   $("#processingCurrent").textContent = current.current || "";
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
-  $("#processingProgressText").textContent = t("status.progressCount", { completed: current.completed || 0, total: current.total || 0 });
+  $("#processingProgressText").textContent = progressText(current);
   const cancelling = Boolean(state.detectCancelRequested || state.importSession?.cancelled);
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
   $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
