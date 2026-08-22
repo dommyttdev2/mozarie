@@ -360,6 +360,14 @@ class JobsMixin:
         LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        if isinstance(exc, RuntimeError) and any(
+            marker in str(exc).lower()
+            for marker in ("out of memory", "failed to allocate memory", "bfcarena")
+        ):
+            exc = ClientError(
+                "GPUメモリが不足しました。同時処理数を1に下げるか、別のGPUまたはCPUを選んでください。",
+                "gpu_out_of_memory",
+            )
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return

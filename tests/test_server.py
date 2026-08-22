@@ -1972,15 +1972,21 @@ class MozarieTests(unittest.TestCase):
         with patch("mozarie.core.time.time", return_value=180.0):
             self.assertEqual(state.job.as_dict()["activeElapsed"], 30.0)
 
-    def test_detection_maps_common_gpu_memory_errors(self):
+    def test_detection_maps_worker_gpu_memory_errors(self):
         for message in ("out of memory", "failed to allocate memory", "bfcarena exhausted"):
             with self.subTest(message=message):
-                state = self.new_state()
-                state.job = server_module.Job(kind="detect", state="running")
-                with patch.object(state, "_ensure_models", side_effect=RuntimeError(message)):
-                    state._detect_worker([], DEFAULT_DETECTION_CONFIDENCE)
-                self.assertEqual(state.job.state, "error")
-                self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / "source.png"
+                    Image.new("RGB", (16, 16), "white").save(source)
+                    state = self.new_state()
+                    image_id = state.set_root(directory)[0]["id"]
+                    record = state.image_for_id(image_id)
+                    state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+                    with patch.object(state, "_ensure_models", return_value=object()), \
+                         patch.object(state, "_detect_image", side_effect=RuntimeError(message)):
+                        state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
+                    self.assertEqual(state.job.state, "error")
+                    self.assertEqual(state.job.error_code, "gpu_out_of_memory")
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
@@ -5208,6 +5214,100 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaisesRegex(ClientError, "外部で変更"):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+
+    def test_destructive_saves_flush_and_sync_before_stale_check_and_replace(self):
+        original_temporary_file = image_io_module.tempfile.NamedTemporaryFile
+        original_replace = image_io_module.os.replace
+        original_assert_source_stat_matches = image_io_module._assert_source_stat_matches
+
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+                events: list[str] = []
+
+                class TrackingTemporaryFile:
+                    def __init__(self, handle):
+                        self.handle = handle
+
+                    @property
+                    def name(self):
+                        return self.handle.name
+
+                    def __enter__(self):
+                        self.handle.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        return self.handle.__exit__(*args)
+
+                    def write(self, data):
+                        events.append("write")
+                        return self.handle.write(data)
+
+                    def flush(self):
+                        events.append("flush")
+                        return self.handle.flush()
+
+                    def fileno(self):
+                        return self.handle.fileno()
+
+                def tracked_temporary_file(*args, **kwargs):
+                    return TrackingTemporaryFile(original_temporary_file(*args, **kwargs))
+
+                def tracked_stat_check(*args, **kwargs):
+                    events.append("stale check")
+                    return original_assert_source_stat_matches(*args, **kwargs)
+
+                def tracked_replace(*args, **kwargs):
+                    events.append("replace")
+                    return original_replace(*args, **kwargs)
+
+                if route == "apply":
+                    save = lambda: save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    save = lambda: image_io_module._replace_record_with_rendered_output(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+
+                with patch.object(image_io_module.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
+                     patch.object(image_io_module.os, "fsync", side_effect=lambda _fd: events.append("fsync")), \
+                     patch.object(image_io_module, "_assert_source_stat_matches", side_effect=tracked_stat_check), \
+                     patch.object(image_io_module.os, "replace", side_effect=tracked_replace):
+                    save()
+
+                self.assertEqual(events[-5:], ["write", "flush", "fsync", "stale check", "replace"])
+
+    def test_destructive_saves_preserve_source_when_fsync_fails(self):
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                source_bytes = source.read_bytes()
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+
+                if route == "apply":
+                    save = lambda: save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    save = lambda: image_io_module._replace_record_with_rendered_output(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+
+                with patch.object(image_io_module.os, "fsync", side_effect=OSError("disk full")), \
+                     patch.object(image_io_module.os, "replace", wraps=image_io_module.os.replace) as replace:
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        save()
+
+                replace.assert_not_called()
+                self.assertEqual(source.read_bytes(), source_bytes)
+                self.assertEqual(list(source.parent.glob("*.mozarie.tmp")), [])
 
     def test_filesystem_save_rejects_change_during_source_read(self):
         with tempfile.TemporaryDirectory() as directory:

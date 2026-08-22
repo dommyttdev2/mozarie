@@ -155,11 +155,6 @@ class DetectionMixin:
                 self._cancel_job(job_generation, catalog_generation)
                 return
             self._finish_job(job_generation, catalog_generation)
-        except RuntimeError as exc:
-            if any(marker in str(exc).lower() for marker in ("out of memory", "failed to allocate memory", "bfcarena")):
-                self._fail_job(ClientError("GPUメモリが不足しました。同時処理数を1に下げるか、別のGPUまたはCPUを選んでください。", "gpu_out_of_memory"), job_generation, catalog_generation)
-            else:
-                self._fail_job(exc, job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc, job_generation, catalog_generation)
 

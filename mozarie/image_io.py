@@ -390,6 +390,8 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
             with rendered_path.open("rb") as rendered:
                 while chunk := rendered.read(IO_CHUNK_BYTES):
                     handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
         os.replace(temporary_path, record.path)
         temporary_path = None
@@ -431,6 +433,8 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
         _assert_source_stat_matches(record)
         os.replace(temporary_path, destination)
         temporary_path = None
