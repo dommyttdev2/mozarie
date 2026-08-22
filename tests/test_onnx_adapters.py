@@ -30,13 +30,11 @@ class OnnxAdapterTests(unittest.TestCase):
             cuda_session.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             cpu_session = Mock()
             cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
-            with patch("mozarie.inference.onnx.ort.preload_dlls") as preload, patch(
-                "mozarie.inference.onnx.ort.get_available_providers",
+            with patch("mozarie.inference.onnx.ort.get_available_providers",
                 return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
             ), patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[cuda_session, cpu_session]) as create:
                 self.assertIs(create_session(path, "gpu", 2), cuda_session)
                 self.assertIs(create_session(path, "cpu"), cpu_session)
-            preload.assert_called_once_with()
             self.assertEqual(create.call_args_list[0].kwargs["providers"], [("CUDAExecutionProvider", {"device_id": 2}), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
 

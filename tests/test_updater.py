@@ -7,7 +7,7 @@ import string
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 import sys
 
@@ -57,6 +57,21 @@ def make_install(root: Path, version: str = "1.1.0") -> Path:
     return root
 
 
+UPDATE_ARCHIVE_CONTENTS = {
+    "wrapper/server.py": "server",
+    "wrapper/run.bat": "run",
+    "wrapper/VERSION": "1.2.0",
+    "wrapper/mozarie/core.py": "core",
+    "wrapper/static/app.js": "app",
+}
+
+
+def write_archive(archive: Path, contents: dict[str, str]) -> None:
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path, data in contents.items():
+            bundle.writestr(path, data)
+
+
 class Response(io.BytesIO):
     def __enter__(self):
         return self
@@ -94,6 +109,7 @@ class UpdaterTests(unittest.TestCase):
                 for name, data in {
                     "norqis-mozarie/server.py": "server",
                     "norqis-mozarie/run.bat": "run",
+                    "norqis-mozarie/VERSION": "1.2.0",
                     "norqis-mozarie/mozarie/core.py": "core",
                     "norqis-mozarie/static/app.js": "app",
                 }.items():
@@ -101,29 +117,127 @@ class UpdaterTests(unittest.TestCase):
             source = updater.extract_archive(archive, root / "out")
             self.assertEqual(source.name, "norqis-mozarie")
 
-    def test_safe_extract_rejects_traversal_and_symlink(self):
+    def test_safe_extract_rejects_required_file_directories(self):
+        for name in ("server.py", "run.bat", "VERSION"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "release.zip"
+                contents = UPDATE_ARCHIVE_CONTENTS.copy()
+                contents.pop(f"wrapper/{name}")
+                contents[f"wrapper/{name}/child"] = "not a required file"
+                write_archive(archive, contents)
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                    updater.extract_archive(archive, root / "out")
+
+    def test_safe_extract_rejects_required_directory_files(self):
+        for name, content_path in (("mozarie", "mozarie/core.py"), ("static", "static/app.js")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "release.zip"
+                contents = UPDATE_ARCHIVE_CONTENTS.copy()
+                contents.pop(f"wrapper/{content_path}")
+                contents[f"wrapper/{name}"] = "not a required directory"
+                write_archive(archive, contents)
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                    updater.extract_archive(archive, root / "out")
+
+    def test_safe_extract_rejects_missing_version(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            traversal = root / "traversal.zip"
-            with zipfile.ZipFile(traversal, "w") as bundle:
-                bundle.writestr("../outside.txt", "bad")
-            with self.assertRaises(updater.UpdateError):
-                updater.extract_archive(traversal, root / "out1")
+            archive = root / "release.zip"
+            contents = UPDATE_ARCHIVE_CONTENTS.copy()
+            contents.pop("wrapper/VERSION")
+            write_archive(archive, contents)
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                updater.extract_archive(archive, root / "out")
 
+    def test_safe_extract_rejects_invalid_paths_without_writing_outside_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (
+                "G:escaped.txt",
+                "C:/absolute",
+                r"C:\absolute",
+                "../outside.txt",
+                r"..\outside.txt",
+                "root/file:stream",
+                "/absolute",
+                "//server/share",
+            ):
+                with self.subTest(name=name):
+                    archive = root / "invalid.zip"
+                    with zipfile.ZipFile(archive, "w") as bundle:
+                        bundle.writestr(name, "bad")
+                    with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                        updater.extract_archive(archive, root / "out")
+                    self.assertFalse((root / "outside.txt").exists())
+                    self.assertEqual(list(root.iterdir()), [archive])
+                    archive.unlink()
+
+    def test_safe_member_path_rejects_windows_reserved_names(self):
+        for name in (
+            "CON",
+            "con.txt",
+            "AUX.tar.gz",
+            "nul ",
+            "PRN.",
+            "clock$.txt",
+            "CONIN$",
+            "conout$.log",
+            "COM1",
+            "com².txt",
+            "LPT9",
+            "lpt³.tar.gz",
+            "COM1 .txt",
+            "LPT9. ",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                    updater._safe_member_path(zipfile.ZipInfo(f"root/{name}"))
+
+    def test_safe_member_path_accepts_non_reserved_windows_names(self):
+        for name in ("COM0", "COM10", "LPT0", "LPT10", "COM4work", ".config"):
+            with self.subTest(name=name):
+                self.assertEqual(updater._safe_member_path(zipfile.ZipInfo(f"root/{name}")), PurePosixPath(f"root/{name}"))
+
+    def test_safe_extract_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             symlink = root / "symlink.zip"
             info = zipfile.ZipInfo("root/link")
             info.external_attr = (0o120777 << 16)
             with zipfile.ZipFile(symlink, "w") as bundle:
                 bundle.writestr(info, "target")
             with self.assertRaises(updater.UpdateError):
-                updater.extract_archive(symlink, root / "out2")
+                updater.extract_archive(symlink, root / "out")
+
+    def test_safe_extract_rejects_precreated_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "out"
+            outside = root / "outside"
+            output.mkdir()
+            outside.mkdir()
+            try:
+                (output / "root").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            archive = root / "release.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("root/escaped.txt", "bad")
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                updater.extract_archive(archive, output)
+            self.assertFalse((outside / "escaped.txt").exists())
 
     def test_apply_updates_code_and_preserves_user_data_and_batch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install = make_install(root / "install")
             source = make_source(root / "source")
-            updater.apply_update(source, install)
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)):
+                updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "new server")
             self.assertEqual((install / "config/defaults.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual((install / "config/local.json").read_text(encoding="utf-8"), '{"mine": true}')
@@ -131,12 +245,38 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / ".mozarie-cache/draft.bin").read_bytes(), b"draft")
             self.assertEqual((install / ".git/HEAD").read_text(encoding="utf-8"), "main")
             self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
+            self.assertFalse(backup.exists())
 
-    def test_apply_rolls_back_all_managed_files_on_failure(self):
+    def test_apply_backup_failure_leaves_install_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install = make_install(root / "install")
             source = make_source(root / "source")
+            original_copy = updater._copy_path
+
+            def fail_backing_up_server(source_path: Path, destination: Path):
+                if source_path == install / "server.py":
+                    raise OSError("simulated backup failure")
+                original_copy(source_path, destination)
+
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_backing_up_server):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_backup_failed"))):
+                    updater.apply_update(source, install)
+            self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
+            self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
+            self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
+            self.assertFalse(backup.exists())
+
+    def test_apply_rolls_back_only_mutated_files_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = make_install(root / "install")
+            source = make_source(root / "source")
+            (install / "updater.py").write_text("old updater", encoding="utf-8")
+            (source / "updater.py").write_text("new updater", encoding="utf-8")
+            (source / "README.md").write_text("new readme", encoding="utf-8")
             original_copy = updater._copy_path
 
             def fail_on_static(source_path: Path, destination: Path):
@@ -144,12 +284,58 @@ class UpdaterTests(unittest.TestCase):
                     raise OSError("simulated failure")
                 original_copy(source_path, destination)
 
-            with patch("updater._copy_path", side_effect=fail_on_static):
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_on_static):
                 with self.assertRaises(updater.UpdateError):
                     updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
             self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
+            self.assertEqual((install / "updater.py").read_text(encoding="utf-8"), "old updater")
+            self.assertFalse((install / "README.md").exists())
+            self.assertFalse(backup.exists())
+
+    def test_apply_preserves_backup_when_rollback_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = make_install(root / "install")
+            source = make_source(root / "source")
+            backup = root / "backup"
+            original_copy = updater._copy_path
+            original_remove = updater._remove_path
+            static_removals = 0
+
+            def fail_during_update_and_restore(source_path: Path, destination: Path):
+                if source_path == source / "static":
+                    original_copy(source_path, destination)
+                    raise OSError("simulated update failure")
+                if source_path == backup / "static":
+                    raise OSError("simulated restore-copy failure")
+                original_copy(source_path, destination)
+
+            def lock_static_on_rollback(path: Path):
+                nonlocal static_removals
+                if path == install / "static":
+                    static_removals += 1
+                    if static_removals == 2:
+                        raise OSError("simulated locked file")
+                original_remove(path)
+
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_during_update_and_restore), \
+                    patch("updater._remove_path", side_effect=lock_static_on_rollback):
+                with self.assertRaisesRegex(
+                    updater.UpdateError,
+                    re.escape(updater.tr(
+                        "update_rollback_incomplete", paths="static", backup=str(backup.resolve())
+                    )),
+                ):
+                    updater.apply_update(source, install)
+
+            self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
+            self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "new app")
+            self.assertTrue(backup.is_dir())
 
     def test_running_lock_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:

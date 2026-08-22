@@ -101,7 +101,7 @@ class SavingMixin:
         image_lock = self.image_io_lock(image_id)
         try:
             # The per-image lock comes first.  The state lock only captures an
-            # immutable epoch; PNG decode, source reads, rendering and fsync do
+            # immutable epoch; PNG decode, source reads and rendering do
             # not block requests for other images.
             with image_lock:
                 with self.lock:
@@ -143,9 +143,8 @@ class SavingMixin:
                 mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
-                output, source_digest = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                source_fingerprint = (record.mtime_ns, record.size_bytes, source_digest)
-                self._assert_record_stat_matches(record)
+                output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                source_fingerprint = (record.mtime_ns, record.size_bytes)
                 if copy_to_default:
                     if not configured_output_directory.is_dir():
                         raise ClientError("保存先フォルダを使用できません。設定で変更してください。")
@@ -256,7 +255,7 @@ class SavingMixin:
                 try:
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
-                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint[2])
+                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)
                     else:
                         self._assert_record_stat_matches(record_snapshot)
                     if source_action == "deleted":
@@ -353,13 +352,11 @@ class SavingMixin:
                     output_path = self._reserve_output_destination(record, suffix, output_directory) if copy_to_default else record.path
                     if copy_to_default:
                         try:
-                            output, _source_digest = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
-                            self._assert_record_stat_matches(record)
+                            output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                             write_rendered_copy(output_path, output)
                         finally:
                             self._release_output_destination(output_path)
                     else:
-                        self._assert_record_stat_matches(record)
                         save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed

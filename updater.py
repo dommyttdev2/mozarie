@@ -20,6 +20,14 @@ RELEASE_API = "https://api.github.com/repos/norqis/mozarie/releases/latest"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 10_000
 
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "COM¹", "COM²", "COM³",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "LPT¹", "LPT²", "LPT³",
+})
+
 MANAGED_DIRECTORIES = ("mozarie", "static", "tests")
 MANAGED_FILES = (
     ".gitattributes",
@@ -60,7 +68,9 @@ MESSAGES = {
         "requirements_updating": "依存関係を更新しています...",
         "requirements_failed": "依存関係の更新に失敗しました。本体は変更していません。",
         "update_missing_version": "更新ZIPにVERSIONファイルがありません。",
+        "update_backup_failed": "更新前のバックアップを作成できなかったため、本体は変更していません。",
         "update_rollback": "更新に失敗したため、元のファイルへ戻しました。",
+        "update_rollback_incomplete": "更新の取り消しが不完全です。次の項目を手動で復元してください: {paths}。バックアップ: {backup}",
         "current": "現在最新バージョンです ({version})。",
         "version_change": "{current} → {latest}",
         "running": "新しいバージョンがあります。先にMozarieを閉じて、もう一度 update.bat を実行してください。",
@@ -93,7 +103,9 @@ MESSAGES = {
         "requirements_updating": "Updating dependencies...",
         "requirements_failed": "Could not update dependencies. Mozarie was not changed.",
         "update_missing_version": "The update archive does not contain a VERSION file.",
+        "update_backup_failed": "Could not create a backup before updating. Mozarie was not changed.",
         "update_rollback": "The update failed, so the original files were restored.",
+        "update_rollback_incomplete": "Rollback was incomplete. Restore these paths manually: {paths}. Backup: {backup}",
         "current": "Mozarie is already up to date ({version}).",
         "version_change": "{current} → {latest}",
         "running": "A new version is available. Close Mozarie, then run update.bat again.",
@@ -221,8 +233,12 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     if not name or "\x00" in name or "\\" in name:
         raise UpdateError(tr("archive_invalid_path"))
     path = PurePosixPath(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
+    for part in path.parts:
+        basename = part.split(".", maxsplit=1)[0].rstrip(" ")
+        if part.endswith((" ", ".")) or basename.upper() in _WINDOWS_RESERVED_NAMES:
+            raise UpdateError(tr("archive_invalid_path"))
     mode = info.external_attr >> 16
     if stat.S_ISLNK(mode):
         raise UpdateError(tr("archive_symlink"))
@@ -231,6 +247,7 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
 
 def extract_archive(archive: Path, destination: Path) -> Path:
     try:
+        destination_root = destination.resolve()
         with zipfile.ZipFile(archive) as bundle:
             infos = bundle.infolist()
             if not infos or len(infos) > MAX_ARCHIVE_FILES:
@@ -239,7 +256,9 @@ def extract_archive(archive: Path, destination: Path) -> Path:
                 raise UpdateError(tr("archive_extracted_too_large"))
             for info in infos:
                 relative = _safe_member_path(info)
-                target = destination.joinpath(*relative.parts)
+                target = destination_root.joinpath(*relative.parts).resolve()
+                if not target.is_relative_to(destination_root):
+                    raise UpdateError(tr("archive_invalid_path"))
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -251,10 +270,11 @@ def extract_archive(archive: Path, destination: Path) -> Path:
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise UpdateError(tr("archive_extract")) from exc
 
-    children = list(destination.iterdir())
-    source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination
-    required = (source_root / "server.py", source_root / "run.bat", source_root / "mozarie", source_root / "static")
-    if not all(path.exists() for path in required):
+    children = list(destination_root.iterdir())
+    source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination_root
+    required_files = (source_root / "server.py", source_root / "run.bat", source_root / "VERSION")
+    required_directories = (source_root / "mozarie", source_root / "static")
+    if not all(path.is_file() for path in required_files) or not all(path.is_dir() for path in required_directories):
         raise UpdateError(tr("archive_missing_app"))
     return source_root
 
@@ -320,33 +340,64 @@ def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
     if "VERSION" not in incoming:
         raise UpdateError(tr("update_missing_version"))
 
-    with tempfile.TemporaryDirectory(prefix="mozarie-backup-") as temporary:
-        backup_root = Path(temporary)
-        backed_up: list[str] = []
+    backup_root: Path | None = None
+    backed_up: set[str] = set()
+    try:
+        backup_root = Path(tempfile.mkdtemp(prefix="mozarie-backup-", dir=app_dir.parent))
+        for relative in incoming:
+            current = app_dir / relative
+            if current.exists():
+                _copy_path(current, backup_root / relative)
+                backed_up.add(relative)
+    except Exception as exc:
+        if backup_root is not None:
+            try:
+                shutil.rmtree(backup_root)
+            except OSError:
+                pass
+        raise UpdateError(tr("update_backup_failed")) from exc
+
+    assert backup_root is not None
+
+    mutated: list[str] = []
+    try:
+        for relative in incoming:
+            mutated.append(relative)
+            current = app_dir / relative
+            if current.exists():
+                _remove_path(current)
+            _copy_path(source_root / relative, current)
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        for relative in reversed(mutated):
+            current = app_dir / relative
+            if current.exists():
+                try:
+                    _remove_path(current)
+                except Exception:
+                    rollback_failures.append(relative)
+            if relative in backed_up:
+                try:
+                    _copy_path(backup_root / relative, current)
+                except Exception:
+                    rollback_failures.append(relative)
+
+        if rollback_failures:
+            paths = ", ".join(dict.fromkeys(rollback_failures))
+            raise UpdateError(
+                tr("update_rollback_incomplete", paths=paths, backup=str(backup_root.resolve()))
+            ) from exc
+
         try:
-            for relative in incoming:
-                current = app_dir / relative
-                if current.exists():
-                    _copy_path(current, backup_root / relative)
-                    backed_up.append(relative)
-            for relative in incoming:
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-                _copy_path(source_root / relative, current)
-        except Exception as exc:
-            for relative in reversed(incoming):
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-            for relative in backed_up:
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-                _copy_path(backup_root / relative, current)
-            if isinstance(exc, UpdateError):
-                raise
-            raise UpdateError(tr("update_rollback")) from exc
+            shutil.rmtree(backup_root)
+        except OSError:
+            pass
+        raise UpdateError(tr("update_rollback")) from exc
+
+    try:
+        shutil.rmtree(backup_root)
+    except OSError:
+        pass
 
 
 def perform_update(

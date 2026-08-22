@@ -4,6 +4,9 @@ from .image_io import *
 from typing import BinaryIO
 
 
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
 def _pick_output_directory(state: StudioState = STATE) -> str | None:
     if not state.native_picker_lock.acquire(blocking=False):
         raise ClientError("保存先の選択を開いています。")
@@ -527,26 +530,30 @@ class MosaicHandler(BaseHTTPRequestHandler):
         cache_control: str = "no-store",
         headers: dict[str, str] | None = None,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", cache_control)
-        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        for key, value in (headers or {}).items():
-            self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", cache_control)
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if self.close_connection:
+                self.send_header("Connection", "close")
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(data)
+        except CLIENT_DISCONNECT_ERRORS:
+            self.close_connection = True
+            return
 
     def _stream_file(self, handle: BinaryIO, record: ImageRecord | None, content_type: str, cache_control: str) -> None:
+        stat = os.fstat(handle.fileno())
+        if record is not None and (stat.st_mtime_ns != record.mtime_ns or stat.st_size != record.size_bytes):
+            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+        size = stat.st_size
         try:
-            stat = os.fstat(handle.fileno())
-            if record is not None and (stat.st_mtime_ns != record.mtime_ns or stat.st_size != record.size_bytes):
-                raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-            size = stat.st_size
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(size))
@@ -555,11 +562,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            while chunk := handle.read(IO_CHUNK_BYTES):
-                self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            # Browser navigation can close a large-image response mid-stream.
+        except CLIENT_DISCONNECT_ERRORS:
+            self.close_connection = True
             return
+        while chunk := handle.read(IO_CHUNK_BYTES):
+            try:
+                self.wfile.write(chunk)
+            except CLIENT_DISCONNECT_ERRORS:
+                self.close_connection = True
+                return
 
     def log_message(self, format: str, *args: Any) -> None:
         try:

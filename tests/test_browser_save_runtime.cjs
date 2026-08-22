@@ -239,9 +239,21 @@ async function runRemoveAfterSavePartialAndStaleCase() {
 }
 
 async function runCopyFailureCase() {
-    const runtime = createRuntime({ copy: () => jsonResponse({ error: "write failed" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /write failed/);
+  let removed = false;
+  const runtime = createRuntime({ deleteOriginal: true, copy: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.sourceAccess.set("image-1", {
+    fileHandle: {
+      name: "source.png",
+      async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; },
+      async remove() { removed = true; },
+    },
+    name: "source.png",
+    size: 1,
+    lastModified: 1,
+  });
+  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", true), /disk full/);
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
+  assert.equal(removed, false, "a failed durable copy does not delete the source handle");
 }
 
 async function runCommitFailureCase() {

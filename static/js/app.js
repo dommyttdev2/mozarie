@@ -29,6 +29,7 @@ function bindEvents() {
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
   document.querySelectorAll("[data-model-picker]").forEach((button) => button.addEventListener("click", () => { void chooseSettingsModelFile(button); }));
   $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
+  $("#settingsProvider").addEventListener("change", syncProviderSelection);
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());

@@ -37,16 +37,6 @@ def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     return chunks
 
 
-def png_ancillary_manifest(raw: bytes, *, exclude: set[bytes] | None = None) -> list[str]:
-    """Hash the exact bytes of every ancillary chunk, in file order."""
-    excluded = exclude or set()
-    return [
-        f"{chunk_type.decode('ascii', 'replace')}:{hashlib.sha256(chunk).hexdigest()}"
-        for chunk_type, chunk in parse_png_chunks(raw)
-        if chunk_type[0] & 0x20 and chunk_type not in excluded
-    ]
-
-
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
     body = chunk_type + payload
     return len(payload).to_bytes(4, "big") + body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "big")
@@ -98,16 +88,7 @@ def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_or
                 wrote_idat = True
             continue
         result.extend(chunk)
-    output = bytes(result)
-    excluded = {b"eXIf"} if normalize_orientation else set()
-    if png_ancillary_manifest(source, exclude=excluded) != png_ancillary_manifest(output, exclude=excluded):
-        raise ClientError("PNGメタデータ検証に失敗したため保存を中止しました。")
-    if normalize_orientation:
-        with Image.open(io.BytesIO(output)) as verified:
-            if verified.getexif().get(274, 1) != 1:
-                raise ClientError("PNGの向き情報を正規化できませんでした。")
-            verified.load()
-    return output
+    return bytes(result)
 
 
 def _parse_jpeg_header(raw: bytes) -> tuple[list[tuple[int, bytes]], bytes]:
@@ -149,23 +130,6 @@ def _is_jpeg_metadata_marker(marker: int) -> bool:
     return 0xE0 <= marker <= 0xEF or marker == 0xFE
 
 
-def jpeg_metadata_manifest(raw: bytes) -> list[str]:
-    segments, _scan = _parse_jpeg_header(raw)
-    return [
-        f"FF{marker:02X}:{hashlib.sha256(segment).hexdigest()}"
-        for marker, segment in segments
-        if _is_jpeg_metadata_marker(marker)
-    ]
-
-
-def _jpeg_metadata_manifest_from_segments(segments: list[tuple[int, bytes]]) -> list[str]:
-    return [
-        f"FF{marker:02X}:{hashlib.sha256(segment).hexdigest()}"
-        for marker, segment in segments
-        if _is_jpeg_metadata_marker(marker)
-    ]
-
-
 def _jpeg_exif_orientation_one_segment(source: bytes) -> bytes:
     with Image.open(io.BytesIO(source)) as source_image:
         exif = source_image.getexif()
@@ -192,19 +156,6 @@ def _expected_image_format(suffix: str) -> str:
 def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -> None:
     if image_format != _expected_image_format(suffix):
         raise ClientError("The image content does not match its file extension.")
-
-
-def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -> tuple[int, int]:
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(raw)) as image:
-                image.load()
-                if expected_suffix is not None:
-                    _assert_image_suffix_matches_format(expected_suffix, image.format)
-                return oriented_image_size(image)
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
@@ -242,7 +193,6 @@ def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize
             orientation_replaced = True
         elif _is_jpeg_metadata_marker(marker):
             metadata_segments.append((marker, segment))
-    source_manifest = _jpeg_metadata_manifest_from_segments(metadata_segments)
     encoded = io.BytesIO()
     image.save(encoded, format="JPEG", quality=95)
     encoded_segments, encoded_scan = _parse_jpeg_header(encoded.getvalue())
@@ -251,9 +201,6 @@ def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize
     ) + b"".join(
         segment for marker, segment in encoded_segments if not _is_jpeg_metadata_marker(marker)
     ) + encoded_scan
-    if source_manifest != jpeg_metadata_manifest(output):
-        raise ClientError("JPEGメタデータ検証に失敗したため保存を中止しました。")
-    _verify_decodable_image(output)
     return output
 
 
@@ -293,20 +240,10 @@ def _validate_safe_webp_structure(raw: bytes) -> None:
         raise ClientError("WebP画像データを安全に検証できません。")
 
 
-def webp_metadata_manifest(raw: bytes, *, exclude: set[bytes] | None = None) -> list[str]:
-    _validate_safe_webp_structure(raw)
-    excluded = exclude or set()
-    return [
-        f"{chunk_type.decode('ascii')}:{hashlib.sha256(chunk).hexdigest()}"
-        for chunk_type, chunk in _parse_webp_chunks(raw)
-        if chunk_type in WEBP_METADATA_CHUNKS and chunk_type not in excluded
-    ]
-
-
 def _webp_with_original_metadata(
     source: bytes, image: Image.Image, source_info: dict[str, Any], *, normalize_orientation: bool = False,
 ) -> bytes:
-    source_manifest = webp_metadata_manifest(source, exclude={b"EXIF"} if normalize_orientation else set())
+    _validate_safe_webp_structure(source)
     save_args = {
         key: source_info[key]
         for key in ("icc_profile", "exif", "xmp")
@@ -317,13 +254,6 @@ def _webp_with_original_metadata(
     encoded = io.BytesIO()
     image.save(encoded, format="WEBP", quality=95, **save_args)
     output = encoded.getvalue()
-    if source_manifest != webp_metadata_manifest(output, exclude={b"EXIF"} if normalize_orientation else set()):
-        raise ClientError("WebPメタデータ検証に失敗したため保存を中止しました。")
-    _verify_decodable_image(output)
-    if normalize_orientation:
-        with Image.open(io.BytesIO(output)) as verified:
-            if verified.getexif().get(274, 1) != 1:
-                raise ClientError("WebPの向き情報を正規化できませんでした。")
     return output
 
 
@@ -418,10 +348,23 @@ def _default_output_destination(record: ImageRecord, suffix: str = "_censored", 
     return unique_session_import_destination(target.with_name(f"{target.stem}{_read_save_suffix(suffix)}{target.suffix}"), reserved)
 
 
-def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> tuple[bytes, str]:
+def _source_stat_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _assert_source_stat_matches(record: ImageRecord, expected: tuple[int, int] | None = None) -> None:
+    if _source_stat_fingerprint(record.path) != (expected or (record.mtime_ns, record.size_bytes)):
+        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+
+
+def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> bytes:
     """Render one image without changing the source file or its catalogue state."""
     source = record.path.read_bytes()
-    source_digest = hashlib.sha256(source).hexdigest()
+    _assert_source_stat_matches(record)
     suffix = record.path.suffix.lower()
     with Image.open(io.BytesIO(source)) as source_image:
         source_image.load()
@@ -429,16 +372,16 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
         normalized = ImageOps.exif_transpose(source_image)
         modified = _apply_mosaic_to_image(normalized, mask, block_size)
         if suffix == ".png":
-            return _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation), source_digest
+            return _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
         if suffix in {".jpg", ".jpeg"}:
-            return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation), source_digest
+            return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
         if suffix == ".webp":
-            return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation), source_digest
+            return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation)
     raise ClientError("この画像形式は保存に対応していません。")
 
 
-def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_digest: str) -> None:
-    """Atomically replace a catalogued source with a previously verified render."""
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> None:
+    """Atomically replace a catalogued source with a staged render."""
     original_stat = record.path.stat()
     temporary_path: Path | None = None
     try:
@@ -449,8 +392,7 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
                     handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
-        if file_sha256(record.path) != expected_source_digest:
-            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+        _assert_source_stat_matches(record, expected_source_fingerprint)
         os.replace(temporary_path, record.path)
         temporary_path = None
         if record.source_kind == "filesystem":
@@ -486,26 +428,7 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
 def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
     destination = record.path
     original_stat = record.path.stat()
-    source = record.path.read_bytes()
-    source_stat = record.path.stat()
-    if source_stat.st_mtime_ns != record.mtime_ns or source_stat.st_size != record.size_bytes:
-        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-    source_digest = hashlib.sha256(source).hexdigest()
-    suffix = record.path.suffix.lower()
-    with Image.open(io.BytesIO(source)) as source_image:
-        source_image.load()
-        normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
-        source_info = dict(source_image.info)
-        source_image = ImageOps.exif_transpose(source_image)
-        modified = _apply_mosaic_to_image(source_image, mask, block_size)
-        if suffix == ".png":
-            output = _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
-        elif suffix in {".jpg", ".jpeg"}:
-            output = _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
-        elif suffix == ".webp":
-            output = _webp_with_original_metadata(source, modified, source_info, normalize_orientation=normalize_orientation)
-        else:
-            raise ClientError("この画像形式は安全保存に対応していません。")
+    output = render_with_mask(record, mask, block_size)
 
     temporary_path: Path | None = None
     try:
@@ -514,8 +437,7 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
-        if file_sha256(destination) != source_digest:
-            raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+        _assert_source_stat_matches(record)
         os.replace(temporary_path, destination)
         temporary_path = None
         try:

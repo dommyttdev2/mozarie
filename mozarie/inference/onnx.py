@@ -11,6 +11,11 @@ import numpy as np
 import onnxruntime as ort
 
 
+_preload_dlls = getattr(ort, "preload_dlls", None)
+if _preload_dlls is not None:
+    _preload_dlls()
+
+
 @dataclass(frozen=True)
 class Letterbox:
     scale: float
@@ -23,10 +28,6 @@ class Letterbox:
 
 
 def available_providers(device: str, gpu_device: int = 0) -> list[object]:
-    if device.lower() != "cpu":
-        preload_dlls = getattr(ort, "preload_dlls", None)
-        if preload_dlls is not None:
-            preload_dlls()
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
         return ["CPUExecutionProvider"]
