@@ -185,7 +185,9 @@ class UpdaterTests(unittest.TestCase):
             root = Path(directory)
             install = make_install(root / "install")
             source = make_source(root / "source")
-            updater.apply_update(source, install)
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)):
+                updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "new server")
             self.assertEqual((install / "config/defaults.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual((install / "config/local.json").read_text(encoding="utf-8"), '{"mine": true}')
@@ -193,6 +195,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / ".mozarie-cache/draft.bin").read_bytes(), b"draft")
             self.assertEqual((install / ".git/HEAD").read_text(encoding="utf-8"), "main")
             self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
+            self.assertFalse(backup.exists())
 
     def test_apply_backup_failure_leaves_install_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -206,12 +209,15 @@ class UpdaterTests(unittest.TestCase):
                     raise OSError("simulated backup failure")
                 original_copy(source_path, destination)
 
-            with patch("updater._copy_path", side_effect=fail_backing_up_server):
-                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_rollback"))):
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_backing_up_server):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_backup_failed"))):
                     updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
             self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
+            self.assertFalse(backup.exists())
 
     def test_apply_rolls_back_only_mutated_files_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -228,7 +234,9 @@ class UpdaterTests(unittest.TestCase):
                     raise OSError("simulated failure")
                 original_copy(source_path, destination)
 
-            with patch("updater._copy_path", side_effect=fail_on_static):
+            backup = root / "backup"
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_on_static):
                 with self.assertRaises(updater.UpdateError):
                     updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "old server")
@@ -236,6 +244,48 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
             self.assertEqual((install / "updater.py").read_text(encoding="utf-8"), "old updater")
             self.assertFalse((install / "README.md").exists())
+            self.assertFalse(backup.exists())
+
+    def test_apply_preserves_backup_when_rollback_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = make_install(root / "install")
+            source = make_source(root / "source")
+            backup = root / "backup"
+            original_copy = updater._copy_path
+            original_remove = updater._remove_path
+            static_removals = 0
+
+            def fail_during_update_and_restore(source_path: Path, destination: Path):
+                if source_path == source / "static":
+                    original_copy(source_path, destination)
+                    raise OSError("simulated update failure")
+                if source_path == backup / "static":
+                    raise OSError("simulated restore-copy failure")
+                original_copy(source_path, destination)
+
+            def lock_static_on_rollback(path: Path):
+                nonlocal static_removals
+                if path == install / "static":
+                    static_removals += 1
+                    if static_removals == 2:
+                        raise OSError("simulated locked file")
+                original_remove(path)
+
+            with patch("updater.tempfile.mkdtemp", return_value=str(backup)), \
+                    patch("updater._copy_path", side_effect=fail_during_update_and_restore), \
+                    patch("updater._remove_path", side_effect=lock_static_on_rollback):
+                with self.assertRaisesRegex(
+                    updater.UpdateError,
+                    re.escape(updater.tr(
+                        "update_rollback_incomplete", paths="static", backup=str(backup.resolve())
+                    )),
+                ):
+                    updater.apply_update(source, install)
+
+            self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
+            self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "new app")
+            self.assertTrue(backup.is_dir())
 
     def test_running_lock_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:

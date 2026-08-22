@@ -68,7 +68,9 @@ MESSAGES = {
         "requirements_updating": "依存関係を更新しています...",
         "requirements_failed": "依存関係の更新に失敗しました。本体は変更していません。",
         "update_missing_version": "更新ZIPにVERSIONファイルがありません。",
+        "update_backup_failed": "更新前のバックアップを作成できなかったため、本体は変更していません。",
         "update_rollback": "更新に失敗したため、元のファイルへ戻しました。",
+        "update_rollback_incomplete": "更新の取り消しが不完全です。次の項目を手動で復元してください: {paths}。バックアップ: {backup}",
         "current": "現在最新バージョンです ({version})。",
         "version_change": "{current} → {latest}",
         "running": "新しいバージョンがあります。先にMozarieを閉じて、もう一度 update.bat を実行してください。",
@@ -101,7 +103,9 @@ MESSAGES = {
         "requirements_updating": "Updating dependencies...",
         "requirements_failed": "Could not update dependencies. Mozarie was not changed.",
         "update_missing_version": "The update archive does not contain a VERSION file.",
+        "update_backup_failed": "Could not create a backup before updating. Mozarie was not changed.",
         "update_rollback": "The update failed, so the original files were restored.",
+        "update_rollback_incomplete": "Rollback was incomplete. Restore these paths manually: {paths}. Backup: {backup}",
         "current": "Mozarie is already up to date ({version}).",
         "version_change": "{current} → {latest}",
         "running": "A new version is available. Close Mozarie, then run update.bat again.",
@@ -335,35 +339,64 @@ def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
     if "VERSION" not in incoming:
         raise UpdateError(tr("update_missing_version"))
 
-    with tempfile.TemporaryDirectory(prefix="mozarie-backup-") as temporary:
-        backup_root = Path(temporary)
-        backed_up: list[str] = []
-        try:
-            for relative in incoming:
-                current = app_dir / relative
-                if current.exists():
-                    _copy_path(current, backup_root / relative)
-                    backed_up.append(relative)
-        except Exception as exc:
-            raise UpdateError(tr("update_rollback")) from exc
+    backup_root: Path | None = None
+    backed_up: set[str] = set()
+    try:
+        backup_root = Path(tempfile.mkdtemp(prefix="mozarie-backup-", dir=app_dir.parent))
+        for relative in incoming:
+            current = app_dir / relative
+            if current.exists():
+                _copy_path(current, backup_root / relative)
+                backed_up.add(relative)
+    except Exception as exc:
+        if backup_root is not None:
+            try:
+                shutil.rmtree(backup_root)
+            except OSError:
+                pass
+        raise UpdateError(tr("update_backup_failed")) from exc
 
-        mutated: list[str] = []
+    assert backup_root is not None
+
+    mutated: list[str] = []
+    try:
+        for relative in incoming:
+            mutated.append(relative)
+            current = app_dir / relative
+            if current.exists():
+                _remove_path(current)
+            _copy_path(source_root / relative, current)
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        for relative in reversed(mutated):
+            current = app_dir / relative
+            if current.exists():
+                try:
+                    _remove_path(current)
+                except Exception:
+                    rollback_failures.append(relative)
+            if relative in backed_up:
+                try:
+                    _copy_path(backup_root / relative, current)
+                except Exception:
+                    rollback_failures.append(relative)
+
+        if rollback_failures:
+            paths = ", ".join(dict.fromkeys(rollback_failures))
+            raise UpdateError(
+                tr("update_rollback_incomplete", paths=paths, backup=str(backup_root.resolve()))
+            ) from exc
+
         try:
-            for relative in incoming:
-                mutated.append(relative)
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-                _copy_path(source_root / relative, current)
-        except Exception as exc:
-            for relative in reversed(mutated):
-                current = app_dir / relative
-                if current.exists():
-                    _remove_path(current)
-            for relative in reversed(mutated):
-                if relative in backed_up:
-                    _copy_path(backup_root / relative, app_dir / relative)
-            raise UpdateError(tr("update_rollback")) from exc
+            shutil.rmtree(backup_root)
+        except OSError:
+            pass
+        raise UpdateError(tr("update_rollback")) from exc
+
+    try:
+        shutil.rmtree(backup_root)
+    except OSError:
+        pass
 
 
 def perform_update(
