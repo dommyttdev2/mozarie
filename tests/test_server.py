@@ -4083,6 +4083,42 @@ class MozarieTests(unittest.TestCase):
             handler._read_binary_body_to_file()
         self.assertEqual(list((state.cache_dir / "import-staging").glob("*")), [])
 
+    def test_response_disconnect_errors_are_swallowed(self):
+        for error in http_module.CLIENT_DISCONNECT_ERRORS:
+            with self.subTest(error=error.__name__):
+                handler = object.__new__(MosaicHandler)
+                handler.close_connection = False
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                handler.wfile = Mock()
+                handler.wfile.write.side_effect = error()
+                handler._binary(b"image", "image/png")
+                self.assertTrue(handler.close_connection)
+
+                handler.close_connection = False
+                handler.wfile.write.side_effect = error()
+                handle = Mock()
+                handle.read.side_effect = (b"image", b"")
+                with patch.object(http_module.os, "fstat", return_value=types.SimpleNamespace(st_size=5)):
+                    handler._stream_file(handle, None, "image/png", "no-store")
+                self.assertTrue(handler.close_connection)
+
+    def test_stream_file_propagates_file_errors(self):
+        handler = object.__new__(MosaicHandler)
+        handler.close_connection = False
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = Mock()
+        with patch.object(http_module.os, "fstat", side_effect=RuntimeError("stat failed")), self.assertRaisesRegex(RuntimeError, "stat failed"):
+            handler._stream_file(Mock(), None, "image/png", "no-store")
+
+        handle = Mock()
+        handle.read.side_effect = RuntimeError("read failed")
+        with patch.object(http_module.os, "fstat", return_value=types.SimpleNamespace(st_size=5)), self.assertRaisesRegex(RuntimeError, "read failed"):
+            handler._stream_file(handle, None, "image/png", "no-store")
+
     def test_thumbnail_requests_singleflight_the_same_image(self):
         from http.server import ThreadingHTTPServer
 

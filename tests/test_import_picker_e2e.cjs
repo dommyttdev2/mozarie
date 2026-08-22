@@ -391,7 +391,12 @@ async function main() {
     await page.locator("#settingsProvider").selectOption("gpu");
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), false, "GPU re-enables the GPU selector");
     assert.match(await page.locator('#settingsHandSegmentationCard a[data-i18n="settings.handSegmentationDownload"]').getAttribute("href"), /handsegnet_vit_b_best\.safetensors$/, "HandSeg points directly to the fixed checkpoint");
+    assert.equal(await page.locator('#settingsHandSegmentationCard a[data-i18n="settings.handSegmentationProject"]').getAttribute("href"), "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl", "HandSeg project details use the authoritative model page");
     assert.match(await page.locator("#settingsHandSegmentationCard").textContent(), /handsegnet_vit_b_best\.safetensors/, "HandSeg explains the exact file to select");
+    await page.locator('[data-model-help="handSegmentation"]').click();
+    assert.match(await page.locator("#modelHelpText").textContent(), /HandSegNet anime SDXL.*handsegnet_vit_b_best\.safetensors.*設定 > 検出 > 参照/, "HandSeg help gives the exact model and Settings path");
+    assert.doesNotMatch(await page.locator("#modelHelpText").textContent(), /対応する .safetensors/, "HandSeg help does not suggest an arbitrary compatible file");
+    await page.locator("#modelHelpCloseButton").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
@@ -521,6 +526,8 @@ async function main() {
     assert.equal(await page.locator("#canvasStage > .canvas-tool-rail").count(), 1, "only editor tools stay in the canvas overlay");
     assert.equal(await page.locator("#overviewDetectAllButton").count(), 0, "overview must not duplicate global actions");
     await page.locator("#applyDialog").evaluate((dialog) => dialog.showModal());
+    assert.equal(await page.locator('#applyDialog [data-i18n="apply.metadata"]').textContent(), "対応するメタデータを引き継ぎます。同名時は自動連番です。", "save dialog describes only supported metadata carryover");
+    assert.doesNotMatch(await page.locator('#applyDialog [data-i18n="apply.metadata"]').textContent(), /検証|validated/, "save dialog makes no verification claim");
     await page.locator("#applyCopyMode").check();
     await page.locator("#applySuffix").fill("_kept");
     await page.locator("#applyOverwriteMode").check();

@@ -39,7 +39,7 @@ Mozarieはモデルを同梱・自動ダウンロードしません。利用前�
 | 必須: 性器の自動検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · [モデルページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
 | 任意: 輪郭補正・境界ツール・手の除外 | `sam_vit_b_01ec64.pth`、`sam_vit_l_0b3195.pth`、`sam_vit_h_4b8939.pth` | [公式SAMチェックポイント](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
 | 任意: 手の検出 | `hand_detect_v1.0_s/model.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
-| 任意: HandSegNetの手輪郭 | `handsegnet_vit_b_best.safetensors` | [固定チェックポイント](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [プロジェクト](https://github.com/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
+| 任意: HandSegNetの手輪郭 | `handsegnet_vit_b_best.safetensors` | [固定チェックポイント](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [モデルページ](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 SAMは設定で選んだ`vit_b`、`vit_l`、`vit_h`と同じ種類のファイルを指定してください。HandSegNetは任意で、手の検出をONにした場合だけ使えます。
 

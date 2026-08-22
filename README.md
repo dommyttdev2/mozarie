@@ -39,7 +39,7 @@ Mozarie never bundles or downloads model files. Check each provider's terms befo
 | Required genital detection | `nsfw-anime-xl-x1280.onnx` | [Download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · [model page](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
 | Optional outline refinement, boundary tool, hand exclusion | `sam_vit_b_01ec64.pth`, `sam_vit_l_0b3195.pth`, or `sam_vit_h_4b8939.pth` | [Official SAM checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
 | Optional hand detection | `hand_detect_v1.0_s/model.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
-| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | [Fixed checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [project](https://github.com/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
+| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | [Fixed checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [model page](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on.
 
