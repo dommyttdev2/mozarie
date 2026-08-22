@@ -1,7 +1,7 @@
 numpy>=1.26
 Pillow>=10.0
 opencv-python>=4.8
-onnxruntime-gpu>=1.17
+onnxruntime-gpu>=1.21
 torch>=2.2
 torchvision>=0.17
 segment-anything @ https://github.com/facebookresearch/segment-anything/archive/dca509fe793f601edb92606367a655c15ac00fdf.tar.gz

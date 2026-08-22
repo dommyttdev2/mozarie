@@ -20,7 +20,6 @@ import argparse
 import atexit
 from concurrent.futures import ThreadPoolExecutor, wait
 import heapq
-import hashlib
 import io
 import json
 import logging
@@ -174,7 +173,7 @@ class ImageRecord:
 class BrowserSaveToken:
     image_id: str
     candidate_revision: int
-    source_fingerprint: tuple[int, int, str]
+    source_fingerprint: tuple[int, int]
     catalog_generation: int
     issued_at: float
     rendered_path: Path | None
@@ -221,6 +220,9 @@ class Job:
     error_code: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
+    ended_at: float | None = None
+    paused_at: float | None = None
+    paused_seconds: float = 0.0
     outputs: list[str] = field(default_factory=list)
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
@@ -228,6 +230,9 @@ class Job:
     remove_after_save: bool = False
 
     def as_dict(self) -> dict[str, Any]:
+        active_elapsed = 0.0
+        if self.started_at is not None:
+            active_elapsed = max(0.0, (self.paused_at or self.ended_at or time.time()) - self.started_at - self.paused_seconds)
         return {
             "kind": self.kind,
             "state": self.state,
@@ -238,6 +243,7 @@ class Job:
             "errorCode": self.error_code,
             "params": self.params,
             "startedAt": self.started_at,
+            "activeElapsed": active_elapsed,
             "outputs": self.outputs,
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
@@ -320,14 +326,6 @@ def mask_containment(left: np.ndarray, right: np.ndarray) -> float:
     if smallest == 0:
         return 0.0
     return float(np.count_nonzero(left_bool & right_bool) / smallest)
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def segment_overlaps(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:

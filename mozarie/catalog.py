@@ -290,7 +290,7 @@ class CatalogMixin:
         self,
         record: ImageRecord,
         revision: int,
-        source_fingerprint: tuple[int, int, str],
+        source_fingerprint: tuple[int, int],
         catalog_generation: int,
         rendered_path: Path | None,
     ) -> str:

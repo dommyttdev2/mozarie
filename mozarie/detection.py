@@ -72,12 +72,12 @@ class DetectionMixin:
         return models
 
     def _ensure_hand_model(self, models: DetectionModels) -> HandDetector:
-        if models.hand is not None:
+        with self.inference_lock:
+            if models.hand is None:
+                model_path = self._configured_model_path("hand_detection", "手の検出")
+                provider = str(self.settings["models"].get("provider", "gpu"))
+                models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
             return models.hand
-        model_path = self._configured_model_path("hand_detection", "手の検出")
-        provider = str(self.settings["models"].get("provider", "gpu"))
-        models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
-        return models.hand
 
     def _detect_worker(
         self,
@@ -93,35 +93,17 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
-            model_slots: list[DetectionModels] = []
-            for slot_index in range(worker_count):
-                self._wait_while_paused(control, job_generation, catalog_generation)
-                if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
-                    self._cancel_job(job_generation, catalog_generation)
-                    return
-                if not self._job_is_current(job_generation, catalog_generation):
-                    return
-                model_slots.append(self._ensure_models() if slot_index == 0 else self._load_detection_models())
-            slot_lock = threading.Lock()
-            next_slot = 0
+            self._wait_while_paused(control, job_generation, catalog_generation)
+            if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                self._cancel_job(job_generation, catalog_generation)
+                return
+            if not self._job_is_current(job_generation, catalog_generation):
+                return
+            models = self._ensure_models()
 
-            # Keep a stable slot per thread by handing each bounded worker its
-            # own model bundle, while records themselves are claimed dynamically.
-            slot_local = threading.local()
             def claim_and_run(index: int, record: ImageRecord) -> None:
-                nonlocal next_slot
-                if not hasattr(slot_local, "models"):
-                    with slot_lock:
-                        slot_local.models = model_slots[next_slot]
-                        next_slot += 1
-                models = slot_local.models
                 self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                try:
-                    candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
-                except RuntimeError as exc:
-                    if "out of memory" in str(exc).lower():
-                        raise ClientError("GPUメモリが不足しました。並列数を下げてください。") from exc
-                    raise
+                candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
                 if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                     self._discard_candidates(candidates)
                     return
@@ -174,6 +156,11 @@ class DetectionMixin:
                 self._cancel_job(job_generation, catalog_generation)
                 return
             self._finish_job(job_generation, catalog_generation)
+        except RuntimeError as exc:
+            if any(marker in str(exc).lower() for marker in ("out of memory", "failed to allocate memory", "bfcarena")):
+                self._fail_job(ClientError("GPUメモリが不足しました。同時処理数を1に下げるか、別のGPUまたはCPUを選んでください。", "gpu_out_of_memory"), job_generation, catalog_generation)
+            else:
+                self._fail_job(exc, job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             self._fail_job(exc, job_generation, catalog_generation)
 
