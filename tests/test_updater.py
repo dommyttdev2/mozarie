@@ -101,22 +101,58 @@ class UpdaterTests(unittest.TestCase):
             source = updater.extract_archive(archive, root / "out")
             self.assertEqual(source.name, "norqis-mozarie")
 
-    def test_safe_extract_rejects_traversal_and_symlink(self):
+    def test_safe_extract_rejects_invalid_paths_without_writing_outside_destination(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            traversal = root / "traversal.zip"
-            with zipfile.ZipFile(traversal, "w") as bundle:
-                bundle.writestr("../outside.txt", "bad")
-            with self.assertRaises(updater.UpdateError):
-                updater.extract_archive(traversal, root / "out1")
+            for name in (
+                "G:escaped.txt",
+                "C:/absolute",
+                r"C:\absolute",
+                "../outside.txt",
+                r"..\outside.txt",
+                "root/file:stream",
+                "/absolute",
+                "//server/share",
+            ):
+                with self.subTest(name=name):
+                    archive = root / "invalid.zip"
+                    with zipfile.ZipFile(archive, "w") as bundle:
+                        bundle.writestr(name, "bad")
+                    with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                        updater.extract_archive(archive, root / "out")
+                    self.assertFalse((root / "outside.txt").exists())
+                    self.assertEqual(list(root.iterdir()), [archive])
+                    archive.unlink()
 
+    def test_safe_extract_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             symlink = root / "symlink.zip"
             info = zipfile.ZipInfo("root/link")
             info.external_attr = (0o120777 << 16)
             with zipfile.ZipFile(symlink, "w") as bundle:
                 bundle.writestr(info, "target")
             with self.assertRaises(updater.UpdateError):
-                updater.extract_archive(symlink, root / "out2")
+                updater.extract_archive(symlink, root / "out")
+
+    def test_safe_extract_rejects_precreated_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "out"
+            outside = root / "outside"
+            output.mkdir()
+            outside.mkdir()
+            try:
+                (output / "root").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+
+            archive = root / "release.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("root/escaped.txt", "bad")
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                updater.extract_archive(archive, output)
+            self.assertFalse((outside / "escaped.txt").exists())
 
     def test_apply_updates_code_and_preserves_user_data_and_batch(self):
         with tempfile.TemporaryDirectory() as directory:

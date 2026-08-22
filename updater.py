@@ -221,7 +221,7 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     if not name or "\x00" in name or "\\" in name:
         raise UpdateError(tr("archive_invalid_path"))
     path = PurePosixPath(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
     mode = info.external_attr >> 16
     if stat.S_ISLNK(mode):
@@ -231,6 +231,7 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
 
 def extract_archive(archive: Path, destination: Path) -> Path:
     try:
+        destination_root = destination.resolve()
         with zipfile.ZipFile(archive) as bundle:
             infos = bundle.infolist()
             if not infos or len(infos) > MAX_ARCHIVE_FILES:
@@ -239,7 +240,9 @@ def extract_archive(archive: Path, destination: Path) -> Path:
                 raise UpdateError(tr("archive_extracted_too_large"))
             for info in infos:
                 relative = _safe_member_path(info)
-                target = destination.joinpath(*relative.parts)
+                target = destination_root.joinpath(*relative.parts).resolve()
+                if not target.is_relative_to(destination_root):
+                    raise UpdateError(tr("archive_invalid_path"))
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -251,8 +254,8 @@ def extract_archive(archive: Path, destination: Path) -> Path:
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise UpdateError(tr("archive_extract")) from exc
 
-    children = list(destination.iterdir())
-    source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination
+    children = list(destination_root.iterdir())
+    source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination_root
     required = (source_root / "server.py", source_root / "run.bat", source_root / "mozarie", source_root / "static")
     if not all(path.exists() for path in required):
         raise UpdateError(tr("archive_missing_app"))
