@@ -57,6 +57,21 @@ def make_install(root: Path, version: str = "1.1.0") -> Path:
     return root
 
 
+UPDATE_ARCHIVE_CONTENTS = {
+    "wrapper/server.py": "server",
+    "wrapper/run.bat": "run",
+    "wrapper/VERSION": "1.2.0",
+    "wrapper/mozarie/core.py": "core",
+    "wrapper/static/app.js": "app",
+}
+
+
+def write_archive(archive: Path, contents: dict[str, str]) -> None:
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path, data in contents.items():
+            bundle.writestr(path, data)
+
+
 class Response(io.BytesIO):
     def __enter__(self):
         return self
@@ -94,12 +109,47 @@ class UpdaterTests(unittest.TestCase):
                 for name, data in {
                     "norqis-mozarie/server.py": "server",
                     "norqis-mozarie/run.bat": "run",
+                    "norqis-mozarie/VERSION": "1.2.0",
                     "norqis-mozarie/mozarie/core.py": "core",
                     "norqis-mozarie/static/app.js": "app",
                 }.items():
                     bundle.writestr(name, data)
             source = updater.extract_archive(archive, root / "out")
             self.assertEqual(source.name, "norqis-mozarie")
+
+    def test_safe_extract_rejects_required_file_directories(self):
+        for name in ("server.py", "run.bat", "VERSION"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "release.zip"
+                contents = UPDATE_ARCHIVE_CONTENTS.copy()
+                contents.pop(f"wrapper/{name}")
+                contents[f"wrapper/{name}/child"] = "not a required file"
+                write_archive(archive, contents)
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                    updater.extract_archive(archive, root / "out")
+
+    def test_safe_extract_rejects_required_directory_files(self):
+        for name, content_path in (("mozarie", "mozarie/core.py"), ("static", "static/app.js")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "release.zip"
+                contents = UPDATE_ARCHIVE_CONTENTS.copy()
+                contents.pop(f"wrapper/{content_path}")
+                contents[f"wrapper/{name}"] = "not a required directory"
+                write_archive(archive, contents)
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                    updater.extract_archive(archive, root / "out")
+
+    def test_safe_extract_rejects_missing_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "release.zip"
+            contents = UPDATE_ARCHIVE_CONTENTS.copy()
+            contents.pop("wrapper/VERSION")
+            write_archive(archive, contents)
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                updater.extract_archive(archive, root / "out")
 
     def test_safe_extract_rejects_invalid_paths_without_writing_outside_destination(self):
         with tempfile.TemporaryDirectory() as directory:

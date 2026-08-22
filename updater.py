@@ -272,8 +272,9 @@ def extract_archive(archive: Path, destination: Path) -> Path:
 
     children = list(destination_root.iterdir())
     source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination_root
-    required = (source_root / "server.py", source_root / "run.bat", source_root / "mozarie", source_root / "static")
-    if not all(path.exists() for path in required):
+    required_files = (source_root / "server.py", source_root / "run.bat", source_root / "VERSION")
+    required_directories = (source_root / "mozarie", source_root / "static")
+    if not all(path.is_file() for path in required_files) or not all(path.is_dir() for path in required_directories):
         raise UpdateError(tr("archive_missing_app"))
     return source_root
 
