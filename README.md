@@ -2,93 +2,74 @@
 
 # Mozarie
 
-Mozarie is a local Windows app for reviewing multiple images and applying mosaic edits. It can automatically find candidate mosaic regions, lets you confirm or correct each result, and preserves supported image metadata when saving.
+Mozarie is a local Windows app for reviewing image sets and applying mosaic edits. It proposes genital-area masks, keeps the final decision with you, and saves PNG, JPEG, and WebP results.
 
-## Quick start
+[Latest release](https://github.com/norqis/mozarie/releases/latest) · [Setup](#setup) · [Model downloads](#model-downloads)
 
-1. Install Python 3.11 or later.
-2. Install the dependencies:
+## Features
+
+- Load individual images or folders, detect current or all images, and pause, resume, or cancel long jobs.
+- Review, hide, clear, and batch-edit candidates; correct masks with the brush, eraser, or boundary tool.
+- Save copies or overwrite sources after confirmation. Supported source metadata is carried into the rendered result.
+
+## Setup
+
+1. Install Python 3.11 or newer on Windows.
+2. Install dependencies:
 
    ```powershell
    python -m pip install -r requirements.txt
    ```
 
-3. Download the primary detection model and outline model listed below.
+3. Download the required primary model below.
 4. Start Mozarie:
 
    ```powershell
    .\run.bat
    ```
 
-5. Open **Settings > Detection**, use **Browse** beside each model path to select the downloaded files, then load images or a folder.
-6. Run automatic detection, review the proposed ranges, make any manual corrections, and save.
+5. In **Settings > Detection**, use **Browse** to select each downloaded file. Load images, run detection, review ranges, then save.
 
-## Model setup
+Mozarie never bundles or downloads model files. Check each provider's terms before use.
 
-### Required
+## Model downloads
 
-| Purpose | File | Download | Source |
-| --- | --- | --- | --- |
-| Automatically detect genital areas | `nsfw-anime-xl-x1280.onnx` | [Download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) | [Model page](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
-| Refine outlines and use the boundary tool | `sam_vit_b_01ec64.pth` | [Download](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) | [Segment Anything](https://github.com/facebookresearch/segment-anything) |
+| Feature | File to select | Download / source |
+| --- | --- | --- |
+| Required genital detection | `nsfw-anime-xl-x1280.onnx` | [Download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · [model page](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
+| Optional outline refinement, boundary tool, hand exclusion | `sam_vit_b_01ec64.pth`, `sam_vit_l_0b3195.pth`, or `sam_vit_h_4b8939.pth` | [Official SAM checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
+| Optional hand detection | `hand_detect_v1.0_s/model.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
+| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | [Fixed checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [project](https://github.com/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
-The outline model is also used when high-precision detection, the boundary tool, or hand exclusion needs an object outline.
+The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on.
 
-### Optional: supplement missed detections
-
-NTD11 and Sensitive are optional additional genital-area detectors. Enable either one only when the primary model misses too much in the images you are processing.
-
-| Model | Source |
-| --- | --- |
-| `ntd11_anime_nsfw_segm_v5-variant1` | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556/anime-nsfw-detection-adetailer-all-in-one) |
-| `sensitive_detect_v07` | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect/tree/main) |
-
-Mozarie needs raw 1024px segmentation ONNX exports for these two models. If a distribution does not provide a compatible ONNX file, export the downloaded `.pt` with Ultralytics and `end2end=False`, then select the generated `.onnx` under **Settings > Detection**.
+NTD11 and Sensitive are optional supplemental ONNX segmentation models. If their distribution only has a `.pt`, export raw 1024px segmentation ONNX:
 
 ```powershell
 python -m pip install ultralytics
 yolo export model="path\to\model.pt" format=onnx imgsz=1024 end2end=False
 ```
 
-### Optional: exclude overlapping hands
+## Use
 
-Enable this only when hands overlap a detected genital area. It requires a hand-detection ONNX file and uses the outline model above to remove only the overlapping hand portion.
-
-| Model | Source |
-| --- | --- |
-| Hand detection | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/0c4ab4d58aafbd56794c82a9c1fe424f86c5780d/hand_detect_v1.0_s) |
-
-### Optional: HandSegNet anime SDXL
-
-When hand detection is enabled, you can optionally use the pinned [HandSegNet anime SDXL checkpoint](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) for hand outlines. Download it manually; Mozarie does not bundle or download models. Use revision `77ff734683306141e56aef9d491958a82508b41a`. The pinned [LICENSE_WEIGHTS.txt](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/blob/77ff734683306141e56aef9d491958a82508b41a/LICENSE_WEIGHTS.txt) applies to the model weights, not the repository's inference and conversion scripts.
-
-### Optional: detect white-fluid candidates
-
-This experimental option needs no additional model. Within a detected penis range, it uses color and area heuristics to create disabled white-fluid exclusion candidates. White highlights, pale details, or other bright objects can be proposed by mistake, so review and enable a candidate only when appropriate.
-
-Model files are not included in this repository. Mozarie never downloads or bundles models. Review the terms and license at each distribution source before use.
-
-## CPU and GPU
-
-Mozarie works on CPU. ONNX detection uses ONNX Runtime's CUDA provider when GPU is selected; SAM and HandSegNet use PyTorch only when those features run. In **Settings > Detection**, **Model and GPU information** lists the GPUs supported by the installed PyTorch build. The check only confirms configured file paths and extensions—it does not open model files or allocate GPU memory. Models are loaded when the feature actually runs, and any incompatible model is reported there.
-
-## Workflow
-
-1. Load individual images or a folder.
+1. Import images or a folder.
 2. Run automatic detection for the current image or all images.
-3. Review each proposed mosaic range and remove unsuitable candidates.
-4. Add or erase ranges with the brush, or use the boundary tool to select an object outline.
-5. Save one image or save all selected images.
+3. Review ranges and correct them when needed.
+4. Save a copy or overwrite the source. Copy names are suffixed automatically when needed.
 
-Saving preserves image metadata supported by PNG, JPEG, and WebP files. Review saved files before publishing.
+Choose a supported GPU in **Settings > Detection** for GPU processing. After the first completed detection, the progress view estimates remaining time excluding pauses. If GPU memory is full, set parallel processing to 1, choose another GPU, or switch to CPU.
 
-## Update
+## Updates
 
-Double-click `update.bat` to check the latest public GitHub Release. Close Mozarie before applying an available update. Local settings, models, caches, and working images are preserved.
+Use **Check for updates** in Settings, or run `update.bat`. Close Mozarie before applying an update. Settings, model paths, cache, and working images stay local.
+
+## Troubleshooting
+
+- **A model cannot load:** confirm the exact filename above and the selected SAM type.
+- **GPU memory or CUDA/provider error:** reduce parallel processing, select CPU, or install a compatible ONNX Runtime GPU and PyTorch environment.
+- **Need help:** open a [GitHub issue](https://github.com/norqis/mozarie/issues) with the error text and provider.
 
 ## Development
-
-Before publishing a release, update `VERSION` to the same semantic version as the GitHub Release tag.
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -98,4 +79,4 @@ npm test
 
 ## License
 
-Mozarie is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components and model-source notices.
+Mozarie is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party and model-source notices.
