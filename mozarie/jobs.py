@@ -360,7 +360,7 @@ class JobsMixin:
         LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        if isinstance(exc, RuntimeError) and any(
+        if not isinstance(exc, ClientError) and any(
             marker in str(exc).lower()
             for marker in ("out of memory", "failed to allocate memory", "bfcarena")
         ):

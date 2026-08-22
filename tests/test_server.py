@@ -1954,8 +1954,9 @@ class MozarieTests(unittest.TestCase):
 
     def test_job_error_response_preserves_client_error_code_and_params(self):
         state = self.new_state(); state.job = server_module.Job(kind="detect", state="running")
-        state._fail_job(ClientError("invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
+        state._fail_job(ClientError("out of memory: invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
         data = state.job.as_dict()
+        self.assertEqual(data["error"], "out of memory: invalid checkpoint")
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
         self.assertEqual(data["params"], {"model": "vit_b"})
 
@@ -1987,6 +1988,20 @@ class MozarieTests(unittest.TestCase):
                         state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
                     self.assertEqual(state.job.state, "error")
                     self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+
+    def test_detection_worker_maps_plain_exception_ort_oom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+            with patch.object(state, "_ensure_models", return_value=object()), \
+                 patch.object(state, "_detect_image", side_effect=Exception("[ONNXRuntimeError] BFCArena failed to allocate memory")):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.error_code, "gpu_out_of_memory")
 
     def test_model_verification_occurs_once_for_a_loaded_model_set(self):
         state = self.new_state()
