@@ -158,19 +158,6 @@ def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -
         raise ClientError("The image content does not match its file extension.")
 
 
-def _verify_decodable_image(raw: bytes, *, expected_suffix: str | None = None) -> tuple[int, int]:
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(raw)) as image:
-                image.load()
-                if expected_suffix is not None:
-                    _assert_image_suffix_matches_format(expected_suffix, image.format)
-                return oriented_image_size(image)
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ClientError("保存後の画像を再読込できません。元画像は変更しません。") from exc
-
-
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
     """Validate an input image without decoding its complete pixel payload."""
     try:
@@ -394,7 +381,7 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
 
 
 def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> None:
-    """Atomically replace a catalogued source with a previously verified render."""
+    """Atomically replace a catalogued source with a staged render."""
     original_stat = record.path.stat()
     temporary_path: Path | None = None
     try:

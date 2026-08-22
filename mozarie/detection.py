@@ -16,9 +16,8 @@ class DetectionMixin:
         parallelism: int = 2,
         target_classes: set[str] | None = None,
     ) -> None:
-        # The gate makes starting a detection mutually exclusive with boundary
-        # inference and model-cache replacement. It is deliberately not held
-        # during the complete background run, so distinct model slots can work.
+        # The gate makes initial job setup mutually exclusive with boundary
+        # inference and model-cache replacement.
         with self.inference_lock:
             records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))

@@ -1416,20 +1416,20 @@ class MozarieTests(unittest.TestCase):
             state.job = server_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
             first_entered = threading.Event()
             release_first = threading.Event()
-            original_save = saving_module.save_with_mask
+            original_source_check = image_io_module._assert_source_stat_matches
 
-            def hold_first_save(record, mask, block_size):
+            def hold_first_source_check(record, *args):
                 if record.image_id == first_id:
                     first_entered.set()
                     self.assertTrue(release_first.wait(2))
-                return original_save(record, mask, block_size)
+                return original_source_check(record, *args)
 
             worker = threading.Thread(
                 target=state._apply_worker,
                 args=(records, 100, masks),
                 kwargs={"saving_parallelism": 1},
             )
-            with patch.object(saving_module, "save_with_mask", side_effect=hold_first_save):
+            with patch.object(image_io_module, "_assert_source_stat_matches", side_effect=hold_first_source_check):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))
                 previous_stat = second_path.stat()
@@ -1487,7 +1487,7 @@ class MozarieTests(unittest.TestCase):
                 if index == 0:
                     with completion_lock:
                         completion_order.append(index)
-                return f"rendered-{index}".encode("ascii"), "digest"
+                return f"rendered-{index}".encode("ascii")
 
             def capture_copy(destination, _output):
                 written_paths.append(destination)
@@ -1550,7 +1550,7 @@ class MozarieTests(unittest.TestCase):
                 second_started.set()
                 if not release_second.wait(2):
                     raise RuntimeError("test did not release the second worker")
-                return b"rendered-second", "digest"
+                return b"rendered-second"
 
             def output_destination(record, _suffix, _reserved):
                 return output_paths[record.image_id]
@@ -3766,7 +3766,7 @@ class MozarieTests(unittest.TestCase):
             )
             with patch.object(state, "combined_candidate_mask", side_effect=compose), \
                 patch.object(state, "_reserve_output_destination", side_effect=lambda record, _suffix, _directory: output_paths[record.image_id]), \
-                 patch.object(saving_module, "render_with_mask", return_value=(b"rendered", "digest")), \
+                 patch.object(saving_module, "render_with_mask", return_value=b"rendered"), \
                  patch.object(saving_module, "write_rendered_copy"):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))

@@ -16,7 +16,7 @@ if str(APP_DIR) not in sys.path:
 
 from mozarie.core import *  # noqa: F403
 from mozarie.image_io import *  # noqa: F403
-from mozarie.image_io import _apply_mosaic_to_image, _assert_image_suffix_matches_format, _decode_mask, _default_output_destination, _verify_decodable_image
+from mozarie.image_io import _apply_mosaic_to_image, _assert_image_suffix_matches_format, _decode_mask, _default_output_destination
 from mozarie.state import DetectionModels, STATE, StudioState
 from mozarie.http import MosaicHandler, _read_candidate_revision, _read_detection_parallelism, _read_mosaic_divisor, _read_save_suffix, _read_target_classes, _start_update_after_response
 

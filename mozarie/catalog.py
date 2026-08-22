@@ -308,7 +308,7 @@ class CatalogMixin:
 
     @staticmethod
     def _assert_record_stat_matches(record: ImageRecord) -> None:
-        """Fast transport-path guard; digest verification belongs to mutations."""
+        """Fast transport-path guard against external source changes."""
         try:
             stat = record.path.stat()
         except OSError as exc:
