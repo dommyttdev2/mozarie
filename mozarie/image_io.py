@@ -416,6 +416,8 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
             handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary_path, destination)
         temporary_path = None
     finally:

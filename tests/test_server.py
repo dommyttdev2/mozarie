@@ -4666,11 +4666,12 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.commit_browser_save(image_id, rendered_revision, token, "keep")["cleared"], committed["cleared"])
             write_copy.assert_called_once()
 
-    def test_browser_copy_render_releases_the_reserved_name_when_output_write_fails(self):
+    def test_browser_copy_render_keeps_source_and_candidates_when_output_sync_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
+            source_bytes = source.read_bytes()
             output_directory = root / "output"
             output_directory.mkdir()
             state = self.new_state()
@@ -4682,12 +4683,18 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
 
-            with patch.object(saving_module, "write_rendered_copy", side_effect=OSError("locked")):
+            with patch.object(image_io_module.os, "fsync", side_effect=OSError("disk full")), \
+                 patch.object(image_io_module.os, "replace", wraps=image_io_module.os.replace) as replace:
                 with self.assertRaisesRegex(ClientError, "保存先フォルダへ保存できませんでした"):
                     state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
 
+            self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertEqual(state.reserved_output_paths, set())
             self.assertEqual(state.browser_save_tokens, {})
+            replace.assert_not_called()
+            self.assertFalse((output_directory / "source_censored.png").exists())
+            self.assertEqual(list(output_directory.glob("*.mozarie.tmp")), [])
 
     def test_browser_save_renders_then_clears_only_matching_revision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5230,12 +5237,12 @@ class MozarieTests(unittest.TestCase):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
-    def test_destructive_saves_flush_and_sync_before_stale_check_and_replace(self):
+    def test_rendered_saves_flush_and_sync_before_replace(self):
         original_temporary_file = image_io_module.tempfile.NamedTemporaryFile
         original_replace = image_io_module.os.replace
         original_assert_source_stat_matches = image_io_module._assert_source_stat_matches
 
-        for route in ("apply", "browser overwrite"):
+        for route in ("apply", "browser overwrite", "browser copy"):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
                 source = Path(directory) / "source.png"
                 Image.new("RGB", (16, 16), "white").save(source)
@@ -5282,12 +5289,15 @@ class MozarieTests(unittest.TestCase):
 
                 if route == "apply":
                     save = lambda: save_with_mask(record, self._mask(16, 16), 4)
-                else:
+                elif route == "browser overwrite":
                     rendered = Path(directory) / "rendered.png"
                     Image.new("RGB", (16, 16), "black").save(rendered)
                     save = lambda: image_io_module._replace_record_with_rendered_output(
                         record, rendered, (record.mtime_ns, record.size_bytes),
                     )
+                else:
+                    destination = Path(directory) / "copy.png"
+                    save = lambda: image_io_module.write_rendered_copy(destination, b"rendered")
 
                 with patch.object(image_io_module.tempfile, "NamedTemporaryFile", side_effect=tracked_temporary_file), \
                      patch.object(image_io_module.os, "fsync", side_effect=lambda _fd: events.append("fsync")), \
@@ -5295,7 +5305,12 @@ class MozarieTests(unittest.TestCase):
                      patch.object(image_io_module.os, "replace", side_effect=tracked_replace):
                     save()
 
-                self.assertEqual(events[-5:], ["write", "flush", "fsync", "stale check", "replace"])
+                expected_events = ["write", "flush", "fsync", "replace"]
+                if route != "browser copy":
+                    expected_events.insert(-1, "stale check")
+                self.assertEqual(events[-len(expected_events):], expected_events)
+                if route == "browser copy":
+                    self.assertEqual(destination.read_bytes(), b"rendered")
 
     def test_destructive_saves_preserve_source_when_fsync_fails(self):
         for route in ("apply", "browser overwrite"):
