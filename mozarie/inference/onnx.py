@@ -13,7 +13,7 @@ import onnxruntime as ort
 
 _preload_dlls = getattr(ort, "preload_dlls", None)
 if _preload_dlls is not None:
-    _preload_dlls(directory="")
+    _preload_dlls()
 
 
 @dataclass(frozen=True)
