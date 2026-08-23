@@ -43,7 +43,7 @@ Downloads are opt-in. Mozarie writes supported files to the full project path `m
 
 The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on.
 
-NTD11 is an optional supplemental ONNX model. Select `ntd11_anime_nsfw_segm_v5-variant1.onnx` from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456). Sensitive uses `sensitive_detect_v07.pt` from its [pinned source](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40), converted to ONNX.
+NTD11 is an optional supplemental ONNX model. Select `ntd11_anime_nsfw_segm_v5-variant1.onnx` from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456). Download `sensitive_detect_v07.pt` from the [Sensitive source](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40) and convert it to ONNX.
 
 ```powershell
 python -m pip install ultralytics

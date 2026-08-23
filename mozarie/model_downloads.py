@@ -64,19 +64,19 @@ MODEL_DOWNLOADS: dict[str, ModelDownload] = {
         "64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14",
     ),
     "sam_vit_b": ModelDownload(
-        "sam_vit_b", "sam_checkpoint",
+        "sam_vit_b", "sam_vit_b",
         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
         "models/sam_vit_b_01ec64.pth", 375042383,
         "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
     ),
     "sam_vit_l": ModelDownload(
-        "sam_vit_l", "sam_checkpoint",
+        "sam_vit_l", "sam_vit_l",
         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
         "models/sam_vit_l_0b3195.pth", 1249524607,
         "3adcc4315b642a4d2101128f611684e8734c41232a17c648ed1693702a49a622",
     ),
     "sam_vit_h": ModelDownload(
-        "sam_vit_h", "sam_checkpoint",
+        "sam_vit_h", "sam_vit_h",
         "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
         "models/sam_vit_h_4b8939.pth", 2564550879,
         "a7bf3b02f3ebf1267aba913ff637d9a2d5c33d3173bb679e46d9f338c26f262e",

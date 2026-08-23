@@ -24,6 +24,36 @@ function renderModelStatus() {
   const gpuMessage = state.settingsStatus?.gpuDeviceReasonCode
     ? `${t("settings.gpu")}: ${t("settings.gpuUnsupported")}` : "";
   $("#settingsModelStatus").textContent = [modelMessage, gpuMessage].filter(Boolean).join("\n");
+  renderSamVariantStatuses();
+}
+
+let samCheckpointPaths = { vit_b: "", vit_l: "", vit_h: "" };
+
+function selectedSamType() { return $("#settingsSamType").value || "vit_b"; }
+
+function storeSelectedSamPath() { samCheckpointPaths[selectedSamType()] = $("#settingsSamModel").value.trim(); }
+
+function selectSamVariant(variant, refresh = false) {
+  if (!Object.hasOwn(samCheckpointPaths, variant)) return;
+  storeSelectedSamPath();
+  $("#settingsSamType").value = variant;
+  document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === variant; });
+  $("#settingsSamModel").value = samCheckpointPaths[variant] || "";
+  if (refresh) void refreshSettingsStatus();
+}
+
+function renderSamVariantStatuses() {
+  const variants = state.settingsStatus?.samVariants || {};
+  for (const output of document.querySelectorAll("[data-sam-status]")) {
+    const variant = variants[output.dataset.samStatus];
+    let key = "notAcquired"; let stateName = "empty";
+    if (variant?.valid) { key = variant.managed ? "downloaded" : "external"; stateName = "ready"; }
+    else if (variant?.reasonCode === "missing") { key = "missing"; stateName = "error"; }
+    else if (variant?.reasonCode === "type_mismatch") { key = "typeMismatch"; stateName = "error"; }
+    else if (variant?.reasonCode === "invalid_format") { key = "invalidFormat"; stateName = "error"; }
+    output.textContent = t(`settings.samStatus.${key}`); output.dataset.state = stateName;
+    output.closest(".sam-variant")?.classList.toggle("unacquired", stateName === "empty");
+  }
 }
 
 function gpuMemoryLabel(totalMemory) {
@@ -154,11 +184,13 @@ function setSettingsForm(settings, status = null) {
   $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
   setModelCardEnabled("hand_segmentation", settings.models.hand_segmentation_enabled);
   setHandSegmentationAvailable(settings.models.hand_detection_enabled);
-  $("#settingsSamModel").value = settings.models.sam_checkpoint;
+  samCheckpointPaths = { vit_b: "", vit_l: "", vit_h: "", ...(settings.models.sam_checkpoints || {}) };
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsExcludeForcedDefault").checked = settings.detection.exclude_forced_default !== false;
   $("#settingsSamType").value = settings.models.sam_model_type;
+  document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === settings.models.sam_model_type; });
+  $("#settingsSamModel").value = samCheckpointPaths[settings.models.sam_model_type] || settings.models.sam_checkpoint || "";
   $("#settingsProvider").value = settings.models.provider;
   syncProviderSelection();
   $("#settingsApplyColor").value = settings.display.apply_color;
@@ -203,6 +235,7 @@ function shortcutBindingsPayload() {
 function shortcutActionsPayload() { return Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked])); }
 
 function settingsPayload() {
+  storeSelectedSamPath();
   return {
     general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcutsEnabled").checked },
     models: {
@@ -210,7 +243,7 @@ function settingsPayload() {
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
       hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: modelCardEnabled("hand_segmentation"),
-      sam_checkpoint: $("#settingsSamModel").value.trim(), sam_model_type: $("#settingsSamType").value, provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
+      sam_checkpoints: { ...samCheckpointPaths }, sam_model_type: selectedSamType(), provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
     },
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
@@ -316,9 +349,9 @@ async function chooseSettingsOutputDirectory() {
   }
 }
 
-function syncSamTypeFromPath(path) {
+function samTypeFromPath(path) {
   const match = /(?:^|[_-])vit[_-]?([blh])(?:[_.-]|$)/i.exec(path.split(/[\\/]/).pop() || "");
-  if (match) $("#settingsSamType").value = `vit_${match[1].toLowerCase()}`;
+  return match ? `vit_${match[1].toLowerCase()}` : null;
 }
 
 async function chooseSettingsModelFile(button) {
@@ -328,8 +361,13 @@ async function chooseSettingsModelFile(button) {
     const input = $(`#${button.dataset.modelInput}`);
     const data = await api("/api/model-file/pick", { method: "POST", body: JSON.stringify({ modelKey: button.dataset.modelPicker, currentPath: input.value }) });
     if (!data.cancelled && data.path) {
-      input.value = data.path;
-      if (button.dataset.modelPicker === "sam_checkpoint") syncSamTypeFromPath(data.path);
+      if (button.dataset.modelPicker === "sam_checkpoint") {
+        storeSelectedSamPath();
+        const variant = samTypeFromPath(data.path) || selectedSamType();
+        selectSamVariant(variant);
+        samCheckpointPaths[variant] = data.path;
+        $("#settingsSamModel").value = data.path;
+      } else input.value = data.path;
       void refreshSettingsStatus();
     }
   } catch (error) {
@@ -367,10 +405,16 @@ function renderModelDownload(job) {
   else { status.textContent = ""; status.classList.remove("error"); }
   $("#modelDownloadCancel").hidden = !["running", "cancelling"].includes(job.state);
   $("#modelDownloadStart").hidden = true;
-  $("#modelDownloadSource").hidden = true; $("#modelDownloadCommand").hidden = true;
+  $("#modelDownloadCommandWrap").hidden = true;
   $("#modelDownloadClose").disabled = ["running", "cancelling"].includes(job.state);
   for (const [settingKey, path] of Object.entries(job.paths || {})) {
-    const selector = modelDownloadInput(settingKey); if (selector) $(selector).value = path;
+    if (settingKey.startsWith("sam_vit_")) {
+      const variant = settingKey.slice(4);
+      samCheckpointPaths[variant] = path;
+      if (selectedSamType() === variant) $("#settingsSamModel").value = path;
+    } else {
+      const selector = modelDownloadInput(settingKey); if (selector) $(selector).value = path;
+    }
   }
   if (["complete", "failed", "cancelled", "idle"].includes(job.state) && modelDownloadPoll) {
     clearInterval(modelDownloadPoll); modelDownloadPoll = null;
@@ -381,10 +425,35 @@ function renderModelDownload(job) {
   }
 }
 
-function setModelDownloadGuide(url = "", command = "") {
-  const source = $("#modelDownloadSource"); const link = $("#modelDownloadSourceLink");
-  source.hidden = !url; link.href = url || "#"; link.textContent = url ? t("modelDownload.sourceLink") : "";
-  const commandNode = $("#modelDownloadCommand"); commandNode.hidden = !command; commandNode.textContent = command;
+function setModelDownloadGuide(command = "") {
+  const commandWrap = $("#modelDownloadCommandWrap"); commandWrap.hidden = !command;
+  $("#modelDownloadCommand").textContent = command; $("#modelDownloadCopyResult").textContent = "";
+}
+
+const MODEL_DOWNLOAD_INFO = {
+  target: { name: "01miku/anime-nsfw-segm-yolo26 / NSFW Anime XL", target: "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a" },
+  hand_detection: { name: "deepghs/anime_hand_detection / hand_detect_v1.0_s", target: "models\\ultralytics\\anime-hand-v1.0-s.onnx", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s" },
+  hand_segmentation: { name: "HandSegNet anime SDXL", target: "models\\handsegnet\\handsegnet_vit_b_best.safetensors", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a" },
+  sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
+  sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", target: "models\\sam_vit_l_0b3195.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth" },
+  sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", target: "models\\sam_vit_h_4b8939.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", target: "ntd11_anime_nsfw_segm_v5-variant1.onnx", source: "CivitAI", url: "https://civitai.com/models/1313556?modelVersionId=2350456" },
+  sensitive: { name: "sugarknight/sensitive-detect / sensitive_detect_v07", target: "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40" },
+};
+
+function renderModelDownloadItems(keys) {
+  const list = $("#modelDownloadItems"); list.textContent = "";
+  for (const key of keys) {
+    const info = MODEL_DOWNLOAD_INFO[key];
+    const item = document.createElement("li"); item.className = "model-download-item";
+    const name = document.createElement("strong"); name.textContent = info.name;
+    const details = document.createElement("dl"); details.className = "model-download-details";
+    const targetLabel = document.createElement("dt"); targetLabel.textContent = t("modelDownload.destination");
+    const target = document.createElement("dd"); const code = document.createElement("code"); code.textContent = info.target; target.append(code);
+    const sourceLabel = document.createElement("dt"); sourceLabel.textContent = t("modelDownload.source");
+    const source = document.createElement("dd"); const link = document.createElement("a"); link.href = info.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = info.source; source.append(link);
+    details.append(targetLabel, target, sourceLabel, source); item.append(name, details); list.append(item);
+  }
 }
 
 async function refreshModelDownload() {
@@ -399,12 +468,10 @@ function showUnsupportedModelDownload(key) {
   const sensitive = key === "sensitive";
   const source = key === "ntd11" ? "NTD11" : "Sensitive";
   $("#modelDownloadMessage").textContent = sensitive ? t("modelDownload.sensitive") : t("modelDownload.unsupported", { model: source });
+  renderModelDownloadItems([key]);
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
   $("#modelDownloadStatus").textContent = sensitive ? "" : t("modelDownload.unsupportedSource", { source: "CivitAI" });
-  setModelDownloadGuide(
-    sensitive ? "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40" : "https://civitai.com/models/1313556?modelVersionId=2350456",
-    sensitive ? 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu' : "",
-  );
+  setModelDownloadGuide(sensitive ? 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu' : "");
   $("#modelDownloadSecurity").hidden = true;
   $("#modelDownloadStart").hidden = true;
   $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
@@ -412,14 +479,12 @@ function showUnsupportedModelDownload(key) {
 }
 
 function modelDownloadConfirmation(key) {
-  const samType = $("#settingsSamType").value;
-  const names = { target: t("settings.targetModel"), sam: `SAM ${samType}`, hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"), all: t("modelDownload.all") };
-  const sources = { target: "Hugging Face", sam: "Meta", hand_detection: "Hugging Face", hand_segmentation: "Hugging Face", all: "Hugging Face / Meta" };
-  const samFiles = { vit_b: "sam_vit_b_01ec64.pth", vit_l: "sam_vit_l_0b3195.pth", vit_h: "sam_vit_h_4b8939.pth" };
-  const targets = { target: "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", sam: `models\\${samFiles[samType]}`, hand_detection: "models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "models\\handsegnet\\handsegnet_vit_b_best.safetensors" };
-  targets.all = [targets.target, targets.sam, targets.hand_detection, targets.hand_segmentation].join("; ");
+  const samType = selectedSamType();
+  const samKey = `sam_${samType}`;
+  const keys = key === "all" ? ["target", samKey, "hand_detection", "hand_segmentation"] : [key === "sam" ? samKey : key];
   pendingModelDownloadKey = key;
-  $("#modelDownloadMessage").textContent = t("modelDownload.confirm", { model: names[key], source: sources[key], target: targets[key] });
+  $("#modelDownloadMessage").textContent = t(key === "all" ? "modelDownload.confirmAll" : "modelDownload.confirmOne");
+  renderModelDownloadItems(keys);
   $("#modelDownloadSecurity").textContent = t("modelDownload.security"); $("#modelDownloadSecurity").hidden = false;
   setModelDownloadGuide();
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
@@ -441,8 +506,8 @@ async function beginModelDownload() {
   $("#modelDownloadStart").hidden = true; $("#modelDownloadSecurity").hidden = true;
   modelDownloadStatusRefreshPending = true;
   try {
-    const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
-    const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) });
+    const modelKey = key === "sam" ? `sam_${selectedSamType()}` : key;
+    const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: selectedSamType() }) });
     renderModelDownload(job);
     if (!modelDownloadPoll && ["running", "cancelling"].includes(job.state)) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
   } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }

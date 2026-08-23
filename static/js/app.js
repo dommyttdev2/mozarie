@@ -25,9 +25,19 @@ function openModelHelp(key) {
   const source = $("#modelHelpSource"); source.textContent = info.source; source.href = info.url || "#";
   $("#modelHelpDetails").hidden = !info;
   source.closest("dd").hidden = !info.url; $("#modelHelpSourceLabel").hidden = !info.url;
-  const command = $("#modelHelpCommand"); command.hidden = !info.command; command.textContent = info.command || "";
+  $("#modelHelpCommandWrap").hidden = !info.command;
+  $("#modelHelpCommand").textContent = info.command || "";
+  $("#modelHelpCopyResult").textContent = "";
   $("#modelHelpSamTable").hidden = key !== "samType";
   $("#modelHelpDialog").showModal();
+}
+
+async function copyCommand(commandId, resultId) {
+  const result = $(resultId); result.textContent = "";
+  try {
+    await navigator.clipboard.writeText($(commandId).textContent);
+    result.textContent = t("command.copied");
+  } catch (error) { setStatus(error.message, "error"); }
 }
 
 function bindEvents() {
@@ -55,11 +65,16 @@ function bindEvents() {
   document.querySelectorAll("[data-model-download]").forEach((button) => button.addEventListener("click", () => { void startModelDownload(button.dataset.modelDownload); }));
   $("#modelDownloadCancel").addEventListener("click", () => { void cancelModelDownload(); });
   $("#modelDownloadStart").addEventListener("click", () => { void beginModelDownload(); });
+  $("#modelDownloadCopy").addEventListener("click", () => { void copyCommand("#modelDownloadCommand", "#modelDownloadCopyResult"); });
   $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
   $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
+  document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => radio.addEventListener("change", () => {
+    if (radio.checked) selectSamVariant(radio.value, true);
+  }));
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
+  $("#modelHelpCopy").addEventListener("click", () => { void copyCommand("#modelHelpCommand", "#modelHelpCopyResult"); });
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
   $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
   lightDismiss($("#modelHelpDialog"), () => $("#modelHelpDialog").close());

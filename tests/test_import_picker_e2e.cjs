@@ -35,7 +35,7 @@ function startFixtureServer() {
   let currentJob = { kind: "idle", state: "idle" };
   const settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
@@ -70,7 +70,11 @@ function startFixtureServer() {
         const gpus = submittedSettings.models.target_segmentation === "gpu-options.onnx"
           ? [{ id: 3, name: "RTX Test", totalMemory: 16 * 1024 ** 3, supported: true }, { id: 4, name: "Legacy Test", totalMemory: 3 * 1024 ** 3, supported: false }]
           : [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default", totalMemory: 16 * 1024 ** 3 }];
-        response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus } }));
+        const paths = submittedSettings.models.sam_checkpoints || {};
+        const samVariants = Object.fromEntries(["vit_b", "vit_l", "vit_h"].map((key) => [key, {
+          path: paths[key] || "", configured: Boolean(paths[key]), exists: Boolean(paths[key]), valid: Boolean(paths[key]), managed: String(paths[key] || "").includes("Mozarie\\models"), reasonCode: paths[key] ? null : "not_configured",
+        }]));
+        response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, samVariants, gpus } }));
       };
       if (deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
@@ -113,7 +117,7 @@ function startFixtureServer() {
       }
       if (modelDownloadJob.state === "running") {
         const paths = modelDownloadJob.key === "all"
-          ? { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx", sam_checkpoint: `C:\\Mozarie\\models\\sam_vit_${modelDownloadJob.samType}_checkpoint.pth`, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
+          ? { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx", [`sam_${modelDownloadJob.samType}`]: `C:\\Mozarie\\models\\sam_${modelDownloadJob.samType === "vit_l" ? "vit_l_0b3195" : modelDownloadJob.samType === "vit_h" ? "vit_h_4b8939" : "vit_b_01ec64"}.pth`, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
           : { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx" };
         modelDownloadJob = { ...modelDownloadJob, state: "complete", current: "", completed: modelDownloadJob.total, received: modelDownloadJob.expected, paths };
       }
@@ -374,6 +378,10 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
+    if (key === "sensitive") {
+      await page.locator("#modelHelpCopy").click();
+      assert.match(await page.locator("#modelHelpCopyResult").textContent(), /コピーしました|Copied/, `Sensitive help command can be copied at ${width}x${height} (${language})`);
+    }
     await page.locator("#modelHelpCloseButton").click();
   }
   await page.locator('[data-model-help="fluid"]').click();
@@ -393,6 +401,21 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     assert.equal(download.hit, true, `model download owns its hit target at ${width}x${height} (${language})`);
     assert.equal(download.overflow, false, `model download does not cause horizontal overflow at ${width}x${height} (${language})`);
   }
+  const samRows = page.locator(".sam-variant");
+  assert.equal(await samRows.count(), 3, `SAM card shows three variant rows at ${width}x${height} (${language})`);
+  assert.equal(await samRows.evaluateAll((rows) => rows.every((row) => {
+    const rect = row.getBoundingClientRect(); const radio = row.querySelector("input");
+    return rect.right <= innerWidth && radio && !radio.disabled;
+  })), true, `SAM rows remain selectable without overflow at ${width}x${height} (${language})`);
+  const allDownload = page.locator('[data-model-download="all"]');
+  await allDownload.scrollIntoViewIfNeeded(); await allDownload.click();
+  assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 4, `download confirmation uses four readable rows at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `download confirmation does not overflow at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").evaluateAll((links) => links.every((link) => {
+    const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link;
+  })), true, `download source links own their hit targets at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
+  assert.equal(await allDownload.evaluate((button) => document.activeElement === button), true, `closing download confirmation restores focus at ${width}x${height} (${language})`);
   const samHelp = page.locator('[data-model-help="samType"]');
   await samHelp.scrollIntoViewIfNeeded();
   assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
@@ -617,6 +640,19 @@ async function main() {
     assert.equal(settingsStatusRequests.length, 2, "a successful model pick refreshes status once");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
+    assert.equal(await page.locator('input[name="settingsSamVariant"]:checked').inputValue(), "vit_l", "the matching accessible SAM radio is selected");
+    await page.locator("#settingsSamModel").fill("C:\\custom\\large.pth");
+    await page.locator('input[name="settingsSamVariant"][value="vit_h"]').check();
+    await page.locator("#settingsSamModel").fill("C:\\custom\\huge.pth");
+    await page.locator('input[name="settingsSamVariant"][value="vit_l"]').check();
+    assert.equal(await page.locator("#settingsSamModel").inputValue(), "C:\\custom\\large.pth", "switching SAM variants preserves each path");
+    await page.locator('input[name="settingsSamVariant"][value="vit_l"]').focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.locator('input[name="settingsSamVariant"]:checked').inputValue(), "vit_h", "SAM radios support native keyboard navigation");
+    await page.locator('input[name="settingsSamVariant"][value="vit_l"]').check();
+    await page.waitForFunction(() => document.querySelector('[data-sam-status="vit_l"]').textContent.length > 0);
+    assert.match(await page.locator('[data-sam-status="vit_l"]').textContent(), /外部ファイル|External file/, "configured SAM path is identified as external");
+    assert.match(await page.locator('[data-sam-status="vit_b"]').textContent(), /未取得|Not acquired/, "unconfigured SAM variants remain selectable and show their status");
     await page.locator('[data-model-help="samType"]').click();
     assert.equal(await page.locator("#modelHelpFile").textContent(), "sam_vit_l_0b3195.pth", "SAM help follows the selected model type");
     await page.locator("#modelHelpCloseButton").click();
@@ -631,17 +667,23 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.match(await page.locator("#modelDownloadMessage").textContent(), /NTD11/, "unsupported download identifies the selected model");
-    assert.match(await page.locator("#modelDownloadStatus").textContent(), /CivitAI/, "NTD11 download identifies its source in the modal");
-    assert.equal(await page.locator("#modelDownloadSourceLink").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
+    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
+    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();
-    assert.match(await page.locator("#modelDownloadMessage").textContent(), /^Sensitiveは/, "Sensitive download message uses natural Japanese");
-    assert.equal(await page.locator("#modelDownloadSourceLink").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40", "Sensitive download links to its pinned source");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "sensitive_detect_v07.pt を配布元から取得し、ONNXへ変換してください。", "Sensitive download message stays concise");
+    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40", "Sensitive download links to its pinned source");
     assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu', "Sensitive download shows its conversion commands");
+    await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
+    await page.locator("#modelDownloadCopy").click();
+    assert.match(await page.locator("#modelDownloadCopyResult").textContent(), /コピーしました|Copied/, "conversion command copy reports success locally");
+    assert.match(await page.evaluate(() => window.__copiedCommand), /yolo export/, "conversion command copy uses the Clipboard API");
     assert.doesNotMatch(`${await page.locator("#modelDownloadMessage").textContent()} ${await page.locator("#modelDownloadStatus").textContent()}`, /MIT|ライセンスのまま|変換済みONNX|already converted/i, "Sensitive download omits implementation and license rationale");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="target"]').click();
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
+    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "individual confirmation has one semantic item");
+    assert.equal(await page.locator("#modelDownloadItems code").textContent(), "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", "individual confirmation shows the full relative destination");
     assert.match(await page.locator("#modelDownloadSecurity").textContent(), /SHA-256/, "confirmation explains the pinned checksum boundary");
     const statusesBeforeTargetDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
@@ -657,6 +699,9 @@ async function main() {
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /fixture download failed/, "download errors remain inside the download modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
+    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 4, "Download all lists four separate models");
+    assert.equal(await page.locator("#modelDownloadItems code").allTextContents().then((items) => items.some((item) => item.includes("sam_vit_l_0b3195.pth"))), true, "Download all lists only the selected SAM variant");
+    assert.doesNotMatch(await page.locator("#modelDownloadDialog").textContent(), /;\s*models\\/, "Download all does not join destinations with semicolons");
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsHandSegmentationModel").value.includes("models\\handsegnet\\handsegnet_vit_b_best.safetensors"));
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "all", samType: "vit_l" }, "Download all uses the selected SAM type without browser-provided URLs or paths");
@@ -690,7 +735,7 @@ async function main() {
     const gpuBeforeStaleResponse = await page.locator("#settingsGpuDevice").textContent();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
-    await page.evaluate(() => refreshSettingsStatus());
+    await page.evaluate(() => { void refreshSettingsStatus(); });
     await page.waitForTimeout(20);
     assert.equal(settingsStatusRequests.length, statusesBeforeStaleResponse + 1, "one silent refresh captures the current form");
     assert.equal(settingsStatusRequests.at(-1).models.target_segmentation, "unsaved.onnx", "the silent refresh validates the current form");
@@ -699,13 +744,11 @@ async function main() {
     await page.waitForTimeout(50);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator("#settingsGpuDevice").textContent(), gpuBeforeStaleResponse, "a stale response leaves GPU state unchanged without a message");
-    console.log("gpu-status-e2e: stale response complete");
     await page.locator("#settingsTargetModel").fill("gpu-options.onnx");
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
     assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\).*GPU 0:/, "status shows actual GPU names, VRAM, and the incompatibility");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
-    console.log("gpu-status-e2e: gpu label complete");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
