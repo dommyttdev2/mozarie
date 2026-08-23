@@ -155,12 +155,22 @@ function progressText(job) {
   return `${count} · ${t("status.eta", { duration: formatDuration(remaining) })}`;
 }
 
+function processingCurrentPath(job) {
+  if (job?.kind !== "detect") return job?.current || "";
+  const imageIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
+  const completedIds = new Set(Array.isArray(job.completedImageIds) ? job.completedImageIds : []);
+  const targetIds = new Set(imageIds);
+  if (![...targetIds].some((imageId) => !completedIds.has(imageId))) return "";
+  const nextImage = state.images.find((image) => targetIds.has(image.id) && !completedIds.has(image.id));
+  return nextImage ? (nextImage.relativePath || "") : (job.current || "");
+}
+
 function showProcessing(processing) {
   state.processing = { ...state.processing, ...processing };
   const current = state.processing;
   const modal = $("#processingDialog");
   $("#processingTitle").textContent = processingTitle(current.kind);
-  $("#processingCurrent").textContent = current.current || "";
+  $("#processingCurrent").textContent = processingCurrentPath(current);
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
   $("#processingProgressText").textContent = progressText(current);

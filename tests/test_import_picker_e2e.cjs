@@ -485,6 +485,42 @@ async function main() {
     await page.evaluate(() => showProcessing({ kind: "import", state: "running", total: 3, completed: 1, activeElapsed: 10 }));
     assert.doesNotMatch(await page.locator("#processingProgressText").textContent(), /残り約/, "imports never show a detection ETA");
     await page.evaluate(() => closeProcessing());
+    const processingLayout = await page.locator("#processingDialog").evaluate((dialog) => ({
+      describedBy: dialog.getAttribute("aria-describedby"),
+      children: [...dialog.querySelector(".dialog-body").children].map((element) => element.id || element.className),
+    }));
+    assert.equal(processingLayout.describedBy, "processingProgressText processingCurrent", "the processing dialog describes progress before the current filename");
+    assert.deepEqual(processingLayout.children, ["processingTitle", "processingProgress", "processingProgressText", "processingCurrent", "dialog-actions"], "processing shows progress, then the current filename, then actions");
+    const processingStateBeforeFilenameChecks = await page.evaluate(() => ({
+      images: state.images,
+      detectionTargetIds: state.detectionTargetIds,
+    }));
+    await page.evaluate(() => {
+      state.images = [
+        { id: "one", relativePath: "001.png" },
+        { id: "two", relativePath: "002.png" },
+        { id: "three", relativePath: "003.png" },
+      ];
+      state.detectionTargetIds = ["one", "two", "three"];
+    });
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 0, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: [] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "001.png", "detection shows the first unfinished filename rather than the last parallel worker update");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["three"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "001.png", "a later completed filename does not move the display ahead of earlier unfinished work");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "paused", total: 3, completed: 2, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "three"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "paused detection keeps the earliest unfinished filename");
+    await page.evaluate(() => closeProcessing());
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "legacy.png", completedImageIds: ["one"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "legacy detection jobs fall back to the remembered target ids");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 1, completed: 0, current: "optimistic.png", imageIds: ["not-in-catalog"], completedImageIds: [] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "optimistic.png", "unmapped active detection targets retain the server filename");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "complete", total: 3, completed: 3, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "two", "three"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "", "completed detection has no current filename");
+    await page.evaluate((previous) => {
+      state.images = previous.images;
+      state.detectionTargetIds = previous.detectionTargetIds;
+      closeProcessing();
+    }, processingStateBeforeFilenameChecks);
     const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
@@ -602,6 +638,11 @@ async function main() {
     }
     for (const position of ["left", "top", "right", "bottom"]) await assertToolRailLayout(page, position);
     await page.locator("#canvasStage").evaluate((stage) => { stage.dataset.toolPosition = "left"; });
+    for (const [language, labels] of [["ja", ["次へ", "削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Next unreviewed", "Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
+      await page.evaluate((locale) => loadTranslations(locale), language);
+      assert.deepEqual(await page.locator(".canvas-navigation-bar > button").evaluateAll((buttons) => buttons.slice(-4).map((button) => button.textContent.trim())), labels, `${language} navigation actions follow the requested order`);
+    }
+    await page.evaluate(() => loadTranslations("ja"));
     const stageWidth = await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width);
     await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
