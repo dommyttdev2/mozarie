@@ -43,11 +43,11 @@ Mozarieは、複数画像のモザイク範囲をローカルで確認・編集�
 
 SAMは設定で選んだ`vit_b`、`vit_l`、`vit_h`と同じ種類のファイルを指定してください。HandSegNetは任意で、手の検出をONにした場合だけ使えます。
 
-NTD11は基本モデルの検出漏れを補う任意のONNXセグメンテーションモデルです。Sensitiveも任意ですが、固定版[`sensitive_detect_v07.pt`](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)はAGPL-3.0のため、MITのMozarie内でダウンロード・変換は行いません。利用する場合は自分でダウンロードしてONNXへ変換し、できたONNXを**参照**から指定してください。
+NTD11は基本モデルを補う任意のONNXモデルです。[Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456)の`ntd11_anime_nsfw_segm_v5-variant1.onnx`を**参照**から指定します。Sensitiveは[固定配布元](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)の`sensitive_detect_v07.pt`をONNXへ変換してから指定します。
 
 ```powershell
 python -m pip install ultralytics
-yolo export model="path\to\sensitive_detect_v07.pt" format=onnx imgsz=1024 end2end=False
+yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu
 ```
 
 ## 使い方

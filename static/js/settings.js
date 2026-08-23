@@ -356,6 +356,7 @@ function renderModelDownload(job) {
   else { status.textContent = ""; status.classList.remove("error"); }
   $("#modelDownloadCancel").hidden = !["running", "cancelling"].includes(job.state);
   $("#modelDownloadStart").hidden = true;
+  $("#modelDownloadSource").hidden = true; $("#modelDownloadCommand").hidden = true;
   $("#modelDownloadClose").disabled = ["running", "cancelling"].includes(job.state);
   for (const [settingKey, path] of Object.entries(job.paths || {})) {
     const selector = modelDownloadInput(settingKey); if (selector) $(selector).value = path;
@@ -363,6 +364,12 @@ function renderModelDownload(job) {
   if (["complete", "failed", "cancelled", "idle"].includes(job.state) && modelDownloadPoll) {
     clearInterval(modelDownloadPoll); modelDownloadPoll = null;
   }
+}
+
+function setModelDownloadGuide(url = "", command = "") {
+  const source = $("#modelDownloadSource"); const link = $("#modelDownloadSourceLink");
+  source.hidden = !url; link.href = url || "#"; link.textContent = url ? t("modelDownload.sourceLink") : "";
+  const commandNode = $("#modelDownloadCommand"); commandNode.hidden = !command; commandNode.textContent = command;
 }
 
 async function refreshModelDownload() {
@@ -378,9 +385,11 @@ function showUnsupportedModelDownload(key) {
   const source = key === "ntd11" ? "NTD11" : "Sensitive";
   $("#modelDownloadMessage").textContent = sensitive ? t("modelDownload.sensitive") : t("modelDownload.unsupported", { model: source });
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadStatus").textContent = sensitive
-    ? t("modelDownload.sensitiveSource")
-    : t("modelDownload.unsupportedSource", { source: "GitHub / Hugging Face" });
+  $("#modelDownloadStatus").textContent = sensitive ? "" : t("modelDownload.unsupportedSource", { source: "CivitAI" });
+  setModelDownloadGuide(
+    sensitive ? "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40" : "https://civitai.com/models/1313556?modelVersionId=2350456",
+    sensitive ? 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu' : "",
+  );
   $("#modelDownloadSecurity").hidden = true;
   $("#modelDownloadStart").hidden = true;
   $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
@@ -397,6 +406,7 @@ function modelDownloadConfirmation(key) {
   pendingModelDownloadKey = key;
   $("#modelDownloadMessage").textContent = t("modelDownload.confirm", { model: names[key], source: sources[key], target: targets[key] });
   $("#modelDownloadSecurity").textContent = t("modelDownload.security"); $("#modelDownloadSecurity").hidden = false;
+  setModelDownloadGuide();
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadStart").hidden = false; $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;

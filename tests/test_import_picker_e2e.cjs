@@ -358,6 +358,28 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   assert.equal(layout.fits, true, `settings does not overflow at ${width}x${height} (${language})`);
   assert.equal(layout.reset && layout.save && layout.close, true, `settings controls own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#settingsTabModels").click();
+  const helpExpectations = {
+    target: ["01miku/anime-nsfw-segm-yolo26 / NSFW Anime XL", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a"],
+    ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.com/models/1313556?modelVersionId=2350456"],
+    sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
+    precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
+    samType: ["Meta Segment Anything (SAM) vit_b", "sam_vit_b_01ec64.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
+    hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
+    handSegmentation: ["HandSegNet anime SDXL", "handsegnet_vit_b_best.safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a"],
+  };
+  for (const [key, [model, file, href]] of Object.entries(helpExpectations)) {
+    const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
+    assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
+    assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
+    assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
+    assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
+    assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
+    await page.locator("#modelHelpCloseButton").click();
+  }
+  await page.locator('[data-model-help="fluid"]').click();
+  assert.match(await page.locator("#modelHelpModel").textContent(), /追加モデルなし|No additional model/, `fluid help identifies that no model is used at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelHelpSource").isVisible(), false, `fluid help hides a nonexistent source at ${width}x${height} (${language})`);
+  await page.locator("#modelHelpCloseButton").click();
   const pickerCount = await page.locator("[data-model-picker]").count();
   assert.equal(pickerCount, 6, `all model pickers are available at ${width}x${height} (${language})`);
   for (const button of await page.locator(".model-card-title [data-model-download]").all()) {
@@ -425,8 +447,7 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   const handSegmentationHelp = page.locator('[data-model-help="handSegmentation"]');
   await handSegmentationHelp.focus();
   await handSegmentationHelp.click();
-  const handSegmentationHelpText = await page.locator("#modelHelpText").textContent();
-  assert.doesNotMatch(handSegmentationHelpText, /handsegnet_vit_b_best\.safetensors|hugging face|ダウンロード|download/i, `HandSeg help is functional rather than a download guide at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelHelpFile").textContent(), "handsegnet_vit_b_best.safetensors", `HandSeg help names its required file at ${width}x${height} (${language})`);
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `Escape closes HandSeg help at ${width}x${height} (${language})`);
   assert.equal(await handSegmentationHelp.evaluate((button) => document.activeElement === button), true, `Escape restores focus to HandSeg help at ${width}x${height} (${language})`);
@@ -586,12 +607,15 @@ async function main() {
     assert.equal(await page.locator("#settingsHandSegmentationCard .model-card-note").count(), 0, "HandSeg matches the other model cards without an inline explanation");
     assert.equal(await page.locator("#settingsHandSegmentationCard a").count(), 0, "HandSeg keeps download information out of Settings");
     await page.locator('[data-model-help="handSegmentation"]').click();
-    assert.doesNotMatch(await page.locator("#modelHelpText").textContent(), /handsegnet_vit_b_best\.safetensors|hugging face|ダウンロード|download/i, "HandSeg help describes the feature without download instructions");
+    assert.equal(await page.locator("#modelHelpFile").textContent(), "handsegnet_vit_b_best.safetensors", "HandSeg help names its required file");
     await page.locator("#modelHelpCloseButton").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
+    await page.locator('[data-model-help="samType"]').click();
+    assert.equal(await page.locator("#modelHelpFile").textContent(), "sam_vit_l_0b3195.pth", "SAM help follows the selected model type");
+    await page.locator("#modelHelpCloseButton").click();
     const targetBeforeCancel = await page.locator("#settingsTargetModel").inputValue();
     const statusBeforeCancel = await page.locator("#settingsResult").textContent();
     const cancelResponse = page.waitForResponse((response) => response.url().includes("/api/model-file/pick") && response.status() === 200);
@@ -603,7 +627,14 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.match(await page.locator("#modelDownloadMessage").textContent(), /NTD11/, "unsupported download identifies the selected model");
-    assert.match(await page.locator("#modelDownloadStatus").textContent(), /GitHub|Hugging Face/, "unsupported download explains its source in the modal");
+    assert.match(await page.locator("#modelDownloadStatus").textContent(), /CivitAI/, "NTD11 download identifies its source in the modal");
+    assert.equal(await page.locator("#modelDownloadSourceLink").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
+    await page.locator("#modelDownloadClose").click();
+    await page.locator('[data-model-download="sensitive"]').click();
+    assert.match(await page.locator("#modelDownloadMessage").textContent(), /^Sensitiveは/, "Sensitive download message uses natural Japanese");
+    assert.equal(await page.locator("#modelDownloadSourceLink").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40", "Sensitive download links to its pinned source");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu', "Sensitive download shows its conversion commands");
+    assert.doesNotMatch(`${await page.locator("#modelDownloadMessage").textContent()} ${await page.locator("#modelDownloadStatus").textContent()}`, /MIT|ライセンスのまま|変換済みONNX|already converted/i, "Sensitive download omits implementation and license rationale");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="target"]').click();
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
