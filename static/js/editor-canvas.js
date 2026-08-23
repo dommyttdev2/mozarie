@@ -417,6 +417,17 @@ function sourceVisibleAfterExclusion(source) {
   return canvasHasPixels(combinedCtx, combinedCanvas);
 }
 
+function manualSourceVisibleAfterExclusion(source) {
+  combinedCtx.globalCompositeOperation = "source-over";
+  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  combinedCtx.drawImage(source, 0, 0);
+  combinedCtx.globalCompositeOperation = "destination-out";
+  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
+  return canvasHasPixels(combinedCtx, combinedCanvas);
+}
+
 function captureCurrentMaskVisibility() {
   const candidateIds = state.candidates
     .filter((candidate) => candidate.role !== "exclude")
@@ -425,7 +436,7 @@ function captureCurrentMaskVisibility() {
       return image && sourceVisibleAfterExclusion(image);
     })
     .map((candidate) => candidate.id);
-  const manual = state.manualMaskPresent && sourceVisibleAfterExclusion(addCanvas);
+  const manual = state.manualMaskPresent && manualSourceVisibleAfterExclusion(addCanvas);
   markMaskDirty(); flushMaskComposition();
   return { candidateIds, manual };
 }
@@ -435,7 +446,6 @@ function maskStatusWithoutCandidate(candidateId) {
   for (const candidate of state.candidates) {
     if (candidate.id !== candidateId && candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   }
-  if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
   for (const candidate of state.candidates) if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);

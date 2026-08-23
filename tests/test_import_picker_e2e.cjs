@@ -692,6 +692,28 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
+    const manualExclusionVisibility = await page.evaluate(() => {
+      const candidates = state.candidates; const candidateImages = state.candidateImages;
+      const manualEnabled = state.manualEnabled; const manualExclusionEnabled = state.manualExclusionEnabled;
+      const manualExclusionForced = state.manualExclusionForced; const manualMaskPresent = state.manualMaskPresent;
+      const exclusion = document.createElement("canvas"); exclusion.width = addCanvas.width; exclusion.height = addCanvas.height;
+      exclusion.getContext("2d").fillRect(0, 0, exclusion.width, exclusion.height);
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, addCanvas.width, addCanvas.height);
+      exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      state.candidateImages = new Map([["temporary-exclude", exclusion]]);
+      state.candidates = [{ id: "temporary-exclude", role: "exclude", enabled: true, forced: false }];
+      state.manualEnabled = true; state.manualExclusionEnabled = false; state.manualExclusionForced = true; state.manualMaskPresent = true;
+      const nonForced = captureCurrentMaskVisibility().manual;
+      state.candidates[0].forced = true;
+      const forced = captureCurrentMaskVisibility().manual;
+      state.candidates = candidates; state.candidateImages = candidateImages;
+      state.manualEnabled = manualEnabled; state.manualExclusionEnabled = manualExclusionEnabled;
+      state.manualExclusionForced = manualExclusionForced; state.manualMaskPresent = manualMaskPresent;
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      markMaskDirty(); flushMaskComposition();
+      return { nonForced, forced };
+    });
+    assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false }, "manual add remains visible through a non-forced exclusion but not a forced exclusion");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
