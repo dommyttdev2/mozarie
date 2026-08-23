@@ -281,6 +281,65 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   const samHelp = page.locator('[data-model-help="samType"]');
   await samHelp.scrollIntoViewIfNeeded();
   assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
+  const handTrack = page.locator("#settingsHandCard .model-switch-track");
+  if (!await page.locator("#settingsHandToggle").isChecked()) await handTrack.click();
+  await page.waitForFunction(() => !document.querySelector("#settingsHandSegmentationToggle").disabled);
+  const handSegmentationCard = page.locator("#settingsHandSegmentationCard");
+  await handSegmentationCard.scrollIntoViewIfNeeded();
+  const readHandSegmentationSwitch = () => page.evaluate(() => {
+    const panel = document.querySelector("#settingsPanelModels");
+    const card = document.querySelector("#settingsHandSegmentationCard");
+    const handCard = document.querySelector("#settingsHandCard");
+    const label = card.querySelector(".model-switch");
+    const input = label.querySelector("input");
+    const track = label.querySelector(".model-switch-track");
+    const rect = (element) => { const box = element.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }; };
+    const labelRect = rect(label); const inputRect = rect(input);
+    return {
+      scrollTop: panel.scrollTop,
+      card: rect(card),
+      handCardHeight: rect(handCard).height,
+      label: labelRect,
+      track: rect(track),
+      input: inputRect,
+      inputInsideLabel: inputRect.x >= labelRect.x && inputRect.y >= labelRect.y && inputRect.x + inputRect.width <= labelRect.x + labelRect.width && inputRect.y + inputRect.height <= labelRect.y + labelRect.height,
+      checked: input.checked,
+      active: card.classList.contains("active"),
+      cardClasses: [...card.classList].filter((name) => name !== "active"),
+      labelClasses: [...label.classList],
+      trackClasses: [...track.classList],
+      notes: card.querySelectorAll(".model-card-note").length,
+      links: card.querySelectorAll("a").length,
+    };
+  });
+  const beforeHandSegmentationToggle = await readHandSegmentationSwitch();
+  assert.equal(beforeHandSegmentationToggle.inputInsideLabel, true, `the HandSeg switch input stays inside its label at ${width}x${height} (${language})`);
+  assert.equal(beforeHandSegmentationToggle.card.height, beforeHandSegmentationToggle.handCardHeight, `HandSeg and hand cards have the same height at ${width}x${height} (${language})`);
+  assert.equal(beforeHandSegmentationToggle.notes, 0, `HandSeg has no inline note at ${width}x${height} (${language})`);
+  assert.equal(beforeHandSegmentationToggle.links, 0, `HandSeg has no download or project link at ${width}x${height} (${language})`);
+  await page.mouse.click(beforeHandSegmentationToggle.label.x + beforeHandSegmentationToggle.label.width - 4, beforeHandSegmentationToggle.label.y + beforeHandSegmentationToggle.label.height / 2);
+  await page.waitForFunction((checked) => document.querySelector("#settingsHandSegmentationToggle").checked === checked, !beforeHandSegmentationToggle.checked);
+  const afterLabelClick = await readHandSegmentationSwitch();
+  assert.equal(afterLabelClick.checked, !beforeHandSegmentationToggle.checked, `a physical HandSeg label click toggles the switch at ${width}x${height} (${language})`);
+  assert.equal(afterLabelClick.active, afterLabelClick.checked, `the HandSeg active state follows the switch at ${width}x${height} (${language})`);
+  assert.deepEqual({ ...afterLabelClick, checked: false, active: false }, { ...beforeHandSegmentationToggle, checked: false, active: false }, `a HandSeg label click changes no layout or card content at ${width}x${height} (${language})`);
+  await page.mouse.click(afterLabelClick.track.x + afterLabelClick.track.width / 2, afterLabelClick.track.y + afterLabelClick.track.height / 2);
+  await page.waitForFunction((checked) => document.querySelector("#settingsHandSegmentationToggle").checked === checked, beforeHandSegmentationToggle.checked);
+  const afterTrackClick = await readHandSegmentationSwitch();
+  assert.equal(afterTrackClick.checked, beforeHandSegmentationToggle.checked, `a physical HandSeg track click toggles the switch at ${width}x${height} (${language})`);
+  assert.equal(afterTrackClick.active, afterTrackClick.checked, `the HandSeg active state returns with the switch at ${width}x${height} (${language})`);
+  assert.deepEqual({ ...afterTrackClick, checked: false, active: false }, { ...beforeHandSegmentationToggle, checked: false, active: false }, `a HandSeg track click keeps the panel scroll and card geometry unchanged at ${width}x${height} (${language})`);
+  const handSegmentationHelp = page.locator('[data-model-help="handSegmentation"]');
+  await handSegmentationHelp.focus();
+  await handSegmentationHelp.click();
+  const handSegmentationHelpText = await page.locator("#modelHelpText").textContent();
+  assert.doesNotMatch(handSegmentationHelpText, /handsegnet_vit_b_best\.safetensors|hugging face|ダウンロード|download/i, `HandSeg help is functional rather than a download guide at ${width}x${height} (${language})`);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `Escape closes HandSeg help at ${width}x${height} (${language})`);
+  assert.equal(await handSegmentationHelp.evaluate((button) => document.activeElement === button), true, `Escape restores focus to HandSeg help at ${width}x${height} (${language})`);
+  await handSegmentationHelp.click();
+  await page.locator("#modelHelpCloseButton").click();
+  assert.equal(await handSegmentationHelp.evaluate((button) => document.activeElement === button), true, `Close restores focus to HandSeg help at ${width}x${height} (${language})`);
   await page.locator("#settingsCloseButton").click();
 }
 async function assertToolRailLayout(page, position) {
@@ -390,12 +449,10 @@ async function main() {
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
     await page.locator("#settingsProvider").selectOption("gpu");
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), false, "GPU re-enables the GPU selector");
-    assert.match(await page.locator('#settingsHandSegmentationCard a[data-i18n="settings.handSegmentationDownload"]').getAttribute("href"), /handsegnet_vit_b_best\.safetensors$/, "HandSeg points directly to the fixed checkpoint");
-    assert.equal(await page.locator('#settingsHandSegmentationCard a[data-i18n="settings.handSegmentationProject"]').getAttribute("href"), "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl", "HandSeg project details use the authoritative model page");
-    assert.match(await page.locator("#settingsHandSegmentationCard").textContent(), /handsegnet_vit_b_best\.safetensors/, "HandSeg explains the exact file to select");
+    assert.equal(await page.locator("#settingsHandSegmentationCard .model-card-note").count(), 0, "HandSeg matches the other model cards without an inline explanation");
+    assert.equal(await page.locator("#settingsHandSegmentationCard a").count(), 0, "HandSeg keeps download information out of Settings");
     await page.locator('[data-model-help="handSegmentation"]').click();
-    assert.match(await page.locator("#modelHelpText").textContent(), /HandSegNet anime SDXL.*handsegnet_vit_b_best\.safetensors.*設定 > 検出 > 参照/, "HandSeg help gives the exact model and Settings path");
-    assert.doesNotMatch(await page.locator("#modelHelpText").textContent(), /対応する .safetensors/, "HandSeg help does not suggest an arbitrary compatible file");
+    assert.doesNotMatch(await page.locator("#modelHelpText").textContent(), /handsegnet_vit_b_best\.safetensors|hugging face|ダウンロード|download/i, "HandSeg help describes the feature without download instructions");
     await page.locator("#modelHelpCloseButton").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
