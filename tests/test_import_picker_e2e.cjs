@@ -30,7 +30,7 @@ function startFixtureServer() {
   let cancelRequests = 0;
   let holdDetection = false;
   let cancelShouldFail = false;
-  let releaseFullSettings = null;
+  const pendingFullSettings = [];
   let deferFullSettings = false;
   let currentJob = { kind: "idle", state: "idle" };
   const settings = {
@@ -58,7 +58,7 @@ function startFixtureServer() {
       settingsRequests.push(requestUrl.search);
       if (request.method === "POST") settingsActions.push({ path: requestPath, method: request.method });
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
-      if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
+      if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
       return;
     }
@@ -68,11 +68,11 @@ function startFixtureServer() {
       settingsStatusRequests.push(submittedSettings);
       const reply = () => {
         const gpus = submittedSettings.models.target_segmentation === "gpu-options.onnx"
-          ? [{ id: 3, name: "RTX Test", supported: true }, { id: 4, name: "Legacy Test", supported: false }]
-          : [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default" }];
+          ? [{ id: 3, name: "RTX Test", totalMemory: 16 * 1024 ** 3, supported: true }, { id: 4, name: "Legacy Test", totalMemory: 3 * 1024 ** 3, supported: false }]
+          : [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default", totalMemory: 16 * 1024 ** 3 }];
         response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, gpus } }));
       };
-      if (deferFullSettings) { await new Promise((resolve) => { releaseFullSettings = () => { reply(); resolve(); }; }); return; }
+      if (deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
       return;
     }
@@ -204,7 +204,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -597,7 +597,9 @@ async function main() {
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
-    await page.waitForFunction(() => document.querySelector("#settingsStatusButton").disabled === false);
+    assert.equal(await page.locator("#settingsStatusButton").count(), 0, "settings has no manual model/GPU status button");
+    assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
     await page.locator("#settingsTabModels").click();
     await page.locator("#settingsProvider").selectOption("cpu");
@@ -611,6 +613,8 @@ async function main() {
     await page.locator("#modelHelpCloseButton").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
+    await page.waitForTimeout(50);
+    assert.equal(settingsStatusRequests.length, 2, "a successful model pick refreshes status once");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
     await page.locator('[data-model-help="samType"]').click();
@@ -639,8 +643,11 @@ async function main() {
     await page.locator('[data-model-download="target"]').click();
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
     assert.match(await page.locator("#modelDownloadSecurity").textContent(), /SHA-256/, "confirmation explains the pinned checksum boundary");
+    const statusesBeforeTargetDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsTargetModel").value.includes("models\\ultralytics\\nsfw-anime-xl-x1280.onnx"));
+    await page.waitForTimeout(50);
+    assert.equal(settingsStatusRequests.length, statusesBeforeTargetDownload + 1, "a completed download refreshes status once");
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "target", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
     await page.locator("#modelDownloadClose").click();
@@ -678,29 +685,27 @@ async function main() {
     assert.equal(modelDownloadPolls(), pollsAfterFailure, "a download status error stops further polling");
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(false); resetModelDownload();
+    await page.waitForTimeout(50);
+    const statusesBeforeStaleResponse = settingsStatusRequests.length;
+    const gpuBeforeStaleResponse = await page.locator("#settingsGpuDevice").textContent();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
-    await page.locator("#settingsStatusButton").click();
-    assert.equal(settingsStatusRequests.length, 2, "model confirmation starts one additional form-status request");
-    assert.equal(settingsStatusRequests[1].models.target_segmentation, "unsaved.onnx", "model confirmation validates the unsaved form value");
-    assert.equal(await page.locator("#settingsStatusButton").isDisabled(), true, "model confirmation stays disabled while its full response is pending");
-    assert.equal(await page.locator("#settingsStatusResult").textContent(), "モデル・GPU情報を確認しています…");
+    await page.evaluate(() => refreshSettingsStatus());
+    await page.waitForTimeout(20);
+    assert.equal(settingsStatusRequests.length, statusesBeforeStaleResponse + 1, "one silent refresh captures the current form");
+    assert.equal(settingsStatusRequests.at(-1).models.target_segmentation, "unsaved.onnx", "the silent refresh validates the current form");
     await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
     releaseFullSettings();
-    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
+    await page.waitForTimeout(50);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
-    assert.equal(await page.locator("#settingsStatusResult").textContent(), "設定が変更されたため、もう一度確認してください。", "a stale form-status response requires an explicit recheck");
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 1: defaultGPU 0:/, "a stale form-status response does not render its GPU state");
-    await page.locator("#settingsStatusButton").click();
-    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
-    assert.equal(settingsStatusRequests.length, 3, "the changed form requires a second explicit status check");
-    assert.equal(settingsStatusRequests[2].models.target_segmentation, "changed-while-checking.onnx", "the recheck sends the changed form");
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: changed-while-checking\.onnxGPU 0:/, "only the recheck renders model and GPU state");
+    assert.equal(await page.locator("#settingsGpuDevice").textContent(), gpuBeforeStaleResponse, "a stale response leaves GPU state unchanged without a message");
+    console.log("gpu-status-e2e: stale response complete");
     await page.locator("#settingsTargetModel").fill("gpu-options.onnx");
-    await page.locator("#settingsStatusButton").click();
-    await page.waitForFunction(() => !document.querySelector("#settingsStatusButton").disabled);
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX TestGPU 4: Legacy Test.*GPU 0:/, "status shows actual GPU names and preserves the configured missing device");
+    await page.evaluate(() => refreshSettingsStatus());
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\).*GPU 0:/, "status shows actual GPU names, VRAM, and the incompatibility");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
+    console.log("gpu-status-e2e: gpu label complete");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");

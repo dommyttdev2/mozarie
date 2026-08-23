@@ -22,8 +22,15 @@ function renderModelStatus() {
       return labelKey && model.reasonCode ? `${t(labelKey)}: ${t(`settings.modelStatus.${model.reasonCode}`)}` : "";
     }).filter(Boolean).join("\n");
   const gpuMessage = state.settingsStatus?.gpuDeviceReasonCode
-    ? `${t("settings.gpu")}: ${t(`settings.modelStatus.${state.settingsStatus.gpuDeviceReasonCode}`)}` : "";
+    ? `${t("settings.gpu")}: ${t("settings.gpuUnsupported")}` : "";
   $("#settingsModelStatus").textContent = [modelMessage, gpuMessage].filter(Boolean).join("\n");
+}
+
+function gpuMemoryLabel(totalMemory) {
+  const gib = Number(totalMemory) / (1024 ** 3);
+  if (!Number.isFinite(gib) || gib <= 0) return "-";
+  const rounded = Math.round(gib);
+  return Math.abs(gib - rounded) < 0.1 ? String(rounded) : gib.toFixed(1);
 }
 
 const MODEL_TOGGLE_IDS = { ntd11: "#settingsNtd11Toggle", sensitive: "#settingsSensitiveToggle", hand_detection: "#settingsHandToggle", hand_segmentation: "#settingsHandSegmentationToggle" };
@@ -113,7 +120,7 @@ function renderSettingsStatus(status) {
   if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; option.disabled = true; gpuSelect.append(option); }
   else for (const gpu of gpus) {
     const option = document.createElement("option"); option.value = String(gpu.id);
-    option.textContent = `GPU ${gpu.id}: ${gpu.name}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
+    option.textContent = `GPU ${gpu.id}: ${gpu.name} / VRAM: ${gpuMemoryLabel(gpu.totalMemory)} GB${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
   if (![...gpuSelect.children].some((option) => option.value === selected)) {
@@ -282,6 +289,7 @@ async function saveSettings(event) {
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     if (languageChanged) await loadTranslations();
     result.textContent = t("settings.saved");
+    void refreshSettingsStatus();
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
@@ -295,6 +303,7 @@ async function resetSettings() {
     setMosaicPreviewEnabled(data.settings.display.mosaic_preview);
     await loadTranslations();
     result.textContent = t("settings.resetDone");
+    void refreshSettingsStatus();
   } catch (error) { result.textContent = error.message; result.classList.add("error"); }
 }
 
@@ -321,6 +330,7 @@ async function chooseSettingsModelFile(button) {
     if (!data.cancelled && data.path) {
       input.value = data.path;
       if (button.dataset.modelPicker === "sam_checkpoint") syncSamTypeFromPath(data.path);
+      void refreshSettingsStatus();
     }
   } catch (error) {
     $("#settingsResult").textContent = error.message;
@@ -333,6 +343,7 @@ async function chooseSettingsModelFile(button) {
 
 let modelDownloadPoll = null;
 let pendingModelDownloadKey = null;
+let modelDownloadStatusRefreshPending = false;
 
 function modelDownloadInput(settingKey) {
   return {
@@ -363,6 +374,10 @@ function renderModelDownload(job) {
   }
   if (["complete", "failed", "cancelled", "idle"].includes(job.state) && modelDownloadPoll) {
     clearInterval(modelDownloadPoll); modelDownloadPoll = null;
+  }
+  if (job.state === "complete" && modelDownloadStatusRefreshPending) {
+    modelDownloadStatusRefreshPending = false;
+    void refreshSettingsStatus();
   }
 }
 
@@ -424,6 +439,7 @@ async function beginModelDownload() {
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
   $("#modelDownloadStart").hidden = true; $("#modelDownloadSecurity").hidden = true;
+  modelDownloadStatusRefreshPending = true;
   try {
     const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
     const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) });
@@ -436,23 +452,20 @@ async function cancelModelDownload() {
   try { renderModelDownload(await api("/api/model-download/cancel", { method: "POST", body: JSON.stringify({}) })); } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
 }
 
+let settingsStatusGeneration = 0;
+
 async function refreshSettingsStatus() {
-  const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
-  button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");
+  const generation = ++settingsStatusGeneration;
+  const snapshot = JSON.stringify(settingsPayload());
   try {
-    const snapshot = JSON.stringify(settingsPayload());
     const data = await api("/api/settings/status", { method: "POST", body: snapshot });
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
-    if (snapshot !== currentSnapshot) {
-      result.textContent = t("settings.statusChanged");
-      result.classList.add("error");
-      return;
-    }
+    if (generation !== settingsStatusGeneration || snapshot !== currentSnapshot) return;
     renderSettingsStatus(data.status);
-    result.textContent = t("settings.statusChecked");
-  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
-  finally { button.disabled = false; button.textContent = t("settings.statusCheck"); }
+  } catch (error) {
+    if (generation === settingsStatusGeneration) setStatus(error.message, "error");
+  }
 }
 
 async function checkForUpdate({ silent = false } = {}) {

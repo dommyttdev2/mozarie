@@ -321,11 +321,12 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 3,
             get_device_capability=lambda index: [(8, 9), (6, 1), (12, 1)][index],
             get_device_name=lambda index: ["RTX 4090", "GTX 1060", "RTX 5090"][index],
+            get_device_properties=lambda index: types.SimpleNamespace(total_memory=[24, 3, 32][index] * 1024 ** 3),
         )
         self.assertEqual(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda)), [
-            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "supported": True},
-            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "supported": False},
-            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "supported": True},
+            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "totalMemory": 24 * 1024 ** 3, "supported": True},
+            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "totalMemory": 3 * 1024 ** 3, "supported": False},
+            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "totalMemory": 32 * 1024 ** 3, "supported": True},
         ])
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
@@ -344,6 +345,7 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 1,
             get_device_capability=lambda _index: (6, 1),
             get_device_name=lambda _index: "GTX 1060",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=3 * 1024 ** 3),
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
@@ -354,6 +356,7 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 1,
             get_device_capability=lambda _index: (6, 1),
             get_device_name=lambda _index: "GTX 1060",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=3 * 1024 ** 3),
         )
         self.assertFalse(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 

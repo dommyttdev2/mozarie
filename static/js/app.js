@@ -57,7 +57,6 @@ function bindEvents() {
   $("#modelDownloadStart").addEventListener("click", () => { void beginModelDownload(); });
   $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
   $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
-  $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));

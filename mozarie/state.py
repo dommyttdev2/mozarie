@@ -37,6 +37,7 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
                 "id": index,
                 "name": cuda.get_device_name(index),
                 "architecture": architecture,
+                "totalMemory": int(cuda.get_device_properties(index).total_memory),
                 # Match PyTorch's CUDA cubin check: an NVIDIA cubin is
                 # compatible with devices from the same compute major.
                 # With no embedded cubin list, PyTorch skips that warning.
@@ -211,7 +212,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             required_suffix=".safetensors",
         )
         add_status("sam_checkpoint", required=True, enabled=True)
-        gpus = cuda_device_statuses(torch_module())
+        torch = torch_module()
+        gpus = cuda_device_statuses(torch)
         selected_gpu = next((gpu for gpu in gpus if gpu["id"] == models.get("gpu_device", 0)), None)
         gpu_device_valid = models["provider"] != "gpu" or bool(selected_gpu and selected_gpu["supported"])
         return {
