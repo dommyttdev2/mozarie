@@ -21,13 +21,20 @@ class MozarieDomainTests(unittest.TestCase):
         self.assertEqual(int(result[1, 1]), 0)
         self.assertEqual(int(result[3, 3]), 255)
 
-    def test_manual_exclusion_remains_when_auto_exclusions_are_not_forced(self) -> None:
+    def test_manual_add_restores_non_forced_exclusion_but_not_forced_exclusion(self) -> None:
         apply = np.full((3, 3), 255, dtype=np.uint8)
         automatic = np.zeros((3, 3), dtype=np.uint8); automatic[0, 0] = 255
-        manual = np.zeros((3, 3), dtype=np.uint8); manual[1, 1] = 255
-        result = compose_masks((3, 3), [apply], [automatic], None, manual, force_exclusion=False)
+        manual_add = np.zeros((3, 3), dtype=np.uint8); manual_add[0, 0] = 255
+        result = compose_masks((3, 3), [apply], [automatic], manual_add)
         self.assertEqual(int(result[0, 0]), 255)
-        self.assertEqual(int(result[1, 1]), 0)
+        forced = compose_masks((3, 3), [apply], [automatic], manual_add, forced_exclude_masks=[automatic])
+        self.assertEqual(int(forced[0, 0]), 0)
+        manual_exclude = np.zeros((3, 3), dtype=np.uint8); manual_exclude[1, 1] = 255
+        manual_add = np.zeros((3, 3), dtype=np.uint8); manual_add[1, 1] = 255
+        restored_manual = compose_masks((3, 3), [apply], [], manual_add, manual_exclude, manual_exclude_forced=False)
+        self.assertEqual(int(restored_manual[1, 1]), 255)
+        forced_manual = compose_masks((3, 3), [apply], [], manual_add, manual_exclude, manual_exclude_forced=True)
+        self.assertEqual(int(forced_manual[1, 1]), 0)
 
     def test_candidate_role_has_stable_api_values(self) -> None:
         self.assertEqual(CandidateRole.APPLY.value, "apply")

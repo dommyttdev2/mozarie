@@ -38,10 +38,10 @@ function startFixtureServer() {
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
-    detection: { mode: "standard", fluid_exclusion_enabled: true, force_exclusion_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
-      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
+      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
       actions: {},
     }, confirmations: {},
   };
@@ -595,31 +595,39 @@ async function main() {
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /GitHub|Hugging Face/, "unsupported download explains its source in the modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="target"]').click();
+    assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
+    assert.match(await page.locator("#modelDownloadSecurity").textContent(), /SHA-256/, "confirmation explains the pinned checksum boundary");
+    await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsTargetModel").value.includes("models\\ultralytics\\nsfw-anime-xl-x1280.onnx"));
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "target", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="hand_detection"]').click();
+    await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture download failed"));
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /fixture download failed/, "download errors remain inside the download modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
+    await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsHandSegmentationModel").value.includes("models\\handsegnet\\handsegnet_vit_b_best.safetensors"));
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "all", samType: "vit_l" }, "Download all uses the selected SAM type without browser-provided URLs or paths");
     assert.equal(await page.locator("#settingsHandModel").inputValue(), "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", "Download all reflects each completed model path immediately");
     await page.locator("#modelDownloadClose").click();
     const jobsBeforeDoubleClick = modelDownloadJobs();
     const errorsBeforeDoubleStart = pageErrors.length;
-    await page.evaluate(() => Promise.all([startModelDownload("sam"), startModelDownload("sam")]));
+    await page.evaluate(() => startModelDownload("sam"));
     await page.waitForFunction(() => document.querySelector("#modelDownloadDialog").open);
-    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick + 1, "two direct starts do not create a second download job");
-    assert.deepEqual(pageErrors.slice(errorsBeforeDoubleStart), [], "two direct starts do not reopen an already-open download dialog");
+    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick, "confirmation does not create a download job");
+    await page.locator("#modelDownloadStart").click();
+    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick + 1, "confirmation starts exactly one download job");
+    assert.deepEqual(pageErrors.slice(errorsBeforeDoubleStart), [], "opening and confirming a download does not reopen the dialog");
     await page.locator("#modelDownloadCancel").click();
     await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("キャンセル"));
     assert.ok(modelDownloadPolls() >= 2, "download progress is polled while a job is active");
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(true);
     await page.locator('[data-model-download="target"]').click();
+    await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture status unavailable"));
     assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");
     assert.equal(await page.locator("#modelDownloadClose").isDisabled(), false, "a download status error lets the user close the modal");
@@ -655,7 +663,7 @@ async function main() {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
     await page.locator("#settingsTabShortcuts").click();
-    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 10 && rows.every((row) => {
       const children = [...row.children];
       return children.length === 3 && children.every((child) => Math.abs((child.getBoundingClientRect().y + child.getBoundingClientRect().height / 2) - (row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2)) < 2);
     })), true, "all shortcut bindings keep one three-column row");
@@ -693,15 +701,15 @@ async function main() {
     });
     assert.equal(eta.polled, eta.first, "ETA is retained between image completions");
     assert.notEqual(eta.completed, eta.first, "ETA is recalculated after an image completes");
-    const legacyDraftForceExclusion = await page.evaluate(() => {
-      state.settings.detection.force_exclusion_default = false;
+    const legacyDraftManualExclusion = await page.evaluate(() => {
+      state.settings.detection.exclude_forced_default = false;
       state.drafts.set("sample", { add: "", exclusion: "" });
-      const forceExclusion = draftPayload(["sample"]).sample.forceExclusion;
+      const forced = draftPayload(["sample"]).sample.manualExclusionForced;
       state.drafts.delete("sample");
-      state.settings.detection.force_exclusion_default = true;
-      return forceExclusion;
+      state.settings.detection.exclude_forced_default = true;
+      return forced;
     });
-    assert.equal(legacyDraftForceExclusion, false, "a legacy draft inherits the configured force-exclusion default");
+    assert.equal(legacyDraftManualExclusion, false, "a legacy draft inherits the configured manual-exclusion default");
     await assertDesktopLayout(page, 1024, 768);
     await assertSettingsDialogLayout(page, 1024, 768, "ja");
     await page.evaluate(() => loadTranslations("en"));
@@ -718,7 +726,7 @@ async function main() {
     assert.ok(settingsResultBox && resetBox && resetBox.x - (settingsResultBox.x + settingsResultBox.width) <= 12, "settings result stays beside Reset");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
     const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
-    assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");
+    assert.equal(shortcutsAfterReset.length, 10, "reset restores every shortcut binding before compact save");
     assert.equal(shortcutsAfterReset.every(Boolean) && new Set(shortcutsAfterReset).size === shortcutsAfterReset.length, true, "reset restores valid unique shortcut bindings before compact save");
     const savesBeforeCompactSave = settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length;
     await page.locator("#settingsSaveButton").click();
@@ -731,14 +739,14 @@ async function main() {
     await page.setViewportSize({ width: 1024, height: 768 });
     assert.equal(await page.locator(".editor-context-bar").count(), 0, "the old editor context row must be removed");
     assert.equal(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().height >= 690), true, "the canvas stage keeps a full editing surface beneath the compact status line at 1024x768");
-    for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#previousImageButton", "#imagePosition", "#nextImageButton", "#nextUnreviewedButton", "#reviewAndNextButton", "#saveButton"]) {
+    for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#currentFileName", "#previousImageButton", "#imagePosition", "#nextImageButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
     for (const position of ["left", "top", "right", "bottom"]) await assertToolRailLayout(page, position);
     await page.locator("#canvasStage").evaluate((stage) => { stage.dataset.toolPosition = "left"; });
-    for (const [language, labels] of [["ja", ["次へ", "削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Next unreviewed", "Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
+    for (const [language, labels] of [["ja", ["削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
       await page.evaluate((locale) => loadTranslations(locale), language);
-      assert.deepEqual(await page.locator(".canvas-navigation-bar > button").evaluateAll((buttons) => buttons.slice(-4).map((button) => button.textContent.trim())), labels, `${language} navigation actions follow the requested order`);
+      assert.deepEqual(await page.locator(".canvas-navigation-bar > button").evaluateAll((buttons) => buttons.slice(-3).map((button) => button.textContent.trim())), labels, `${language} navigation actions follow the requested order`);
     }
     await page.evaluate(() => loadTranslations("ja"));
     const stageWidth = await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width);

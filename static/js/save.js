@@ -78,8 +78,8 @@ function draftPayload(imageIds) {
     const draft = state.drafts.get(imageId);
     if (draft) drafts[imageId] = {
       add: draft.manualEnabled === false ? "" : draft.add,
-      exclusion: draft.exclusion,
-      forceExclusion: draft.forceExclusion ?? (state.settings?.detection?.force_exclusion_default !== false),
+      exclusion: draft.manualExclusionEnabled === false ? "" : draft.exclusion,
+      manualExclusionForced: draft.manualExclusionForced ?? draft.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false),
     };
   }
   return drafts;

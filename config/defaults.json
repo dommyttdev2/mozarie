@@ -33,7 +33,7 @@
   "detection": {
     "mode": "standard",
     "fluid_exclusion_enabled": true,
-    "force_exclusion_default": true,
+    "exclude_forced_default": true,
     "threshold": 0.5,
     "parallelism": 2,
     "targets": ["penis", "pussy"]
@@ -51,13 +51,12 @@
       "nextVisible": "ArrowDown",
       "first": "Home",
       "last": "End",
-      "nextUnreviewed": "Shift+ArrowRight",
       "reviewAndNext": "Enter",
       "toggleOverview": "G",
       "undo": "Ctrl+Z",
       "redo": "Ctrl+Shift+Z"
     },
-    "actions": {"previous": true, "next": true, "previousVisible": true, "nextVisible": true, "first": true, "last": true, "nextUnreviewed": true, "reviewAndNext": true, "toggleOverview": true, "undo": true, "redo": true}
+    "actions": {"previous": true, "next": true, "previousVisible": true, "nextVisible": true, "first": true, "last": true, "reviewAndNext": true, "toggleOverview": true, "undo": true, "redo": true}
   },
   "confirmations": {
     "clearMasks": true,

@@ -144,8 +144,8 @@ def validate_settings(value: Any) -> dict[str, Any]:
     fluid_exclusion_enabled = _expect_bool(
         detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
     )
-    force_exclusion_default = _expect_bool(
-        detection.get("force_exclusion_default", True), "detection.force_exclusion_default"
+    exclude_forced_default = _expect_bool(
+        detection.get("exclude_forced_default", detection.get("force_exclusion_default", True)), "detection.exclude_forced_default"
     )
     tool_position = display.get("tool_position")
     if tool_position not in {"left", "top", "right", "bottom"}:
@@ -189,7 +189,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
-            "force_exclusion_default": force_exclusion_default,
+            "exclude_forced_default": exclude_forced_default,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
@@ -241,7 +241,7 @@ def _validate_targets(value: Any) -> list[str]:
     return list(dict.fromkeys(value))
 
 
-_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "previousVisible": "ArrowUp", "nextVisible": "ArrowDown", "first": "Home", "last": "End", "nextUnreviewed": "Shift+ArrowRight", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
+_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "previousVisible": "ArrowUp", "nextVisible": "ArrowDown", "first": "Home", "last": "End", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
 _SHORTCUT_ACTIONS = set(_DEFAULT_SHORTCUTS)
 
 

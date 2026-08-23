@@ -1719,7 +1719,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(combined[3, 3], 255)
             self.assertEqual(combined[4, 4], 0)
 
-    def test_combined_mask_can_leave_auto_exclusions_unforced(self):
+    def test_combined_mask_always_applies_auto_exclusions_before_manual_add(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "white").save(path)
@@ -1734,8 +1734,8 @@ class MozarieTests(unittest.TestCase):
                 Candidate("apply", "penis", 0.9, apply_path),
                 Candidate("exclude", "手を除外", None, exclude_path, role=server_module.CandidateRole.EXCLUDE),
             ]
-            combined = state.combined_candidate_mask(image_id, force_exclusion=False)
-            self.assertEqual(combined[4, 4], 255)
+            combined = state.combined_candidate_mask(image_id)
+            self.assertEqual(combined[4, 4], 0)
 
     def test_tile_layout_restores_masks_to_original_coordinates(self):
         specs = detection_tiles(100, 80)
@@ -2667,11 +2667,11 @@ class MozarieTests(unittest.TestCase):
             candidates = state.list_candidates(record.image_id)
             self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude", "exclude"])
             self.assertEqual([candidate["source"] for candidate in candidates[1:]], ["hand_exclusion", "fluid_exclusion"])
-            self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, False])
+            self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
             combined = state.combined_candidate_mask(record.image_id)
             self.assertFalse(np.any(combined[4:6, 4:8]))
-            self.assertTrue(np.all(combined[6:8, 4:8] == 255))
+            self.assertFalse(np.any(combined[6:8, 4:8]))
 
     def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
@@ -2753,7 +2753,7 @@ class MozarieTests(unittest.TestCase):
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, server_module.CandidateRole.EXCLUDE)
-            self.assertFalse(candidates[1].enabled)
+            self.assertTrue(candidates[1].enabled)
 
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3840,7 +3840,7 @@ class MozarieTests(unittest.TestCase):
             release_first = threading.Event()
             output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
 
-            def compose(image_id, _draft):
+            def compose(image_id, _draft, **_kwargs):
                 if image_id == image_ids[0]:
                     first_entered.set()
                     self.assertTrue(release_first.wait(2))

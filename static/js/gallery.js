@@ -231,12 +231,6 @@ function moveCurrentBy(offset) {
   const target = visible[index + offset];
   if (target) void selectImage(target.id);
 }
-function nextUnreviewedImage() {
-  const current = imageIndex();
-  for (let index = Math.max(0, current + 1); index < state.images.length; index += 1) if (!isHidden(state.images[index]) && !isReviewed(state.images[index])) return state.images[index];
-  return null;
-}
-function moveToNextUnreviewed() { if (isGestureActive()) return; const target = nextUnreviewedImage(); if (target) void selectImage(target.id); }
 function reviewAndMoveNext() {
   if (isGestureActive()) return null;
   const current = currentRecord();

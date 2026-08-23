@@ -363,6 +363,7 @@ class DetectionMixin:
                     source=f"{exclusion_kind}_exclusion",
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
+                    forced=self.settings["detection"].get("exclude_forced_default", True),
                 ))
             if segment["class_name"] not in TARGET_CLASSES:
                 continue
@@ -400,7 +401,8 @@ class DetectionMixin:
                     source=exclusion_source,
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
-                    enabled=exclusion_kind != "fluid",
+                    enabled=True,
+                    forced=self.settings["detection"].get("exclude_forced_default", True),
                 ))
         return candidates
 
@@ -484,7 +486,8 @@ class DetectionMixin:
                     candidate_id=exclusion_id, class_name=SOURCE_LABELS[exclusion_source], confidence=None,
                     mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
                     source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
-                    enabled=exclusion_kind != "fluid",
+                    enabled=True,
+                    forced=self.settings["detection"].get("exclude_forced_default", True),
                 ))
                 masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
             temporary_paths: list[Path] = []

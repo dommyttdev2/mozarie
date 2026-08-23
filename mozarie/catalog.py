@@ -727,6 +727,8 @@ class CatalogMixin:
             )
             if candidate is None:
                 raise ClientError("検出候補が見つかりません。")
+            if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
+                raise ClientError("除外候補の強制指定が正しくありません。")
             if "enabled" in payload:
                 if not isinstance(payload["enabled"], bool):
                     raise ClientError("候補のON/OFFは真偽値で指定してください。")
@@ -736,6 +738,8 @@ class CatalogMixin:
                 if not _valid_color(color):
                     raise ClientError("色の形式が正しくありません。")
                 candidate.color = color
+            if "forced" in payload:
+                candidate.forced = payload["forced"]
             self._touch_candidates(image_id)
             return self._candidate_revision(image_id)
 

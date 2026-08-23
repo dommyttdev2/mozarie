@@ -16,7 +16,7 @@ Mozarie is distributed under the [MIT License](LICENSE). The following direct ru
 
 ## Model Weights
 
-No model weights are included in this repository. When the user explicitly chooses Download in Mozarie, supported files are fetched from the fixed sources below and accepted only after their recorded size and SHA-256 match. Downloads are not performed at startup or while detecting. NTD11 and Sensitive remain user-supplied ONNX files; their provenance, terms, license obligations, and permitted uses must be verified separately by the person who provides them.
+No model weights are included in this repository. When the user explicitly chooses Download in Mozarie, supported files are fetched from the fixed sources below and accepted only after their recorded size and SHA-256 match. That check detects changes to the pinned download; it is not an absolute guarantee that a file is harmless. Downloads are not performed at startup or while detecting. NTD11 remains a user-supplied ONNX file; its provenance, terms, license obligations, and permitted uses must be verified separately by the person who provides it.
 
 | Model | Pinned source | License / terms |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ No model weights are included in this repository. When the user explicitly choos
 | Anime hand detector ONNX | [deepghs/anime_hand_detection at `dba2c5b`](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) | Provider metadata: `openrail`; review provider terms |
 | SAM checkpoints | [Meta Segment Anything checkpoint source](https://github.com/facebookresearch/segment-anything#model-checkpoints) | Apache-2.0 |
 | HandSegNet anime SDXL | [pinned revision `77ff734`](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) | Apache-2.0 |
+| Sensitive v07 checkpoint | [pinned `sensitive_detect_v07.pt` revision `b7ec7a5`](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40) | AGPL-3.0; not downloaded, loaded, or converted by Mozarie |
 
 Mozarie installs Segment Anything from GitHub's source archive at the fixed `dca509fe793f601edb92606367a655c15ac00fdf` revision, so installing the Python dependencies does not require Git. Mozarie supports SAM checkpoints supplied by the user. The official Segment Anything repository provides links to its checkpoints and states that SAM is licensed under Apache-2.0. See the [Mozarie Model downloads documentation](README.md#model-downloads) and the [official Segment Anything repository](https://github.com/facebookresearch/segment-anything) for details.
 

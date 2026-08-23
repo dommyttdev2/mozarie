@@ -18,8 +18,7 @@ const state = {
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
-  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true,
-  forceExclusion: true,
+  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
@@ -222,8 +221,8 @@ function renderStatus() {
 
 function renderLocalizedDynamicState() {
   const record = currentRecord();
-  $("#imageInfo").textContent = record && state.currentImage
-    ? `${record.relativePath} / ${record.width} x ${record.height}`
+  $("#currentFileName").textContent = record && state.currentImage
+    ? record.relativePath
     : t("editor.none");
   updateNavigationControls();
   updateCandidateStatus();
@@ -459,7 +458,6 @@ function updateActionButtons() {
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || switchingImages || imageIndex() <= 0;
   $("#nextImageButton").disabled = running || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
-  $("#nextUnreviewedButton").disabled = running || switchingImages || !nextUnreviewedImage();
   $("#reviewAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#removeAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#hideAndNextButton").disabled = running || switchingImages || !hasImage;

@@ -151,7 +151,7 @@ class SettingsTests(unittest.TestCase):
         settings = validate_settings(legacy)
         self.assertEqual(settings["models"]["hand_segmentation"], "")
         self.assertFalse(settings["models"]["hand_segmentation_enabled"])
-        self.assertTrue(settings["detection"]["force_exclusion_default"])
+        self.assertTrue(settings["detection"]["exclude_forced_default"])
         self.assertTrue(Path(settings["saving"]["default_output_directory"]).is_absolute())
 
     def test_hand_segmentation_requires_hand_detection_but_legacy_load_is_normalised(self):

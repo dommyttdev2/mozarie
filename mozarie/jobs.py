@@ -193,7 +193,7 @@ class JobsMixin:
         self,
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
-        force_exclusion: bool = True,
+        manual_exclude_forced: bool | None = None,
     ) -> np.ndarray | None:
         add_mask, exclusion_mask = draft or (None, None)
         with self.image_io_lock(image_id):
@@ -210,6 +210,7 @@ class JobsMixin:
                 return None
             apply_masks: list[np.ndarray] = []
             exclude_masks: list[np.ndarray] = []
+            forced_exclude_masks: list[np.ndarray] = []
             for candidate in candidates:
                 try:
                     with Image.open(candidate.mask_path) as mask_image:
@@ -218,9 +219,15 @@ class JobsMixin:
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。") from exc
                 if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
+                if candidate.role == CandidateRole.APPLY:
+                    apply_masks.append(mask)
+                else:
+                    exclude_masks.append(mask)
+                    if candidate.forced:
+                        forced_exclude_masks.append(mask)
             result = compose_masks(
-                (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask, force_exclusion,
+                (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask,
+                forced_exclude_masks, True if manual_exclude_forced is None else manual_exclude_forced,
             )
             with self.lock:
                 current_record = self.images.get(image_id)

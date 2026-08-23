@@ -94,7 +94,7 @@ class SavingMixin:
     ) -> BrowserSaveRender:
         record = self.image_snapshot(image_id)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
-        force_exclusion = draft_force_exclusion(draft, self.settings["detection"].get("force_exclusion_default", True))
+        manual_exclude_forced = draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True))
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
         output_path: Path | None = None
@@ -123,6 +123,7 @@ class SavingMixin:
                 # disk read.  Do not compose a silently reduced mask.
                 apply_masks: list[np.ndarray] = []
                 exclude_masks: list[np.ndarray] = []
+                forced_exclude_masks: list[np.ndarray] = []
                 add_mask, exclusion_mask = draft_masks
                 enabled_apply_candidates = [candidate for candidate in candidates if candidate.enabled and candidate.role == CandidateRole.APPLY]
                 if not enabled_apply_candidates and add_mask is None:
@@ -139,10 +140,17 @@ class SavingMixin:
                         raise ClientError("候補が変更されました。保存をやり直してください。") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                    if candidate.enabled and (candidate.role == CandidateRole.APPLY or force_exclusion):
-                        (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(candidate_mask)
+                    if not candidate.enabled:
+                        continue
+                    if candidate.role == CandidateRole.APPLY:
+                        apply_masks.append(candidate_mask)
+                    else:
+                        exclude_masks.append(candidate_mask)
+                        if candidate.forced:
+                            forced_exclude_masks.append(candidate_mask)
                 mask = compose_masks(
-                    (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask, force_exclusion,
+                    (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask,
+                    forced_exclude_masks, manual_exclude_forced,
                 )
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
@@ -347,12 +355,12 @@ class SavingMixin:
                             mask = draft_or_mask
                         else:
                             draft_masks = decode_draft_masks(draft_or_mask, record.width, record.height)
-                            force_exclusion = draft_force_exclusion(
-                                draft_or_mask, self.settings["detection"].get("force_exclusion_default", True),
+                            manual_exclude_forced = draft_manual_exclusion_forced(
+                                draft_or_mask, self.settings["detection"].get("exclude_forced_default", True),
                             )
                             mask = self.combined_candidate_mask(
                                 record.image_id, draft_masks,
-                                **({"force_exclusion": False} if not force_exclusion else {}),
+                                manual_exclude_forced=manual_exclude_forced,
                             )
                     except Exception:
                         raise

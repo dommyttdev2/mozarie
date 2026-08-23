@@ -84,9 +84,9 @@
           <label id="bucketToleranceControl" class="numeric-control" for="bucketTolerance" hidden><span data-i18n="editor.bucketTolerance">許容値</span><input id="bucketTolerance" type="number" min="0" max="255" value="20"></label>
         </div>
         <div class="canvas-navigation-bar" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
-          <span id="imageInfo" hidden data-i18n-dynamic>画像未選択</span><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
+          <output id="currentFileName" class="current-file-name" data-i18n-dynamic>画像未選択</output><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
           <button id="previousImageButton" class="icon-button" type="button" aria-label="前へ" title="前へ" data-i18n-aria-label="navigation.previous" data-i18n-title="navigation.previous">‹</button><output id="imagePosition" class="image-position">- / -</output><button id="nextImageButton" class="icon-button" type="button" aria-label="次へ" title="次へ" data-i18n-aria-label="navigation.next" data-i18n-title="navigation.next">›</button>
-          <button id="nextUnreviewedButton" type="button" data-i18n="navigation.nextUnreviewed">次へ</button><button id="removeAndNextButton" type="button" data-i18n="navigation.removeAndNext">削除して次へ</button><button id="hideAndNextButton" type="button" data-i18n="navigation.hideAndNext">非表示にして次へ</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済にして次へ</button>
+          <button id="removeAndNextButton" type="button" data-i18n="navigation.removeAndNext">削除して次へ</button><button id="hideAndNextButton" type="button" data-i18n="navigation.hideAndNext">非表示にして次へ</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済にして次へ</button>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
         <div id="boundaryActions" class="boundary-actions" role="group" aria-label="境界操作" data-i18n-aria-label="boundary.actions" hidden>
@@ -126,7 +126,6 @@
       </section>
       <section class="candidate-section">
         <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:enable" type="button">ON</button><button data-candidate-batch="exclude:disable" type="button">OFF</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
-        <label class="force-exclusion-toggle"><input id="forceExclusionToggle" type="checkbox"><span data-i18n="candidates.forceExclusion">除外を強制</span></label>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -272,7 +271,7 @@
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
         <label class="choice-row"><input id="settingsMosaicPreview" type="checkbox"><span data-i18n="settings.mosaicPreview">モザイク表示</span></label>
         <p class="fixed-note" data-i18n="settings.mosaicPreviewHelp">編集画面にモザイクを表示します。保存内容には影響しません。</p>
-        <label class="choice-row"><input id="settingsForceExclusionDefault" type="checkbox"><span data-i18n="settings.forceExclusionDefault">除外を強制する</span></label>
+        <label class="choice-row"><input id="settingsExcludeForcedDefault" type="checkbox"><span data-i18n="settings.excludeForcedDefault">新しい除外候補を強制する</span></label>
       </section>
       <section id="settingsPanelShortcuts" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabShortcuts" data-settings-panel="shortcuts" hidden>
         <label class="choice-row"><input id="settingsShortcutsEnabled" type="checkbox"><span data-i18n="settings.shortcuts">キーボードショートカット</span></label>
@@ -293,9 +292,10 @@
     <div class="dialog-body">
       <div class="settings-heading"><h2 id="modelDownloadTitle" data-i18n="modelDownload.title">モデルをダウンロード</h2><button id="modelDownloadClose" type="button" data-i18n="dialog.close">閉じる</button></div>
       <p id="modelDownloadMessage"></p>
+      <p id="modelDownloadSecurity" class="fixed-note" hidden></p>
       <progress id="modelDownloadProgress" max="1" value="0"></progress>
       <output id="modelDownloadStatus" class="dialog-result" aria-live="polite"></output>
-      <div class="dialog-actions"><button id="modelDownloadCancel" type="button" data-i18n="dialog.cancel">キャンセル</button></div>
+      <div class="dialog-actions"><button id="modelDownloadStart" class="primary" type="button" hidden data-i18n="modelDownload.download">ダウンロード</button><button id="modelDownloadCancel" type="button" data-i18n="dialog.cancel">キャンセル</button></div>
     </div>
   </dialog>
 

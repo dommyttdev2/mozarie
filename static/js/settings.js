@@ -150,7 +150,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
-  $("#settingsForceExclusionDefault").checked = settings.detection.force_exclusion_default !== false;
+  $("#settingsExcludeForcedDefault").checked = settings.detection.exclude_forced_default !== false;
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
   syncProviderSelection();
@@ -177,7 +177,7 @@ function setSettingsForm(settings, status = null) {
   renderSettingsStatus(status);
 }
 
-const SHORTCUT_LABELS = { previous: "settings.shortcut.previous", next: "settings.shortcut.next", previousVisible: "settings.shortcut.previousVisible", nextVisible: "settings.shortcut.nextVisible", first: "settings.shortcut.first", last: "settings.shortcut.last", nextUnreviewed: "settings.shortcut.nextUnreviewed", reviewAndNext: "settings.shortcut.reviewAndNext", toggleOverview: "settings.shortcut.toggleOverview", undo: "settings.shortcut.undo", redo: "settings.shortcut.redo" };
+const SHORTCUT_LABELS = { previous: "settings.shortcut.previous", next: "settings.shortcut.next", previousVisible: "settings.shortcut.previousVisible", nextVisible: "settings.shortcut.nextVisible", first: "settings.shortcut.first", last: "settings.shortcut.last", reviewAndNext: "settings.shortcut.reviewAndNext", toggleOverview: "settings.shortcut.toggleOverview", undo: "settings.shortcut.undo", redo: "settings.shortcut.redo" };
 function renderShortcutBindings(bindings, actions) {
   const root = $("#shortcutBindings"); root.textContent = "";
   for (const [action, labelKey] of Object.entries(SHORTCUT_LABELS)) {
@@ -216,7 +216,7 @@ function settingsPayload() {
       parallelism: detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
-      force_exclusion_default: $("#settingsForceExclusionDefault").checked, targets: detectionTargets(),
+      exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),
     },
     saving: {
       parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),
@@ -332,6 +332,7 @@ async function chooseSettingsModelFile(button) {
 }
 
 let modelDownloadPoll = null;
+let pendingModelDownloadKey = null;
 
 function modelDownloadInput(settingKey) {
   return {
@@ -354,6 +355,7 @@ function renderModelDownload(job) {
   else if (job.state === "complete") { status.textContent = t("modelDownload.complete"); status.classList.remove("error"); }
   else { status.textContent = ""; status.classList.remove("error"); }
   $("#modelDownloadCancel").hidden = !["running", "cancelling"].includes(job.state);
+  $("#modelDownloadStart").hidden = true;
   $("#modelDownloadClose").disabled = ["running", "cancelling"].includes(job.state);
   for (const [settingKey, path] of Object.entries(job.paths || {})) {
     const selector = modelDownloadInput(settingKey); if (selector) $(selector).value = path;
@@ -372,19 +374,46 @@ async function refreshModelDownload() {
 }
 
 function showUnsupportedModelDownload(key) {
+  const sensitive = key === "sensitive";
   const source = key === "ntd11" ? "NTD11" : "Sensitive";
-  $("#modelDownloadMessage").textContent = t("modelDownload.unsupported", { model: source });
+  $("#modelDownloadMessage").textContent = sensitive ? t("modelDownload.sensitive") : t("modelDownload.unsupported", { model: source });
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadStatus").textContent = t("modelDownload.unsupportedSource", { source: "GitHub / Hugging Face" });
+  $("#modelDownloadStatus").textContent = sensitive
+    ? t("modelDownload.sensitiveSource")
+    : t("modelDownload.unsupportedSource", { source: "GitHub / Hugging Face" });
+  $("#modelDownloadSecurity").hidden = true;
+  $("#modelDownloadStart").hidden = true;
   $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
   const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
 }
 
-async function startModelDownload(key) {
+function modelDownloadConfirmation(key) {
+  const samType = $("#settingsSamType").value;
+  const names = { target: t("settings.targetModel"), sam: `SAM ${samType}`, hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"), all: t("modelDownload.all") };
+  const sources = { target: "Hugging Face", sam: "Meta", hand_detection: "Hugging Face", hand_segmentation: "Hugging Face", all: "Hugging Face / Meta" };
+  const samFiles = { vit_b: "sam_vit_b_01ec64.pth", vit_l: "sam_vit_l_0b3195.pth", vit_h: "sam_vit_h_4b8939.pth" };
+  const targets = { target: "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", sam: `models\\${samFiles[samType]}`, hand_detection: "models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "models\\handsegnet\\handsegnet_vit_b_best.safetensors" };
+  targets.all = [targets.target, targets.sam, targets.hand_detection, targets.hand_segmentation].join("; ");
+  pendingModelDownloadKey = key;
+  $("#modelDownloadMessage").textContent = t("modelDownload.confirm", { model: names[key], source: sources[key], target: targets[key] });
+  $("#modelDownloadSecurity").textContent = t("modelDownload.security"); $("#modelDownloadSecurity").hidden = false;
+  $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
+  $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
+  $("#modelDownloadStart").hidden = false; $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
+  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+}
+
+function startModelDownload(key) {
   if (key === "ntd11" || key === "sensitive") return showUnsupportedModelDownload(key);
+  modelDownloadConfirmation(key);
+}
+
+async function beginModelDownload() {
+  const key = pendingModelDownloadKey;
+  if (!key) return;
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+  $("#modelDownloadStart").hidden = true; $("#modelDownloadSecurity").hidden = true;
   try {
     const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
     const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) });
