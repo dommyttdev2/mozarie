@@ -303,6 +303,31 @@ async function assertDesktopLayout(page, width, height) {
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
 
+async function assertCompactNavigationLayout(page, language) {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.evaluate((locale) => loadTranslations(locale), language);
+  const layout = await page.evaluate(() => {
+    const nav = document.querySelector(".canvas-navigation-bar");
+    const bounds = nav.getBoundingClientRect();
+    const children = [...nav.children].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { id: element.id, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
+    });
+    return {
+      filename: document.querySelector("#currentFileName").textContent,
+      firstChild: nav.firstElementChild?.id,
+      bounds: { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom },
+      children,
+    };
+  });
+  const filename = layout.children.find((child) => child.id === "currentFileName");
+  assert.equal(layout.filename, "sample.png", `current filename stays visible at 1024x768 (${language})`);
+  assert.equal(layout.firstChild, "currentFileName", `current filename remains the first footer item at 1024x768 (${language})`);
+  assert.ok(filename.width >= 48, `current filename keeps a usable width at 1024x768 (${language})`);
+  assert.equal(layout.children.every((child) => child.left >= layout.bounds.left && child.right <= layout.bounds.right && child.top >= layout.bounds.top && child.bottom <= layout.bounds.bottom), true, `all footer items stay inside navigation at 1024x768 (${language})`);
+  assert.equal(layout.children.slice(1).every((child) => filename.left <= child.left), true, `current filename is visually leftmost at 1024x768 (${language})`);
+}
+
 async function assertConnectionStatusLayout(page, width, height, language) {
   await page.setViewportSize({ width, height });
   await page.evaluate(async (selected) => {
@@ -896,6 +921,7 @@ async function main() {
     for (const [language, labels] of [["ja", ["削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
       await page.evaluate((locale) => loadTranslations(locale), language);
       assert.deepEqual(await page.locator(".canvas-navigation-bar > button").evaluateAll((buttons) => buttons.slice(-3).map((button) => button.textContent.trim())), labels, `${language} navigation actions follow the requested order`);
+      await assertCompactNavigationLayout(page, language);
     }
     await page.evaluate(() => loadTranslations("ja"));
     const stageWidth = await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width);

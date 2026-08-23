@@ -290,6 +290,16 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .studio-grid.overview-active { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 .studio-grid.overview-active > .gallery-pane, .studio-grid.overview-active > .editor-pane, .studio-grid.overview-active > .candidate-pane { display: none; }
 .studio-grid.overview-active > .overview-pane { grid-column: 1; grid-row: 1; }
+@media (min-width: 900px) and (max-width: 1279px) {
+  .studio-grid { grid-template-columns: 120px minmax(0, 1fr) 240px; }
+  .canvas-navigation-bar { gap: 3px; padding: 4px; }
+  .canvas-navigation-bar .current-file-name { min-width: 48px; }
+  .canvas-navigation-bar button { min-height: 28px; padding: 3px 6px; font-size: 12px; }
+  .canvas-navigation-bar .icon-button { min-width: 26px; padding-inline: 4px; font-size: 18px; }
+  .canvas-navigation-bar .review-status { min-width: 0; font-size: 12px; }
+  .canvas-navigation-bar .image-position { min-width: 48px; font-size: 12px; }
+  .canvas-stage[data-tool-position="bottom"] .canvas-navigation-bar { padding: 5px; }
+}
 @media (min-width: 1280px) { .studio-grid { grid-template-columns: 216px minmax(0, 1fr) 280px; } .studio-grid.gallery-collapsed { grid-template-columns: 40px minmax(0, 1fr) 280px; } .studio-grid.inspector-collapsed { grid-template-columns: 216px minmax(0, 1fr) 40px; } }
 @media (min-width: 1600px) { .studio-grid { grid-template-columns: 260px minmax(0, 1fr) 320px; } .studio-grid.gallery-collapsed { grid-template-columns: 40px minmax(0, 1fr) 320px; } .studio-grid.inspector-collapsed { grid-template-columns: 260px minmax(0, 1fr) 40px; } }
 .update-toast { position: fixed; right: 1rem; bottom: 1rem; z-index: 20; }
