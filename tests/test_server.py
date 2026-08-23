@@ -178,7 +178,12 @@ class MozarieTests(unittest.TestCase):
                 self.assertEqual(http_module._pick_output_directory(state), str(selected.resolve()))
             command = run.call_args.args[0]
             self.assertEqual(command[:-1], [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand"])
-            self.assertIn("FolderBrowserDialog", base64.b64decode(command[-1]).decode("utf-16le"))
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertIn("FolderBrowserDialog", script)
+            self.assertIn("FormStartPosition]::CenterScreen", script)
+            self.assertIn("ShowDialog($owner)", script)
+            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
+            self.assertNotIn("-32000", script)
             self.assertFalse(run.call_args.kwargs["shell"])
             self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
             self.assertEqual(
@@ -215,6 +220,10 @@ class MozarieTests(unittest.TestCase):
             script = base64.b64decode(command[-1]).decode("utf-16le")
             self.assertIn("OpenFileDialog", script)
             self.assertIn("RestoreDirectory", script)
+            self.assertIn("FormStartPosition]::CenterScreen", script)
+            self.assertIn("ShowDialog($owner)", script)
+            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
+            self.assertNotIn("-32000", script)
             self.assertFalse(picker_kwargs["shell"])
             self.assertEqual(picker_kwargs["env"]["MOZARIE_MODEL_INITIAL_DIRECTORY"], str(root))
             self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
@@ -258,6 +267,38 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(state.native_picker_lock.acquire(blocking=False))
                 state.native_picker_lock.release()
 
+    def test_model_download_api_uses_existing_mutation_guards_and_allowlist(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        manager = Mock(snapshot=Mock(return_value={"state": "idle", "paths": {}}), start=Mock(return_value={"state": "running", "paths": {}}), cancel=Mock(return_value={"state": "cancelled", "paths": {}}))
+        state.model_downloads = manager
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+        def request(method, path, payload=None, headers=None):
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                connection.request(method, path, body, headers or {})
+                response = connection.getresponse(); data = response.read(); return response.status, data
+            finally:
+                connection.close()
+        try:
+            with patch.object(http_module, "STATE", state):
+                status, body = request("GET", "/api/model-download")
+                self.assertEqual(status, 200); self.assertEqual(json.loads(body)["state"], "idle")
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b"}, {"Content-Type": "application/json"})
+                self.assertEqual(status, 403)
+                headers = {"Content-Type": "application/json", "Origin": origin, "X-Mozarie-Token": state.session_token}
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b", "url": "https://evil.example/model"}, headers)
+                self.assertEqual(status, 200)
+                manager.start.assert_called_once_with("hand_detection", "vit_b")
+                status, _ = request("POST", "/api/model-download/cancel", {}, headers)
+                self.assertEqual(status, 200); manager.cancel.assert_called_once_with()
+        finally:
+            httpd.shutdown(); httpd.server_close()
+
     def test_settings_status_preview_does_not_save_or_replace_settings(self):
         state = self.new_state()
         original = copy.deepcopy(state.settings)
@@ -280,11 +321,12 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 3,
             get_device_capability=lambda index: [(8, 9), (6, 1), (12, 1)][index],
             get_device_name=lambda index: ["RTX 4090", "GTX 1060", "RTX 5090"][index],
+            get_device_properties=lambda index: types.SimpleNamespace(total_memory=[24, 3, 32][index] * 1024 ** 3),
         )
         self.assertEqual(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda)), [
-            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "supported": True},
-            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "supported": False},
-            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "supported": True},
+            {"id": 0, "name": "RTX 4090", "architecture": "sm_89", "totalMemory": 24 * 1024 ** 3, "supported": True},
+            {"id": 1, "name": "GTX 1060", "architecture": "sm_61", "totalMemory": 3 * 1024 ** 3, "supported": False},
+            {"id": 2, "name": "RTX 5090", "architecture": "sm_121", "totalMemory": 32 * 1024 ** 3, "supported": True},
         ])
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
@@ -303,6 +345,7 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 1,
             get_device_capability=lambda _index: (6, 1),
             get_device_name=lambda _index: "GTX 1060",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=3 * 1024 ** 3),
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
@@ -313,6 +356,7 @@ class MozarieTests(unittest.TestCase):
             device_count=lambda: 1,
             get_device_capability=lambda _index: (6, 1),
             get_device_name=lambda _index: "GTX 1060",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=3 * 1024 ** 3),
         )
         self.assertFalse(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
@@ -321,6 +365,22 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"].update({"hand_detection_enabled": False, "hand_segmentation_enabled": True})
         status = state.settings_status()["models"]["hand_segmentation"]
         self.assertFalse(status["enabled"])
+
+    def test_sam_variant_statuses_are_lightweight_and_distinguish_managed_external_and_mismatch(self):
+        state = self.new_state()
+        managed = self.app_dir / "models" / "sam_vit_b_01ec64.pth"
+        managed.parent.mkdir(); managed.write_bytes(b"b")
+        external = self.app_dir.parent / "external.ckpt"; external.write_bytes(b"l")
+        mismatch = self.app_dir.parent / "sam_vit_l_0b3195.pth"; mismatch.write_bytes(b"h")
+        state.settings["models"]["sam_checkpoints"] = {
+            "vit_b": str(managed), "vit_l": str(external), "vit_h": str(mismatch),
+        }
+        state.settings["models"]["sam_checkpoint"] = str(managed)
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))):
+            variants = state.settings_status()["samVariants"]
+        self.assertTrue(variants["vit_b"]["valid"]); self.assertTrue(variants["vit_b"]["managed"])
+        self.assertTrue(variants["vit_l"]["valid"]); self.assertFalse(variants["vit_l"]["managed"])
+        self.assertFalse(variants["vit_h"]["valid"]); self.assertEqual(variants["vit_h"]["reasonCode"], "type_mismatch")
 
     def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
         from http.server import ThreadingHTTPServer
@@ -1678,6 +1738,24 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(combined[3, 3], 255)
             self.assertEqual(combined[4, 4], 0)
 
+    def test_combined_mask_always_applies_auto_exclusions_before_manual_add(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            apply = self._mask(16, 16)
+            exclude = np.zeros((16, 16), dtype=np.uint8); exclude[4:6, 4:6] = 255
+            cache = state.cache_dir / image_id; cache.mkdir(parents=True)
+            apply_path, exclude_path = cache / "apply.png", cache / "exclude.png"
+            Image.fromarray(apply).save(apply_path); Image.fromarray(exclude).save(exclude_path)
+            state.candidates[image_id] = [
+                Candidate("apply", "penis", 0.9, apply_path),
+                Candidate("exclude", "手を除外", None, exclude_path, role=server_module.CandidateRole.EXCLUDE),
+            ]
+            combined = state.combined_candidate_mask(image_id)
+            self.assertEqual(combined[4, 4], 0)
+
     def test_tile_layout_restores_masks_to_original_coordinates(self):
         specs = detection_tiles(100, 80)
         self.assertEqual(len(specs), 9)
@@ -1849,12 +1927,11 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(len({tuple(point) for point in points}), 3)
         self.assertTrue(all(source[int(y), int(x)] and not hand[int(y), int(x)] for x, y in points))
 
-    def test_specialist_hand_mask_requires_box_containment_and_genital_intersection(self):
-        genital = np.zeros((12, 12), dtype=np.uint8); genital[4:8, 4:8] = 255
+    def test_specialist_hand_mask_requires_box_containment(self):
         accepted = np.zeros((1, 12, 12), dtype=bool); accepted[0, 4:8, 4:8] = True
-        self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9), genital))
+        self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9)))
         outside = np.zeros((1, 12, 12), dtype=bool); outside[0, :3, :3] = True
-        self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9), genital))
+        self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9)))
 
     def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
         rgb = np.zeros((24, 24, 3), dtype=np.uint8)
@@ -2309,15 +2386,16 @@ class MozarieTests(unittest.TestCase):
             generic.predict.assert_called_once()
             self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
-    def test_final_exclusion_subtracts_hand_from_sam_expansion(self):
+    def test_full_hand_exclusion_is_kept_separate_from_the_apply_mask(self):
         state = self.new_state()
         final_mask = np.zeros((12, 12), dtype=np.uint8); final_mask[2:10, 2:10] = 255
         hand = np.zeros_like(final_mask); hand[8:10, 8:10] = 255
         segment = {"class_name": "penis", "mask": final_mask, "_confirmed_hand": hand}
+        segment["image_exclusions"] = {"hand": hand}
         finalized = state._finalize_exclusions(np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
-        self.assertTrue(np.array_equal(finalized["exclusions"]["hand"], hand))
+        self.assertTrue(np.array_equal(finalized["image_exclusions"]["hand"], hand))
 
-    def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
+    def test_hand_sam_runs_once_per_detected_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
         record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         base_mask = np.zeros((16, 16), dtype=np.uint8)
@@ -2342,7 +2420,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
         hand_boxes.assert_called_once()
-        self.assertEqual(predictor.predict.call_count, 2)
+        self.assertEqual(predictor.predict.call_count, 3)
         self.assertTrue(all(np.count_nonzero(segment["_confirmed_hand"]) == 8 for segment in result))
         self.assertTrue(all(np.count_nonzero(segment["mask"]) == 64 for segment in result))
 
@@ -2379,8 +2457,20 @@ class MozarieTests(unittest.TestCase):
             )
         result = state._finalize_exclusions(rgb, result)
         self.assertEqual(np.count_nonzero(result[0]["mask"]), 400)
-        self.assertTrue(np.any(result[0]["exclusions"]["hand"]))
+        self.assertTrue(np.any(result[0]["image_exclusions"]["hand"]))
         self.assertTrue(np.any(result[0]["exclusions"]["fluid"]))
+
+    def test_hand_mask_creates_an_image_exclusion_without_target_segments(self):
+        state = self.new_state()
+        record = Mock(image_id="image")
+        hand = np.zeros((16, 16), dtype=bool); hand[4:8, 4:8] = True
+        predictor = Mock(); predictor.predict.return_value = np.asarray([hand]), np.asarray([0.95]), None
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_sam_predictor_for", return_value=predictor
+        ):
+            result = state._refine_detected_segments(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [])
+        self.assertEqual(result[0]["class_name"], "__hand_exclusion__")
+        self.assertTrue(np.any(result[0]["image_exclusions"]["hand"]))
 
     def test_fluid_exclusion_can_be_disabled_without_changing_hand_refinement(self):
         state = self.new_state()
@@ -2596,11 +2686,11 @@ class MozarieTests(unittest.TestCase):
             candidates = state.list_candidates(record.image_id)
             self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude", "exclude"])
             self.assertEqual([candidate["source"] for candidate in candidates[1:]], ["hand_exclusion", "fluid_exclusion"])
-            self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, False])
+            self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
             combined = state.combined_candidate_mask(record.image_id)
             self.assertFalse(np.any(combined[4:6, 4:8]))
-            self.assertTrue(np.all(combined[6:8, 4:8] == 255))
+            self.assertFalse(np.any(combined[6:8, 4:8]))
 
     def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
@@ -2682,7 +2772,7 @@ class MozarieTests(unittest.TestCase):
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, server_module.CandidateRole.EXCLUDE)
-            self.assertFalse(candidates[1].enabled)
+            self.assertTrue(candidates[1].enabled)
 
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3769,7 +3859,7 @@ class MozarieTests(unittest.TestCase):
             release_first = threading.Event()
             output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
 
-            def compose(image_id, _draft):
+            def compose(image_id, _draft, **_kwargs):
                 if image_id == image_ids[0]:
                     first_entered.set()
                     self.assertTrue(release_first.wait(2))

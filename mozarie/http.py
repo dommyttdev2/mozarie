@@ -1,60 +1,75 @@
 from .core import *
 from .state import STATE, StudioState
 from .image_io import *
+from .model_downloads import ModelDownloadError
 from typing import BinaryIO
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
-def _pick_output_directory(state: StudioState = STATE) -> str | None:
+def _run_native_picker(script: str, environment: dict[str, str], *, failed_message: str, busy_message: str, state: StudioState) -> str | None:
+    """Run one Windows picker, owned by an invisible topmost native window."""
     if not state.native_picker_lock.acquire(blocking=False):
-        raise ClientError("保存先の選択を開いています。")
+        raise ClientError(busy_message, "model_picker_busy")
     try:
-        with state.lock:
-            default_output_directory = state.settings["saving"]["default_output_directory"]
-            if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
-                raise ClientError("処理中は保存先を変更できません。")
-        system_root = Path(os.environ.get("SystemRoot", r"C:\\Windows"))
-        executable = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        executable = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         if not executable.is_file():
-            raise ClientError("保存先の選択を開けませんでした。")
-        script = """
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Mozarie の保存先を選択'
-$initial = $env:MOZARIE_DEFAULT_OUTPUT_DIRECTORY
-if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
-if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
-[Console]::Out.Write([Convert]::ToBase64String($bytes))
-"""
+            raise ClientError(failed_message, "model_picker_failed")
         encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        picker_environment = os.environ.copy()
-        picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(default_output_directory)
         try:
             completed = subprocess.run(
                 [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
-                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False, env=picker_environment,
+                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False, env=environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ClientError("保存先の選択を開けませんでした。") from exc
+            raise ClientError(failed_message, "model_picker_failed") from exc
         if completed.returncode:
-            raise ClientError("保存先の選択を開けませんでした。")
+            raise ClientError(failed_message, "model_picker_failed")
         encoded = completed.stdout.strip()
         if not encoded:
             return None
         try:
-            selected = base64.b64decode(encoded, validate=True).decode("utf-8")
+            return base64.b64decode(encoded, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
-            raise ClientError("保存先の選択結果が正しくありません。") from exc
-        path = Path(selected)
-        if not path.is_absolute() or not path.is_dir():
-            raise ClientError("保存先は存在する絶対パスで選択してください。")
-        return str(path.resolve())
+            raise ClientError("選択結果が正しくありません。", "model_picker_invalid") from exc
     finally:
         state.native_picker_lock.release()
+
+
+def _pick_output_directory(state: StudioState = STATE) -> str | None:
+    with state.lock:
+        default_output_directory = state.settings["saving"]["default_output_directory"]
+        if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            raise ClientError("処理中は保存先を変更できません。")
+    script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$owner = New-Object System.Windows.Forms.Form
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+try {
+  $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Show(); $owner.Activate(); $owner.BringToFront()
+  $dialog.Description = 'Mozarie の保存先を選択'
+  $initial = $env:MOZARIE_DEFAULT_OUTPUT_DIRECTORY
+  if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
+  if ($dialog.ShowDialog($owner) -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
+  [Console]::Out.Write([Convert]::ToBase64String($bytes))
+} finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }
+"""
+    picker_environment = os.environ.copy()
+    picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(default_output_directory)
+    selected = _run_native_picker(script, picker_environment, failed_message="保存先の選択を開けませんでした。", busy_message="保存先の選択を開いています。", state=state)
+    if selected is None:
+        return None
+    path = Path(selected)
+    if not path.is_absolute() or not path.is_dir():
+        raise ClientError("保存先は存在する絶対パスで選択してください。")
+    return str(path.resolve())
 
 
 _MODEL_PICKER_SUFFIXES = {
@@ -67,57 +82,40 @@ def _pick_model_file(model_key: str, state: StudioState = STATE, current_path: s
     suffixes = _MODEL_PICKER_SUFFIXES.get(model_key)
     if suffixes is None:
         raise ClientError("選択するモデルの種類が正しくありません。", "model_picker_invalid")
-    if not state.native_picker_lock.acquire(blocking=False):
-        raise ClientError("ファイルの選択を開いています。", "model_picker_busy")
-    try:
-        with state.lock:
-            if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
-                raise ClientError("処理中はモデルを選択できません。", "job_running")
-        executable = Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        if not executable.is_file():
-            raise ClientError("モデルファイルの選択を開けませんでした。", "model_picker_failed")
-        pattern = ";".join(f"*{suffix}" for suffix in sorted(suffixes))
-        script = f"""
+    with state.lock:
+        if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            raise ClientError("処理中はモデルを選択できません。", "job_running")
+    pattern = ";".join(f"*{suffix}" for suffix in sorted(suffixes))
+    script = f"""
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$owner = New-Object System.Windows.Forms.Form
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Filter = 'Model files ({pattern})|{pattern}'
-$dialog.CheckFileExists = $true
-$dialog.Multiselect = $false
-$dialog.RestoreDirectory = $true
-$initial = $env:MOZARIE_MODEL_INITIAL_DIRECTORY
-if ($initial -and [System.IO.Directory]::Exists($initial)) {{ $dialog.InitialDirectory = $initial }}
-if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {{ exit 0 }}
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.FileName)
-[Console]::Out.Write([Convert]::ToBase64String($bytes))
+try {{
+  $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Show(); $owner.Activate(); $owner.BringToFront()
+  $dialog.Filter = 'Model files ({pattern})|{pattern}'
+  $dialog.CheckFileExists = $true; $dialog.Multiselect = $false; $dialog.RestoreDirectory = $true
+  $initial = $env:MOZARIE_MODEL_INITIAL_DIRECTORY
+  if ($initial -and [System.IO.Directory]::Exists($initial)) {{ $dialog.InitialDirectory = $initial }}
+  if ($dialog.ShowDialog($owner) -ne [System.Windows.Forms.DialogResult]::OK) {{ exit 0 }}
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.FileName)
+  [Console]::Out.Write([Convert]::ToBase64String($bytes))
+}} finally {{ $dialog.Dispose(); $owner.Close(); $owner.Dispose() }}
 """
-        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        picker_environment = os.environ.copy()
-        candidate = Path(current_path).expanduser() if isinstance(current_path, str) and current_path else None
-        if candidate is not None and candidate.is_absolute() and candidate.parent.is_dir():
-            picker_environment["MOZARIE_MODEL_INITIAL_DIRECTORY"] = str(candidate.parent)
-        try:
-            completed = subprocess.run(
-                [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
-                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False,
-                env=picker_environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ClientError("モデルファイルの選択を開けませんでした。", "model_picker_failed") from exc
-        if completed.returncode:
-            raise ClientError("モデルファイルの選択を開けませんでした。", "model_picker_failed")
-        encoded = completed.stdout.strip()
-        if not encoded:
-            return None
-        try:
-            selected = base64.b64decode(encoded, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ClientError("モデルファイルの選択結果が正しくありません。", "model_picker_invalid") from exc
-        path = Path(selected)
-        if not path.is_absolute() or not path.is_file() or path.suffix.lower() not in suffixes:
-            raise ClientError("選択したモデルファイルが正しくありません。", "model_picker_invalid")
-        return str(path.resolve())
-    finally:
-        state.native_picker_lock.release()
+    picker_environment = os.environ.copy()
+    candidate = Path(current_path).expanduser() if isinstance(current_path, str) and current_path else None
+    if candidate is not None and candidate.is_absolute() and candidate.parent.is_dir():
+        picker_environment["MOZARIE_MODEL_INITIAL_DIRECTORY"] = str(candidate.parent)
+    selected = _run_native_picker(script, picker_environment, failed_message="モデルファイルの選択を開けませんでした。", busy_message="ファイルの選択を開いています。", state=state)
+    if selected is None:
+        return None
+    path = Path(selected)
+    if not path.is_absolute() or not path.is_file() or path.suffix.lower() not in suffixes:
+        raise ClientError("選択したモデルファイルが正しくありません。", "model_picker_invalid")
+    return str(path.resolve())
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
@@ -184,6 +182,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     payload["status"] = STATE.settings_status()
                 self._json(payload)
+            elif path == "/api/model-download":
+                self._json(STATE.model_downloads.snapshot())
             elif path == "/api/update/status":
                 self._json(_update_status())
             elif path == "/api/images":
@@ -292,6 +292,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/model-file/pick":
                 selected = _pick_model_file(str(payload.get("modelKey", "")), current_path=str(payload.get("currentPath", "")))
                 self._json({"path": selected} if selected else {"cancelled": True})
+            elif path == "/api/model-download/start":
+                try:
+                    self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
+                except ModelDownloadError as exc:
+                    raise ClientError(str(exc), "model_download_invalid") from exc
+            elif path == "/api/model-download/cancel":
+                self._json(STATE.model_downloads.cancel())
             elif path == "/api/update/start":
                 self._json({"ok": True})
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()

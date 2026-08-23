@@ -1,9 +1,43 @@
+function modelHelpInfo(key) {
+  const samType = $("#settingsSamType")?.value || "vit_b";
+  const samFiles = { vit_b: "sam_vit_b_01ec64.pth", vit_l: "sam_vit_l_0b3195.pth", vit_h: "sam_vit_h_4b8939.pth" };
+  const source = (label, url) => ({ source: label, url });
+  const models = {
+    target: { model: t("settings.targetModel"), file: ".onnx", source: "", url: "" },
+    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", file: "ntd11_anime_nsfw_segm_v5-variant1.onnx", ...source("CivitAI", "https://civitai.com/models/1313556?modelVersionId=2350456") },
+    sensitive: { model: "sugarknight/sensitive-detect / sensitive_detect_v07", file: "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"), command: `python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu` },
+    precision: { model: "Meta Segment Anything (SAM)", file: "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
+    samType: { model: `Meta Segment Anything (SAM) ${samType}`, file: samFiles[samType], ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
+    hand: { model: "deepghs/anime_hand_detection / hand_detect_v1.0_s", file: "hand_detect_v1.0_s/model.onnx（保存名 anime-hand-v1.0-s.onnx）", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s") },
+    handSegmentation: { model: "HandSegNet anime SDXL", file: "handsegnet_vit_b_best.safetensors", ...source("Hugging Face", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a") },
+    fluid: { model: t("modelHelp.noAdditionalModel"), file: t("modelHelp.notRequired"), source: "", url: "" },
+  };
+  return models[key];
+}
+
 function openModelHelp(key) {
+  const info = modelHelpInfo(key);
   $("#modelHelpTitle").textContent = t(`modelHelp.${key}.title`);
   $("#modelHelpText").hidden = false;
   $("#modelHelpText").textContent = t(`modelHelp.${key}.text`);
+  $("#modelHelpModel").textContent = info.model;
+  $("#modelHelpFile").textContent = info.file;
+  const source = $("#modelHelpSource"); source.textContent = info.source; source.href = info.url || "#";
+  $("#modelHelpDetails").hidden = !info;
+  source.closest("dd").hidden = !info.url; $("#modelHelpSourceLabel").hidden = !info.url;
+  $("#modelHelpCommandWrap").hidden = !info.command;
+  $("#modelHelpCommand").textContent = info.command || "";
+  $("#modelHelpCopyResult").textContent = "";
   $("#modelHelpSamTable").hidden = key !== "samType";
   $("#modelHelpDialog").showModal();
+}
+
+async function copyCommand(commandId, resultId) {
+  const result = $(resultId); result.textContent = "";
+  try {
+    await navigator.clipboard.writeText($(commandId).textContent);
+    result.textContent = t("command.copied");
+  } catch (error) { setStatus(error.message, "error"); }
 }
 
 function bindEvents() {
@@ -28,10 +62,19 @@ function bindEvents() {
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
   document.querySelectorAll("[data-model-picker]").forEach((button) => button.addEventListener("click", () => { void chooseSettingsModelFile(button); }));
-  $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
+  document.querySelectorAll("[data-model-download]").forEach((button) => button.addEventListener("click", () => { void startModelDownload(button.dataset.modelDownload); }));
+  $("#modelDownloadCancel").addEventListener("click", () => { void cancelModelDownload(); });
+  $("#modelDownloadStart").addEventListener("click", () => { void beginModelDownload(); });
+  $("#modelDownloadCopy").addEventListener("click", () => { void copyCommand("#modelDownloadCommand", "#modelDownloadCopyResult"); });
+  $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
+  $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
+  document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => radio.addEventListener("change", () => {
+    if (radio.checked) selectSamVariant(radio.value, true);
+  }));
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });
   document.querySelectorAll("[data-model-help]").forEach((button) => button.addEventListener("click", () => openModelHelp(button.dataset.modelHelp)));
+  $("#modelHelpCopy").addEventListener("click", () => { void copyCommand("#modelHelpCommand", "#modelHelpCopyResult"); });
   $("#modelHelpCloseButton").addEventListener("click", () => $("#modelHelpDialog").close());
   $("#modelHelpDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#modelHelpDialog").close(); });
   lightDismiss($("#modelHelpDialog"), () => $("#modelHelpDialog").close());
@@ -84,7 +127,6 @@ function bindEvents() {
   $("#closeOverviewButton").addEventListener("click", () => setViewMode("edit"));
   $("#previousImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(-1)));
   $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
-  $("#nextUnreviewedButton").addEventListener("click", () => runNavigationAction(moveToNextUnreviewed));
   $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });

@@ -16,7 +16,7 @@ function clearEditor() {
   addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = 1;
   $("#emptyState").hidden = false;
-  $("#imageInfo").textContent = t("editor.none");
+  $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
   renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render();
 }
@@ -66,7 +66,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
-    $("#imageInfo").textContent = `${record.relativePath} / ${record.width} x ${record.height}`;
+    $("#currentFileName").textContent = record.relativePath;
     updateCandidateStatus();
     renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
     state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
@@ -312,7 +312,8 @@ function saveDraft() {
   flushMaskComposition();
   const hasAdd = canvasHasPixels(addCtx, addCanvas);
   const hasExclusion = canvasHasPixels(exclusionCtx, exclusionCanvas);
-  if (!hasAdd && !hasExclusion) {
+  const defaultManualExclusionForced = state.settings?.detection?.exclude_forced_default !== false;
+  if (!hasAdd && !hasExclusion && state.manualExclusionForced === defaultManualExclusionForced) {
     state.drafts.delete(state.currentId);
     return;
   }
@@ -321,6 +322,7 @@ function saveDraft() {
     add: hasAdd ? addCanvas.toDataURL("image/png") : "",
     exclusion: hasExclusion ? exclusionCanvas.toDataURL("image/png") : "",
     manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualMaskPresent: state.manualMaskPresent,
+    manualExclusionForced: state.manualExclusionForced,
     visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
   });
 }
@@ -330,6 +332,7 @@ function restoreDraft(imageId, generation) {
   state.history = []; state.historyIndex = 0; state.activeStroke = null;
   state.manualEnabled = draft?.manualEnabled !== false;
   state.manualExclusionEnabled = draft?.manualExclusionEnabled !== false;
+  state.manualExclusionForced = draft?.manualExclusionForced ?? draft?.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false);
   state.manualMaskPresent = false;
   if (!draft) { resetHistoryToCurrentManualMask(); updateCandidateStatus(); renderCandidates(); return; }
   const addImagePromise = draft.add ? loadImage(draft.add) : Promise.resolve(null);
@@ -389,12 +392,14 @@ function composeCurrentMask() {
   for (const candidate of state.candidates) {
     if (candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   }
+  combinedCtx.globalCompositeOperation = "destination-out";
+  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
   if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) {
-    if (candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  }
-  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
   state.maskDirty = false;
 }
@@ -406,7 +411,19 @@ function sourceVisibleAfterExclusion(source) {
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   combinedCtx.drawImage(source, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
+  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
+  return canvasHasPixels(combinedCtx, combinedCanvas);
+}
+
+function manualSourceVisibleAfterExclusion(source) {
+  combinedCtx.globalCompositeOperation = "source-over";
+  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+  combinedCtx.drawImage(source, 0, 0);
+  combinedCtx.globalCompositeOperation = "destination-out";
+  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
   return canvasHasPixels(combinedCtx, combinedCanvas);
 }
@@ -419,7 +436,7 @@ function captureCurrentMaskVisibility() {
       return image && sourceVisibleAfterExclusion(image);
     })
     .map((candidate) => candidate.id);
-  const manual = state.manualMaskPresent && sourceVisibleAfterExclusion(addCanvas);
+  const manual = state.manualMaskPresent && manualSourceVisibleAfterExclusion(addCanvas);
   markMaskDirty(); flushMaskComposition();
   return { candidateIds, manual };
 }
@@ -429,12 +446,14 @@ function maskStatusWithoutCandidate(candidateId) {
   for (const candidate of state.candidates) {
     if (candidate.id !== candidateId && candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   }
+  combinedCtx.globalCompositeOperation = "destination-out";
+  for (const candidate of state.candidates) if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  combinedCtx.globalCompositeOperation = "source-over";
   if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) {
-    if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  }
-  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  for (const candidate of state.candidates) if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "source-over";
   const hasMask = canvasHasPixels(combinedCtx, combinedCanvas);
   markMaskDirty(); flushMaskComposition();

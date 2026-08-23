@@ -323,12 +323,19 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
         return None, None
     if not isinstance(raw_draft, dict):
         raise ClientError("手描きマスクの形式が正しくありません。")
-    add = raw_draft.get("add")
-    exclusion = raw_draft.get("exclusion")
+    add = raw_draft.get("add") if raw_draft.get("manualEnabled", True) is not False else None
+    exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
     return (
         _decode_mask(str(add), width, height) if add else None,
         _decode_mask(str(exclusion), width, height) if exclusion else None,
     )
+
+
+def draft_manual_exclusion_forced(raw_draft: Any, default: bool = True) -> bool:
+    """Use the configured default for drafts created before per-exclusion state existed."""
+    if not isinstance(raw_draft, dict):
+        return default
+    return raw_draft.get("manualExclusionForced", raw_draft.get("forceExclusion", default)) is not False
 
 
 def unique_session_import_destination(path: Path, reserved: set[Path] | None = None) -> Path:

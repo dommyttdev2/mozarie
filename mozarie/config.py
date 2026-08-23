@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ class SettingsStore:
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
         settings = defaults if not self.local_path.is_file() else _merge(defaults, json.loads(self.local_path.read_text(encoding="utf-8")))
+        settings = self._normalise_sam_checkpoints(settings)
         return self._normalise_hand_segmentation(self._set_builtin_output_directory(settings))
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
@@ -42,7 +44,7 @@ class SettingsStore:
 
     def default_settings(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        return validate_settings(self._set_builtin_output_directory(defaults))
+        return validate_settings(self._set_builtin_output_directory(self._normalise_sam_checkpoints(defaults)))
 
     def _set_builtin_output_directory(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Fill a missing built-in output setting and ensure that folder exists."""
@@ -67,13 +69,38 @@ class SettingsStore:
             models["hand_segmentation_enabled"] = False
         return settings
 
+    @staticmethod
+    def _normalise_sam_checkpoints(settings: dict[str, Any]) -> dict[str, Any]:
+        """Migrate the former single SAM path into the selected variant slot."""
+        models = settings.get("models")
+        if not isinstance(models, dict):
+            return settings
+        selected = models.get("sam_model_type") if models.get("sam_model_type") in {"vit_b", "vit_l", "vit_h"} else "vit_b"
+        raw = models.get("sam_checkpoints")
+        checkpoints = {
+            key: str(raw.get(key, "")).strip() if isinstance(raw, dict) else ""
+            for key in ("vit_b", "vit_l", "vit_h")
+        }
+        legacy = str(models.get("sam_checkpoint", "")).strip()
+        if legacy and not any(checkpoints.values()):
+            match = re.search(r"(?:^|[_-])vit[_-]?([blh])(?:[_.-]|$)", Path(legacy).name, re.IGNORECASE)
+            if match:
+                selected = f"vit_{match.group(1).lower()}"
+                models["sam_model_type"] = selected
+            checkpoints[selected] = legacy
+        models["sam_checkpoints"] = checkpoints
+        models["sam_checkpoint"] = checkpoints[selected]
+        return settings
+
     def save_validated(self, settings: dict[str, Any]) -> dict[str, Any]:
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.local_path.parent, prefix=f".{self.local_path.name}.", suffix=".tmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
-                handle.write(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+                persisted = copy.deepcopy(settings)
+                persisted.get("models", {}).pop("sam_checkpoint", None)
+                handle.write(json.dumps(persisted, ensure_ascii=False, indent=2) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary_path, self.local_path)
@@ -144,15 +171,28 @@ def validate_settings(value: Any) -> dict[str, Any]:
     fluid_exclusion_enabled = _expect_bool(
         detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
     )
+    exclude_forced_default = _expect_bool(
+        detection.get("exclude_forced_default", detection.get("force_exclusion_default", True)), "detection.exclude_forced_default"
+    )
     tool_position = display.get("tool_position")
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
     paths = {}
-    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation", "sam_checkpoint"):
+    for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation"):
         path = models.get(key, "") if key == "hand_segmentation" else models.get(key)
         if not isinstance(path, str):
             raise SettingsError(f"models.{key} must be a string")
         paths[key] = path.strip()
+    raw_sam_checkpoints = _expect_dict(models.get("sam_checkpoints", {}), "models.sam_checkpoints")
+    sam_checkpoints = {}
+    for key in ("vit_b", "vit_l", "vit_h"):
+        path = raw_sam_checkpoints.get(key, "")
+        if not isinstance(path, str):
+            raise SettingsError(f"models.sam_checkpoints.{key} must be a string")
+        sam_checkpoints[key] = path.strip()
+    legacy_sam = models.get("sam_checkpoint")
+    if isinstance(legacy_sam, str) and legacy_sam.strip() and not any(sam_checkpoints.values()):
+        sam_checkpoints[sam_model_type] = legacy_sam.strip()
     enabled = {
         key: _expect_bool(models.get(key, False) if key == "hand_segmentation_enabled" else models.get(key), f"models.{key}")
         for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled", "hand_segmentation_enabled")
@@ -169,6 +209,8 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "models": {
             **paths,
             **enabled,
+            "sam_checkpoints": sam_checkpoints,
+            "sam_checkpoint": sam_checkpoints[sam_model_type],
             "sam_model_type": sam_model_type,
             "provider": provider,
             "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, 64)),
@@ -186,6 +228,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
+            "exclude_forced_default": exclude_forced_default,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
@@ -237,7 +280,7 @@ def _validate_targets(value: Any) -> list[str]:
     return list(dict.fromkeys(value))
 
 
-_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "previousVisible": "ArrowUp", "nextVisible": "ArrowDown", "first": "Home", "last": "End", "nextUnreviewed": "Shift+ArrowRight", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
+_DEFAULT_SHORTCUTS = {"previous": "ArrowLeft", "next": "ArrowRight", "previousVisible": "ArrowUp", "nextVisible": "ArrowDown", "first": "Home", "last": "End", "reviewAndNext": "Enter", "toggleOverview": "G", "undo": "Ctrl+Z", "redo": "Ctrl+Shift+Z"}
 _SHORTCUT_ACTIONS = set(_DEFAULT_SHORTCUTS)
 
 

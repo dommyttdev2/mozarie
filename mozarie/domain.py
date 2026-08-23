@@ -28,6 +28,7 @@ class Candidate:
     origin: str = "auto"
     refinement: str | None = None
     role: CandidateRole = CandidateRole.APPLY
+    forced: bool = True
 
     def as_api_dict(self, source_label: str, refinement_label: str = "") -> dict[str, object]:
         return {
@@ -42,4 +43,5 @@ class Candidate:
             "refinement": self.refinement,
             "refinementLabel": refinement_label,
             "role": self.role.value,
+            "forced": self.forced if self.role == CandidateRole.EXCLUDE else False,
         }

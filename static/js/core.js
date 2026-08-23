@@ -18,7 +18,7 @@ const state = {
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
-  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true,
+  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
@@ -151,8 +151,26 @@ function formatDuration(seconds) {
 function progressText(job) {
   const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
   if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
-  const remaining = (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed));
-  return `${count} · ${t("status.eta", { duration: formatDuration(remaining) })}`;
+  const key = `${job.kind}:${job.startedAt || ""}`;
+  const eta = state.detectionEta;
+  if (!eta || eta.key !== key || Number(job.completed) > eta.completed) {
+    state.detectionEta = {
+      key,
+      completed: Number(job.completed),
+      remaining: (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed)),
+    };
+  }
+  return `${count} · ${t("status.eta", { duration: formatDuration(state.detectionEta.remaining) })}`;
+}
+
+function processingCurrentPath(job) {
+  if (job?.kind !== "detect") return job?.current || "";
+  const imageIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
+  const completedIds = new Set(Array.isArray(job.completedImageIds) ? job.completedImageIds : []);
+  const targetIds = new Set(imageIds);
+  if (![...targetIds].some((imageId) => !completedIds.has(imageId))) return "";
+  const nextImage = state.images.find((image) => targetIds.has(image.id) && !completedIds.has(image.id));
+  return nextImage ? (nextImage.relativePath || "") : (job.current || "");
 }
 
 function showProcessing(processing) {
@@ -160,7 +178,7 @@ function showProcessing(processing) {
   const current = state.processing;
   const modal = $("#processingDialog");
   $("#processingTitle").textContent = processingTitle(current.kind);
-  $("#processingCurrent").textContent = current.current || "";
+  $("#processingCurrent").textContent = processingCurrentPath(current);
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
   $("#processingProgressText").textContent = progressText(current);
@@ -173,6 +191,7 @@ function showProcessing(processing) {
 
 function closeProcessing() {
   state.processing = null;
+  state.detectionEta = null;
   for (const id of ["#processingPauseButton", "#processingCancelButton"]) {
     const control = $(id); control.disabled = false; delete control.dataset.disabledByLock;
   }
@@ -185,6 +204,16 @@ function renderStatus() {
   const status = state.status;
   const element = $("#status");
   const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
+  const connectionStatus = $("#connectionStatus");
+  const headerError = Boolean(message) && status?.kind === "error";
+  connectionStatus.textContent = headerError ? message : "";
+  connectionStatus.hidden = !headerError;
+  if (headerError) {
+    element.textContent = "";
+    element.className = "status";
+    $("#statusLine").hidden = true;
+    return;
+  }
   element.textContent = message;
   element.className = `status ${status?.kind || ""}`;
   $("#statusLine").hidden = !message;
@@ -192,8 +221,8 @@ function renderStatus() {
 
 function renderLocalizedDynamicState() {
   const record = currentRecord();
-  $("#imageInfo").textContent = record && state.currentImage
-    ? `${record.relativePath} / ${record.width} x ${record.height}`
+  $("#currentFileName").textContent = record && state.currentImage
+    ? record.relativePath
     : t("editor.none");
   updateNavigationControls();
   updateCandidateStatus();
@@ -429,7 +458,6 @@ function updateActionButtons() {
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || switchingImages || imageIndex() <= 0;
   $("#nextImageButton").disabled = running || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
-  $("#nextUnreviewedButton").disabled = running || switchingImages || !nextUnreviewedImage();
   $("#reviewAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#removeAndNextButton").disabled = running || switchingImages || !hasImage;
   $("#hideAndNextButton").disabled = running || switchingImages || !hasImage;

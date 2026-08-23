@@ -39,7 +39,18 @@ function renderCandidates() {
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
     remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", isApply ? deleteManualMask : deleteManualExclusion);
-    row.append(enabled, blink, label, remove); list.append(row);
+    if (!isApply) {
+      const forced = document.createElement("input"); forced.type = "checkbox"; forced.checked = state.manualExclusionForced;
+      forced.setAttribute("aria-label", t("candidates.forced"));
+      forced.addEventListener("change", () => {
+        if (isBusy() || state.importing) { forced.checked = state.manualExclusionForced; return; }
+        state.manualExclusionForced = forced.checked; markMaskDirty(); saveDraft();
+        setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
+      });
+      const forcedLabel = document.createElement("label"); forcedLabel.className = "candidate-forced"; forcedLabel.append(forced, document.createTextNode(t("candidates.forced")));
+      row.append(enabled, blink, label, forcedLabel, remove);
+    } else row.append(enabled, blink, label, remove);
+    list.append(row);
   };
   appendManual(applyList, "apply");
   appendManual(excludeList, "exclude");
@@ -76,7 +87,22 @@ function renderCandidates() {
     const deleteLabel = t("candidates.delete", { label: candidate.className });
     remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
     remove.addEventListener("click", () => deleteCandidate(candidate));
-    row.append(enabled, blink, label, remove); (role === "apply" ? applyList : excludeList).append(row);
+    if (role === "exclude") {
+      const forced = document.createElement("input"); forced.type = "checkbox"; forced.checked = candidate.forced !== false;
+      forced.disabled = deleting || state.candidateBatchPending.has(state.currentId);
+      forced.setAttribute("aria-label", t("candidates.forced"));
+      forced.addEventListener("change", async () => {
+        if (isBusy() || state.importing) { forced.checked = candidate.forced !== false; return; }
+        const previousForced = candidate.forced !== false;
+        const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
+        candidate.forced = forced.checked; setReviewed(currentRecord(), false);
+        syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render();
+        await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
+      });
+      const forcedLabel = document.createElement("label"); forcedLabel.className = "candidate-forced"; forcedLabel.append(forced, document.createTextNode(t("candidates.forced")));
+      row.append(enabled, blink, label, forcedLabel, remove);
+    } else row.append(enabled, blink, label, remove);
+    (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
   updateCandidateBatchButtons(undefined, undefined, hasManualExclude);
@@ -112,22 +138,23 @@ async function waitForCandidateMutations() {
   }
 }
 
-async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
+async function updateCandidate(candidate, previousEnabled, previousMaskStatus, previousForced = candidate.forced) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   const targetCandidates = [...state.candidates];
   const mutationKey = candidateMutationKey(imageId, candidate.id);
   const version = nextCandidateMutationVersion(mutationKey);
   const desired = candidate.enabled;
+  const desiredForced = candidate.forced;
   const send = async () => {
     try {
       const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
-        method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color }),
+        method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color, ...(candidate.role === "exclude" ? { forced: desiredForced } : {}) }),
       });
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
-        if (currentCandidate) currentCandidate.enabled = desired;
+        if (currentCandidate) { currentCandidate.enabled = desired; currentCandidate.forced = desiredForced; }
         retainCurrentCandidateBundle(imageId, result.candidateRevision);
         syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
       } else {
@@ -144,13 +171,13 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus) {
           }
         } catch {
           if (state.currentId === imageId && isCurrentGeneration(generation)) {
-            candidate.enabled = previousEnabled; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
+            candidate.enabled = previousEnabled; candidate.forced = previousForced; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
             setStatus(error.message, "error");
             return;
           }
         }
       }
-      candidate.enabled = previousEnabled;
+      candidate.enabled = previousEnabled; candidate.forced = previousForced;
       syncCandidateRecord(imageId, targetCandidates);
       if (previousMaskStatus !== undefined) state.maskStatus.set(imageId, previousMaskStatus);
       try {
@@ -378,7 +405,7 @@ function resetHistoryToCurrentManualMask() {
 
 function paintStrokeOnContexts(addContext, exclusionContext, from, to, erase, size) {
   const target = erase ? exclusionContext : addContext; const opposite = erase ? addContext : exclusionContext;
-  opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore();
+  if (erase || !state.manualExclusionForced) { opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore(); }
   target.save(); target.globalCompositeOperation = "source-over"; target.strokeStyle = "#ffffff"; target.lineWidth = size; target.lineCap = "round"; target.beginPath(); target.moveTo(from.x, from.y); target.lineTo(to.x, to.y); target.stroke(); target.restore();
 }
 
@@ -411,10 +438,12 @@ function fillAt(point) {
 
 function paintFillSpans(addContext, exclusionContext, spans) {
   addContext.save(); addContext.fillStyle = "#ffffff";
-  exclusionContext.save(); exclusionContext.globalCompositeOperation = "destination-out";
-  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); exclusionContext.fillRect(start, row, end - start, 1); }
-  addContext.restore(); exclusionContext.restore();
+  if (!state.manualExclusionForced) exclusionContext.save();
+  if (!state.manualExclusionForced) exclusionContext.globalCompositeOperation = "destination-out";
+  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); if (!state.manualExclusionForced) exclusionContext.fillRect(start, row, end - start, 1); }
+  addContext.restore(); if (!state.manualExclusionForced) exclusionContext.restore();
 }
+
 function applyFillSpans(spans) {
   paintFillSpans(addCtx, exclusionCtx, spans); markMaskDirty(); flushMaskComposition();
 }

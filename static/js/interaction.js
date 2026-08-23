@@ -470,7 +470,7 @@ function handleEditorKeydown(event) {
 function navigationShortcutAction(event) {
   if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || isEditableTarget(document.activeElement) || hasOpenDialog()) return null;
   const binding = shortcutFromEvent(event);
-  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
+  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
   const actionForBinding = Object.entries(bindings).find(([, value]) => value === binding)?.[0];
   if (!actionForBinding || state.settings?.shortcuts?.actions?.[actionForBinding] === false) return null;
   if (actionForBinding === "toggleOverview") return "toggleOverview";
@@ -487,7 +487,6 @@ function handleNavigationKeydown(event) {
   else if (action === "next") moveCurrentBy(1);
   else if (action === "previousVisible") moveCurrentBy(-1);
   else if (action === "nextVisible") moveCurrentBy(1);
-  else if (action === "nextUnreviewed") moveToNextUnreviewed();
   else if (action === "first" && state.images[0]) void selectImage(state.images[0].id);
   else if (action === "last" && state.images.at(-1)) void selectImage(state.images.at(-1).id);
   else if (action === "reviewAndNext") reviewAndMoveNext();
