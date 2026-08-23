@@ -110,7 +110,7 @@ class ModelDownloadManager:
         else:
             raise ModelDownloadError("ダウンロードするモデルの種類が正しくありません。")
         with self._lock:
-            if self._job.get("state") == "running":
+            if self._job.get("state") in {"running", "cancelling"}:
                 return self.snapshot()
             self._cancel = threading.Event()
             self._job = {

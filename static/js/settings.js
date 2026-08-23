@@ -364,7 +364,11 @@ function renderModelDownload(job) {
 }
 
 async function refreshModelDownload() {
-  try { renderModelDownload(await api("/api/model-download")); } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+  try { renderModelDownload(await api("/api/model-download")); } catch (error) {
+    if (modelDownloadPoll) { clearInterval(modelDownloadPoll); modelDownloadPoll = null; }
+    $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error");
+    $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
+  }
 }
 
 function showUnsupportedModelDownload(key) {
@@ -373,14 +377,14 @@ function showUnsupportedModelDownload(key) {
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
   $("#modelDownloadStatus").textContent = t("modelDownload.unsupportedSource", { source: "GitHub / Hugging Face" });
   $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
-  $("#modelDownloadDialog").showModal();
+  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
 }
 
 async function startModelDownload(key) {
   if (key === "ntd11" || key === "sensitive") return showUnsupportedModelDownload(key);
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadDialog").showModal();
+  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
   try {
     const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
     const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) });

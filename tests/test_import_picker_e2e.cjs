@@ -26,6 +26,7 @@ function startFixtureServer() {
   let modelDownloadJobs = 0;
   let modelDownloadPolls = 0;
   let modelDownloadJob = { state: "idle", paths: {} };
+  let failModelDownloadStatus = false;
   let cancelRequests = 0;
   let holdDetection = false;
   let cancelShouldFail = false;
@@ -106,6 +107,10 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/model-download" && request.method === "GET") {
       modelDownloadPolls += 1;
+      if (failModelDownloadStatus) {
+        response.writeHead(503, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "fixture status unavailable" }));
+        return;
+      }
       if (modelDownloadJob.state === "running") {
         const paths = modelDownloadJob.key === "all"
           ? { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx", sam_checkpoint: `C:\\Mozarie\\models\\sam_vit_${modelDownloadJob.samType}_checkpoint.pth`, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
@@ -199,7 +204,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
     });
   });
 }
@@ -464,11 +469,11 @@ async function main() {
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
-  let cancelRequests, holdDetection, failCancel;
+  let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -604,13 +609,25 @@ async function main() {
     assert.equal(await page.locator("#settingsHandModel").inputValue(), "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", "Download all reflects each completed model path immediately");
     await page.locator("#modelDownloadClose").click();
     const jobsBeforeDoubleClick = modelDownloadJobs();
-    await page.locator('[data-model-download="sam"]').dblclick();
+    const errorsBeforeDoubleStart = pageErrors.length;
+    await page.evaluate(() => Promise.all([startModelDownload("sam"), startModelDownload("sam")]));
     await page.waitForFunction(() => document.querySelector("#modelDownloadDialog").open);
-    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick + 1, "a double click does not create a second download job");
+    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick + 1, "two direct starts do not create a second download job");
+    assert.deepEqual(pageErrors.slice(errorsBeforeDoubleStart), [], "two direct starts do not reopen an already-open download dialog");
     await page.locator("#modelDownloadCancel").click();
     await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("キャンセル"));
     assert.ok(modelDownloadPolls() >= 2, "download progress is polled while a job is active");
     await page.locator("#modelDownloadClose").click();
+    failModelDownloadStatus(true);
+    await page.locator('[data-model-download="target"]').click();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture status unavailable"));
+    assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");
+    assert.equal(await page.locator("#modelDownloadClose").isDisabled(), false, "a download status error lets the user close the modal");
+    const pollsAfterFailure = modelDownloadPolls();
+    await page.waitForTimeout(500);
+    assert.equal(modelDownloadPolls(), pollsAfterFailure, "a download status error stops further polling");
+    await page.locator("#modelDownloadClose").click();
+    failModelDownloadStatus(false); resetModelDownload();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
     await page.locator("#settingsStatusButton").click();
@@ -963,7 +980,7 @@ async function main() {
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
-    assert.deepEqual(consoleErrors, ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)"], `unexpected console errors: ${consoleErrors.join("; ")}`);
+    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
     await browser?.close();
     if (server) await closeServer(server);

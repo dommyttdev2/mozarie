@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -96,6 +97,27 @@ class ModelDownloadTests(unittest.TestCase):
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
         with self.assertRaises(ModelDownloadError): manager.start("https://example.invalid/model", "vit_b")
         with self.assertRaises(ModelDownloadError): manager.start("all", "vit_unknown")
+
+    def test_cancel_then_immediate_start_keeps_the_original_worker_cancelled(self) -> None:
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        entered = threading.Event(); release = threading.Event()
+        def blocked_download(entry: ModelDownload) -> Path:
+            entered.set(); self.assertTrue(release.wait(1))
+            if manager._cancel.is_set(): raise ModelDownloadCancelled()
+            return entry.destination(root)
+        with patch.object(manager, "_download", side_effect=blocked_download) as download:
+            manager.start("target", "vit_b")
+            self.assertTrue(entered.wait(1))
+            original_cancel = manager._cancel
+            manager.cancel()
+            immediate = manager.start("hand_detection", "vit_b")
+            self.assertEqual(immediate["state"], "cancelling")
+            self.assertIs(manager._cancel, original_cancel)
+            self.assertTrue(original_cancel.is_set())
+            self.assertEqual(download.call_count, 1)
+            release.set()
+            while manager.snapshot()["state"] in {"running", "cancelling"}: time.sleep(0.002)
+        self.assertEqual(manager.snapshot()["state"], "cancelled")
 
 
 if __name__ == "__main__":
