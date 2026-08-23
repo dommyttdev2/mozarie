@@ -256,6 +256,48 @@ async function assertDesktopLayout(page, width, height) {
   await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
 }
 
+async function assertConnectionStatusLayout(page, width, height, language) {
+  await page.setViewportSize({ width, height });
+  await page.evaluate(async (selected) => {
+    await loadTranslations(selected);
+    setStatusKey("error.connectionLost", {}, "error");
+  }, language);
+  const layout = await page.evaluate(() => {
+    const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+    const appbar = box(".appbar");
+    const connection = box("#connectionStatus");
+    const settings = box("#settingsButton");
+    const dimensions = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
+    return {
+      inAppbar: connection.top >= appbar.top && connection.bottom <= appbar.bottom,
+      gap: settings.left - connection.right,
+      settingsHit: document.elementFromPoint(settings.x + settings.width / 2, settings.y + settings.height / 2) === document.querySelector("#settingsButton"),
+      statusLineHidden: document.querySelector("#statusLine").hidden,
+      connectionHidden: document.querySelector("#connectionStatus").hidden,
+      parentIsAppbar: document.querySelector("#connectionStatus").parentElement === document.querySelector(".appbar"),
+      ...dimensions,
+    };
+  });
+  assert.equal(layout.connectionHidden, false, `connection status is visible at ${width}x${height} (${language})`);
+  assert.equal(layout.statusLineHidden, true, `connection status does not use the line below the header at ${width}x${height} (${language})`);
+  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit, true, `connection status stays in the header and settings stays clickable at ${width}x${height} (${language})`);
+  assert.ok(layout.gap >= 0 && layout.gap <= 10, `connection status sits immediately left of settings at ${width}x${height} (${language})`);
+  assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
+
+  await page.evaluate(() => setStatus("Test notification"));
+  const general = await page.evaluate(() => {
+    const appbar = document.querySelector(".appbar").getBoundingClientRect();
+    const status = document.querySelector("#status").getBoundingClientRect();
+    return { connectionHidden: document.querySelector("#connectionStatus").hidden, statusLineHidden: document.querySelector("#statusLine").hidden, belowAppbar: status.top >= appbar.bottom };
+  });
+  assert.equal(general.connectionHidden, true, `ordinary status hides the appbar connection message at ${width}x${height} (${language})`);
+  assert.equal(general.statusLineHidden, false, `ordinary status remains below the header at ${width}x${height} (${language})`);
+  assert.equal(general.belowAppbar, true, `ordinary status remains outside the header at ${width}x${height} (${language})`);
+
+  await page.evaluate(() => clearStatus());
+  assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `clearing status hides both status areas at ${width}x${height} (${language})`);
+}
+
 async function assertSettingsDialogLayout(page, width, height, language) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
@@ -429,6 +471,11 @@ async function main() {
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
     assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
+    for (const [width, height] of [[1024, 768], [1920, 1080]]) {
+      await assertConnectionStatusLayout(page, width, height, "ja");
+      await assertConnectionStatusLayout(page, width, height, "en");
+    }
+    await page.evaluate(() => loadTranslations("ja"));
     await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, activeElapsed: 10 }));
     assert.match(await page.locator("#processingProgressText").textContent(), /残り約 20秒/, "detection ETA uses active elapsed time after the first completion");
     await page.evaluate(() => showProcessing({ kind: "detect", state: "paused", total: 3, completed: 1, activeElapsed: 10 }));

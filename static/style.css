@@ -171,6 +171,8 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .appbar-commands { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .appbar-commands button, .appbar > #settingsButton { min-height: 30px; }
 .appbar-spacer { flex: 1 1 auto; min-width: 0; }
+.appbar-status { flex: 0 1 420px; max-width: 32vw; min-width: 0; overflow: hidden; color: #ff9d92; text-overflow: ellipsis; white-space: nowrap; }
+.appbar-status[hidden] { display: none; }
 #pickFolder { anchor-name: --source-picker; }
 .picker-menu { width: 360px; padding: 10px; gap: 8px; }
 .picker-menu label { color: #c0c8d0; }

@@ -185,6 +185,16 @@ function renderStatus() {
   const status = state.status;
   const element = $("#status");
   const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
+  const connectionStatus = $("#connectionStatus");
+  const connectionLost = Boolean(message) && status?.key === "error.connectionLost";
+  connectionStatus.textContent = connectionLost ? message : "";
+  connectionStatus.hidden = !connectionLost;
+  if (connectionLost) {
+    element.textContent = "";
+    element.className = "status";
+    $("#statusLine").hidden = true;
+    return;
+  }
   element.textContent = message;
   element.className = `status ${status?.kind || ""}`;
   $("#statusLine").hidden = !message;
