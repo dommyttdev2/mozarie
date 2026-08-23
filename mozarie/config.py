@@ -144,6 +144,9 @@ def validate_settings(value: Any) -> dict[str, Any]:
     fluid_exclusion_enabled = _expect_bool(
         detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
     )
+    force_exclusion_default = _expect_bool(
+        detection.get("force_exclusion_default", True), "detection.force_exclusion_default"
+    )
     tool_position = display.get("tool_position")
     if tool_position not in {"left", "top", "right", "bottom"}:
         raise SettingsError("display.tool_position must be left, top, right, or bottom")
@@ -186,6 +189,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
+            "force_exclusion_default": force_exclusion_default,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
             "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),

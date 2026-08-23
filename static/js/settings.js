@@ -150,6 +150,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsSamModel").value = settings.models.sam_checkpoint;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
+  $("#settingsForceExclusionDefault").checked = settings.detection.force_exclusion_default !== false;
   $("#settingsSamType").value = settings.models.sam_model_type;
   $("#settingsProvider").value = settings.models.provider;
   syncProviderSelection();
@@ -214,7 +215,8 @@ function settingsPayload() {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
       parallelism: detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
-      fluid_exclusion_enabled: $("#settingsFluidToggle").checked, targets: detectionTargets(),
+      fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
+      force_exclusion_default: $("#settingsForceExclusionDefault").checked, targets: detectionTargets(),
     },
     saving: {
       parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),

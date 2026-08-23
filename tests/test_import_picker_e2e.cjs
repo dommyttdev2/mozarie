@@ -33,7 +33,7 @@ function startFixtureServer() {
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
-    detection: { mode: "standard", fluid_exclusion_enabled: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, force_exclusion_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
       bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", nextUnreviewed: "Shift+ArrowRight", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
@@ -293,6 +293,9 @@ async function assertConnectionStatusLayout(page, width, height, language) {
   assert.equal(general.connectionHidden, true, `ordinary status hides the appbar connection message at ${width}x${height} (${language})`);
   assert.equal(general.statusLineHidden, false, `ordinary status remains below the header at ${width}x${height} (${language})`);
   assert.equal(general.belowAppbar, true, `ordinary status remains outside the header at ${width}x${height} (${language})`);
+
+  await page.evaluate(() => setStatus("Test error", "error"));
+  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => clearStatus());
   assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `clearing status hides both status areas at ${width}x${height} (${language})`);
@@ -604,6 +607,15 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
+    const eta = await page.evaluate(() => {
+      state.detectionEta = null;
+      const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
+      const polled = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 40 });
+      const completed = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 2, total: 4, activeElapsed: 40 });
+      return { first, polled, completed };
+    });
+    assert.equal(eta.polled, eta.first, "ETA is retained between image completions");
+    assert.notEqual(eta.completed, eta.first, "ETA is recalculated after an image completes");
     await assertDesktopLayout(page, 1024, 768);
     await assertSettingsDialogLayout(page, 1024, 768, "ja");
     await page.evaluate(() => loadTranslations("en"));
@@ -744,7 +756,7 @@ async function main() {
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => !document.querySelector("#processingCancelButton").disabled);
     assert.equal(cancelRequests(), 1, "a failed processing cancel sends one request and re-enables the button");
-    assert.match(await page.locator("#status").textContent(), /cancel failed/, "a failed cancel is shown as an error without leaving the modal locked");
+    assert.match(await page.locator("#connectionStatus").textContent(), /cancel failed/, "a failed cancel is shown in the header without leaving the modal locked");
     failCancel(false);
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);

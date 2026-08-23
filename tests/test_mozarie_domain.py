@@ -21,6 +21,14 @@ class MozarieDomainTests(unittest.TestCase):
         self.assertEqual(int(result[1, 1]), 0)
         self.assertEqual(int(result[3, 3]), 255)
 
+    def test_manual_exclusion_remains_when_auto_exclusions_are_not_forced(self) -> None:
+        apply = np.full((3, 3), 255, dtype=np.uint8)
+        automatic = np.zeros((3, 3), dtype=np.uint8); automatic[0, 0] = 255
+        manual = np.zeros((3, 3), dtype=np.uint8); manual[1, 1] = 255
+        result = compose_masks((3, 3), [apply], [automatic], None, manual, force_exclusion=False)
+        self.assertEqual(int(result[0, 0]), 255)
+        self.assertEqual(int(result[1, 1]), 0)
+
     def test_candidate_role_has_stable_api_values(self) -> None:
         self.assertEqual(CandidateRole.APPLY.value, "apply")
         self.assertEqual(CandidateRole.EXCLUDE.value, "exclude")

@@ -11,8 +11,9 @@ def compose_masks(
     exclude_masks: list[np.ndarray],
     manual_add: np.ndarray | None = None,
     manual_exclude: np.ndarray | None = None,
+    force_exclusion: bool = True,
 ) -> np.ndarray:
-    """Return union(APPLY, manual add) minus union(EXCLUDE, manual erase)."""
+    """Return the enabled apply masks minus the requested exclusions."""
 
     result = np.zeros(shape, dtype=np.uint8)
     for mask in apply_masks:
@@ -25,10 +26,11 @@ def compose_masks(
         result = np.maximum(result, np.asarray(manual_add > 0, dtype=np.uint8) * 255)
 
     exclusions = np.zeros(shape, dtype=np.uint8)
-    for mask in exclude_masks:
-        if mask.shape != shape:
-            raise ValueError("exclude mask dimensions do not match the source image")
-        exclusions = np.maximum(exclusions, np.asarray(mask > 0, dtype=np.uint8) * 255)
+    if force_exclusion:
+        for mask in exclude_masks:
+            if mask.shape != shape:
+                raise ValueError("exclude mask dimensions do not match the source image")
+            exclusions = np.maximum(exclusions, np.asarray(mask > 0, dtype=np.uint8) * 255)
     if manual_exclude is not None:
         if manual_exclude.shape != shape:
             raise ValueError("manual exclude mask dimensions do not match the source image")

@@ -1678,6 +1678,24 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(combined[3, 3], 255)
             self.assertEqual(combined[4, 4], 0)
 
+    def test_combined_mask_can_leave_auto_exclusions_unforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            apply = self._mask(16, 16)
+            exclude = np.zeros((16, 16), dtype=np.uint8); exclude[4:6, 4:6] = 255
+            cache = state.cache_dir / image_id; cache.mkdir(parents=True)
+            apply_path, exclude_path = cache / "apply.png", cache / "exclude.png"
+            Image.fromarray(apply).save(apply_path); Image.fromarray(exclude).save(exclude_path)
+            state.candidates[image_id] = [
+                Candidate("apply", "penis", 0.9, apply_path),
+                Candidate("exclude", "手を除外", None, exclude_path, role=server_module.CandidateRole.EXCLUDE),
+            ]
+            combined = state.combined_candidate_mask(image_id, force_exclusion=False)
+            self.assertEqual(combined[4, 4], 255)
+
     def test_tile_layout_restores_masks_to_original_coordinates(self):
         specs = detection_tiles(100, 80)
         self.assertEqual(len(specs), 9)
@@ -2309,15 +2327,16 @@ class MozarieTests(unittest.TestCase):
             generic.predict.assert_called_once()
             self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
-    def test_final_exclusion_subtracts_hand_from_sam_expansion(self):
+    def test_full_hand_exclusion_is_kept_separate_from_the_apply_mask(self):
         state = self.new_state()
         final_mask = np.zeros((12, 12), dtype=np.uint8); final_mask[2:10, 2:10] = 255
         hand = np.zeros_like(final_mask); hand[8:10, 8:10] = 255
         segment = {"class_name": "penis", "mask": final_mask, "_confirmed_hand": hand}
+        segment["image_exclusions"] = {"hand": hand}
         finalized = state._finalize_exclusions(np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
-        self.assertTrue(np.array_equal(finalized["exclusions"]["hand"], hand))
+        self.assertTrue(np.array_equal(finalized["image_exclusions"]["hand"], hand))
 
-    def test_hand_sam_runs_once_per_intersecting_hand_and_is_reused_by_all_segments(self):
+    def test_hand_sam_runs_once_per_detected_hand_and_is_reused_by_all_segments(self):
         state = self.new_state()
         record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=16, height=16, mtime_ns=0)
         base_mask = np.zeros((16, 16), dtype=np.uint8)
@@ -2342,7 +2361,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
         hand_boxes.assert_called_once()
-        self.assertEqual(predictor.predict.call_count, 2)
+        self.assertEqual(predictor.predict.call_count, 3)
         self.assertTrue(all(np.count_nonzero(segment["_confirmed_hand"]) == 8 for segment in result))
         self.assertTrue(all(np.count_nonzero(segment["mask"]) == 64 for segment in result))
 
@@ -2379,8 +2398,20 @@ class MozarieTests(unittest.TestCase):
             )
         result = state._finalize_exclusions(rgb, result)
         self.assertEqual(np.count_nonzero(result[0]["mask"]), 400)
-        self.assertTrue(np.any(result[0]["exclusions"]["hand"]))
+        self.assertTrue(np.any(result[0]["image_exclusions"]["hand"]))
         self.assertTrue(np.any(result[0]["exclusions"]["fluid"]))
+
+    def test_hand_mask_creates_an_image_exclusion_without_target_segments(self):
+        state = self.new_state()
+        record = Mock(image_id="image")
+        hand = np.zeros((16, 16), dtype=bool); hand[4:8, 4:8] = True
+        predictor = Mock(); predictor.predict.return_value = np.asarray([hand]), np.asarray([0.95]), None
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
+            state, "_sam_predictor_for", return_value=predictor
+        ):
+            result = state._refine_detected_segments(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [])
+        self.assertEqual(result[0]["class_name"], "__hand_exclusion__")
+        self.assertTrue(np.any(result[0]["image_exclusions"]["hand"]))
 
     def test_fluid_exclusion_can_be_disabled_without_changing_hand_refinement(self):
         state = self.new_state()

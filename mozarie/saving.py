@@ -94,6 +94,7 @@ class SavingMixin:
     ) -> BrowserSaveRender:
         record = self.image_snapshot(image_id)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
+        force_exclusion = draft_force_exclusion(draft, self.settings["detection"].get("force_exclusion_default", True))
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
         output_path: Path | None = None
@@ -138,9 +139,11 @@ class SavingMixin:
                         raise ClientError("候補が変更されました。保存をやり直してください。") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                    if candidate.enabled:
+                    if candidate.enabled and (candidate.role == CandidateRole.APPLY or force_exclusion):
                         (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(candidate_mask)
-                mask = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+                mask = compose_masks(
+                    (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask, force_exclusion,
+                )
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
@@ -340,9 +343,17 @@ class SavingMixin:
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                     draft_or_mask = drafts_or_masks.get(record.image_id)
                     try:
-                        mask = (draft_or_mask if isinstance(draft_or_mask, np.ndarray) else self.combined_candidate_mask(
-                            record.image_id, decode_draft_masks(draft_or_mask, record.width, record.height)
-                        ))
+                        if isinstance(draft_or_mask, np.ndarray):
+                            mask = draft_or_mask
+                        else:
+                            draft_masks = decode_draft_masks(draft_or_mask, record.width, record.height)
+                            force_exclusion = draft_force_exclusion(
+                                draft_or_mask, self.settings["detection"].get("force_exclusion_default", True),
+                            )
+                            mask = self.combined_candidate_mask(
+                                record.image_id, draft_masks,
+                                **({"force_exclusion": False} if not force_exclusion else {}),
+                            )
                     except Exception:
                         raise
                     if mask is None or not np.any(mask):

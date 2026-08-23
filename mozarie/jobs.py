@@ -193,6 +193,7 @@ class JobsMixin:
         self,
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
+        force_exclusion: bool = True,
     ) -> np.ndarray | None:
         add_mask, exclusion_mask = draft or (None, None)
         with self.image_io_lock(image_id):
@@ -218,7 +219,9 @@ class JobsMixin:
                 if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                 (apply_masks if candidate.role == CandidateRole.APPLY else exclude_masks).append(mask)
-            result = compose_masks((record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask)
+            result = compose_masks(
+                (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask, force_exclusion,
+            )
             with self.lock:
                 current_record = self.images.get(image_id)
                 if (current_record is None or current_record.path != record.path

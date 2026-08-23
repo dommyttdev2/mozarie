@@ -126,6 +126,7 @@
       </section>
       <section class="candidate-section">
         <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:enable" type="button">ON</button><button data-candidate-batch="exclude:disable" type="button">OFF</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
+        <label class="force-exclusion-toggle"><input id="forceExclusionToggle" type="checkbox"><span data-i18n="candidates.forceExclusion">除外を強制</span></label>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -271,6 +272,7 @@
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
         <label class="choice-row"><input id="settingsMosaicPreview" type="checkbox"><span data-i18n="settings.mosaicPreview">モザイク表示</span></label>
         <p class="fixed-note" data-i18n="settings.mosaicPreviewHelp">編集画面にモザイクを表示します。保存内容には影響しません。</p>
+        <label class="choice-row"><input id="settingsForceExclusionDefault" type="checkbox"><span data-i18n="settings.forceExclusionDefault">除外を強制する</span></label>
       </section>
       <section id="settingsPanelShortcuts" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabShortcuts" data-settings-panel="shortcuts" hidden>
         <label class="choice-row"><input id="settingsShortcutsEnabled" type="checkbox"><span data-i18n="settings.shortcuts">キーボードショートカット</span></label>

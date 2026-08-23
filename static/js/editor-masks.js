@@ -2,6 +2,8 @@ function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
+  $("#forceExclusionToggle").checked = state.forceExclusion;
+  $("#forceExclusionToggle").disabled = !state.currentId || isBusy() || state.importing;
   if (!state.currentId) { updateCandidateBatchButtons(false); return; }
   const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
   if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude) {
@@ -378,7 +380,7 @@ function resetHistoryToCurrentManualMask() {
 
 function paintStrokeOnContexts(addContext, exclusionContext, from, to, erase, size) {
   const target = erase ? exclusionContext : addContext; const opposite = erase ? addContext : exclusionContext;
-  opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore();
+  if (erase || !state.forceExclusion) { opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore(); }
   target.save(); target.globalCompositeOperation = "source-over"; target.strokeStyle = "#ffffff"; target.lineWidth = size; target.lineCap = "round"; target.beginPath(); target.moveTo(from.x, from.y); target.lineTo(to.x, to.y); target.stroke(); target.restore();
 }
 
@@ -411,9 +413,17 @@ function fillAt(point) {
 
 function paintFillSpans(addContext, exclusionContext, spans) {
   addContext.save(); addContext.fillStyle = "#ffffff";
-  exclusionContext.save(); exclusionContext.globalCompositeOperation = "destination-out";
-  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); exclusionContext.fillRect(start, row, end - start, 1); }
-  addContext.restore(); exclusionContext.restore();
+  if (!state.forceExclusion) exclusionContext.save();
+  if (!state.forceExclusion) exclusionContext.globalCompositeOperation = "destination-out";
+  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); if (!state.forceExclusion) exclusionContext.fillRect(start, row, end - start, 1); }
+  addContext.restore(); if (!state.forceExclusion) exclusionContext.restore();
+}
+
+function setForceExclusion(enabled) {
+  if (!state.currentId || isBusy() || state.importing) return;
+  state.forceExclusion = Boolean(enabled);
+  saveDraft(); markMaskDirty(); flushMaskComposition();
+  setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 function applyFillSpans(spans) {
   paintFillSpans(addCtx, exclusionCtx, spans); markMaskDirty(); flushMaskComposition();

@@ -331,6 +331,11 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
     )
 
 
+def draft_force_exclusion(raw_draft: Any, default: bool = True) -> bool:
+    """Use the configured default for drafts created before this setting existed."""
+    return default if not isinstance(raw_draft, dict) else raw_draft.get("forceExclusion", default) is not False
+
+
 def unique_session_import_destination(path: Path, reserved: set[Path] | None = None) -> Path:
     reserved = reserved if reserved is not None else set()
     if not path.exists() and path not in reserved:

@@ -33,6 +33,7 @@
   "detection": {
     "mode": "standard",
     "fluid_exclusion_enabled": true,
+    "force_exclusion_default": true,
     "threshold": 0.5,
     "parallelism": 2,
     "targets": ["penis", "pussy"]

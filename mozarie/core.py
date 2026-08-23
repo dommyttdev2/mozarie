@@ -456,11 +456,13 @@ def accepted_hand_sam_mask(
     return None
 
 
-def accepted_specialist_hand_mask(masks: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int], genital_mask: np.ndarray) -> np.ndarray | None:
-    """Accept only a bounded HandSegNet result that actually intersects detected anatomy."""
+def accepted_specialist_hand_mask(
+    masks: np.ndarray, expected_shape: tuple[int, int], box: tuple[int, int, int, int], genital_mask: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Accept a bounded HandSegNet result, optionally requiring target overlap."""
     left, top, right, bottom = box
     box_area = max(1, (right - left) * (bottom - top))
-    genital = np.asarray(genital_mask > 0, dtype=bool)
+    genital = None if genital_mask is None else np.asarray(genital_mask > 0, dtype=bool)
     for raw_mask in masks:
         mask = np.asarray(raw_mask > 0, dtype=np.uint8)
         if mask.shape != expected_shape or not np.any(mask):
@@ -471,7 +473,7 @@ def accepted_specialist_hand_mask(masks: np.ndarray, expected_shape: tuple[int, 
             continue
         clipped = np.zeros_like(mask, dtype=np.uint8)
         clipped[top:bottom, left:right] = mask[top:bottom, left:right]
-        if np.any((clipped > 0) & genital):
+        if genital is None or np.any((clipped > 0) & genital):
             return clipped * 255
     return None
 

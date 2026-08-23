@@ -19,6 +19,7 @@ const state = {
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true,
+  forceExclusion: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
@@ -151,8 +152,16 @@ function formatDuration(seconds) {
 function progressText(job) {
   const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
   if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
-  const remaining = (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed));
-  return `${count} · ${t("status.eta", { duration: formatDuration(remaining) })}`;
+  const key = `${job.kind}:${job.startedAt || ""}`;
+  const eta = state.detectionEta;
+  if (!eta || eta.key !== key || Number(job.completed) > eta.completed) {
+    state.detectionEta = {
+      key,
+      completed: Number(job.completed),
+      remaining: (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed)),
+    };
+  }
+  return `${count} · ${t("status.eta", { duration: formatDuration(state.detectionEta.remaining) })}`;
 }
 
 function processingCurrentPath(job) {
@@ -183,6 +192,7 @@ function showProcessing(processing) {
 
 function closeProcessing() {
   state.processing = null;
+  state.detectionEta = null;
   for (const id of ["#processingPauseButton", "#processingCancelButton"]) {
     const control = $(id); control.disabled = false; delete control.dataset.disabledByLock;
   }
@@ -196,10 +206,10 @@ function renderStatus() {
   const element = $("#status");
   const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
   const connectionStatus = $("#connectionStatus");
-  const connectionLost = Boolean(message) && status?.key === "error.connectionLost";
-  connectionStatus.textContent = connectionLost ? message : "";
-  connectionStatus.hidden = !connectionLost;
-  if (connectionLost) {
+  const headerError = Boolean(message) && status?.kind === "error";
+  connectionStatus.textContent = headerError ? message : "";
+  connectionStatus.hidden = !headerError;
+  if (headerError) {
     element.textContent = "";
     element.className = "status";
     $("#statusLine").hidden = true;
