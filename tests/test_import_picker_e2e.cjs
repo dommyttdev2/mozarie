@@ -67,14 +67,19 @@ function startFixtureServer() {
       const submittedSettings = JSON.parse(body);
       settingsStatusRequests.push(submittedSettings);
       const reply = () => {
-        const gpus = submittedSettings.models.target_segmentation === "gpu-options.onnx"
+        const targetPath = submittedSettings.models.target_segmentation;
+        const gpus = targetPath === "gpu-options.onnx"
           ? [{ id: 3, name: "RTX Test", totalMemory: 16 * 1024 ** 3, supported: true }, { id: 4, name: "Legacy Test", totalMemory: 3 * 1024 ** 3, supported: false }]
-          : [{ id: settingsStatusRequests.length, name: submittedSettings.models.target_segmentation || "default", totalMemory: 16 * 1024 ** 3 }];
+          : targetPath === "unknown-vram.onnx"
+            ? [{ id: 5, name: "Unknown VRAM", supported: true }]
+            : [{ id: settingsStatusRequests.length, name: targetPath || "default", totalMemory: 16 * 1024 ** 3 }];
         const paths = submittedSettings.models.sam_checkpoints || {};
         const samVariants = Object.fromEntries(["vit_b", "vit_l", "vit_h"].map((key) => [key, {
           path: paths[key] || "", configured: Boolean(paths[key]), exists: Boolean(paths[key]), valid: Boolean(paths[key]), managed: String(paths[key] || "").includes("Mozarie\\models"), reasonCode: paths[key] ? null : "not_configured",
         }]));
-        response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status: { models: {}, samVariants, gpus } }));
+        const status = { models: {}, gpus };
+        if (targetPath !== "legacy-sam-status.onnx") status.samVariants = samVariants;
+        response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status }));
       };
       if (deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
@@ -362,6 +367,10 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   assert.equal(layout.fits, true, `settings does not overflow at ${width}x${height} (${language})`);
   assert.equal(layout.reset && layout.save && layout.close, true, `settings controls own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#settingsTabModels").click();
+  const expectedPathPlaceholder = language === "ja" ? "パスを指定してください" : "Specify a path";
+  for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
+    assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
+  }
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26 / NSFW Anime XL", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.com/models/1313556?modelVersionId=2350456"],
@@ -653,6 +662,14 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('[data-sam-status="vit_l"]').textContent.length > 0);
     assert.match(await page.locator('[data-sam-status="vit_l"]').textContent(), /外部ファイル|External file/, "configured SAM path is identified as external");
     assert.match(await page.locator('[data-sam-status="vit_b"]').textContent(), /未取得|Not acquired/, "unconfigured SAM variants remain selectable and show their status");
+    await page.locator("#settingsTargetModel").fill("legacy-sam-status.onnx");
+    await page.evaluate(() => refreshSettingsStatus());
+    await page.waitForFunction(() => !document.querySelector('[data-sam-status="vit_b"]').textContent);
+    assert.equal(await page.locator(".sam-variant.unacquired").count(), 0, "an older backend without SAM variants shows no misleading unacquired state");
+    await page.locator("#settingsTargetModel").fill("unknown-vram.onnx");
+    await page.evaluate(() => refreshSettingsStatus());
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Unknown VRAM"));
+    assert.doesNotMatch(await page.locator("#settingsGpuDevice").textContent(), /VRAM: - GB/, "an unknown VRAM value omits the VRAM fragment");
     await page.locator('[data-model-help="samType"]').click();
     assert.equal(await page.locator("#modelHelpFile").textContent(), "sam_vit_l_0b3195.pth", "SAM help follows the selected model type");
     await page.locator("#modelHelpCloseButton").click();

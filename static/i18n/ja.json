@@ -250,6 +250,7 @@
   "settings.defaultOutputDirectory": "既定の保存先",
   "settings.browseOutputDirectory": "参照",
   "settings.browseModel": "参照",
+  "settings.modelPathPlaceholder": "パスを指定してください",
   "modelDownload.title": "モデルをダウンロード",
   "modelDownload.download": "ダウンロード",
   "modelDownload.all": "全モデルをダウンロード",

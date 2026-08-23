@@ -259,6 +259,7 @@
   "settings.helpInfo": "About this option",
   "settings.browseOutputDirectory": "Browse",
   "settings.browseModel": "Browse",
+  "settings.modelPathPlaceholder": "Specify a path",
   "modelDownload.title": "Download model",
   "modelDownload.download": "Download",
   "modelDownload.all": "Download all models",

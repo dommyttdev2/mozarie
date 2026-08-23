@@ -43,8 +43,16 @@ function selectSamVariant(variant, refresh = false) {
 }
 
 function renderSamVariantStatuses() {
-  const variants = state.settingsStatus?.samVariants || {};
+  const hasVariants = Boolean(state.settingsStatus && Object.hasOwn(state.settingsStatus, "samVariants"));
+  const variants = state.settingsStatus?.samVariants;
   for (const output of document.querySelectorAll("[data-sam-status]")) {
+    const row = output.closest(".sam-variant");
+    if (!hasVariants || !variants || typeof variants !== "object") {
+      output.textContent = "";
+      output.removeAttribute("data-state");
+      row?.classList.remove("unacquired");
+      continue;
+    }
     const variant = variants[output.dataset.samStatus];
     let key = "notAcquired"; let stateName = "empty";
     if (variant?.valid) { key = variant.managed ? "downloaded" : "external"; stateName = "ready"; }
@@ -52,13 +60,13 @@ function renderSamVariantStatuses() {
     else if (variant?.reasonCode === "type_mismatch") { key = "typeMismatch"; stateName = "error"; }
     else if (variant?.reasonCode === "invalid_format") { key = "invalidFormat"; stateName = "error"; }
     output.textContent = t(`settings.samStatus.${key}`); output.dataset.state = stateName;
-    output.closest(".sam-variant")?.classList.toggle("unacquired", stateName === "empty");
+    row?.classList.toggle("unacquired", stateName === "empty");
   }
 }
 
 function gpuMemoryLabel(totalMemory) {
   const gib = Number(totalMemory) / (1024 ** 3);
-  if (!Number.isFinite(gib) || gib <= 0) return "-";
+  if (!Number.isFinite(gib) || gib <= 0) return "";
   const rounded = Math.round(gib);
   return Math.abs(gib - rounded) < 0.1 ? String(rounded) : gib.toFixed(1);
 }
@@ -150,7 +158,8 @@ function renderSettingsStatus(status) {
   if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; option.disabled = true; gpuSelect.append(option); }
   else for (const gpu of gpus) {
     const option = document.createElement("option"); option.value = String(gpu.id);
-    option.textContent = `GPU ${gpu.id}: ${gpu.name} / VRAM: ${gpuMemoryLabel(gpu.totalMemory)} GB${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
+    const memory = gpuMemoryLabel(gpu.totalMemory);
+    option.textContent = `GPU ${gpu.id}: ${gpu.name}${memory ? ` / VRAM: ${memory} GB` : ""}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
   if (![...gpuSelect.children].some((option) => option.value === selected)) {
