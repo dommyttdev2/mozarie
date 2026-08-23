@@ -22,6 +22,10 @@ function startFixtureServer() {
   const settingsStatusRequests = [];
   const updateRequests = [];
   const modelPickerRequests = [];
+  const modelDownloadRequests = [];
+  let modelDownloadJobs = 0;
+  let modelDownloadPolls = 0;
+  let modelDownloadJob = { state: "idle", paths: {} };
   let cancelRequests = 0;
   let holdDetection = false;
   let cancelShouldFail = false;
@@ -100,6 +104,34 @@ function startFixtureServer() {
       response.end(JSON.stringify(modelPickerRequests.length === 1 ? { path: "C:\\models\\sam_vit_l_0b3195.pth" } : { cancelled: true }));
       return;
     }
+    if (requestPath === "/api/model-download" && request.method === "GET") {
+      modelDownloadPolls += 1;
+      if (modelDownloadJob.state === "running") {
+        const paths = modelDownloadJob.key === "all"
+          ? { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx", sam_checkpoint: `C:\\Mozarie\\models\\sam_vit_${modelDownloadJob.samType}_checkpoint.pth`, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
+          : { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx" };
+        modelDownloadJob = { ...modelDownloadJob, state: "complete", current: "", completed: modelDownloadJob.total, received: modelDownloadJob.expected, paths };
+      }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(modelDownloadJob));
+      return;
+    }
+    if (requestPath === "/api/model-download/start" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); modelDownloadRequests.push(payload);
+      if (payload.modelKey === "hand_detection") {
+        modelDownloadJob = { state: "failed", paths: {}, error: "fixture download failed" };
+      } else if (modelDownloadJob.state !== "running") {
+        modelDownloadJobs += 1;
+        modelDownloadJob = { state: "running", key: payload.modelKey, samType: payload.samType, total: payload.modelKey === "all" ? 4 : 1, completed: 0, current: payload.modelKey === "all" ? "target" : payload.modelKey, received: 1, expected: 10, paths: {} };
+      }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(modelDownloadJob));
+      return;
+    }
+    if (requestPath === "/api/model-download/cancel" && request.method === "POST") {
+      modelDownloadJob = { ...modelDownloadJob, state: "cancelled", current: "" };
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(modelDownloadJob));
+      return;
+    }
     if (requestPath === "/api/job/cancel" && request.method === "POST") {
       cancelRequests += 1;
       if (cancelShouldFail) { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "cancel failed" })); return; }
@@ -167,7 +199,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; releaseFullSettings?.(); } });
     });
   });
 }
@@ -427,7 +459,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, modelPickerRequests, resetJob, finishApply;
+  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishApply;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -436,7 +468,7 @@ async function main() {
   let deferFullSettings;
   let releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, cancelRequests, holdDetection, failCancel, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -551,6 +583,34 @@ async function main() {
     await cancelResponse;
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
     assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
+    assert.equal(await page.locator("[data-model-download]").count(), 7, "every model and the genital section expose their download action");
+    await page.locator('[data-model-download="ntd11"]').click();
+    assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
+    assert.match(await page.locator("#modelDownloadMessage").textContent(), /NTD11/, "unsupported download identifies the selected model");
+    assert.match(await page.locator("#modelDownloadStatus").textContent(), /GitHub|Hugging Face/, "unsupported download explains its source in the modal");
+    await page.locator("#modelDownloadClose").click();
+    await page.locator('[data-model-download="target"]').click();
+    await page.waitForFunction(() => document.querySelector("#settingsTargetModel").value.includes("models\\ultralytics\\nsfw-anime-xl-x1280.onnx"));
+    assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "target", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
+    assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
+    await page.locator("#modelDownloadClose").click();
+    await page.locator('[data-model-download="hand_detection"]').click();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture download failed"));
+    assert.match(await page.locator("#modelDownloadStatus").textContent(), /fixture download failed/, "download errors remain inside the download modal");
+    await page.locator("#modelDownloadClose").click();
+    await page.locator('[data-model-download="all"]').click();
+    await page.waitForFunction(() => document.querySelector("#settingsHandSegmentationModel").value.includes("models\\handsegnet\\handsegnet_vit_b_best.safetensors"));
+    assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "all", samType: "vit_l" }, "Download all uses the selected SAM type without browser-provided URLs or paths");
+    assert.equal(await page.locator("#settingsHandModel").inputValue(), "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", "Download all reflects each completed model path immediately");
+    await page.locator("#modelDownloadClose").click();
+    const jobsBeforeDoubleClick = modelDownloadJobs();
+    await page.locator('[data-model-download="sam"]').dblclick();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadDialog").open);
+    assert.equal(modelDownloadJobs(), jobsBeforeDoubleClick + 1, "a double click does not create a second download job");
+    await page.locator("#modelDownloadCancel").click();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("キャンセル"));
+    assert.ok(modelDownloadPolls() >= 2, "download progress is polled while a job is active");
+    await page.locator("#modelDownloadClose").click();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
     await page.locator("#settingsStatusButton").click();

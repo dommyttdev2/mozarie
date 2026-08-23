@@ -383,8 +383,9 @@ async function startModelDownload(key) {
   $("#modelDownloadDialog").showModal();
   try {
     const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
-    renderModelDownload(await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) }));
-    if (!modelDownloadPoll) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
+    const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) });
+    renderModelDownload(job);
+    if (!modelDownloadPoll && ["running", "cancelling"].includes(job.state)) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
   } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
 }
 

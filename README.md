@@ -36,10 +36,10 @@ Downloads are opt-in. Mozarie writes supported files to the full project path `m
 
 | Feature | File to select | Download / source |
 | --- | --- | --- |
-| Required genital detection | `nsfw-anime-xl-x1280.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx). Installed at `Mozarie\models\nsfw-anime-xl-x1280.onnx`. |
+| Required genital detection | `nsfw-anime-xl-x1280.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx). Installed at `Mozarie\models\ultralytics\nsfw-anime-xl-x1280.onnx`. |
 | Optional outline refinement, boundary tool, hand exclusion | `sam_vit_b_01ec64.pth`, `sam_vit_l_0b3195.pth`, or `sam_vit_h_4b8939.pth` | Download the selected type in Mozarie or use the [official SAM checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints). Installed under `Mozarie\models\`. |
-| Optional anime hand detector | `hand_detect_v1.0_s.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx). Installed at `Mozarie\models\hand_detect_v1.0_s.onnx`. |
-| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | Download in Mozarie, or use the [pinned source](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors). Installed at `Mozarie\models\handsegnet_vit_b_best.safetensors`. |
+| Optional anime hand detector | `hand_detect_v1.0_s.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx). Installed at `Mozarie\models\ultralytics\anime-hand-v1.0-s.onnx`. |
+| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | Download in Mozarie, or use the [pinned source](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors). Installed at `Mozarie\models\handsegnet\handsegnet_vit_b_best.safetensors`. |
 
 The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on.
 

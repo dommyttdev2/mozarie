@@ -50,8 +50,8 @@ $owner = New-Object System.Windows.Forms.Form
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 try {
   $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
-  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-  $owner.Size = New-Object System.Drawing.Size(1, 1); $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
   $owner.Show(); $owner.Activate(); $owner.BringToFront()
   $dialog.Description = 'Mozarie の保存先を選択'
   $initial = $env:MOZARIE_DEFAULT_OUTPUT_DIRECTORY
@@ -93,8 +93,8 @@ $owner = New-Object System.Windows.Forms.Form
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 try {{
   $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
-  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-  $owner.Size = New-Object System.Drawing.Size(1, 1); $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
   $owner.Show(); $owner.Activate(); $owner.BringToFront()
   $dialog.Filter = 'Model files ({pattern})|{pattern}'
   $dialog.CheckFileExists = $true; $dialog.Multiselect = $false; $dialog.RestoreDirectory = $true

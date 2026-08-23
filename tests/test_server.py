@@ -178,7 +178,12 @@ class MozarieTests(unittest.TestCase):
                 self.assertEqual(http_module._pick_output_directory(state), str(selected.resolve()))
             command = run.call_args.args[0]
             self.assertEqual(command[:-1], [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand"])
-            self.assertIn("FolderBrowserDialog", base64.b64decode(command[-1]).decode("utf-16le"))
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertIn("FolderBrowserDialog", script)
+            self.assertIn("FormStartPosition]::CenterScreen", script)
+            self.assertIn("ShowDialog($owner)", script)
+            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
+            self.assertNotIn("-32000", script)
             self.assertFalse(run.call_args.kwargs["shell"])
             self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
             self.assertEqual(
@@ -215,6 +220,10 @@ class MozarieTests(unittest.TestCase):
             script = base64.b64decode(command[-1]).decode("utf-16le")
             self.assertIn("OpenFileDialog", script)
             self.assertIn("RestoreDirectory", script)
+            self.assertIn("FormStartPosition]::CenterScreen", script)
+            self.assertIn("ShowDialog($owner)", script)
+            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
+            self.assertNotIn("-32000", script)
             self.assertFalse(picker_kwargs["shell"])
             self.assertEqual(picker_kwargs["env"]["MOZARIE_MODEL_INITIAL_DIRECTORY"], str(root))
             self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
@@ -257,6 +266,38 @@ class MozarieTests(unittest.TestCase):
                         self.assertEqual(raised.exception.error_code, error_code)
                 self.assertTrue(state.native_picker_lock.acquire(blocking=False))
                 state.native_picker_lock.release()
+
+    def test_model_download_api_uses_existing_mutation_guards_and_allowlist(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        manager = Mock(snapshot=Mock(return_value={"state": "idle", "paths": {}}), start=Mock(return_value={"state": "running", "paths": {}}), cancel=Mock(return_value={"state": "cancelled", "paths": {}}))
+        state.model_downloads = manager
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+        def request(method, path, payload=None, headers=None):
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                connection.request(method, path, body, headers or {})
+                response = connection.getresponse(); data = response.read(); return response.status, data
+            finally:
+                connection.close()
+        try:
+            with patch.object(http_module, "STATE", state):
+                status, body = request("GET", "/api/model-download")
+                self.assertEqual(status, 200); self.assertEqual(json.loads(body)["state"], "idle")
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "target", "samType": "vit_b"}, {"Content-Type": "application/json"})
+                self.assertEqual(status, 403)
+                headers = {"Content-Type": "application/json", "Origin": origin, "X-Mozarie-Token": state.session_token}
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "target", "samType": "vit_b", "url": "https://evil.example/model"}, headers)
+                self.assertEqual(status, 200)
+                manager.start.assert_called_once_with("target", "vit_b")
+                status, _ = request("POST", "/api/model-download/cancel", {}, headers)
+                self.assertEqual(status, 200); manager.cancel.assert_called_once_with()
+        finally:
+            httpd.shutdown(); httpd.server_close()
 
     def test_settings_status_preview_does_not_save_or_replace_settings(self):
         state = self.new_state()

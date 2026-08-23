@@ -92,6 +92,11 @@ class ModelDownloadTests(unittest.TestCase):
         self.assertEqual(job["state"], "failed")
         self.assertIn("target_segmentation", job["paths"])
 
+    def test_only_manifest_keys_can_start_a_download(self) -> None:
+        manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
+        with self.assertRaises(ModelDownloadError): manager.start("https://example.invalid/model", "vit_b")
+        with self.assertRaises(ModelDownloadError): manager.start("all", "vit_unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

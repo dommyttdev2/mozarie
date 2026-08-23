@@ -48,19 +48,19 @@ MODEL_DOWNLOADS: dict[str, ModelDownload] = {
     "target": ModelDownload(
         "target", "target_segmentation",
         "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx",
-        "models/nsfw-anime-xl-x1280.onnx", 126350117,
+        "models/ultralytics/nsfw-anime-xl-x1280.onnx", 126350117,
         "92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a",
     ),
     "hand_detection": ModelDownload(
         "hand_detection", "hand_detection",
         "https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx",
-        "models/hand_detect_v1.0_s.onnx", 44583229,
+        "models/ultralytics/anime-hand-v1.0-s.onnx", 44583229,
         "408750ad39645fcdc0c5e774aa45a73941b2e785fc5611fb7d3d9790a41899c0",
     ),
     "hand_segmentation": ModelDownload(
         "hand_segmentation", "hand_segmentation",
         "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors",
-        "models/handsegnet_vit_b_best.safetensors", 374979240,
+        "models/handsegnet/handsegnet_vit_b_best.safetensors", 374979240,
         "64b35e5ee09aac8737e2554f15e73503f94ce9bf443dde4864255e14b7ca9c14",
     ),
     "sam_vit_b": ModelDownload(

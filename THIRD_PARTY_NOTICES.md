@@ -20,8 +20,8 @@ No model weights are included in this repository. When the user explicitly choos
 
 | Model | Pinned source | License / terms |
 | --- | --- | --- |
-| NSFW Anime XL ONNX | [01miku/anime-nsfw-segm-yolo26 at `1697d5d`](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a) | Provider terms |
-| Anime hand detector ONNX | [deepghs/anime_hand_detection at `dba2c5b`](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) | [OpenRAIL](https://huggingface.co/deepghs/anime_hand_detection) |
+| NSFW Anime XL ONNX | [01miku/anime-nsfw-segm-yolo26 at `1697d5d`](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a) | MIT |
+| Anime hand detector ONNX | [deepghs/anime_hand_detection at `dba2c5b`](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) | Provider metadata: `openrail`; review provider terms |
 | SAM checkpoints | [Meta Segment Anything checkpoint source](https://github.com/facebookresearch/segment-anything#model-checkpoints) | Apache-2.0 |
 | HandSegNet anime SDXL | [pinned revision `77ff734`](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) | Apache-2.0 |
 
