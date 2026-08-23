@@ -528,9 +528,16 @@ async function cancelModelDownload() {
 
 let settingsStatusGeneration = 0;
 
+function setSettingsGpuLoading(loading) {
+  $("#settingsGpuLoading").hidden = !loading;
+  if (loading) $("#settingsGpuDevice").setAttribute("aria-busy", "true");
+  else $("#settingsGpuDevice").removeAttribute("aria-busy");
+}
+
 async function refreshSettingsStatus() {
   const generation = ++settingsStatusGeneration;
   const snapshot = JSON.stringify(settingsPayload());
+  setSettingsGpuLoading(true);
   try {
     const data = await api("/api/settings/status", { method: "POST", body: snapshot });
     let currentSnapshot = null;
@@ -539,6 +546,8 @@ async function refreshSettingsStatus() {
     renderSettingsStatus(data.status);
   } catch (error) {
     if (generation === settingsStatusGeneration) setStatus(error.message, "error");
+  } finally {
+    if (generation === settingsStatusGeneration) setSettingsGpuLoading(false);
   }
 }
 

@@ -213,7 +213,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -535,9 +535,9 @@ async function main() {
   let updateRequests;
   let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
-  let releaseFullSettings;
+  let releaseNextFullSettings, releaseFullSettings;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
@@ -756,14 +756,28 @@ async function main() {
     await page.waitForTimeout(20);
     assert.equal(settingsStatusRequests.length, statusesBeforeStaleResponse + 1, "one silent refresh captures the current form");
     assert.equal(settingsStatusRequests.at(-1).models.target_segmentation, "unsaved.onnx", "the silent refresh validates the current form");
+    assert.equal(await page.locator("#settingsGpuLoading").isVisible(), true, "GPU loading is visible while status is pending");
+    assert.equal(await page.locator("#settingsGpuLoading").getAttribute("role"), "status", "GPU loading is announced as status");
+    assert.equal(await page.locator("#settingsGpuDevice").getAttribute("aria-busy"), "true", "GPU selector reports that its options are loading");
     await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
     releaseFullSettings();
     await page.waitForTimeout(50);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator("#settingsGpuDevice").textContent(), gpuBeforeStaleResponse, "a stale response leaves GPU state unchanged without a message");
+    assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears when a stale response completes");
+    assert.equal(await page.locator("#settingsGpuDevice").getAttribute("aria-busy"), null, "GPU selector is no longer busy after the response");
+    deferFullSettings();
+    await page.evaluate(() => { void refreshSettingsStatus(); void refreshSettingsStatus(); });
+    await page.waitForTimeout(20);
+    releaseNextFullSettings();
+    await page.waitForTimeout(20);
+    assert.equal(await page.locator("#settingsGpuLoading").isVisible(), true, "an older status response does not clear a newer loading indicator");
+    releaseFullSettings();
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     await page.locator("#settingsTargetModel").fill("gpu-options.onnx");
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
+    assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears after a successful response");
     assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\).*GPU 0:/, "status shows actual GPU names, VRAM, and the incompatibility");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {

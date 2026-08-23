@@ -343,6 +343,7 @@
   "confirm.clearCatalog": "Clear list",
   "confirm.removeImage": "Remove from list",
   "settings.gpu": "GPU",
+  "settings.gpuLoading": "Loading…",
   "settings.confirmations": "Confirmations",
   "selection.count": "{count} selected",
   "selection.batchMode": "Batch edit",
