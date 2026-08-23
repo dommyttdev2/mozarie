@@ -385,6 +385,9 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
+    if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
+      ? "1280入力、rank-3の43チャンネル予測出力とrank-4の32チャンネルプロトタイプ出力を持つONNXを指定します。"
+      : "Use a 1280-input ONNX with rank-3 43-channel predictions and rank-4 32-channel prototypes.", `${key} help states the neutral file contract at ${width}x${height} (${language})`);
     if (href) {
       assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
       assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);

@@ -283,7 +283,7 @@
   "command.copied": "コピーしました",
   "modelHelp.ntd11.title": "NTD11",
   "modelHelp.target.title": "基本モデル",
-  "modelHelp.target.text": "性器候補を検出する基本モデルです。",
+  "modelHelp.target.text": "1280入力、rank-3の43チャンネル予測出力とrank-4の32チャンネルプロトタイプ出力を持つONNXを指定します。",
   "modelHelp.ntd11.text": "基本モデルで見落とす性器候補を補う追加モデルです。",
   "modelHelp.sensitive.title": "Sensitive",
   "modelHelp.sensitive.text": "Sensitiveは基本モデルの見落としを補う任意の性器検出モデルです。",

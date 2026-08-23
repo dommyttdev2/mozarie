@@ -41,6 +41,8 @@ Downloads are opt-in. Mozarie writes supported files to the full project path `m
 | Optional anime hand detector | `hand_detect_v1.0_s.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx). Installed at `Mozarie\models\ultralytics\anime-hand-v1.0-s.onnx`. |
 | Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | Download in Mozarie, or use the [pinned source](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors). Installed at `Mozarie\models\handsegnet\handsegnet_vit_b_best.safetensors`. |
 
+The primary model needs a 1280 input, a rank-3 prediction output with a 43-channel axis, and a rank-4 prototype output with 32 channels. Its class order is `anus`, `nipple`, `penis`, `vagina`, `female face`, `male face`, `pubic hair`.
+
 The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on. NTD11 and Sensitive are optional supplemental models.
 
 NTD11 is an optional supplemental ONNX model. Select `ntd11_anime_nsfw_segm_v5-variant1.onnx` from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456). Download `sensitive_detect_v07.pt` from the [Sensitive source](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40) and convert it to ONNX.

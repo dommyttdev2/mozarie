@@ -290,7 +290,7 @@
   "command.copied": "Copied",
   "modelHelp.ntd11.title": "NTD11",
   "modelHelp.target.title": "Primary model",
-  "modelHelp.target.text": "Detects genital candidates.",
+  "modelHelp.target.text": "Use a 1280-input ONNX with rank-3 43-channel predictions and rank-4 32-channel prototypes.",
   "modelHelp.ntd11.text": "An optional model that can catch genital regions missed by the primary model.",
   "modelHelp.sensitive.title": "Sensitive",
   "modelHelp.sensitive.text": "Sensitive is an optional genital detector that supplements the primary model.",

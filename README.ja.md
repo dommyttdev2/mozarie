@@ -41,6 +41,8 @@ Mozarieは、複数画像のモザイク範囲をローカルで確認・編集�
 | 任意: アニメ手検出 | `hand_detect_v1.0_s.onnx` | Mozarieでダウンロード、または[固定配布元](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx)から取得。保存先: `Mozarie\models\ultralytics\anime-hand-v1.0-s.onnx` |
 | 任意: HandSegNetの手輪郭 | `handsegnet_vit_b_best.safetensors` | Mozarieでダウンロード、または[固定配布元](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors)から取得。保存先: `Mozarie\models\handsegnet\handsegnet_vit_b_best.safetensors` |
 
+基本モデルは1280入力、43チャンネル軸を持つrank-3予測出力、32チャンネルのrank-4プロトタイプ出力が必要です。クラス順は`anus`、`nipple`、`penis`、`vagina`、`female face`、`male face`、`pubic hair`です。
+
 SAMは設定で選んだ`vit_b`、`vit_l`、`vit_h`と同じ種類のファイルを指定してください。HandSegNetは任意で、手の検出をONにした場合だけ使えます。NTD11とSensitiveは任意の補助モデルです。
 
 NTD11は基本モデルを補う任意のONNXモデルです。[Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456)の`ntd11_anime_nsfw_segm_v5-variant1.onnx`を**参照**から指定します。Sensitiveは[固定配布元](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)の`sensitive_detect_v07.pt`をONNXへ変換してから指定します。
