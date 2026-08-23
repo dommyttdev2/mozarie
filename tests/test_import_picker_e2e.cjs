@@ -419,6 +419,18 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     } else assert.equal(await page.locator("#modelHelpSource").isVisible(), false, `${key} help hides an unavailable source at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
     if (key === "sensitive") {
+      const helpCommandLayout = await page.locator("#modelHelpDialog").evaluate((dialog) => {
+        const pre = dialog.querySelector("#modelHelpCommand"); const button = dialog.querySelector("#modelHelpCopy");
+        const preBox = pre.getBoundingClientRect(); const buttonBox = button.getBoundingClientRect();
+        return {
+          buttonBelow: buttonBox.top >= preBox.bottom,
+          noOverlap: buttonBox.top >= preBox.bottom || buttonBox.bottom <= preBox.top || buttonBox.right <= preBox.left || buttonBox.left >= preBox.right,
+          hit: document.elementFromPoint(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2) === button,
+          actionsFollowPre: pre.nextElementSibling?.classList.contains("command-actions") && pre.nextElementSibling.contains(button),
+          fits: dialog.scrollWidth <= dialog.clientWidth,
+        };
+      });
+      assert.equal(helpCommandLayout.buttonBelow && helpCommandLayout.noOverlap && helpCommandLayout.hit && helpCommandLayout.actionsFollowPre && helpCommandLayout.fits, true, `help command and copy control are separate and usable at ${width}x${height} (${language})`);
       await page.locator("#modelHelpCopy").click();
       assert.match(await page.locator("#modelHelpCopyResult").textContent(), /コピーしました|Copied/, `Sensitive help command can be copied at ${width}x${height} (${language})`);
     }
@@ -456,6 +468,30 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   })), true, `download source links own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
   assert.equal(await allDownload.evaluate((button) => document.activeElement === button), true, `closing download confirmation restores focus at ${width}x${height} (${language})`);
+  const ntd11Download = page.locator('[data-model-download="ntd11"]');
+  await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
+  assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
+    ? "NTD11は基本モデルの見落としを補う任意の性器検出モデルです。配布元から animeNSFWDetection_v50Variant1.zip を取得・展開し、ntd11_anime_nsfw_segm_v5-variant1.onnx を「参照」から指定してください。"
+    : "NTD11 is an optional genital detector that supplements areas missed by the primary model. Download and extract animeNSFWDetection_v50Variant1.zip from the source, then select ntd11_anime_nsfw_segm_v5-variant1.onnx with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", `NTD11 download keeps its source link at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `NTD11 download has no conversion command at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
+  const sensitiveDownload = page.locator('[data-model-download="sensitive"]');
+  await sensitiveDownload.scrollIntoViewIfNeeded(); await sensitiveDownload.click();
+  const downloadCommandLayout = await page.locator("#modelDownloadDialog").evaluate((dialog) => {
+    const pre = dialog.querySelector("#modelDownloadCommand"); const button = dialog.querySelector("#modelDownloadCopy");
+    const preBox = pre.getBoundingClientRect(); const buttonBox = button.getBoundingClientRect();
+    return {
+      buttonBelow: buttonBox.top >= preBox.bottom,
+      noOverlap: buttonBox.top >= preBox.bottom || buttonBox.bottom <= preBox.top || buttonBox.right <= preBox.left || buttonBox.left >= preBox.right,
+      hit: document.elementFromPoint(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2) === button,
+      actionsFollowPre: pre.nextElementSibling?.classList.contains("command-actions") && pre.nextElementSibling.contains(button),
+      fits: dialog.scrollWidth <= dialog.clientWidth,
+    };
+  });
+  assert.equal(downloadCommandLayout.buttonBelow && downloadCommandLayout.noOverlap && downloadCommandLayout.hit && downloadCommandLayout.actionsFollowPre && downloadCommandLayout.fits, true, `download command and copy control are separate and usable at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
   const samHelp = page.locator('[data-model-help="samType"]');
   await samHelp.scrollIntoViewIfNeeded();
   assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
@@ -714,9 +750,10 @@ async function main() {
     assert.equal(await page.locator("[data-model-download]").count(), 6, "only downloadable models and the section expose download actions");
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
-    assert.match(await page.locator("#modelDownloadMessage").textContent(), /NTD11/, "unsupported download identifies the selected model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意の性器検出モデルです。配布元から animeNSFWDetection_v50Variant1.zip を取得・展開し、ntd11_anime_nsfw_segm_v5-variant1.onnx を「参照」から指定してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
     assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
+    assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, "NTD11 download does not show an unrelated conversion command");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();
     assert.equal(await page.locator("#modelDownloadMessage").textContent(), "sensitive_detect_v07.pt を配布元から取得し、ONNXへ変換してください。", "Sensitive download message stays concise");

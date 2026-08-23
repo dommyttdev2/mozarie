@@ -299,7 +299,7 @@
       <div class="settings-heading"><h2 id="modelDownloadTitle" data-i18n="modelDownload.title">モデルをダウンロード</h2><button id="modelDownloadClose" type="button" data-i18n="dialog.close">閉じる</button></div>
       <p id="modelDownloadMessage"></p>
       <ul id="modelDownloadItems" class="model-download-items"></ul>
-      <div id="modelDownloadCommandWrap" class="command-wrap" hidden><button id="modelDownloadCopy" type="button" data-i18n="command.copy">コピー</button><pre id="modelDownloadCommand" class="model-help-command"></pre><output id="modelDownloadCopyResult" class="copy-result" aria-live="polite"></output></div>
+      <div id="modelDownloadCommandWrap" class="command-wrap" hidden><pre id="modelDownloadCommand" class="model-help-command"></pre><div class="command-actions"><output id="modelDownloadCopyResult" class="copy-result" aria-live="polite"></output><button id="modelDownloadCopy" type="button" data-i18n="command.copy">コピー</button></div></div>
       <p id="modelDownloadSecurity" class="fixed-note" hidden></p>
       <progress id="modelDownloadProgress" max="1" value="0"></progress>
       <output id="modelDownloadStatus" class="dialog-result" aria-live="polite"></output>
@@ -362,7 +362,7 @@
         <dt data-i18n="modelHelp.file">指定するファイル</dt><dd id="modelHelpFile"></dd>
         <dt id="modelHelpSourceLabel" data-i18n="modelHelp.source">配布元</dt><dd><a id="modelHelpSource" target="_blank" rel="noreferrer"></a></dd>
       </dl>
-      <div id="modelHelpCommandWrap" class="command-wrap" hidden><button id="modelHelpCopy" type="button" data-i18n="command.copy">コピー</button><pre id="modelHelpCommand" class="model-help-command"></pre><output id="modelHelpCopyResult" class="copy-result" aria-live="polite"></output></div>
+      <div id="modelHelpCommandWrap" class="command-wrap" hidden><pre id="modelHelpCommand" class="model-help-command"></pre><div class="command-actions"><output id="modelHelpCopyResult" class="copy-result" aria-live="polite"></output><button id="modelHelpCopy" type="button" data-i18n="command.copy">コピー</button></div></div>
       <table id="modelHelpSamTable" class="model-help-table" hidden>
         <thead><tr><th scope="col" data-i18n="modelHelp.samTable.model">モデル</th><th scope="col" data-i18n="modelHelp.samTable.speed">速度</th><th scope="col" data-i18n="modelHelp.samTable.accuracy">輪郭の細かさ目安</th><th scope="col" data-i18n="modelHelp.samTable.vram">VRAM</th><th scope="col" data-i18n="modelHelp.samTable.use">向いている用途</th></tr></thead>
         <tbody>

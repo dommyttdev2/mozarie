@@ -144,11 +144,11 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .model-help-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 14px 0 0; }
 .model-help-details dt { color: #aeb8c2; }
 .model-help-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.model-help-command { margin: 12px 0 0; padding: 9px 10px; overflow-x: auto; border: 1px solid #596570; border-radius: 4px; background: #20252a; color: #e9f5f0; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
-.command-wrap { position: relative; display: grid; gap: 6px; }
+.model-help-command { width: 100%; box-sizing: border-box; margin: 12px 0 0; padding: 9px 10px; overflow-x: auto; border: 1px solid #596570; border-radius: 4px; background: #20252a; color: #e9f5f0; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+.command-wrap { display: grid; min-width: 0; gap: 6px; }
 .command-wrap[hidden] { display: none; }
-.command-wrap > button { position: absolute; top: 6px; right: 6px; }
-.command-wrap .model-help-command { padding-top: 42px; overflow-wrap: anywhere; }
+.command-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.command-wrap .model-help-command { overflow-wrap: anywhere; }
 .copy-result { min-height: 1.2em; color: #9ae0c7; font-size: 12px; }
 .sam-variants { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
 .sam-variants legend { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; color: #c6ced6; font-size: 12px; }

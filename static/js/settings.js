@@ -474,11 +474,10 @@ async function refreshModelDownload() {
 
 function showUnsupportedModelDownload(key) {
   const sensitive = key === "sensitive";
-  const source = key === "ntd11" ? "NTD11" : "Sensitive";
-  $("#modelDownloadMessage").textContent = sensitive ? t("modelDownload.sensitive") : t("modelDownload.unsupported", { model: source });
+  $("#modelDownloadMessage").textContent = t(`modelDownload.${key}`);
   renderModelDownloadItems([key]);
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadStatus").textContent = sensitive ? "" : t("modelDownload.unsupportedSource", { source: "CivitAI" });
+  $("#modelDownloadStatus").textContent = "";
   setModelDownloadGuide(sensitive ? 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu' : "");
   $("#modelDownloadSecurity").hidden = true;
   $("#modelDownloadStart").hidden = true;
