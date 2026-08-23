@@ -360,6 +360,17 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   await page.locator("#settingsTabModels").click();
   const pickerCount = await page.locator("[data-model-picker]").count();
   assert.equal(pickerCount, 6, `all model pickers are available at ${width}x${height} (${language})`);
+  for (const button of await page.locator(".model-card-title [data-model-download]").all()) {
+    await button.scrollIntoViewIfNeeded();
+    const download = await button.evaluate((element) => {
+      const title = element.closest(".model-card-title").querySelector("h4");
+      const rect = element.getBoundingClientRect(); const titleRect = title.getBoundingClientRect();
+      return { gap: rect.left - titleRect.right, hit: document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === element, overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    assert.ok(download.gap >= 0 && download.gap <= 10, `model download stays beside its name at ${width}x${height} (${language})`);
+    assert.equal(download.hit, true, `model download owns its hit target at ${width}x${height} (${language})`);
+    assert.equal(download.overflow, false, `model download does not cause horizontal overflow at ${width}x${height} (${language})`);
+  }
   const samHelp = page.locator('[data-model-help="samType"]');
   await samHelp.scrollIntoViewIfNeeded();
   assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);

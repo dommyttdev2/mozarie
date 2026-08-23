@@ -130,7 +130,9 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .model-card h4 { margin: 0; font-size: 13px; font-weight: 600; }
 .model-card input[type="text"] { width: 100%; min-width: 0; }
 .settings-dialog .dialog-actions #settingsResult { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow-wrap: anywhere; }
-.model-card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; min-height: 30px; }
+.model-card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 30px; }
+.model-card-title { display: inline-flex; min-width: 0; align-items: center; justify-self: start; gap: 8px; }
+.model-card-title h4 { min-width: 0; }
 .help-button { position: relative; display: grid; width: 28px; min-width: 28px; min-height: 28px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #b9c3cc; }
 .help-button::before { display: grid; width: 16px; height: 16px; place-items: center; border: 1px solid currentColor; border-radius: 50%; content: "i"; font-family: Georgia, serif; font-size: 12px; font-weight: 700; line-height: 1; }
 .help-button:hover { color: #e9f5f0; background: #313941; }
