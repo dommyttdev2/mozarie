@@ -616,6 +616,15 @@ async function main() {
     });
     assert.equal(eta.polled, eta.first, "ETA is retained between image completions");
     assert.notEqual(eta.completed, eta.first, "ETA is recalculated after an image completes");
+    const legacyDraftForceExclusion = await page.evaluate(() => {
+      state.settings.detection.force_exclusion_default = false;
+      state.drafts.set("sample", { add: "", exclusion: "" });
+      const forceExclusion = draftPayload(["sample"]).sample.forceExclusion;
+      state.drafts.delete("sample");
+      state.settings.detection.force_exclusion_default = true;
+      return forceExclusion;
+    });
+    assert.equal(legacyDraftForceExclusion, false, "a legacy draft inherits the configured force-exclusion default");
     await assertDesktopLayout(page, 1024, 768);
     await assertSettingsDialogLayout(page, 1024, 768, "ja");
     await page.evaluate(() => loadTranslations("en"));

@@ -1867,12 +1867,11 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(len({tuple(point) for point in points}), 3)
         self.assertTrue(all(source[int(y), int(x)] and not hand[int(y), int(x)] for x, y in points))
 
-    def test_specialist_hand_mask_requires_box_containment_and_genital_intersection(self):
-        genital = np.zeros((12, 12), dtype=np.uint8); genital[4:8, 4:8] = 255
+    def test_specialist_hand_mask_requires_box_containment(self):
         accepted = np.zeros((1, 12, 12), dtype=bool); accepted[0, 4:8, 4:8] = True
-        self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9), genital))
+        self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9)))
         outside = np.zeros((1, 12, 12), dtype=bool); outside[0, :3, :3] = True
-        self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9), genital))
+        self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9)))
 
     def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
         rgb = np.zeros((24, 24, 3), dtype=np.uint8)
