@@ -121,9 +121,10 @@ function startFixtureServer() {
         return;
       }
       if (modelDownloadJob.state === "running") {
+        const samPath = `C:\\Mozarie\\models\\sam_${modelDownloadJob.samType === "vit_l" ? "vit_l_0b3195" : modelDownloadJob.samType === "vit_h" ? "vit_h_4b8939" : "vit_b_01ec64"}.pth`;
         const paths = modelDownloadJob.key === "all"
-          ? { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx", [`sam_${modelDownloadJob.samType}`]: `C:\\Mozarie\\models\\sam_${modelDownloadJob.samType === "vit_l" ? "vit_l_0b3195" : modelDownloadJob.samType === "vit_h" ? "vit_h_4b8939" : "vit_b_01ec64"}.pth`, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
-          : { target_segmentation: "C:\\Mozarie\\models\\ultralytics\\nsfw-anime-xl-x1280.onnx" };
+          ? { [`sam_${modelDownloadJob.samType}`]: samPath, hand_detection: "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx", hand_segmentation: "C:\\Mozarie\\models\\handsegnet\\handsegnet_vit_b_best.safetensors" }
+          : { [modelDownloadJob.key]: modelDownloadJob.key.startsWith("sam_") ? samPath : "C:\\Mozarie\\models\\ultralytics\\anime-hand-v1.0-s.onnx" };
         modelDownloadJob = { ...modelDownloadJob, state: "complete", current: "", completed: modelDownloadJob.total, received: modelDownloadJob.expected, paths };
       }
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(modelDownloadJob));
@@ -136,7 +137,7 @@ function startFixtureServer() {
         modelDownloadJob = { state: "failed", paths: {}, error: "fixture download failed" };
       } else if (modelDownloadJob.state !== "running") {
         modelDownloadJobs += 1;
-        modelDownloadJob = { state: "running", key: payload.modelKey, samType: payload.samType, total: payload.modelKey === "all" ? 4 : 1, completed: 0, current: payload.modelKey === "all" ? "target" : payload.modelKey, received: 1, expected: 10, paths: {} };
+        modelDownloadJob = { state: "running", key: payload.modelKey, samType: payload.samType, total: payload.modelKey === "all" ? 3 : 1, completed: 0, current: payload.modelKey === "all" ? `sam_${payload.samType}` : payload.modelKey, received: 1, expected: 10, paths: {} };
       }
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(modelDownloadJob));
       return;
@@ -372,7 +373,7 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
   const helpExpectations = {
-    target: ["01miku/anime-nsfw-segm-yolo26 / NSFW Anime XL", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a"],
+    target: [language === "ja" ? "基本モデル" : "Primary model", ".onnx", ""],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.com/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
@@ -384,8 +385,10 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
-    assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
-    assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
+    if (href) {
+      assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
+      assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
+    } else assert.equal(await page.locator("#modelHelpSource").isVisible(), false, `${key} help hides an unavailable source at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
     if (key === "sensitive") {
       await page.locator("#modelHelpCopy").click();
@@ -418,7 +421,7 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   })), true, `SAM rows remain selectable without overflow at ${width}x${height} (${language})`);
   const allDownload = page.locator('[data-model-download="all"]');
   await allDownload.scrollIntoViewIfNeeded(); await allDownload.click();
-  assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 4, `download confirmation uses four readable rows at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 3, `download confirmation uses three readable rows at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `download confirmation does not overflow at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems a").evaluateAll((links) => links.every((link) => {
     const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link;
@@ -680,7 +683,7 @@ async function main() {
     await cancelResponse;
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
     assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
-    assert.equal(await page.locator("[data-model-download]").count(), 7, "every model and the genital section expose their download action");
+    assert.equal(await page.locator("[data-model-download]").count(), 6, "only downloadable models and the section expose download actions");
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.match(await page.locator("#modelDownloadMessage").textContent(), /NTD11/, "unsupported download identifies the selected model");
@@ -697,17 +700,17 @@ async function main() {
     assert.match(await page.evaluate(() => window.__copiedCommand), /yolo export/, "conversion command copy uses the Clipboard API");
     assert.doesNotMatch(`${await page.locator("#modelDownloadMessage").textContent()} ${await page.locator("#modelDownloadStatus").textContent()}`, /MIT|ライセンスのまま|変換済みONNX|already converted/i, "Sensitive download omits implementation and license rationale");
     await page.locator("#modelDownloadClose").click();
-    await page.locator('[data-model-download="target"]').click();
+    await page.locator('[data-model-download="sam"]').click();
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "individual confirmation has one semantic item");
-    assert.equal(await page.locator("#modelDownloadItems code").textContent(), "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", "individual confirmation shows the full relative destination");
+    assert.equal(await page.locator("#modelDownloadItems code").textContent(), "models\\sam_vit_l_0b3195.pth", "individual confirmation shows the full relative destination");
     assert.match(await page.locator("#modelDownloadSecurity").textContent(), /SHA-256/, "confirmation explains the pinned checksum boundary");
-    const statusesBeforeTargetDownload = settingsStatusRequests.length;
+    const statusesBeforeSamDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
-    await page.waitForFunction(() => document.querySelector("#settingsTargetModel").value.includes("models\\ultralytics\\nsfw-anime-xl-x1280.onnx"));
+    await page.waitForFunction(() => document.querySelector("#settingsSamModel").value.includes("models\\sam_vit_l_0b3195.pth"));
     await page.waitForTimeout(50);
-    assert.equal(settingsStatusRequests.length, statusesBeforeTargetDownload + 1, "a completed download refreshes status once");
-    assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "target", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
+    assert.equal(settingsStatusRequests.length, statusesBeforeSamDownload + 1, "a completed download refreshes status once");
+    assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "sam_vit_l", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="hand_detection"]').click();
@@ -716,7 +719,7 @@ async function main() {
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /fixture download failed/, "download errors remain inside the download modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
-    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 4, "Download all lists four separate models");
+    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 3, "Download all lists three separate models");
     assert.equal(await page.locator("#modelDownloadItems code").allTextContents().then((items) => items.some((item) => item.includes("sam_vit_l_0b3195.pth"))), true, "Download all lists only the selected SAM variant");
     assert.doesNotMatch(await page.locator("#modelDownloadDialog").textContent(), /;\s*models\\/, "Download all does not join destinations with semicolons");
     await page.locator("#modelDownloadStart").click();
@@ -737,7 +740,7 @@ async function main() {
     assert.ok(modelDownloadPolls() >= 2, "download progress is polled while a job is active");
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(true);
-    await page.locator('[data-model-download="target"]').click();
+    await page.locator('[data-model-download="sam"]').click();
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture status unavailable"));
     assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");

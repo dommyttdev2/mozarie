@@ -89,9 +89,9 @@ class ModelDownloadTests(unittest.TestCase):
             manager.start("all", "vit_b")
             while manager.snapshot()["state"] in {"running", "cancelling"}: time.sleep(0.002)
         job = manager.snapshot()
-        self.assertEqual(calls, ["target", "sam_vit_b"])
+        self.assertEqual(calls, ["sam_vit_b", "hand_detection"])
         self.assertEqual(job["state"], "failed")
-        self.assertIn("target_segmentation", job["paths"])
+        self.assertIn("sam_vit_b", job["paths"])
 
     def test_only_manifest_keys_can_start_a_download(self) -> None:
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
@@ -106,7 +106,7 @@ class ModelDownloadTests(unittest.TestCase):
             if manager._cancel.is_set(): raise ModelDownloadCancelled()
             return entry.destination(root)
         with patch.object(manager, "_download", side_effect=blocked_download) as download:
-            manager.start("target", "vit_b")
+            manager.start("sam_vit_b", "vit_b")
             self.assertTrue(entered.wait(1))
             original_cancel = manager._cancel
             manager.cancel()

@@ -404,7 +404,7 @@ function renderModelDownload(job) {
   const expected = Number(job.expected) || 1; const received = Number(job.received) || 0;
   progress.max = expected; progress.value = Math.min(received, expected);
   const labels = {
-    target: t("settings.targetModel"), sam_vit_b: "SAM vit_b", sam_vit_l: "SAM vit_l", sam_vit_h: "SAM vit_h",
+    sam_vit_b: "SAM vit_b", sam_vit_l: "SAM vit_l", sam_vit_h: "SAM vit_h",
     hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"),
   };
   $("#modelDownloadMessage").textContent = job.current ? t("modelDownload.current", { model: labels[job.current] || job.current, completed: job.completed || 0, total: job.total || 1 }) : "";
@@ -440,7 +440,6 @@ function setModelDownloadGuide(command = "") {
 }
 
 const MODEL_DOWNLOAD_INFO = {
-  target: { name: "01miku/anime-nsfw-segm-yolo26 / NSFW Anime XL", target: "models\\ultralytics\\nsfw-anime-xl-x1280.onnx", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/tree/1697d5d1827b6a818b350b44bf3ec27f08837a2a" },
   hand_detection: { name: "deepghs/anime_hand_detection / hand_detect_v1.0_s", target: "models\\ultralytics\\anime-hand-v1.0-s.onnx", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s" },
   hand_segmentation: { name: "HandSegNet anime SDXL", target: "models\\handsegnet\\handsegnet_vit_b_best.safetensors", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a" },
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
@@ -490,7 +489,7 @@ function showUnsupportedModelDownload(key) {
 function modelDownloadConfirmation(key) {
   const samType = selectedSamType();
   const samKey = `sam_${samType}`;
-  const keys = key === "all" ? ["target", samKey, "hand_detection", "hand_segmentation"] : [key === "sam" ? samKey : key];
+  const keys = key === "all" ? [samKey, "hand_detection", "hand_segmentation"] : [key === "sam" ? samKey : key];
   pendingModelDownloadKey = key;
   $("#modelDownloadMessage").textContent = t(key === "all" ? "modelDownload.confirmAll" : "modelDownload.confirmOne");
   renderModelDownloadItems(keys);

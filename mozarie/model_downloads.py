@@ -45,12 +45,6 @@ class ModelDownload:
 # These entries are intentionally fixed rather than resolved from a provider API.
 # A download is accepted only when it matches the recorded size and SHA-256.
 MODEL_DOWNLOADS: dict[str, ModelDownload] = {
-    "target": ModelDownload(
-        "target", "target_segmentation",
-        "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx",
-        "models/ultralytics/nsfw-anime-xl-x1280.onnx", 126350117,
-        "92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a",
-    ),
     "hand_detection": ModelDownload(
         "hand_detection", "hand_detection",
         "https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx",
@@ -104,7 +98,7 @@ class ModelDownloadManager:
 
     def start(self, key: str, sam_type: str) -> dict[str, Any]:
         if key == "all":
-            keys = ["target", _sam_key(sam_type), "hand_detection", "hand_segmentation"]
+            keys = [_sam_key(sam_type), "hand_detection", "hand_segmentation"]
         elif key in MODEL_DOWNLOADS:
             keys = [key]
         else:

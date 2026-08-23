@@ -288,12 +288,12 @@ class MozarieTests(unittest.TestCase):
             with patch.object(http_module, "STATE", state):
                 status, body = request("GET", "/api/model-download")
                 self.assertEqual(status, 200); self.assertEqual(json.loads(body)["state"], "idle")
-                status, _ = request("POST", "/api/model-download/start", {"modelKey": "target", "samType": "vit_b"}, {"Content-Type": "application/json"})
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b"}, {"Content-Type": "application/json"})
                 self.assertEqual(status, 403)
                 headers = {"Content-Type": "application/json", "Origin": origin, "X-Mozarie-Token": state.session_token}
-                status, _ = request("POST", "/api/model-download/start", {"modelKey": "target", "samType": "vit_b", "url": "https://evil.example/model"}, headers)
+                status, _ = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b", "url": "https://evil.example/model"}, headers)
                 self.assertEqual(status, 200)
-                manager.start.assert_called_once_with("target", "vit_b")
+                manager.start.assert_called_once_with("hand_detection", "vit_b")
                 status, _ = request("POST", "/api/model-download/cancel", {}, headers)
                 self.assertEqual(status, 200); manager.cancel.assert_called_once_with()
         finally:
