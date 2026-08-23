@@ -366,6 +366,22 @@ class MozarieTests(unittest.TestCase):
         status = state.settings_status()["models"]["hand_segmentation"]
         self.assertFalse(status["enabled"])
 
+    def test_sam_variant_statuses_are_lightweight_and_distinguish_managed_external_and_mismatch(self):
+        state = self.new_state()
+        managed = self.app_dir / "models" / "sam_vit_b_01ec64.pth"
+        managed.parent.mkdir(); managed.write_bytes(b"b")
+        external = self.app_dir.parent / "external.ckpt"; external.write_bytes(b"l")
+        mismatch = self.app_dir.parent / "sam_vit_l_0b3195.pth"; mismatch.write_bytes(b"h")
+        state.settings["models"]["sam_checkpoints"] = {
+            "vit_b": str(managed), "vit_l": str(external), "vit_h": str(mismatch),
+        }
+        state.settings["models"]["sam_checkpoint"] = str(managed)
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))):
+            variants = state.settings_status()["samVariants"]
+        self.assertTrue(variants["vit_b"]["valid"]); self.assertTrue(variants["vit_b"]["managed"])
+        self.assertTrue(variants["vit_l"]["valid"]); self.assertFalse(variants["vit_l"]["managed"])
+        self.assertFalse(variants["vit_h"]["valid"]); self.assertEqual(variants["vit_h"]["reasonCode"], "type_mismatch")
+
     def test_import_transfer_blocks_catalog_mutation_while_http_body_is_pending(self):
         from http.server import ThreadingHTTPServer
 

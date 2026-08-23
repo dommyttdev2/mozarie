@@ -123,7 +123,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
                 "hand_detection", "hand_detection_enabled", "provider", "gpu_device",
             }
-            sam_keys = {"sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
+            sam_keys = {"sam_checkpoints", "sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
                 self.models = None
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
@@ -212,6 +212,41 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             required_suffix=".safetensors",
         )
         add_status("sam_checkpoint", required=True, enabled=True)
+        sam_files = {
+            "vit_b": "sam_vit_b_01ec64.pth",
+            "vit_l": "sam_vit_l_0b3195.pth",
+            "vit_h": "sam_vit_h_4b8939.pth",
+        }
+        sam_variants: dict[str, dict[str, Any]] = {}
+        app_dir = self.settings_store.defaults_path.parent.parent.resolve()
+        for variant, filename in sam_files.items():
+            raw = str(models.get("sam_checkpoints", {}).get(variant, "")).strip()
+            path = Path(raw).expanduser() if raw else None
+            exists = bool(path and path.is_file())
+            suffix_valid = bool(path and path.suffix.lower() in {".pth", ".pt", ".ckpt"})
+            known_match = None
+            if path:
+                known_match = next((key for key, known in sam_files.items() if path.name.lower() == known.lower()), None)
+            mismatch = known_match is not None and known_match != variant
+            managed_path = (app_dir / "models" / filename).resolve()
+            managed = bool(path and path.resolve() == managed_path)
+            reason_code = None
+            if not raw:
+                reason_code = "not_configured"
+            elif not exists:
+                reason_code = "missing"
+            elif not suffix_valid:
+                reason_code = "invalid_format"
+            elif mismatch:
+                reason_code = "type_mismatch"
+            sam_variants[variant] = {
+                "path": raw,
+                "configured": bool(raw),
+                "exists": exists,
+                "valid": exists and suffix_valid and not mismatch,
+                "managed": managed,
+                "reasonCode": reason_code,
+            }
         torch = torch_module()
         gpus = cuda_device_statuses(torch)
         selected_gpu = next((gpu for gpu in gpus if gpu["id"] == models.get("gpu_device", 0)), None)
@@ -220,6 +255,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             "models": result,
             "provider": models["provider"],
             "samModelType": models["sam_model_type"],
+            "samVariants": sam_variants,
             "gpus": gpus,
             "gpuDevice": models.get("gpu_device", 0),
             "gpuDeviceValid": gpu_device_valid,

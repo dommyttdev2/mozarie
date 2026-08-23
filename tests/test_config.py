@@ -122,6 +122,27 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(reset["saving"]["default_output_directory"], str((root / "output").resolve()))
             self.assertFalse((root / "config" / "local.json").exists())
 
+    def test_legacy_sam_path_moves_to_its_named_variant_and_new_saves_use_the_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = root / "config"; config.mkdir()
+            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
+            legacy_path = r"C:\models\sam_vit_l_0b3195.pth"
+            (config / "local.json").write_text(json.dumps({"models": {"sam_checkpoint": legacy_path, "sam_model_type": "vit_b"}}), encoding="utf-8")
+            store = SettingsStore(root)
+
+            loaded = store.load()
+            self.assertEqual(loaded["models"]["sam_model_type"], "vit_l")
+            self.assertEqual(loaded["models"]["sam_checkpoints"]["vit_l"], legacy_path)
+            self.assertEqual(loaded["models"]["sam_checkpoint"], legacy_path)
+
+            loaded["models"]["sam_checkpoints"]["vit_h"] = r"D:\models\sam_vit_h_4b8939.pth"
+            loaded["models"]["sam_model_type"] = "vit_h"
+            saved = store.save(loaded)
+            persisted = json.loads((config / "local.json").read_text(encoding="utf-8"))
+            self.assertNotIn("sam_checkpoint", persisted["models"])
+            self.assertEqual(saved["models"]["sam_checkpoint"], r"D:\models\sam_vit_h_4b8939.pth")
+
     def test_invalid_provider_and_threshold_are_rejected(self):
         valid = {
             "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
