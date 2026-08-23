@@ -331,6 +331,67 @@ async function chooseSettingsModelFile(button) {
   }
 }
 
+let modelDownloadPoll = null;
+
+function modelDownloadInput(settingKey) {
+  return {
+    target_segmentation: "#settingsTargetModel", sam_checkpoint: "#settingsSamModel",
+    hand_detection: "#settingsHandModel", hand_segmentation: "#settingsHandSegmentationModel",
+  }[settingKey];
+}
+
+function renderModelDownload(job) {
+  const progress = $("#modelDownloadProgress"); const status = $("#modelDownloadStatus");
+  const expected = Number(job.expected) || 1; const received = Number(job.received) || 0;
+  progress.max = expected; progress.value = Math.min(received, expected);
+  const labels = {
+    target: t("settings.targetModel"), sam_vit_b: "SAM vit_b", sam_vit_l: "SAM vit_l", sam_vit_h: "SAM vit_h",
+    hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"),
+  };
+  $("#modelDownloadMessage").textContent = job.current ? t("modelDownload.current", { model: labels[job.current] || job.current, completed: job.completed || 0, total: job.total || 1 }) : "";
+  if (job.state === "failed") { status.textContent = job.error || t("modelDownload.failed"); status.classList.add("error"); }
+  else if (job.state === "cancelled") { status.textContent = t("modelDownload.cancelled"); status.classList.remove("error"); }
+  else if (job.state === "complete") { status.textContent = t("modelDownload.complete"); status.classList.remove("error"); }
+  else { status.textContent = ""; status.classList.remove("error"); }
+  $("#modelDownloadCancel").hidden = !["running", "cancelling"].includes(job.state);
+  $("#modelDownloadClose").disabled = ["running", "cancelling"].includes(job.state);
+  for (const [settingKey, path] of Object.entries(job.paths || {})) {
+    const selector = modelDownloadInput(settingKey); if (selector) $(selector).value = path;
+  }
+  if (["complete", "failed", "cancelled", "idle"].includes(job.state) && modelDownloadPoll) {
+    clearInterval(modelDownloadPoll); modelDownloadPoll = null;
+  }
+}
+
+async function refreshModelDownload() {
+  try { renderModelDownload(await api("/api/model-download")); } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+}
+
+function showUnsupportedModelDownload(key) {
+  const source = key === "ntd11" ? "NTD11" : "Sensitive";
+  $("#modelDownloadMessage").textContent = t("modelDownload.unsupported", { model: source });
+  $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
+  $("#modelDownloadStatus").textContent = t("modelDownload.unsupportedSource", { source: "GitHub / Hugging Face" });
+  $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
+  $("#modelDownloadDialog").showModal();
+}
+
+async function startModelDownload(key) {
+  if (key === "ntd11" || key === "sensitive") return showUnsupportedModelDownload(key);
+  $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
+  $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
+  $("#modelDownloadDialog").showModal();
+  try {
+    const modelKey = key === "sam" ? `sam_${$("#settingsSamType").value}` : key;
+    renderModelDownload(await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: $("#settingsSamType").value }) }));
+    if (!modelDownloadPoll) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
+  } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+}
+
+async function cancelModelDownload() {
+  try { renderModelDownload(await api("/api/model-download/cancel", { method: "POST", body: JSON.stringify({}) })); } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+}
+
 async function refreshSettingsStatus() {
   const button = $("#settingsStatusButton"); const result = $("#settingsStatusResult");
   button.disabled = true; button.textContent = t("settings.statusChecking"); result.textContent = t("settings.statusChecking"); result.classList.remove("error");

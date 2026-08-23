@@ -28,6 +28,10 @@ function bindEvents() {
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
   $("#settingsChooseOutputDirectory").addEventListener("click", () => { void chooseSettingsOutputDirectory(); });
   document.querySelectorAll("[data-model-picker]").forEach((button) => button.addEventListener("click", () => { void chooseSettingsModelFile(button); }));
+  document.querySelectorAll("[data-model-download]").forEach((button) => button.addEventListener("click", () => { void startModelDownload(button.dataset.modelDownload); }));
+  $("#modelDownloadCancel").addEventListener("click", () => { void cancelModelDownload(); });
+  $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
+  $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
   $("#settingsStatusButton").addEventListener("click", () => { void refreshSettingsStatus(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
   $("#checkUpdateButton").addEventListener("click", () => { void startUpdate(); });

@@ -11,6 +11,7 @@ from .catalog import CatalogMixin
 from .saving import SavingMixin
 from .detection import DetectionMixin
 from .jobs import JobsMixin
+from .model_downloads import ModelDownloadManager
 
 
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
@@ -82,6 +83,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # Windows native dialogs are process-modal. Keep folder and model
         # pickers mutually exclusive without blocking unrelated work.
         self.native_picker_lock = threading.Lock()
+        self.model_downloads = ModelDownloadManager(APP_DIR)
         self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()

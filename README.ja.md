@@ -28,17 +28,18 @@ Mozarieは、複数画像のモザイク範囲をローカルで確認・編集�
    .\run.bat
    ```
 
-5. **設定 > 検出**で、ダウンロードした各ファイルを**参照**から指定します。画像を読み込み、自動検出、候補確認、必要な修正を行って保存します。
+5. **設定 > 検出**で、対応モデルは見出し横の**ダウンロード**、手元にあるファイルは**参照**から指定します。画像を読み込み、自動検出、候補確認、必要な修正を行って保存します。
 
-Mozarieはモデルを同梱・自動ダウンロードしません。利用前に各配布元の利用条件を確認してください。
+ダウンロードは利用者が操作したときだけ実行します。対応モデルはプロジェクトの`Mozarie\models\`へ保存し、ダウンロード時に固定したサイズとSHA-256を確認してから利用可能にします。起動時や検出時にハッシュを再確認することはありません。
 
 ## モデルのダウンロード
 
 | 機能 | 指定するファイル | ダウンロード / 配布元 |
 | --- | --- | --- |
-| 必須: 性器の自動検出 | `nsfw-anime-xl-x1280.onnx` | [ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · [モデルページ](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) |
-| 任意: 輪郭補正・境界ツール・手の除外 | `sam_vit_b_01ec64.pth`、`sam_vit_l_0b3195.pth`、`sam_vit_h_4b8939.pth` | [公式SAMチェックポイント](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
-| 任意: HandSegNetの手輪郭 | `handsegnet_vit_b_best.safetensors` | [固定チェックポイント](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors) · [モデルページ](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
+| 必須: 性器の自動検出 | `nsfw-anime-xl-x1280.onnx` | Mozarieでダウンロード、または[固定配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)から取得。保存先: `Mozarie\models\nsfw-anime-xl-x1280.onnx` |
+| 任意: 輪郭補正・境界ツール・手の除外 | `sam_vit_b_01ec64.pth`、`sam_vit_l_0b3195.pth`、`sam_vit_h_4b8939.pth` | 選択中の種類をMozarieでダウンロード、または[公式SAMチェックポイント](https://github.com/facebookresearch/segment-anything#model-checkpoints)から取得。保存先: `Mozarie\models\` |
+| 任意: アニメ手検出 | `hand_detect_v1.0_s.onnx` | Mozarieでダウンロード、または[固定配布元](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx)から取得。保存先: `Mozarie\models\hand_detect_v1.0_s.onnx` |
+| 任意: HandSegNetの手輪郭 | `handsegnet_vit_b_best.safetensors` | Mozarieでダウンロード、または[固定配布元](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors)から取得。保存先: `Mozarie\models\handsegnet_vit_b_best.safetensors` |
 
 SAMは設定で選んだ`vit_b`、`vit_l`、`vit_h`と同じ種類のファイルを指定してください。HandSegNetは任意で、手の検出をONにした場合だけ使えます。
 
