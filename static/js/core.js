@@ -13,7 +13,7 @@ const state = {
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null,
+  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false,
   outputDirectoryPicking: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
@@ -487,15 +487,6 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
       if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
       const active = enabled.length > 0 && enabled.every(Boolean);
       button.textContent = t(active ? "settings.on" : "settings.off");
-      button.setAttribute("aria-pressed", String(active));
-    }
-    if (operation === "blink") {
-      const ids = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.id);
-      if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
-      if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
-      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) ids.push("manual:excludeErase");
-      const active = ids.length > 0 && ids.every((id) => state.blinkCandidateIds.has(id));
-      button.textContent = t("candidates.blinkState", { state: t(active ? "settings.on" : "settings.off") });
       button.setAttribute("aria-pressed", String(active));
     }
   }

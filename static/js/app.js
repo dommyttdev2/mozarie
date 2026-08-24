@@ -220,8 +220,8 @@ function bindEvents() {
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
     const record = currentRecord(); const size = calculatedBlockSize(record);
-    $("#mosaicHelpFormula").textContent = `Mozarie: max(4, ceil(長辺 / ${mosaicDivisor()}))`;
-    $("#mosaicHelpBlock").textContent = record ? `この画像: ${size} × ${size} px` : "画像を選択するとブロック寸法を表示します。";
+    $("#mosaicHelpFormula").textContent = t("mosaicHelp.formula", { divisor: mosaicDivisor() });
+    $("#mosaicHelpBlock").textContent = record ? t("mosaicHelp.block", { size }) : t("mosaicHelp.empty");
     $("#mosaicHelpDialog").showModal();
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());

@@ -37,6 +37,7 @@ function syncApplyMode() {
   $("#deleteOriginalRow").hidden = !copying;
   $("#applyOutputDirectoryRow").hidden = !copying;
   $("#applySuffix").disabled = state.applyRunning;
+  $("#applyTargetMode").disabled = state.applyRunning || state.saveStarting;
   $("#chooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
   $("#applyOutputDirectoryStatus").value = state.settings?.saving?.default_output_directory || "";
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
@@ -52,7 +53,7 @@ function syncApplyMode() {
     : (!canDelete ? t("apply.deleteUnavailable", { count: state.applyTargetIds.filter((imageId) => !sourceCanDelete(state.images.find((image) => image.id === imageId))).length }) : "");
   $("#applyTemporarySourceNote").textContent = restriction || capabilityNote || t("apply.handleSource");
   $("#applyTemporarySourceNote").hidden = !restriction && !capabilityNote;
-  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning;
+  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning || state.saveStarting || state.applyTargetIds.length === 0;
 }
 
 function refreshApplyTargets() {

@@ -71,16 +71,14 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .candidate-section { display: flex; flex: 1 1 0; min-height: 94px; flex-direction: column; border-top: 1px solid #363c43; }
 .candidate-section h3 { margin: 0; padding: 9px 10px 7px; font-size: 13px; font-weight: 600; color: #d8dde3; }
 .candidate-list { flex: 1 1 auto; min-height: 0; padding: 0 9px 9px; overflow: auto; } .candidate-empty { margin: 3px 0; color: #98a2ad; }
-.candidate-row { display: grid; grid-template-columns: 36px 26px minmax(0, 1fr) 28px; gap: 8px; align-items: center; min-height: 37px; padding: 6px 0; border-bottom: 1px solid #363c43; }
+.candidate-row { display: grid; grid-template-columns: 34px 72px minmax(0, 1fr) 28px; gap: 4px; align-items: center; min-height: 37px; padding: 6px 0; border-bottom: 1px solid #363c43; }
 .candidate-row.enabled { background: #193c31; }
-.candidate-row-exclude, .candidate-row-manual-exclude { grid-template-columns: 36px 26px minmax(0, 1fr) auto 28px; }
+.candidate-row-exclude, .candidate-row-manual-exclude { grid-template-columns: 34px 72px minmax(0, 1fr) 54px 28px; }
 .candidate-toggle { min-width: 36px; min-height: 25px; padding: 2px 4px; color: #9ba6ae; font-size: 11px; }
 .candidate-toggle[aria-pressed="true"] { border-color: #42a98f; background: #235242; color: #e2fff3; }
 .candidate-forced { min-height: 25px; padding: 2px 5px; color: #9ee5f2; font-size: 11px; white-space: nowrap; }
 .candidate-forced[aria-pressed="true"] { border-color: #347f95; background: #173641; }
-.candidate-blink { width: 26px; height: 26px; padding: 0; color: #d3d8de; }
-.candidate-blink.active.apply { color: #ff7575; border-color: #bf4b4b; background: #43272a; }
-.candidate-blink.active.exclude { color: #6bdbf3; border-color: #347f95; background: #173641; }
+.candidate-display { width: 72px; min-width: 72px; height: 26px; padding: 1px 3px; font-size: 11px; }
 .candidate-row.blink-apply { animation: candidate-blink-apply 0.32s steps(2, jump-none) infinite; }
 .candidate-row.blink-exclude { animation: candidate-blink-exclude 0.32s steps(2, jump-none) infinite; }
 @keyframes candidate-blink-apply { 50% { background: rgba(238, 78, 78, 0.30); } }

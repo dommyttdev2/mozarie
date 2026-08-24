@@ -329,6 +329,7 @@ function saveDraft() {
     exclusionErase: hasExclusionErase ? exclusionEraseCanvas.toDataURL("image/png") : "",
     manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled, manualMaskPresent: state.manualMaskPresent,
     manualExclusionForced: state.manualExclusionForced,
+    candidateRevision: Number(currentRecord()?.candidateRevision || 0),
     visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
     removedCandidateIds: [...state.removedCandidateIds],
     history: state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })),
@@ -351,7 +352,8 @@ function restoreDraft(imageId, generation) {
   state.manualExclusionEraseEnabled = draft?.manualExclusionEraseEnabled !== false;
   state.manualExclusionForced = draft?.manualExclusionForced ?? draft?.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false);
   state.manualMaskPresent = false;
-  state.removedCandidateIds = new Set(draft?.removedCandidateIds || []);
+  const candidateRevisionMatches = !draft || Number(draft.candidateRevision) === Number(currentRecord()?.candidateRevision || 0);
+  state.removedCandidateIds = new Set(candidateRevisionMatches ? (draft?.removedCandidateIds || []) : []);
   if (!draft) { resetHistoryToCurrentManualMask(); updateCandidateStatus(); renderCandidates(); return; }
   const addImagePromise = draft.add ? loadImage(draft.add) : Promise.resolve(null);
   const exclusionImagePromise = draft.exclusion ? loadImage(draft.exclusion) : Promise.resolve(null);
@@ -373,13 +375,16 @@ function restoreDraft(imageId, generation) {
       if (historyAddImage) historyAddCanvas.getContext("2d").drawImage(historyAddImage, 0, 0);
       if (historyExclusionImage) historyExclusionCanvas.getContext("2d").drawImage(historyExclusionImage, 0, 0);
       if (historyExclusionEraseImage) historyExclusionEraseCanvas.getContext("2d").drawImage(historyExclusionEraseImage, 0, 0);
-      state.history = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
-      state.historyRemovedCandidateIds = new Set(draft.historyBase.removedCandidateIds || []);
-      state.historyCandidateIds = new Set(draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id));
-      state.historyIndex = Math.max(0, Math.min(state.history.length, Number(draft.historyIndex) || 0));
+      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
+      const candidateOperation = (stroke) => ["removeCandidates", "restoreCandidates", "addCandidates"].includes(stroke.kind);
+      state.history = candidateRevisionMatches ? originalHistory : originalHistory.filter((stroke) => !candidateOperation(stroke));
+      state.historyRemovedCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.removedCandidateIds || []) : []);
+      state.historyCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id)) : state.candidates.map((candidate) => candidate.id));
+      const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
+      state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
       rebuildManualMaskFromHistory(); updateHistoryButtons();
     } else resetHistoryToCurrentManualMask();
-    refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
+    refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   });
 }
 
@@ -426,6 +431,12 @@ function rebuildMosaicPreview() {
   };
   worker.onerror = () => { worker.terminate(); if (state.mosaicWorker === worker) state.mosaicWorker = null; };
   worker.postMessage({ source: source.data.buffer, mask: mask.buffer, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation }, [source.data.buffer, mask.buffer]);
+}
+
+function requestMosaicPreview() {
+  if (!state.currentImage || state.mosaicPreviewRequested) return;
+  state.mosaicPreviewRequested = true;
+  requestAnimationFrame(() => { state.mosaicPreviewRequested = false; rebuildMosaicPreview(); });
 }
 
 function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId = "") {

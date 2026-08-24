@@ -26,8 +26,9 @@ function renderCandidates() {
   };
   const makeDisplay = (id, role) => {
     const select = document.createElement("select"); select.className = "candidate-display";
-    const modes = role === "apply" ? [["off", "停止"], ["normal", "点滅"], ["effective", "除外反映"]] : [["off", "停止"], ["normal", "点滅"]];
-    for (const [value, label] of modes) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); }
+    const modes = role === "apply" ? [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"], ["effective", "candidates.displayEffective"]] : [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"]];
+    select.setAttribute("aria-label", t("candidates.display"));
+    for (const [value, label] of modes) { const option = document.createElement("option"); option.value = value; option.textContent = t(label); select.append(option); }
     select.value = state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
     select.addEventListener("change", () => { if (select.value === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); } else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, select.value); } renderCandidates(); render(); });
     return select;
@@ -44,7 +45,7 @@ function renderCandidates() {
       if (isApply) state.manualEnabled = !state.manualEnabled; else state.manualExclusionEnabled = !state.manualExclusionEnabled;
       markMaskDirty();
       setReviewed(currentRecord(), false);
-      refreshCurrentReviewAndMask(); renderCandidates(); render();
+      refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     });
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId, role);
@@ -58,7 +59,7 @@ function renderCandidates() {
       const forced = makeForceToggle(state.manualExclusionForced, () => {
         if (isBusy() || state.importing) return;
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
-        setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
+        setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       });
       row.append(enabled, blink, label, forced, remove);
     } else row.append(enabled, blink, label, remove);
@@ -74,7 +75,7 @@ function renderCandidates() {
     const enabled = makeToggle(state.manualExclusionEraseEnabled, t("candidates.manualExcludeEraseToggle"), () => {
       if (isBusy() || state.importing) return;
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
-      setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
+      setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     });
     const blink = makeDisplay(blinkId, "exclude");
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
@@ -97,7 +98,7 @@ function renderCandidates() {
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
       candidate.enabled = !candidate.enabled;
       setReviewed(currentRecord(), false);
-      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
+      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     }, deleting || state.candidateBatchPending.has(state.currentId));
     const blink = makeDisplay(candidate.id, role);
     const label = document.createElement("span"); label.className = "candidate-label";
@@ -115,7 +116,7 @@ function renderCandidates() {
         const previousForced = candidate.forced !== false;
         const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
         candidate.forced = !previousForced; setReviewed(currentRecord(), false);
-        syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render();
+        syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
       row.append(enabled, blink, label, forced, remove);
@@ -174,7 +175,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
         if (currentCandidate) { currentCandidate.enabled = desired; currentCandidate.forced = desiredForced; }
         retainCurrentCandidateBundle(imageId, result.candidateRevision);
-        syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
+        syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
       } else {
         try { await refreshCandidateRecord(imageId, true); } catch { /* Keep the optimistic aggregate until a later refresh. */ }
         renderCatalogViews();
@@ -189,7 +190,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
           }
         } catch {
           if (state.currentId === imageId && isCurrentGeneration(generation)) {
-            candidate.enabled = previousEnabled; candidate.forced = previousForced; syncCurrentCandidateRecord(); refreshMaskStatus(true); renderCandidates(); render();
+            candidate.enabled = previousEnabled; candidate.forced = previousForced; syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
             setStatus(error.message, "error");
             return;
           }
@@ -212,7 +213,7 @@ async function deleteCandidate(candidate) {
   if (confirmationRequired("candidateDelete") && !await confirmAction(t("confirm.candidateDelete.title"), t("confirm.candidateDelete.message"), "candidateDelete")) return;
   state.removedCandidateIds.add(candidate.id);
   recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] });
-  markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+  markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
 }
 
 function deleteManualMask() {
@@ -221,7 +222,7 @@ function deleteManualMask() {
   state.manualMaskPresent = false; state.manualEnabled = true;
   state.blinkCandidateIds.delete("manual:apply");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); rebuildMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); requestMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusion() {
@@ -230,7 +231,7 @@ function deleteManualExclusion() {
   state.manualExclusionEnabled = true;
   state.blinkCandidateIds.delete("manual:exclude");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); rebuildMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusionErase() {
@@ -239,7 +240,7 @@ function deleteManualExclusionErase() {
   state.manualExclusionEraseEnabled = true;
   state.blinkCandidateIds.delete("manual:excludeErase");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); rebuildMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function shouldBlinkNewManual(role) {
@@ -254,14 +255,6 @@ async function batchCandidateOperation(spec) {
   let [role, operation] = spec.split(":");
   const manual = role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas);
   const manualErase = role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
-  if (operation === "blink") {
-    const ids = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id)).map((item) => item.id);
-    if (manual) ids.push(`manual:${role}`);
-    if (manualErase) ids.push("manual:excludeErase");
-    const allActive = ids.length && ids.every((id) => state.blinkCandidateIds.has(id));
-    ids.forEach((id) => allActive ? state.blinkCandidateIds.delete(id) : state.blinkCandidateIds.add(id));
-    renderCandidates(); render(); return;
-  }
   if (operation === "toggle") {
     const enabled = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id)).map((item) => item.enabled);
     if (manual) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
@@ -275,7 +268,7 @@ async function batchCandidateOperation(spec) {
     const ids = changed.map((item) => item.id);
     ids.forEach((id) => state.removedCandidateIds.add(id));
     if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids });
-    markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+    markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
     return;
   }
   state.candidateBatchPending.add(imageId);
@@ -301,7 +294,7 @@ async function batchCandidateOperation(spec) {
         if (manualErase) { state.manualExclusionEraseEnabled = operation === "enable"; markMaskDirty(); }
       }
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
-      setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+      setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     } catch (error) {
       if (state.currentId === imageId && isCurrentGeneration(generation)) setStatus(error.message, "error");
     } finally {
@@ -454,7 +447,7 @@ function fillAt(point, tool = state.tool) {
   const apply = (spans) => {
     if (!catalogRecordMatches(record, epoch, { version, revision }) || !isCurrentGeneration(generation) || state.currentId !== imageId) { state.fillPending = false; return; }
     applyFillSpans(spans, tool); state.history.splice(state.historyIndex); state.history.push({ tool, spans }); trimHistory();
-    state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+    state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
   };
   if (typeof Worker !== "function") { setStatus(t("error.requestFailed"), "error"); return; }
   state.fillWorker?.terminate?.(); state.fillPending = true;
@@ -522,7 +515,11 @@ function replayManualStroke(stroke, addContext = addCtx, exclusionContext = excl
 function historyWeight(stroke) { return stroke.spans?.byteLength || (stroke.spans?.length || 0) * 4 || (stroke.points?.length || 0) * 16; }
 function trimHistory() {
   while (state.history.length > 12 || state.history.reduce((total, stroke) => total + historyWeight(stroke), 0) > 64 * 1024 * 1024) {
-    replayManualStroke(state.history.shift(), historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"), historyExclusionEraseCanvas.getContext("2d"));
+    const operation = state.history.shift();
+    replayManualStroke(operation, historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"), historyExclusionEraseCanvas.getContext("2d"));
+    if (operation.kind === "removeCandidates") operation.ids.forEach((id) => state.historyRemovedCandidateIds.add(id));
+    if (operation.kind === "restoreCandidates") operation.ids.forEach((id) => state.historyRemovedCandidateIds.delete(id));
+    if (operation.kind === "addCandidates") operation.ids.forEach((id) => { state.historyCandidateIds.add(id); state.historyRemovedCandidateIds.delete(id); });
   }
 }
 
@@ -555,7 +552,7 @@ function completeManualStroke() {
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); rebuildMosaicPreview(); renderCandidates();
+  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates();
 }
 
 function restoreSnapshot(index) {
@@ -563,7 +560,7 @@ function restoreSnapshot(index) {
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); rebuildMosaicPreview(); renderCandidates(); render();
+  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
 }
 
 function buildCombinedMask() {

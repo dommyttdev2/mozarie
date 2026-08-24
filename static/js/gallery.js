@@ -182,7 +182,10 @@ function renderOverview(force = false) {
     item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
     item.querySelector(".overview-review-badge").textContent = isReviewed(image) ? t("review.reviewedBadge") : "";
     item.title = image.relativePath;
-    item.setAttribute("aria-label", image.relativePath);
+    const states = [image.relativePath];
+    if (isReviewed(image)) states.push(t("overview.stateReviewed"));
+    if (imageHasMask(image)) states.push(t("overview.stateMasked"));
+    item.setAttribute("aria-label", states.join("、"));
     item.onclick = (event) => selectOverviewImage(image.id, event);
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     grid.append(item);

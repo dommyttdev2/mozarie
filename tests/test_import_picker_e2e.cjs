@@ -929,7 +929,7 @@ async function main() {
       state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
       state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
       state.blinkCandidateIds = new Set(); renderCandidates();
-      document.querySelector('[data-candidate-batch="apply:blink"]').click();
+      const display = document.querySelector('[data-candidate-display="apply"]'); display.value = "normal"; display.dispatchEvent(new Event("change", { bubbles: true }));
       beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
       const row = document.querySelector(".candidate-row-manual-apply");
       const result = {
