@@ -13,8 +13,8 @@ function setDetectionTargets(targets, prefix = "detectTarget") {
 }
 
 function syncDetectionTargetSwitch(input) {
-  const label = input.closest(".target-switch");
-  label?.classList.toggle("is-on", input.checked);
+  const label = input.closest(".target-chip");
+  label?.classList.toggle("is-selected", input.checked);
 }
 
 function validateDetectionTargets(targetClasses, target = null) {

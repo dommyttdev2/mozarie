@@ -192,7 +192,7 @@ function bindEvents() {
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
   $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
   $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
-  document.querySelectorAll(".target-switch input").forEach((input) => input.addEventListener("change", () => {
+  document.querySelectorAll(".target-chip input").forEach((input) => input.addEventListener("change", () => {
     syncDetectionTargetSwitch(input);
     if (input.id.startsWith("dialog")) validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
     else validateDetectionTargets(detectionTargets(), $("#detectionTargetValidation"));

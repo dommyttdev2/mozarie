@@ -120,8 +120,8 @@
         <h2 data-i18n="detection.title">検出設定</h2>
         <fieldset class="target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
           <legend data-i18n="detection.targets">対象</legend>
-          <label class="target-switch"><span>penis</span><input id="detectTargetPenis" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
-          <label class="target-switch"><span>pussy</span><input id="detectTargetPussy" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+          <label class="target-chip"><input id="detectTargetPenis" type="checkbox" checked><span>penis</span></label>
+          <label class="target-chip"><input id="detectTargetPussy" type="checkbox" checked><span>pussy</span></label>
         </fieldset>
         <p id="detectionTargetValidation" class="target-validation" role="alert" hidden></p>
         <label class="threshold-control" for="confidence">
@@ -220,8 +220,8 @@
        </label>
       <fieldset class="target-choices dialog-target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
         <legend data-i18n="detection.targets">対象</legend>
-        <label class="target-switch"><span>penis</span><input id="dialogTargetPenis" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
-        <label class="target-switch"><span>pussy</span><input id="dialogTargetPussy" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+        <label class="target-chip"><input id="dialogTargetPenis" type="checkbox" checked><span>penis</span></label>
+        <label class="target-chip"><input id="dialogTargetPussy" type="checkbox" checked><span>pussy</span></label>
       </fieldset>
        <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>

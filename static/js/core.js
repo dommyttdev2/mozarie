@@ -103,7 +103,7 @@ async function loadTranslations(languageOverride = null) {
   if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
   renderModelStatus();
   renderLocalizedDynamicState();
-  document.querySelectorAll(".target-switch input").forEach((input) => syncDetectionTargetSwitch(input));
+  document.querySelectorAll(".target-chip input").forEach((input) => syncDetectionTargetSwitch(input));
   updateBoundaryActions();
   renderCatalogViews(); renderCandidates(); render();
   return true;
