@@ -28,7 +28,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
-  if (state.currentId !== imageId) { state.blinkCandidateIds.clear(); state.blinkModes.clear(); }
+  if (state.currentId !== imageId) clearCandidateBlink();
   cancelFillWork();
   abortCatalogLoads();
   const generation = ++state.imageGeneration;
@@ -803,7 +803,7 @@ function drawPolygonBoundary() {
 }
 
 function drawCandidateBlinkOverlay() {
-  if (!state.blinkCandidateIds.size || !state.currentImage || performance.now() % 400 > 200) return;
+  if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
   blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };

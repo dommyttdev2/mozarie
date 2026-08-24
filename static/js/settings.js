@@ -320,6 +320,9 @@ async function openSettings() {
 async function saveSettings(event) {
   event.preventDefault();
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
+  if (!validateDetectionTargets(detectionTargets())) {
+    result.textContent = t("error.detectionTargetsRequired"); result.classList.add("error"); return;
+  }
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;

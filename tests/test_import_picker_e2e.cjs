@@ -275,15 +275,15 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    const logo = box(".brand-logo"); const brand = box(".brand"); const appbar = box(".appbar");
-    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, brand, logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
+    const logo = box(".brand-logo"); const appbar = box(".appbar");
+    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, noBrandText: !document.querySelector(".brand"), logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
   if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.top && appbar.status.bottom <= appbar.appbar.bottom, `status stays in the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
   assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
   assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
-  assert.ok(appbar.logo.left < appbar.brand.left && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, `brand logo stays immediately left of the app name at ${width}x${height}`);
+  assert.equal(appbar.noBrandText && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, true, `header uses only the logo at ${width}x${height}`);
   await page.locator("#mosaicHelpButton").focus();
   assert.equal(await page.locator("#mosaicHelpButton").evaluate((button) => document.activeElement === button), true, `mosaic help accepts keyboard focus at ${width}x${height}`);
   if (width >= 1280) {
@@ -370,11 +370,12 @@ async function assertConnectionStatusLayout(page, width, height, language) {
       settingsHit: document.elementFromPoint(settings.x + settings.width / 2, settings.y + settings.height / 2) === document.querySelector("#settingsButton"),
       connectionHidden: document.querySelector("#connectionStatus").hidden,
       parentIsAppbar: document.querySelector("#connectionStatus").parentElement === document.querySelector(".appbar"),
+      rightAligned: getComputedStyle(document.querySelector("#connectionStatus")).textAlign === "right",
       ...dimensions,
     };
   });
   assert.equal(layout.connectionHidden, false, `connection status is visible at ${width}x${height} (${language})`);
-  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit, true, `connection status stays in the header and settings stays clickable at ${width}x${height} (${language})`);
+  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit && layout.rightAligned, true, `connection status stays right-aligned in the header and settings stays clickable at ${width}x${height} (${language})`);
   assert.ok(layout.gap >= 0 && layout.gap <= 10, `connection status sits immediately left of settings at ${width}x${height} (${language})`);
   assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
 
@@ -989,7 +990,7 @@ async function main() {
       const row = document.querySelector(".candidate-row-manual-apply");
       const result = {
         manualBlink: state.blinkCandidateIds.has("manual:apply"),
-        rowBlinking: row?.classList.contains("blink-apply"),
+        rowBlinking: row?.classList.contains("blink-selected"),
       };
       state.candidates = candidates; state.candidateImages = candidateImages; state.blinkCandidateIds = blinkCandidateIds; state.tool = tool;
       deleteManualMask(); renderCandidates();
@@ -1383,8 +1384,9 @@ async function main() {
         const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions > button")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, text: node.textContent }; });
         const candidateOverflow = [...document.querySelectorAll(".candidate-section-actions, .candidate-row")].some((node) => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight);
         const candidateHit = [...document.querySelectorAll(".candidate-section-actions > button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); });
+        const targetChoices = document.querySelector(".candidate-pane .target-choices"); const targetPane = document.querySelector(".candidate-pane"); const targetBounds = targetChoices.getBoundingClientRect(); const paneBounds = targetPane.getBoundingClientRect(); const targetInputs = [...targetChoices.querySelectorAll('input[role="switch"]')];
         const blockHeading = document.querySelector(".block-control-heading"); const blockLabel = blockHeading.querySelector('label[for="divisor"]'); const blockHelp = document.querySelector("#mosaicHelpButton"); const headingBox = blockHeading.getBoundingClientRect(); const labelBox = blockLabel.getBoundingClientRect(); const helpBox = blockHelp.getBoundingClientRect();
-        return { toolbar, stage, controls, candidateOverflow, candidateHit, overviewAll: document.querySelector('[data-overview-filter="all"]').textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, targets: { count: targetInputs.length, roles: targetInputs.every((input) => input.getAttribute("role") === "switch"), oneLine: new Set([...targetChoices.querySelectorAll(".target-switch")].map((item) => Math.round(item.getBoundingClientRect().top))).size === 1, withinPane: targetBounds.left >= paneBounds.left && targetBounds.right <= paneBounds.right, tracks: [...targetChoices.querySelectorAll(".target-switch-track")].every((track) => { const rect = track.getBoundingClientRect(); return Math.round(rect.width) === 30 && Math.round(rect.height) === 16; }) }, overviewAll: document.querySelector('[data-overview-filter="all"]').textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
       });
       assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
@@ -1398,12 +1400,14 @@ async function main() {
       assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "表示" : "Show")).length, 2, `both candidate sections expose a display button at ${width}/${language}`);
       assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
       assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
+      assert.equal(editor.targets.count === 2 && editor.targets.roles && editor.targets.oneLine && editor.targets.withinPane && editor.targets.tracks, true, `target switches stay compact and aligned at ${width}/${language}`);
       await page.locator("#mosaicHelpButton").click();
       const mosaicHelp = await page.locator("#mosaicHelpDialog").evaluate((dialog) => {
         const links = [...dialog.querySelectorAll(".mosaic-guideline-links a")];
         const row = dialog.querySelector(".mosaic-guideline-links");
         return {
           guideline: dialog.querySelector('[data-i18n="mosaicHelp.guideline"]').textContent,
+          noFormula: !dialog.querySelector("#mosaicHelpFormula, #mosaicHelpBlock"),
           links: links.map((link) => ({ text: link.textContent, href: link.href, target: link.target, rel: link.rel })),
           oneLine: getComputedStyle(row).whiteSpace === "nowrap" && row.scrollWidth <= row.clientWidth,
         };
@@ -1412,6 +1416,7 @@ async function main() {
         ? "モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。"
         : "The default mosaic setting uses the following sites' guidelines as a reference: 1/100 of the image's long edge (minimum 4 px).";
       assert.equal(mosaicHelp.guideline, guideline, `mosaic help gives the localized default at ${width}/${language}`);
+      assert.equal(mosaicHelp.noFormula, true, `mosaic help omits implementation formula details at ${width}/${language}`);
       assert.deepEqual(mosaicHelp.links, [
         { text: "BOOTH", href: "https://booth.pm/guidelines", target: "_blank", rel: "noreferrer" },
         { text: "pixiv", href: "https://www.pixiv.net/terms/?page=guideline", target: "_blank", rel: "noreferrer" },

@@ -42,7 +42,6 @@ function renderCandidates() {
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = role;
-    if (state.blinkCandidateIds.has(blinkId)) row.classList.add(`blink-${role}`);
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
@@ -64,7 +63,6 @@ function renderCandidates() {
     const blinkId = "manual:excludeErase";
     const row = document.createElement("div"); row.className = "candidate-row candidate-row-manual candidate-row-manual-exclude-erase";
     row.classList.toggle("enabled", state.manualExclusionEraseEnabled);
-    if (state.blinkCandidateIds.has(blinkId)) row.classList.add("blink-apply");
     const enabled = makeToggle(state.manualExclusionEraseEnabled, t("candidates.manualExcludeEraseToggle"), () => {
       if (isBusy() || state.importing) return;
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
@@ -85,7 +83,6 @@ function renderCandidates() {
     const role = candidate.role === "exclude" ? "exclude" : "apply";
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-${role}`;
     row.classList.toggle("enabled", candidate.enabled);
-    if (state.blinkCandidateIds.has(candidate.id)) row.classList.add(`blink-${role}`);
     const enabled = makeToggle(candidate.enabled, t("candidates.toggle", { label: candidate.className }), async () => {
       if (isBusy() || state.importing) return;
       const previousEnabled = candidate.enabled;
@@ -151,10 +148,24 @@ function syncCandidateDisplayButtons() {
   document.querySelectorAll("[data-candidate-effective-id]").forEach((button) => {
     button.setAttribute("aria-pressed", String(candidateDisplayMode(button.dataset.candidateEffectiveId) === "effective"));
   });
-  document.querySelectorAll("[data-candidate-blink-id]").forEach((row) => {
-    const active = candidateDisplayMode(row.dataset.candidateBlinkId) !== "off";
-    row.classList.toggle(`blink-${row.dataset.candidateBlinkRole}`, active);
-  });
+  const pane = $("#candidatePane");
+  pane.classList.toggle("blink-active", state.blinkCandidateIds.size > 0);
+  pane.classList.toggle("blink-phase", state.blinkPhase);
+  document.querySelectorAll("[data-candidate-blink-id]").forEach((row) => row.classList.toggle("blink-selected", candidateDisplayMode(row.dataset.candidateBlinkId) !== "off"));
+}
+
+function clearCandidateBlink() {
+  state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkPhase = false;
+  if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
+  $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
+}
+
+function syncCandidateBlinkTimer() {
+  if (!state.blinkCandidateIds.size) { clearCandidateBlink(); return; }
+  if (!state.blinkTimer) {
+    state.blinkPhase = true;
+    state.blinkTimer = setInterval(() => { state.blinkPhase = !state.blinkPhase; syncCandidateDisplayButtons(); render(); }, 200);
+  }
 }
 
 function setCandidateDisplayMode(ids, mode) {
@@ -162,7 +173,7 @@ function setCandidateDisplayMode(ids, mode) {
     if (mode === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); }
     else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, mode); }
   });
-  syncCandidateDisplayButtons(); render();
+  syncCandidateBlinkTimer(); syncCandidateDisplayButtons(); render();
 }
 
 function toggleCandidateDisplay(role) {
@@ -288,7 +299,7 @@ function deleteManualMask() {
   if (!state.manualMaskPresent || isBusy() || state.importing) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   state.manualMaskPresent = false; state.manualEnabled = true;
-  state.blinkCandidateIds.delete("manual:apply");
+  setCandidateDisplayMode(["manual:apply"], "off");
   setReviewed(currentRecord(), false);
   recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); requestMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
@@ -297,7 +308,7 @@ function deleteManualExclusion() {
   if (!canvasHasPixels(exclusionCtx, exclusionCanvas) || isBusy() || state.importing) return;
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   state.manualExclusionEnabled = true;
-  state.blinkCandidateIds.delete("manual:exclude");
+  setCandidateDisplayMode(["manual:exclude"], "off");
   setReviewed(currentRecord(), false);
   recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
@@ -306,7 +317,7 @@ function deleteManualExclusionErase() {
   if (!canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas) || isBusy() || state.importing) return;
   exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
   state.manualExclusionEraseEnabled = true;
-  state.blinkCandidateIds.delete("manual:excludeErase");
+  setCandidateDisplayMode(["manual:excludeErase"], "off");
   setReviewed(currentRecord(), false);
   recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
@@ -555,8 +566,8 @@ function drawStroke(from, to, tool, size = Number($("#brushSize").value)) {
 
 function beginManualStroke(point) {
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
-  if (state.tool === "brush" && shouldBlinkNewManual("apply")) state.blinkCandidateIds.add("manual:apply");
-  if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) state.blinkCandidateIds.add("manual:exclude");
+  if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
+  if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 

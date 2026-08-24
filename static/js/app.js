@@ -192,9 +192,14 @@ function bindEvents() {
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
   $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
   $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
+  document.querySelectorAll(".target-switch input").forEach((input) => input.addEventListener("change", () => {
+    syncDetectionTargetSwitch(input);
+    if (input.id.startsWith("dialog")) validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
+    else validateDetectionTargets(detectionTargets(), $("#detectionTargetValidation"));
+  }));
   $("#detectForm").addEventListener("submit", startDetectionFromDialog);
-  $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
-  $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
+  $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
+  $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
@@ -225,9 +230,6 @@ function bindEvents() {
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
-    const record = currentRecord(); const size = calculatedBlockSize(record);
-    $("#mosaicHelpFormula").textContent = t("mosaicHelp.formula", { divisor: mosaicDivisor() });
-    $("#mosaicHelpBlock").textContent = record ? t("mosaicHelp.block", { size }) : t("mosaicHelp.empty");
     $("#mosaicHelpDialog").showModal();
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
@@ -449,7 +451,6 @@ async function initialise() {
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
   document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));
-  setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");

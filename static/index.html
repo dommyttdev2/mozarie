@@ -11,7 +11,6 @@
 <body>
   <header class="appbar">
     <img class="brand-logo" src="/logo.png" alt="" aria-hidden="true">
-    <div class="brand" data-i18n="app.brand">Mozarie</div>
     <div class="appbar-commands"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button><button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button></div>
     <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
@@ -119,13 +118,18 @@
       </div>
       <section class="detection-settings">
         <h2 data-i18n="detection.title">検出設定</h2>
+        <fieldset class="target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
+          <legend data-i18n="detection.targets">対象</legend>
+          <label class="target-switch"><span>penis</span><input id="detectTargetPenis" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+          <label class="target-switch"><span>pussy</span><input id="detectTargetPussy" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+        </fieldset>
+        <p id="detectionTargetValidation" class="target-validation" role="alert" hidden></p>
         <label class="threshold-control" for="confidence">
           <span data-i18n="detection.confidence">判定しきい値</span>
           <output id="confidenceValue">0.50</output>
         </label>
         <input id="confidence" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-        <div class="target-choices"><label><input id="detectTargetPenis" type="checkbox" checked> penis</label><label><input id="detectTargetPussy" type="checkbox" checked> pussy</label></div>
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
@@ -214,6 +218,11 @@
          <span data-i18n="detectDialog.parallelism">同時処理数</span>
          <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2" data-i18n-aria-label="detectDialog.parallelism" aria-label="同時処理数">
        </label>
+      <fieldset class="target-choices dialog-target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
+        <legend data-i18n="detection.targets">対象</legend>
+        <label class="target-switch"><span>penis</span><input id="dialogTargetPenis" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+        <label class="target-switch"><span>pussy</span><input id="dialogTargetPussy" type="checkbox" role="switch" checked><span class="target-switch-track" aria-hidden="true"></span></label>
+      </fieldset>
        <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
@@ -222,7 +231,7 @@
         </span>
        </label>
       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-      <div class="target-choices"><label><input id="dialogTargetPenis" type="checkbox" checked> penis</label><label><input id="dialogTargetPussy" type="checkbox" checked> pussy</label></div>
+      <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
         <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>
@@ -269,9 +278,9 @@
         </section>
         <section class="settings-model-section" aria-labelledby="settingsExclusionHeading">
           <h3 id="settingsExclusionHeading" class="settings-section-heading" data-i18n="settings.exclusionProcessing">除外処理</h3>
-          <section id="settingsHandCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandTitle" data-i18n="settings.handModel">手を除外</h4><button type="button" data-model-download="hand_detection" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="hand" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandToggle" type="checkbox" role="switch" aria-labelledby="settingsHandTitle" data-model-toggle="hand_detection"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_detection" data-model-input="settingsHandModel" data-i18n="settings.browseModel">参照</button></span></section>
+          <section id="settingsHandCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandTitle" data-i18n="settings.handModel">手</h4><button type="button" data-model-download="hand_detection" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="hand" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandToggle" type="checkbox" role="switch" aria-labelledby="settingsHandTitle" data-model-toggle="hand_detection"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_detection" data-model-input="settingsHandModel" data-i18n="settings.browseModel">参照</button></span></section>
           <section id="settingsHandSegmentationCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandSegmentationTitle" data-i18n="settings.handSegmentationModel">HandSegNet anime SDXL</h4><button type="button" data-model-download="hand_segmentation" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="handSegmentation" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandSegmentationToggle" type="checkbox" role="switch" aria-labelledby="settingsHandSegmentationTitle" data-model-toggle="hand_segmentation"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandSegmentationModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handSegmentationModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_segmentation" data-model-input="settingsHandSegmentationModel" data-i18n="settings.browseModel">参照</button></span></section>
-          <section id="settingsFluidCard" class="model-card"><div class="model-card-heading"><h4 id="settingsFluidTitle" data-i18n="settings.fluidExclusion">白い体液候補を検出</h4><button type="button" class="help-button" data-model-help="fluid" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsFluidToggle" type="checkbox" role="switch" aria-labelledby="settingsFluidTitle" data-fluid-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div></section>
+          <section id="settingsFluidCard" class="model-card"><div class="model-card-heading"><h4 id="settingsFluidTitle" data-i18n="settings.fluidExclusion">白い液</h4><button type="button" class="help-button" data-model-help="fluid" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsFluidToggle" type="checkbox" role="switch" aria-labelledby="settingsFluidTitle" data-fluid-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div></section>
         </section>
         <output id="settingsModelStatus" class="fixed-note"></output>
       </section>
@@ -346,7 +355,7 @@
     </form>
   </dialog>
 
-  <dialog id="mosaicHelpDialog" class="modal-dialog" aria-labelledby="mosaicHelpTitle"><section class="dialog-body"><h2 id="mosaicHelpTitle" data-i18n="mosaicHelp.title">モザイク粗さ</h2><p id="mosaicHelpFormula"></p><p id="mosaicHelpBlock" class="muted"></p><p data-i18n="mosaicHelp.guideline">モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。</p><p class="mosaic-guideline-links"><a href="https://booth.pm/guidelines" target="_blank" rel="noreferrer">BOOTH</a> / <a href="https://www.pixiv.net/terms/?page=guideline" target="_blank" rel="noreferrer">pixiv</a> / <a href="https://terms.dmm.co.jp/doujin_regulation" target="_blank" rel="noreferrer">FANZA</a> / <a href="https://www.dlsite.com/home/mosaic" target="_blank" rel="noreferrer">DLsite</a></p><div class="dialog-actions"><button id="mosaicHelpCloseButton" type="button" data-i18n="dialog.close">閉じる</button></div></section></dialog>
+  <dialog id="mosaicHelpDialog" class="modal-dialog" aria-labelledby="mosaicHelpTitle"><section class="dialog-body"><h2 id="mosaicHelpTitle" data-i18n="mosaicHelp.title">モザイク粗さ</h2><p data-i18n="mosaicHelp.guideline">モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。</p><p class="mosaic-guideline-links"><a href="https://booth.pm/guidelines" target="_blank" rel="noreferrer">BOOTH</a> / <a href="https://www.pixiv.net/terms/?page=guideline" target="_blank" rel="noreferrer">pixiv</a> / <a href="https://terms.dmm.co.jp/doujin_regulation" target="_blank" rel="noreferrer">FANZA</a> / <a href="https://www.dlsite.com/home/mosaic" target="_blank" rel="noreferrer">DLsite</a></p><div class="dialog-actions"><button id="mosaicHelpCloseButton" type="button" data-i18n="dialog.close">閉じる</button></div></section></dialog>
 
   <dialog id="processingDialog" class="modal-dialog processing-dialog" closedby="none" aria-labelledby="processingTitle" aria-describedby="processingProgressText processingCurrent">
     <section class="dialog-body">

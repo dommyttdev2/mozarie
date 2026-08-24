@@ -80,13 +80,13 @@ SOURCE_LABELS = {
     "ntd11": "NTD11補助モデル",
     "sensitive": "Sensitive補助モデル",
     "boundary": "境界選択",
-    "hand_exclusion": "手を除外",
-    "fluid_exclusion": "白い体液候補",
+    "hand_exclusion": "手",
+    "fluid_exclusion": "白い液",
 }
 REFINEMENT_LABELS = {
     "hand": "手の重なりを除外",
-    "fluid": "白い体液候補を検出",
-    "hand_fluid": "手の重なりを除外・白い体液候補を検出",
+    "fluid": "白い液を検出",
+    "hand_fluid": "手の重なりを除外・白い液を検出",
 }
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
