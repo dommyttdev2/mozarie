@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
 import importlib.util
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 
 
 _dll_directory_handles: list[object] = []
+_cuda_runtime_handles: list[object] = []
 
 
 def _register_torch_dll_directory() -> None:
@@ -25,11 +27,21 @@ def _register_torch_dll_directory() -> None:
     directory = Path(torch_spec.origin).parent / "lib"
     if directory.is_dir():
         _dll_directory_handles.append(os.add_dll_directory(str(directory)))
+        nvrtc = next((path for path in directory.glob("nvrtc64_*_0.dll") if not path.name.endswith(".alt.dll")), None)
+        if nvrtc is not None:
+            try:
+                _cuda_runtime_handles.append(ctypes.WinDLL(str(nvrtc)))
+            except OSError:
+                pass
 
 
 _register_torch_dll_directory()
 
 import onnxruntime as ort
+
+preload_dlls = getattr(ort, "preload_dlls", None)
+if preload_dlls is not None:
+    preload_dlls()
 
 
 @dataclass(frozen=True)
@@ -54,7 +66,7 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
         {
             "device_id": int(gpu_device),
             "arena_extend_strategy": "kSameAsRequested",
-            "cudnn_conv_algo_search": "DEFAULT",
+            "cudnn_conv_algo_search": "HEURISTIC",
             "cudnn_conv_use_max_workspace": "0",
             "do_copy_in_default_stream": "1",
         },

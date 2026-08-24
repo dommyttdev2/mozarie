@@ -2,11 +2,11 @@ function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
-  if (!state.currentId) { syncCandidateDisplayChoices(); updateCandidateBatchButtons(false); return; }
+  if (!state.currentId) { syncCandidateDisplayButtons(); updateCandidateBatchButtons(false); return; }
   const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
   const hasManualExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
   if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude && !hasManualExclusionErase) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayChoices(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
@@ -24,7 +24,7 @@ function renderCandidates() {
     button.disabled = disabled; button.setAttribute("aria-pressed", String(forced)); button.setAttribute("aria-label", text);
     button.textContent = text; button.addEventListener("click", onChange); return button;
   };
-  const makeDisplay = (id, role) => candidateDisplayChoice(id, role);
+  const makeDisplay = (id) => candidateDisplayToggle(id);
   const appendManual = (list, role) => {
     const isApply = role === "apply";
     const exists = isApply ? state.manualMaskPresent : hasManualExclude;
@@ -40,7 +40,7 @@ function renderCandidates() {
       refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     });
     const blinkId = `manual:${role}`;
-    const blink = makeDisplay(blinkId, role);
+    const blink = makeDisplay(blinkId);
     if (state.blinkCandidateIds.has(blinkId)) row.classList.add(`blink-${role}`);
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
@@ -53,8 +53,8 @@ function renderCandidates() {
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       });
-      row.append(label, remove, candidateRowControls(enabled, blink, forced));
-    } else row.append(label, remove, candidateRowControls(enabled, blink));
+      row.append(label, blink, forced, enabled, remove);
+    } else row.append(label, blink, candidateEffectiveToggle(blinkId), enabled, remove);
     list.append(row);
   };
   appendManual(applyList, "apply");
@@ -69,12 +69,12 @@ function renderCandidates() {
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
       setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     });
-    const blink = makeDisplay(blinkId, "exclude");
+    const blink = makeDisplay(blinkId);
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
-    row.append(label, remove, candidateRowControls(enabled, blink)); excludeList.append(row);
+    row.append(label, blink, enabled, remove); excludeList.append(row);
   }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -92,7 +92,7 @@ function renderCandidates() {
       setReviewed(currentRecord(), false);
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     }, deleting || state.candidateBatchPending.has(state.currentId));
-    const blink = makeDisplay(candidate.id, role);
+    const blink = makeDisplay(candidate.id);
     const label = document.createElement("span"); label.className = "candidate-label";
     const name = document.createElement("span"); name.className = "candidate-class"; name.textContent = candidate.className;
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
@@ -111,22 +111,12 @@ function renderCandidates() {
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
-      row.append(label, remove, candidateRowControls(enabled, blink, forced));
-    } else row.append(label, remove, candidateRowControls(enabled, blink));
+      row.append(label, blink, forced, enabled, remove);
+    } else row.append(label, blink, candidateEffectiveToggle(candidate.id), enabled, remove);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
-  syncCandidateDisplayChoices(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
-}
-
-function candidateRowControls(...controls) {
-  const row = document.createElement("div"); row.className = "candidate-row-controls"; row.append(...controls); return row;
-}
-
-function candidateDisplayModes(role) {
-  return role === "apply"
-    ? [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"], ["effective", "candidates.displayEffective"]]
-    : [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"]];
+  syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
 }
 
 function candidateDisplayMode(id) {
@@ -141,12 +131,16 @@ function candidateDisplayIdsForRole(role) {
   return ids;
 }
 
-function syncCandidateDisplayChoices() {
-  document.querySelectorAll("[data-candidate-display]").forEach((group) => {
-    const ids = candidateDisplayIdsForRole(group.dataset.candidateDisplay);
-    const mode = ids.length && ids.every((id) => candidateDisplayMode(id) === candidateDisplayMode(ids[0])) ? candidateDisplayMode(ids[0]) : "off";
-    const input = group.querySelector(`input[value="${mode}"]`);
-    if (input) input.checked = true;
+function syncCandidateDisplayButtons() {
+  document.querySelectorAll("[data-candidate-display-toggle]").forEach((button) => {
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle);
+    const active = ids.length > 0 && ids.every((id) => candidateDisplayMode(id) !== "off");
+    button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("[data-candidate-effective-toggle]").forEach((button) => {
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle);
+    const active = ids.length > 0 && ids.every((id) => candidateDisplayMode(id) === "effective");
+    button.setAttribute("aria-pressed", String(active));
   });
 }
 
@@ -158,17 +152,34 @@ function setCandidateDisplayMode(ids, mode) {
   renderCandidates(); render();
 }
 
-function candidateDisplayChoice(id, role) {
-  const group = document.createElement("fieldset"); group.className = "candidate-display-choice";
-  group.title = t("candidates.displayHelp"); group.setAttribute("aria-label", t("candidates.display"));
-  const name = `candidate-display-${id}`;
-  for (const [value, label] of candidateDisplayModes(role)) {
-    const option = document.createElement("label"); const input = document.createElement("input"); const text = document.createElement("span");
-    input.type = "radio"; input.name = name; input.value = value; input.checked = candidateDisplayMode(id) === value;
-    input.addEventListener("change", () => { if (input.checked) setCandidateDisplayMode([id], value); });
-    text.textContent = t(label); option.append(input, text); group.append(option);
-  }
-  return group;
+function toggleCandidateDisplay(role) {
+  const ids = candidateDisplayIdsForRole(role);
+  if (!ids.length) return;
+  const active = ids.every((id) => candidateDisplayMode(id) !== "off");
+  setCandidateDisplayMode(ids, active ? "off" : "normal");
+}
+
+function toggleCandidateEffective(role) {
+  const ids = candidateDisplayIdsForRole(role);
+  if (!ids.length) return;
+  const active = ids.every((id) => candidateDisplayMode(id) === "effective");
+  setCandidateDisplayMode(ids, active ? "normal" : "effective");
+}
+
+function candidateDisplayToggle(id) {
+  const button = document.createElement("button"); button.type = "button"; button.className = "candidate-display-toggle";
+  const active = candidateDisplayMode(id) !== "off";
+  button.textContent = t("candidates.show"); button.title = t("candidates.displayHelp"); button.setAttribute("aria-label", t("candidates.displayHelp")); button.setAttribute("aria-pressed", String(active));
+  button.addEventListener("click", () => setCandidateDisplayMode([id], active ? "off" : "normal"));
+  return button;
+}
+
+function candidateEffectiveToggle(id) {
+  const button = document.createElement("button"); button.type = "button"; button.className = "candidate-effective-toggle";
+  const active = candidateDisplayMode(id) === "effective";
+  button.textContent = t("candidates.applied"); button.title = t("candidates.displayEffective"); button.setAttribute("aria-label", t("candidates.displayEffective")); button.setAttribute("aria-pressed", String(active));
+  button.addEventListener("click", () => setCandidateDisplayMode([id], active ? "normal" : "effective"));
+  return button;
 }
 
 function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }

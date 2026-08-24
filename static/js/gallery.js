@@ -70,10 +70,10 @@ function renderGallery(force = false) {
 }
 
 function imageMatchesGalleryFilter(image) {
-  if (state.galleryFilter !== "hidden" && isHidden(image)) return false;
+  if (state.galleryFilter === "hidden") return isHidden(image);
+  if (state.galleryFilter !== "all" && isHidden(image)) return false;
   if (state.galleryFilter === "masked") return imageHasMask(image);
   if (state.galleryFilter === "unmasked") return !imageHasMask(image);
-  if (state.galleryFilter === "hidden") return isHidden(image);
   if (state.galleryFilter === "reviewed") return isReviewed(image);
   if (state.galleryFilter === "unreviewed") return !isReviewed(image);
   return true;
@@ -102,8 +102,8 @@ function overviewImages() {
   const query = state.overviewQuery.trim().toLowerCase();
   const folder = state.overviewFolder;
   return state.images.filter((image) => {
-    if (state.overviewFilter !== "hidden" && isHidden(image)) return false;
     if (state.overviewFilter === "hidden" && !isHidden(image)) return false;
+    if (state.overviewFilter !== "all" && state.overviewFilter !== "hidden" && isHidden(image)) return false;
     if (state.overviewFilter === "unreviewed" && isReviewed(image)) return false;
     if (state.overviewFilter === "reviewed" && !isReviewed(image)) return false;
     if (state.overviewFilter === "masked" && !imageHasMask(image)) return false;
@@ -173,6 +173,7 @@ function renderOverview(force = false) {
     const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
     item.classList.toggle("current", current);
     item.classList.toggle("batch-selected", batchSelected);
+    item.classList.toggle("hidden", isHidden(image));
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
     if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
     const preview = item.querySelector("img");

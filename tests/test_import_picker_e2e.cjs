@@ -984,7 +984,7 @@ async function main() {
       state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
       state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
       state.blinkCandidateIds = new Set(); renderCandidates();
-      const display = document.querySelector('[data-candidate-display="apply"] input[value="normal"]'); display.checked = true; display.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector('[data-candidate-display-toggle="apply"]').click();
       beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
       const row = document.querySelector(".candidate-row-manual-apply");
       const result = {
@@ -1351,26 +1351,51 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
+    const catalogCardsAndHidden = await page.evaluate(() => {
+      const box = (node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }; };
+      const image = state.images.find((item) => item.id === "sample");
+      setHidden(image, true); state.galleryFilter = "all"; renderGallery(true);
+      const galleryCard = document.querySelector('.gallery-item[data-id="sample"]'); const galleryImage = galleryCard.querySelector("img"); const galleryFooter = galleryCard.querySelector(".catalog-card-footer");
+      const allIncludesHidden = Boolean(galleryCard) && galleryCard.classList.contains("hidden");
+      state.galleryFilter = "hidden"; renderGallery(true); const hiddenOnly = document.querySelectorAll(".gallery-item").length === 1;
+      const gallery = { card: box(galleryCard), image: box(galleryImage), footer: box(galleryFooter), name: box(galleryCard.querySelector(".gallery-name")), meta: box(galleryCard.querySelector(".gallery-meta")) };
+      state.galleryFilter = "all"; setViewMode("overview"); state.overviewFilter = "all"; renderOverview(true);
+      const overviewCard = document.querySelector('.overview-item[data-id="sample"]'); const overviewImage = overviewCard.querySelector("img"); const overviewFooter = overviewCard.querySelector(".catalog-card-footer");
+      const overviewIncludesHidden = overviewCard.classList.contains("hidden");
+      const result = {
+        allIncludesHidden, hiddenOnly, overviewIncludesHidden,
+        gallery,
+        overview: { card: box(overviewCard), image: box(overviewImage), footer: box(overviewFooter), name: box(overviewCard.querySelector(".overview-item-name")), meta: box(overviewCard.querySelector(".overview-item-dimensions")) },
+      };
+      setHidden(image, false); state.galleryFilter = "all"; setViewMode("edit"); return result;
+    });
+    assert.deepEqual({ all: catalogCardsAndHidden.allIncludesHidden, hidden: catalogCardsAndHidden.hiddenOnly, overview: catalogCardsAndHidden.overviewIncludesHidden }, { all: true, hidden: true, overview: true }, "All includes dimmed hidden cards while Hidden isolates them");
+    for (const [name, card] of Object.entries({ gallery: catalogCardsAndHidden.gallery, overview: catalogCardsAndHidden.overview })) {
+      assert.equal(card.footer.height, 32, `${name} card footer has one shared 32px row`);
+      assert.ok(card.image.left - card.card.left >= 5 && card.image.right <= card.card.right - 5 && card.image.top - card.card.top >= 5, `${name} preview stays inside the card border`);
+      assert.ok(Math.abs(card.name.top - card.meta.top) <= 1 && Math.abs(card.name.bottom - card.meta.bottom) <= 1, `${name} filename and dimensions share one baseline row: ${JSON.stringify(card)}`);
+    }
+
     for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
       await page.setViewportSize({ width, height: 768 }); await page.evaluate((locale) => loadTranslations(locale), language);
       const editor = await page.evaluate(() => {
         const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; };
-        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, radios: node.querySelectorAll('input[type="radio"]').length }; });
+        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions > button")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, text: node.textContent }; });
         const candidateOverflow = [...document.querySelectorAll(".candidate-section-actions, .candidate-row")].some((node) => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight);
-        const candidateHit = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice label")].every((label) => { const rect = label.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return label === target || label.contains(target); });
+        const candidateHit = [...document.querySelectorAll(".candidate-section-actions > button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); });
         const blockHeading = document.querySelector(".block-control-heading"); const blockLabel = blockHeading.querySelector('label[for="divisor"]'); const blockHelp = document.querySelector("#mosaicHelpButton"); const headingBox = blockHeading.getBoundingClientRect(); const labelBox = blockLabel.getBoundingClientRect(); const helpBox = blockHelp.getBoundingClientRect();
-        return { toolbar, stage, controls, candidateOverflow, candidateHit, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, overviewAll: document.querySelector('[data-overview-filter="all"]').textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
       });
       assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
+      assert.equal(editor.overviewAll, language === "ja" ? "すべて" : "All", `overview All is localized at ${width}/${language}`);
       assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
       assert.equal(editor.help.parent, "block-control-heading", `mosaic help follows the block-size label at ${width}/${language}`);
       assert.equal(editor.help.nestedInLabel, false, `mosaic help is not nested in the block-size label at ${width}/${language}`);
       assert.equal(editor.help.followsLabel && editor.help.fitsHeading, true, `mosaic help sits immediately after the block-size label at ${width}/${language}`);
       assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
-      assert.ok(editor.controls.every((control) => control.width > 0 && control.radios >= 2), `candidate display controls use visible native radio choices at ${width}/${language}`);
-      assert.equal(editor.controls.length, 2, `both candidate sections have a display control at ${width}/${language}`);
-      assert.ok(Math.abs(editor.controls[0].width - editor.controls[1].width) <= 1 && Math.abs(editor.controls[0].height - editor.controls[1].height) <= 1 && editor.controls.every((control) => control.height >= 25 && control.height <= 28), `candidate section display controls share one compact size at ${width}/${language}`);
+      assert.ok(editor.controls.every((control) => control.width > 0 && control.height >= 25 && control.height <= 28), `candidate section controls use compact buttons at ${width}/${language}`);
+      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "表示" : "Show")).length, 2, `both candidate sections expose a display button at ${width}/${language}`);
       assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
       assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
       await page.locator("#mosaicHelpButton").click();
@@ -1400,19 +1425,17 @@ async function main() {
       const candidates = state.candidates; const images = state.candidateImages; const removed = state.removedCandidateIds; const currentId = state.currentId;
       const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
       state.currentId = "sample"; state.candidates = [{ id: "radio-candidate", role: "apply", enabled: true, className: "Radio" }, { id: "radio-exclusion", role: "exclude", enabled: true, className: "Exclude" }]; state.candidateImages = new Map([["radio-candidate", mask], ["radio-exclusion", mask]]); state.removedCandidateIds = new Set(); renderCandidates();
-      const group = document.querySelector('.candidate-row-apply .candidate-display-choice'); const radios = [...group.querySelectorAll('input[type="radio"]')];
+      const apply = document.querySelector('.candidate-row-apply'); const exclude = document.querySelector('.candidate-row-exclude'); const applyButtons = [...apply.querySelectorAll('button')]; const excludeButtons = [...exclude.querySelectorAll('button')];
       window.__candidateDisplayTestState = { candidates, images, removed, currentId };
       const box = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
-      return { fieldset: group.tagName, label: group.getAttribute("aria-label"), types: radios.map((radio) => radio.type), names: new Set(radios.map((radio) => radio.name)).size, values: radios.map((radio) => radio.value), displays: [box(document.querySelector('.candidate-row-apply .candidate-display-choice')), box(document.querySelector('.candidate-row-exclude .candidate-display-choice'))] };
+      return { apply: applyButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), exclude: excludeButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), rows: [box(apply), box(exclude)] };
     });
-    assert.equal(candidateDisplaySemantics.fieldset, "FIELDSET", "candidate display uses a native fieldset");
-    assert.equal(candidateDisplaySemantics.label, "Candidate highlight", "candidate display has a clear accessible name");
-    assert.deepEqual({ types: candidateDisplaySemantics.types, names: candidateDisplaySemantics.names, values: candidateDisplaySemantics.values }, { types: ["radio", "radio", "radio"], names: 1, values: ["off", "normal", "effective"] }, "candidate display uses one labelled native radio group");
-    assert.ok(Math.abs(candidateDisplaySemantics.displays[0].width - candidateDisplaySemantics.displays[1].width) <= 1 && Math.abs(candidateDisplaySemantics.displays[0].height - candidateDisplaySemantics.displays[1].height) <= 1 && candidateDisplaySemantics.displays.every((display) => display.height >= 25 && display.height <= 28), "candidate rows keep matching full-width display controls");
-    const effectiveRadio = page.locator('.candidate-row-apply .candidate-display-choice input[value="effective"]');
-    await effectiveRadio.focus(); await effectiveRadio.press("ArrowLeft");
-    const candidateDisplayKeyboard = await page.evaluate(() => ({ normal: document.querySelector('.candidate-row-apply .candidate-display-choice input[value="normal"]').checked, mode: state.blinkModes.get("radio-candidate") }));
-    assert.deepEqual(candidateDisplayKeyboard, { normal: true, mode: "normal" }, "candidate display radio arrows update the existing blink mode");
+    assert.deepEqual(candidateDisplaySemantics.apply.map((button) => button.text), ["Show", "Applied", "ON", "×"], "mosaic rows keep their one-line action order");
+    assert.deepEqual(candidateDisplaySemantics.exclude.map((button) => button.text), ["Show", "Force ON", "ON", "×"], `exclusion rows keep their one-line action order: ${JSON.stringify(candidateDisplaySemantics.exclude)}`);
+    assert.ok(Math.abs(candidateDisplaySemantics.rows[0].height - candidateDisplaySemantics.rows[1].height) <= 1 && candidateDisplaySemantics.rows.every((row) => row.height >= 36 && row.height <= 40), `candidate rows share one compact height: ${JSON.stringify(candidateDisplaySemantics.rows)}`);
+    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus(); await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
+    const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
+    assert.deepEqual(candidateDisplayKeyboard, { display: "true", effective: "true", mode: "effective" }, "Applied turns on exclusion-aware display using the existing blink mode");
     await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
     const targetModes = await page.evaluate(() => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
@@ -1432,7 +1455,7 @@ async function main() {
       const trimmed = state.history.length === 12 && state.historyRemovedCandidateIds.has("trim-0");
       state.removedCandidateIds.delete(candidate.id);
       renderCandidates();
-      const display = document.querySelector('[data-candidate-display="apply"] input[value="effective"]'); display.checked = true; display.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector('[data-candidate-effective-toggle="apply"]').click();
       const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
       state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
       return { afterDelete, undo, redo, trimmed, effective, cleared };

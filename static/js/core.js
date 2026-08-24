@@ -448,7 +448,10 @@ function updateActionButtons() {
   detectAllButton.disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
-  $("#removeCurrentImageButton").disabled = running || !hasImage;
+  const visibilityButton = $("#removeCurrentImageButton");
+  visibilityButton.disabled = running || !hasImage;
+  const visibilityLabel = t(current && isHidden(current) ? "editor.show" : "editor.hide");
+  visibilityButton.textContent = visibilityLabel; visibilityButton.title = visibilityLabel; visibilityButton.setAttribute("aria-label", visibilityLabel);
   for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
   $("#batchModeButton").disabled = locked || state.images.length === 0;
   $("#galleryFilter").disabled = running;
@@ -489,6 +492,11 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
       button.textContent = t(active ? "settings.on" : "settings.off");
       button.setAttribute("aria-pressed", String(active));
     }
+  }
+  for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) {
+    const role = button.dataset.candidateDisplayToggle || button.dataset.candidateEffectiveToggle;
+    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role).length > 0;
+    button.disabled = locked || !hasRoleCandidate;
   }
 }
 

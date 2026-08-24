@@ -40,7 +40,7 @@ class OnnxAdapterTests(unittest.TestCase):
                 {
                     "device_id": 2,
                     "arena_extend_strategy": "kSameAsRequested",
-                    "cudnn_conv_algo_search": "DEFAULT",
+                    "cudnn_conv_algo_search": "HEURISTIC",
                     "cudnn_conv_use_max_workspace": "0",
                     "do_copy_in_default_stream": "1",
                 },

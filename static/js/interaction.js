@@ -151,6 +151,7 @@ function openCatalogContextMenu(event, imageId) {
   state.contextMenuImageId = imageId;
   state.contextMenuOrigin = event.currentTarget || document.activeElement;
   $("#toggleReviewMenuItem").textContent = t(isReviewed(image) ? "context.unreview" : "context.review");
+  $("#removeImageMenuItem").textContent = t(isHidden(image) ? "editor.show" : "editor.hide");
   const menu = $("#catalogContextMenu");
   menu.style.left = `${event.clientX}px`;
   menu.style.top = `${event.clientY}px`;
