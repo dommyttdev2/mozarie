@@ -152,7 +152,7 @@ function bindEvents() {
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
-  $("#excludeBrushTool").addEventListener("click", () => setTool("exclude_brush")); $("#excludeEraserTool").addEventListener("click", () => setTool("exclude_eraser"));
+  $("#excludeEraserTool").addEventListener("click", () => setTool("exclude_eraser"));
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
   });
@@ -343,7 +343,7 @@ function bindEvents() {
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = ["eraser", "exclude_brush", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
+    canvas.style.cursor = ["eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
     if (wasDrawing && manualStrokeStarted) completeManualStroke();
     if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
     if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;

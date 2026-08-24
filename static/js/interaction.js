@@ -5,13 +5,13 @@ function setTool(tool) {
   if (!boundaryTools.has(tool)) clearBoundaryInteraction();
   else if (state.tool !== tool) clearBoundaryConstruction();
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#excludeBrushTool", "exclude_brush"], ["#excludeEraserTool", "exclude_eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"], ["#excludeBucketTool", "exclude_bucket"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#excludeEraserTool", "exclude_eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"], ["#excludeBucketTool", "exclude_bucket"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
   $("#bucketToleranceControl").hidden = !["bucket", "exclude_bucket"].includes(tool);
-  canvas.style.cursor = ["eraser", "exclude_brush", "exclude_eraser"].includes(tool) ? "cell" : "crosshair";
+  canvas.style.cursor = ["eraser", "exclude_eraser"].includes(tool) ? "cell" : "crosshair";
   updateBoundaryActions(); render();
   if (focusedInBoundaryMenu) focusCanvas();
 }

@@ -462,7 +462,7 @@ function strokeLine(context, from, to, size, operation = "source-over") {
 
 function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, from, to, tool, size) {
   if (tool === "exclude_eraser") { strokeLine(exclusionEraseContext, from, to, size); return; }
-  if (tool === "eraser" || tool === "exclude_brush") {
+  if (tool === "eraser") {
     strokeLine(exclusionContext, from, to, size);
     strokeLine(exclusionEraseContext, from, to, size, "destination-out");
     return;
@@ -499,19 +499,19 @@ function fillAt(point, tool = state.tool) {
 }
 
 function paintFillSpans(addContext, exclusionContext, exclusionEraseContext, spans, tool = "bucket") {
-  const target = tool === "exclude_eraser" ? exclusionEraseContext : (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket" ? exclusionContext : addContext);
+  const target = tool === "exclude_eraser" ? exclusionEraseContext : (tool === "eraser" || tool === "exclude_bucket" ? exclusionContext : addContext);
   target.save(); target.globalCompositeOperation = "source-over"; target.fillStyle = "#ffffff";
-  if ((tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") || (!state.manualExclusionForced && tool === "bucket")) exclusionEraseContext.save();
-  if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.globalCompositeOperation = "destination-out";
+  if ((tool === "eraser" || tool === "exclude_bucket") || (!state.manualExclusionForced && tool === "bucket")) exclusionEraseContext.save();
+  if (tool === "eraser" || tool === "exclude_bucket") exclusionEraseContext.globalCompositeOperation = "destination-out";
   else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.save(), exclusionContext.globalCompositeOperation = "destination-out";
   for (let index = 0; index < spans.length; index += 3) {
     const row = spans[index]; const start = spans[index + 1]; const width = spans[index + 2] - start;
     target.fillRect(start, row, width, 1);
-    if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.fillRect(start, row, width, 1);
+    if (tool === "eraser" || tool === "exclude_bucket") exclusionEraseContext.fillRect(start, row, width, 1);
     else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.fillRect(start, row, width, 1);
   }
   target.restore();
-  if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.restore();
+  if (tool === "eraser" || tool === "exclude_bucket") exclusionEraseContext.restore();
   else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.restore();
 }
 
@@ -526,7 +526,7 @@ function drawStroke(from, to, tool, size = Number($("#brushSize").value)) {
 function beginManualStroke(point) {
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) state.blinkCandidateIds.add("manual:apply");
-  if (["eraser", "exclude_brush"].includes(state.tool) && shouldBlinkNewManual("exclude")) state.blinkCandidateIds.add("manual:exclude");
+  if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) state.blinkCandidateIds.add("manual:exclude");
   drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 

@@ -927,6 +927,27 @@ async function main() {
       exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
     });
     assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion restore has its own visible ON/OFF row");
+    const manualBlinkStartsWithSection = await page.evaluate(() => {
+      const candidates = state.candidates; const candidateImages = state.candidateImages;
+      const blinkCandidateIds = state.blinkCandidateIds;
+      const candidateMask = document.createElement("canvas"); candidateMask.width = addCanvas.width; candidateMask.height = addCanvas.height;
+      candidateMask.getContext("2d").fillRect(0, 0, 8, 8);
+      const tool = state.tool;
+      state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
+      state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
+      state.blinkCandidateIds = new Set(); renderCandidates();
+      document.querySelector('[data-candidate-batch="apply:blink"]').click();
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
+      const row = document.querySelector(".candidate-row-manual-apply");
+      const result = {
+        manualBlink: state.blinkCandidateIds.has("manual:apply"),
+        rowBlinking: row?.classList.contains("blink-apply"),
+      };
+      state.candidates = candidates; state.candidateImages = candidateImages; state.blinkCandidateIds = blinkCandidateIds; state.tool = tool;
+      deleteManualMask(); renderCandidates();
+      return result;
+    });
+    assert.deepEqual(manualBlinkStartsWithSection, { manualBlink: true, rowBlinking: true }, "a first manual mosaic stroke joins an enabled section blink");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });

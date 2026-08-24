@@ -114,7 +114,7 @@ function setFluidExclusionEnabled(enabled) {
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
 
 function normaliseToolPosition(position) { return TOOL_POSITIONS.has(position) ? position : "left"; }
-function toolRailItems() { return ["#brushTool", "#eraserTool", "#excludeBrushTool", "#excludeEraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
+function toolRailItems() { return ["#brushTool", "#eraserTool", "#excludeEraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
 
 function setToolRailTabStop(activeItem = null) {
   const items = toolRailItems().filter((item) => !item.disabled);

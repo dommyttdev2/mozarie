@@ -519,7 +519,7 @@ function paintMosaicPreview() {
 }
 
 function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "eraser", "exclude_brush", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
+  if (!state.hover || !state.currentImage || !["brush", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
