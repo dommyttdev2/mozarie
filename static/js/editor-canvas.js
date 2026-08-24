@@ -338,6 +338,7 @@ function saveDraft() {
       exclusion: canvasHasPixels(historyExclusionCanvas.getContext("2d"), historyExclusionCanvas) ? historyExclusionCanvas.toDataURL("image/png") : "",
       exclusionErase: canvasHasPixels(historyExclusionEraseCanvas.getContext("2d"), historyExclusionEraseCanvas) ? historyExclusionEraseCanvas.toDataURL("image/png") : "",
       removedCandidateIds: [...(state.historyRemovedCandidateIds || [])],
+      candidateIds: [...(state.historyCandidateIds || [])],
     },
   });
 }
@@ -374,6 +375,7 @@ function restoreDraft(imageId, generation) {
       if (historyExclusionEraseImage) historyExclusionEraseCanvas.getContext("2d").drawImage(historyExclusionEraseImage, 0, 0);
       state.history = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
       state.historyRemovedCandidateIds = new Set(draft.historyBase.removedCandidateIds || []);
+      state.historyCandidateIds = new Set(draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id));
       state.historyIndex = Math.max(0, Math.min(state.history.length, Number(draft.historyIndex) || 0));
       rebuildManualMaskFromHistory(); updateHistoryButtons();
     } else resetHistoryToCurrentManualMask();

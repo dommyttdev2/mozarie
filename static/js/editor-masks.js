@@ -221,7 +221,7 @@ function deleteManualMask() {
   state.manualMaskPresent = false; state.manualEnabled = true;
   state.blinkCandidateIds.delete("manual:apply");
   setReviewed(currentRecord(), false);
-  resetHistoryToCurrentManualMask(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); rebuildMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusion() {
@@ -230,7 +230,7 @@ function deleteManualExclusion() {
   state.manualExclusionEnabled = true;
   state.blinkCandidateIds.delete("manual:exclude");
   setReviewed(currentRecord(), false);
-  resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); rebuildMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusionErase() {
@@ -239,7 +239,7 @@ function deleteManualExclusionErase() {
   state.manualExclusionEraseEnabled = true;
   state.blinkCandidateIds.delete("manual:excludeErase");
   setReviewed(currentRecord(), false);
-  resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); rebuildMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function shouldBlinkNewManual(role) {
@@ -321,6 +321,7 @@ async function addBoundaryCandidate() {
   const viewGeneration = state.imageGeneration;
   const requests = boundaryRequests();
   let catalogChanged = false;
+  const createdCandidateIds = [];
   state.boundaryPending = true; updateBoundaryActions(); updateActionButtons(); setStatusKey("status.boundaryDetecting", {}, "running");
   try {
     for (const request of requests) {
@@ -339,6 +340,7 @@ async function addBoundaryCandidate() {
         if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(t("error.boundaryResponse"), "error");
         break;
       }
+      createdCandidateIds.push(...created.map((candidate) => candidate.id));
       const record = state.images.find((item) => item.id === imageId);
       if (record) {
         record.candidateCount = (record.candidateCount || 0) + created.length;
@@ -354,6 +356,7 @@ async function addBoundaryCandidate() {
       markImagesUnreviewed([imageId], false);
       if (state.currentId === imageId && state.imageGeneration === viewGeneration) {
         await reconcileCurrentCandidates(imageId, viewGeneration);
+        if (createdCandidateIds.length) { recordHistoryOperation({ kind: "addCandidates", ids: createdCandidateIds }); saveDraft(); }
         if (!state.boundaryDrafts.length) setStatusKey("status.boundaryDone");
       }
     }
@@ -416,6 +419,7 @@ function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
   copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
   state.historyRemovedCandidateIds = new Set(state.removedCandidateIds || []);
+  state.historyCandidateIds = new Set(state.candidates.map((candidate) => candidate.id));
   state.history = []; state.historyIndex = 0; state.activeStroke = null; updateHistoryButtons();
 }
 
@@ -504,6 +508,8 @@ function appendManualStrokePoint(point) {
 function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx, exclusionEraseContext = exclusionEraseCtx) {
   if (stroke.kind === "removeCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.add(id)); return; }
   if (stroke.kind === "restoreCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.delete(id)); return; }
+  if (stroke.kind === "addCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.delete(id)); return; }
+  if (stroke.kind === "clearManual") { const target = stroke.role === "apply" ? addContext : (stroke.role === "exclude" ? exclusionContext : exclusionEraseContext); target.clearRect(0, 0, target.canvas.width, target.canvas.height); return; }
   if (["bucket", "exclude_bucket"].includes(stroke.tool)) { paintFillSpans(addContext, exclusionContext, exclusionEraseContext, stroke.spans, stroke.tool); return; }
   const points = stroke.points;
   if (!points.length) return;
@@ -532,6 +538,7 @@ function rebuildManualMaskFromHistory() {
   exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
   addCtx.drawImage(historyAddCanvas, 0, 0); exclusionCtx.drawImage(historyExclusionCanvas, 0, 0); exclusionEraseCtx.drawImage(historyExclusionEraseCanvas, 0, 0);
   state.removedCandidateIds = new Set(state.historyRemovedCandidateIds || []);
+  for (const candidate of state.candidates) if (!(state.historyCandidateIds || new Set()).has(candidate.id)) state.removedCandidateIds.add(candidate.id);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   markMaskDirty();
@@ -548,7 +555,7 @@ function completeManualStroke() {
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates();
+  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); rebuildMosaicPreview(); renderCandidates();
 }
 
 function restoreSnapshot(index) {
@@ -556,7 +563,7 @@ function restoreSnapshot(index) {
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); rebuildMosaicPreview(); renderCandidates(); render();
 }
 
 function buildCombinedMask() {
