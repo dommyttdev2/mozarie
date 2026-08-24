@@ -260,6 +260,7 @@ button { overflow: visible; text-overflow: clip; white-space: nowrap; }
 .tool-separator { width: 1px; height: 18px; margin: 0 2px; }
 .canvas-settings-bar { padding: 0; }
 .canvas-settings-bar .numeric-control { gap: 5px; }
+.block-control-heading { display: inline-flex; align-items: center; gap: 2px; }
 .canvas-settings-bar input[type="range"] { width: 92px; }
 .canvas-settings-bar input[type="number"] { width: 60px; min-width: 60px; }
 .canvas-navigation-bar { position: absolute; right: 12px; bottom: 12px; left: 12px; min-width: 0; padding: 5px; border: 1px solid #48515a; border-radius: 5px; background: #20252aed; }

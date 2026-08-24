@@ -267,6 +267,8 @@ async function assertDesktopLayout(page, width, height) {
   assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
   assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
   assert.ok(appbar.logo.left < appbar.brand.left && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, `brand logo stays immediately left of the app name at ${width}x${height}`);
+  await page.locator("#mosaicHelpButton").focus();
+  assert.equal(await page.locator("#mosaicHelpButton").evaluate((button) => document.activeElement === button), true, `mosaic help accepts keyboard focus at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
       const pane = document.querySelector("#galleryPane").getBoundingClientRect();
@@ -395,6 +397,8 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   assert.equal(layout.fits, true, `settings does not overflow at ${width}x${height} (${language})`);
   assert.equal(layout.reset && layout.save && layout.close, true, `settings controls own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#settingsTabModels").click();
+  const precisionTitle = language === "ja" ? "輪郭を補正" : "Refine contours";
+  assert.equal(await page.locator("#settingsPrecisionTitle").textContent(), precisionTitle, `contour refinement has the concise title at ${width}x${height} (${language})`);
   const expectedPathPlaceholder = language === "ja" ? "パスを指定してください" : "Specify a path";
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
@@ -410,6 +414,7 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   };
   for (const [key, [model, file, href]] of Object.entries(helpExpectations)) {
     const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
+    if (key === "precision") assert.equal(await page.locator("#modelHelpTitle").textContent(), precisionTitle, `contour refinement help shares the concise title at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
     if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
@@ -1277,11 +1282,15 @@ async function main() {
         const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, radios: node.querySelectorAll('input[type="radio"]').length }; });
         const candidateOverflow = [...document.querySelectorAll(".candidate-section-actions, .candidate-row")].some((node) => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight);
         const candidateHit = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice label")].every((label) => { const rect = label.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return label === target || label.contains(target); });
-        return { toolbar, stage, controls, candidateOverflow, candidateHit, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: document.querySelector("#mosaicHelpButton").getAttribute("aria-label"), title: document.querySelector("#mosaicHelpButton").title }, toolPosition: document.querySelector("#settingsToolPosition") };
+        const blockHeading = document.querySelector(".block-control-heading"); const blockLabel = blockHeading.querySelector('label[for="divisor"]'); const blockHelp = document.querySelector("#mosaicHelpButton"); const headingBox = blockHeading.getBoundingClientRect(); const labelBox = blockLabel.getBoundingClientRect(); const helpBox = blockHelp.getBoundingClientRect();
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
       });
       assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
       assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
+      assert.equal(editor.help.parent, "block-control-heading", `mosaic help follows the block-size label at ${width}/${language}`);
+      assert.equal(editor.help.nestedInLabel, false, `mosaic help is not nested in the block-size label at ${width}/${language}`);
+      assert.equal(editor.help.followsLabel && editor.help.fitsHeading, true, `mosaic help sits immediately after the block-size label at ${width}/${language}`);
       assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
       assert.ok(editor.controls.every((control) => control.width > 0 && control.radios >= 2), `candidate display controls use visible native radio choices at ${width}/${language}`);
       assert.equal(editor.controls.length, 2, `both candidate sections have a display control at ${width}/${language}`);
