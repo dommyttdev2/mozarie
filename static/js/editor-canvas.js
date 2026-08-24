@@ -258,12 +258,13 @@ async function reconcileCurrentCandidates(imageId, generation) {
   state.candidateImages = bundle.candidateImages;
   const record = state.images.find((image) => image.id === imageId);
   if (record) {
-    record.candidateCount = bundle.candidates.length;
-    record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+    const visible = bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
+    record.candidateCount = visible.length;
+    record.enabledCandidateCount = visible.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
     record.candidateRevision = bundle.candidateRevision;
   }
   invalidateCandidateBundles(imageId);
-  refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
+  refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   return true;
 }
 
@@ -277,8 +278,9 @@ function canvasHasPixels(context, target) {
 function syncCandidateRecord(imageId, candidates) {
   const record = state.images.find((image) => image.id === imageId);
   if (!record) return;
-  record.candidateCount = candidates.length;
-  record.enabledCandidateCount = candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+  const visible = candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
+  record.candidateCount = visible.length;
+  record.enabledCandidateCount = visible.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
 }
 
 function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, state.candidates); }
@@ -302,13 +304,14 @@ async function refreshCandidateRecord(imageId, syncMask = false) {
 function updateCandidateStatus() {
   const status = $("#candidateStatus");
   if (!state.currentId) { status.textContent = t("candidates.unselected"); return; }
+  const visibleCount = state.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id)).length;
   if (state.manualMaskPresent) {
-    status.textContent = state.candidates.length
-      ? t("candidates.countWithManual", { count: state.candidates.length })
+    status.textContent = visibleCount
+      ? t("candidates.countWithManual", { count: visibleCount })
       : t("candidates.manualOnly");
     return;
   }
-  status.textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
+  status.textContent = visibleCount ? t("candidates.count", { count: visibleCount }) : t("candidates.none");
 }
 
 function saveDraft() {

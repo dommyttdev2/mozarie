@@ -1237,6 +1237,26 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
+    for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
+      await page.setViewportSize({ width, height: 768 }); await page.evaluate((locale) => loadTranslations(locale), language);
+      const editor = await page.evaluate(() => {
+        const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; };
+        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-display")].map((node) => box(`.${node.className}`));
+        return { toolbar, stage, controls, help: { label: document.querySelector("#mosaicHelpButton").getAttribute("aria-label"), title: document.querySelector("#mosaicHelpButton").title }, toolPosition: document.querySelector("#settingsToolPosition") };
+      });
+      assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
+      assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
+      assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
+      assert.ok(editor.controls.every((control) => control.width >= 70 && control.width <= 75), `candidate display selects remain compact at ${width}/${language}`);
+    }
+    const targetModes = await page.evaluate(() => {
+      state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
+      setReviewed(state.images.find((image) => image.id === "sample"), true);
+      state.currentId = "sample-two";
+      return ["current", "masked", "reviewed"].map((mode) => ({ mode, ids: saveTargets(mode), count: saveTargets(mode).length }));
+    });
+    assert.deepEqual(targetModes, [{ mode: "current", ids: ["sample-two"], count: 1 }, { mode: "masked", ids: ["sample", "sample-two"], count: 2 }, { mode: "reviewed", ids: ["sample"], count: 1 }], "save target modes select explicit current, mosaicked, and reviewed IDs");
+
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
