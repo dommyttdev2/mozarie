@@ -1258,6 +1258,28 @@ async function main() {
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
       assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
       assert.ok(editor.controls.every((control) => control.width >= 70 && control.width <= 75), `candidate display selects remain compact at ${width}/${language}`);
+      await page.locator("#mosaicHelpButton").click();
+      const mosaicHelp = await page.locator("#mosaicHelpDialog").evaluate((dialog) => {
+        const links = [...dialog.querySelectorAll(".mosaic-guideline-links a")];
+        const row = dialog.querySelector(".mosaic-guideline-links");
+        return {
+          guideline: dialog.querySelector('[data-i18n="mosaicHelp.guideline"]').textContent,
+          links: links.map((link) => ({ text: link.textContent, href: link.href, target: link.target, rel: link.rel })),
+          oneLine: getComputedStyle(row).whiteSpace === "nowrap" && row.scrollWidth <= row.clientWidth,
+        };
+      });
+      const guideline = language === "ja"
+        ? "モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。"
+        : "The default mosaic setting uses the following sites' guidelines as a reference: 1/100 of the image's long edge (minimum 4 px).";
+      assert.equal(mosaicHelp.guideline, guideline, `mosaic help gives the localized default at ${width}/${language}`);
+      assert.deepEqual(mosaicHelp.links, [
+        { text: "BOOTH", href: "https://booth.pm/guidelines", target: "_blank", rel: "noreferrer" },
+        { text: "pixiv", href: "https://www.pixiv.net/terms/?page=guideline", target: "_blank", rel: "noreferrer" },
+        { text: "FANZA", href: "https://terms.dmm.co.jp/doujin_regulation", target: "_blank", rel: "noreferrer" },
+        { text: "DLsite", href: "https://www.dlsite.com/home/mosaic", target: "_blank", rel: "noreferrer" },
+      ], `mosaic help keeps the requested guideline links in order at ${width}/${language}`);
+      assert.equal(mosaicHelp.oneLine, true, `mosaic guideline links remain on one line at ${width}/${language}`);
+      await page.locator("#mosaicHelpCloseButton").click();
     }
     const targetModes = await page.evaluate(() => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
