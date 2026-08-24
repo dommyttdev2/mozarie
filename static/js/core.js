@@ -13,12 +13,12 @@ const state = {
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
+  applyTargetIds: [], applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
   outputDirectoryPicking: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
-  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true,
+  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true, manualExclusionEraseEnabled: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
@@ -38,17 +38,22 @@ const toolRail = $("#canvasToolRail");
 const ctx = canvas.getContext("2d");
 const addCanvas = document.createElement("canvas");
 const exclusionCanvas = document.createElement("canvas");
+const exclusionEraseCanvas = document.createElement("canvas");
+const effectiveExclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
 const mosaicCanvas = document.createElement("canvas");
 const mosaicSourceCanvas = document.createElement("canvas");
 const originalCanvas = document.createElement("canvas");
 const historyAddCanvas = document.createElement("canvas");
 const historyExclusionCanvas = document.createElement("canvas");
+const historyExclusionEraseCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
 const boundaryOverlayCanvas = document.createElement("canvas");
 const blinkCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
 const exclusionCtx = exclusionCanvas.getContext("2d");
+const exclusionEraseCtx = exclusionEraseCanvas.getContext("2d");
+const effectiveExclusionCtx = effectiveExclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
 const mosaicCtx = mosaicCanvas.getContext("2d");
 const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
@@ -202,21 +207,11 @@ function closeProcessing() {
 
 function renderStatus() {
   const status = state.status;
-  const element = $("#status");
   const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
-  const connectionStatus = $("#connectionStatus");
-  const headerError = Boolean(message) && status?.kind === "error";
-  connectionStatus.textContent = headerError ? message : "";
-  connectionStatus.hidden = !headerError;
-  if (headerError) {
-    element.textContent = "";
-    element.className = "status";
-    $("#statusLine").hidden = true;
-    return;
-  }
-  element.textContent = message;
-  element.className = `status ${status?.kind || ""}`;
-  $("#statusLine").hidden = !message;
+  const headerStatus = $("#connectionStatus");
+  headerStatus.textContent = message;
+  headerStatus.className = `appbar-status ${status?.kind || ""}`;
+  headerStatus.hidden = !message;
 }
 
 function renderLocalizedDynamicState() {
@@ -477,9 +472,26 @@ function updateActionButtons() {
 
 function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), hasManualExclude = false) {
   for (const button of document.querySelectorAll("[data-candidate-batch]")) {
-    const [role] = button.dataset.candidateBatch.split(":");
+    const [role, operation] = button.dataset.candidateBatch.split(":");
     const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
     button.disabled = locked || !hasRoleCandidate;
+    if (operation === "toggle") {
+      const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
+      if (role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas)) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
+      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
+      const active = enabled.length > 0 && enabled.every(Boolean);
+      button.textContent = t(active ? "settings.on" : "settings.off");
+      button.setAttribute("aria-pressed", String(active));
+    }
+    if (operation === "blink") {
+      const ids = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.id);
+      if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
+      if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
+      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) ids.push("manual:excludeErase");
+      const active = ids.length > 0 && ids.every((id) => state.blinkCandidateIds.has(id));
+      button.textContent = t("candidates.blinkState", { state: t(active ? "settings.on" : "settings.off") });
+      button.setAttribute("aria-pressed", String(active));
+    }
   }
 }
 

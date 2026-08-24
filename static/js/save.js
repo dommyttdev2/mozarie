@@ -42,6 +42,8 @@ function syncApplyMode() {
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
+  $("#removeOnlyMasked").disabled = state.applyRunning || !$("#removeAfterSave").checked;
+  $("#removeOnlyMaskedRow").classList.toggle("muted", !$("#removeAfterSave").checked);
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -79,6 +81,7 @@ function draftPayload(imageIds) {
     if (draft) drafts[imageId] = {
       add: draft.manualEnabled === false ? "" : draft.add,
       exclusion: draft.manualExclusionEnabled === false ? "" : draft.exclusion,
+      exclusionErase: draft.manualExclusionEraseEnabled === false ? "" : draft.exclusionErase,
       manualExclusionForced: draft.manualExclusionForced ?? draft.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false),
     };
   }
@@ -279,13 +282,13 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   updateActionButtons();
 }
 
-async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
+async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false, removeOnlyMasked = true) {
   const result = await api("/api/save/prepare", {
     method: "POST",
     body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
   const save = {
-    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
+    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave, removeOnlyMasked,
     removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
     catalogEpoch: state.catalogEpoch,
   };
@@ -361,7 +364,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             resetCurrentDraft();
           }
         }
-        if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
+        if (save.removeAfterSave && save.removeOnlyMasked && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
         if (committed.stale) save.stale += 1;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
         pruneSourceAccess();
@@ -401,6 +404,9 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         setApplyResult(error.message, true);
       }
       if (catalogCurrent) {
+        if (save.removeAfterSave && !save.removeOnlyMasked && !save.cancelled && !save.failed && !save.stale && save.completed === save.entries.length) {
+          save.removableImageIds = new Set(save.initialOrder);
+        }
         try {
           await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
         } catch (error) {
@@ -414,6 +420,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
     } finally {
       state.saving = false;
       state.applyRunning = false;
+      state.applyCatalogSnapshot = null;
       state.browserSave = null;
       state.job = { kind: "idle", state: "idle" };
       $("#applyPauseButton").hidden = true;
@@ -451,10 +458,11 @@ async function startApplyFromDialog(event) {
   state.saveStarting = true;
   state.saving = true;
   state.applyRunning = true;
+  state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])), removeOnlyMasked: $("#removeOnlyMasked").checked };
   updateActionButtons();
   if (copy && !$("#deleteOriginal").checked) {
     try {
-      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
+      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, removeOnlyMasked: $("#removeOnlyMasked").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
     } catch (error) { setApplyResult(error.message, true); return finishSaveStart(); }
   }
@@ -469,11 +477,12 @@ async function startApplyFromDialog(event) {
   if (state.importing) return finishSaveStart();
   try {
     state.saveStarting = false;
-    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
+    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked, $("#removeOnlyMasked").checked);
   } catch (error) {
     setApplyResult(error.message, true);
     state.saving = false;
     state.applyRunning = false;
+    state.applyCatalogSnapshot = null;
     state.browserSave = null;
     $("#applyPauseButton").hidden = true;
     $("#applyCancelButton").hidden = true;
@@ -486,6 +495,7 @@ function finishSaveStart() {
   state.saveStarting = false;
   state.saving = false;
   state.applyRunning = false;
+  state.applyCatalogSnapshot = null;
   updateActionButtons();
 }
 
@@ -541,11 +551,18 @@ async function finishApplyJob(job) {
     state.maskStatus.clear();
     for (const imageId of completedImageIds) state.drafts.delete(imageId);
     state.applyTargetIds = requestedImageIds;
-    if (job.removeAfterSave && completedImageIds.length) {
-      await removeCompletedImagesFromCatalog(completedImageIds, previousOrder, previousImagesById);
+    const snapshot = state.applyCatalogSnapshot;
+    const fullyCompleted = job.state === "complete" && completedImageIds.length === requestedImageIds.length;
+    const removableImageIds = job.removeAfterSave && fullyCompleted && snapshot?.removeOnlyMasked === false
+      ? snapshot.order
+      : completedImageIds;
+    const removalOrder = snapshot?.removeOnlyMasked === false ? snapshot.order : previousOrder;
+    const removalRecords = snapshot?.removeOnlyMasked === false ? snapshot.recordsById : previousImagesById;
+    if (job.removeAfterSave && removableImageIds.length && (fullyCompleted || snapshot?.removeOnlyMasked !== false)) {
+      await removeCompletedImagesFromCatalog(removableImageIds, removalOrder, removalRecords);
       if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     }
-    const removedAfterSave = Boolean(job.removeAfterSave && completedImageIds.length);
+    const removedAfterSave = Boolean(job.removeAfterSave && removableImageIds.length && (fullyCompleted || snapshot?.removeOnlyMasked !== false));
     if (removedAfterSave) {
       // removeCompletedImagesFromCatalog already selects the next surviving image.
     } else if (reloadCurrent) {
@@ -576,6 +593,7 @@ async function finishApplyJob(job) {
     reconciled = true;
   } finally {
     if (reconciled && job.startedAt != null) state.handledApplyStartedAt = job.startedAt;
+    if (reconciled) state.applyCatalogSnapshot = null;
     state.applyFinishing = false;
   }
 }

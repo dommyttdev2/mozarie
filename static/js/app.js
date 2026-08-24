@@ -152,10 +152,12 @@ function bindEvents() {
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
   $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#excludeBrushTool").addEventListener("click", () => setTool("exclude_brush")); $("#excludeEraserTool").addEventListener("click", () => setTool("exclude_eraser"));
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
   });
   $("#bucketTool").addEventListener("click", () => setTool("bucket"));
+  $("#excludeBucketTool").addEventListener("click", () => setTool("exclude_bucket"));
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
   $("#boundaryBrushTool").addEventListener("click", () => setTool("boundary_brush"));
@@ -207,6 +209,7 @@ function bindEvents() {
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {
     const paused = state.browserSave ? state.browserSave.paused : state.job?.state === "paused";
@@ -267,8 +270,8 @@ function bindEvents() {
     }
     if (event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
-    const point = clampPoint(pointFromEvent(event));
-    state.drawing = true; state.pointer = point; state.hover = point;
+    const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
+    state.drawing = true; state.pointer = point; state.hover = rawPoint;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
@@ -284,7 +287,6 @@ function bindEvents() {
           if (state.polygonPoints.length === 4 && polygonIsValid()) {
             addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
             state.polygonPoints = [];
-            setStatusKey("status.boundaryReady");
           }
         }
         state.drawing = false;
@@ -292,7 +294,7 @@ function bindEvents() {
       updateBoundaryActions(); render(); return;
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
-    if (state.tool === "bucket") { state.drawing = false; fillAt(point); return; }
+    if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
     beginManualStroke(point); render();
   });
   const processPointerMove = (event) => {
@@ -300,9 +302,9 @@ function bindEvents() {
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
     }
-    state.hover = clampPoint(pointFromEvent(event));
+    state.hover = pointFromEvent(event);
     if (state.drawing && (event.buttons & 1)) {
-      const point = state.hover;
+      const point = clampPoint(state.hover);
       if (state.tool === "boundary") {
         state.boundaryPoint = point;
         state.boundaryDragging ||= boundaryDragStarted(event);
@@ -335,14 +337,13 @@ function bindEvents() {
       if (state.polygonPoints.length === 4 && polygonIsValid()) {
         addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
         state.polygonPoints = [];
-        setStatusKey("status.boundaryReady");
       }
       state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair";
+    canvas.style.cursor = ["eraser", "exclude_brush", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
     if (wasDrawing && manualStrokeStarted) completeManualStroke();
     if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
     if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;
@@ -352,13 +353,11 @@ function bindEvents() {
       if (boundaryDragging && roi) {
         addBoundaryDraft({ type: "rectangle", roi, point: pointForRoi(roi) });
         state.boundaryRoi = null;
-        setStatusKey("status.boundaryReady");
       } else {
         const draft = rectangleDraftAt(point);
         if (draft) {
           draft.point = point;
           state.boundaryActiveId = draft.id;
-          setStatusKey("status.boundaryReady");
         }
       }
     }

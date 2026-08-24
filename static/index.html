@@ -30,7 +30,6 @@
     <button id="settingsButton" type="button" data-i18n="settings.open">設定</button>
   </header>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
-  <div id="statusLine" class="status-line" hidden><div id="status" class="status" aria-live="polite"></div></div>
 
   <main class="studio-grid">
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
@@ -63,6 +62,8 @@
         <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="vertical" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
           <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
           <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+          <button id="excludeBrushTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.excludeBrush" data-i18n-title="editor.excludeBrush">⊖</button>
+          <button id="excludeEraserTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser">⊕</button>
           <div class="boundary-tool-menu">
             <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" data-toolbar-item aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
             <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
@@ -70,6 +71,7 @@
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
               <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
               <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="塗りつぶし" title="塗りつぶし" data-i18n-aria-label="boundary.fill" data-i18n-title="boundary.fill">▣</button>
+              <button id="excludeBucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>
@@ -121,11 +123,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:enable" type="button">ON</button><button data-candidate-batch="apply:disable" type="button">OFF</button><button data-candidate-batch="apply:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="apply:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-batch="apply:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="apply:delete" type="button">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:enable" type="button">ON</button><button data-candidate-batch="exclude:disable" type="button">OFF</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -322,6 +324,7 @@
         </div>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
         <label class="choice-row"><input id="removeAfterSave" type="checkbox"><span data-i18n="apply.removeAfterSave">完了後、一覧から削除</span></label>
+        <label id="removeOnlyMaskedRow" class="choice-row nested-choice"><input id="removeOnlyMasked" type="checkbox" checked><span data-i18n="apply.removeOnlyMasked">モザイクがある画像のみ対象</span></label>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize"></output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">対応するメタデータを引き継ぎます。同名時は自動連番です。</p>
       </fieldset>

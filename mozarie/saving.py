@@ -124,7 +124,7 @@ class SavingMixin:
                 apply_masks: list[np.ndarray] = []
                 exclude_masks: list[np.ndarray] = []
                 forced_exclude_masks: list[np.ndarray] = []
-                add_mask, exclusion_mask = draft_masks
+                add_mask, exclusion_mask, exclusion_erase_mask = draft_masks
                 enabled_apply_candidates = [candidate for candidate in candidates if candidate.enabled and candidate.role == CandidateRole.APPLY]
                 if not enabled_apply_candidates and add_mask is None:
                     raise ClientError("保存するモザイク範囲がありません。")
@@ -150,7 +150,7 @@ class SavingMixin:
                             forced_exclude_masks.append(candidate_mask)
                 mask = compose_masks(
                     (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask,
-                    forced_exclude_masks, manual_exclude_forced,
+                    forced_exclude_masks, manual_exclude_forced, exclusion_erase_mask,
                 )
                 if mask is None or not np.any(mask):
                     raise ClientError("保存するモザイク範囲がありません。")

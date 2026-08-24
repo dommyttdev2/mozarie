@@ -4,31 +4,45 @@ function renderCandidates() {
   applyList.textContent = ""; excludeList.textContent = "";
   if (!state.currentId) { updateCandidateBatchButtons(false); return; }
   const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
-  if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude) {
+  const hasManualExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
+  if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude && !hasManualExclusionErase) {
     const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
     const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); list.append(empty);
   };
+  const makeToggle = (enabled, label, onChange, disabled = false) => {
+    const button = document.createElement("button"); button.type = "button"; button.className = "candidate-toggle";
+    button.disabled = disabled; button.setAttribute("aria-label", label); button.setAttribute("aria-pressed", String(enabled));
+    button.textContent = t(enabled ? "settings.on" : "settings.off");
+    button.addEventListener("click", onChange); return button;
+  };
+  const makeForceToggle = (forced, onChange, disabled = false) => {
+    const button = document.createElement("button"); button.type = "button"; button.className = "candidate-forced";
+    const text = `${t("candidates.forced")} ${t(forced ? "settings.on" : "settings.off")}`;
+    button.disabled = disabled; button.setAttribute("aria-pressed", String(forced)); button.setAttribute("aria-label", text);
+    button.textContent = text; button.addEventListener("click", onChange); return button;
+  };
   const appendManual = (list, role) => {
     const isApply = role === "apply";
     const exists = isApply ? state.manualMaskPresent : hasManualExclude;
     if (!exists) return;
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-manual ${isApply ? "candidate-row-manual-apply" : "candidate-row-manual-exclude"}`;
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled;
-    enabled.setAttribute("aria-label", isApply ? t("candidates.manualToggle") : t("candidates.manualExcludeToggle"));
-    enabled.addEventListener("change", () => {
-      if (isBusy() || state.importing) { enabled.checked = isApply ? state.manualEnabled : state.manualExclusionEnabled; return; }
-      if (isApply) state.manualEnabled = enabled.checked; else state.manualExclusionEnabled = enabled.checked;
+    const isEnabled = isApply ? state.manualEnabled : state.manualExclusionEnabled;
+    row.classList.toggle("enabled", isEnabled);
+    const enabled = makeToggle(isEnabled, isApply ? t("candidates.manualToggle") : t("candidates.manualExcludeToggle"), () => {
+      if (isBusy() || state.importing) return;
+      if (isApply) state.manualEnabled = !state.manualEnabled; else state.manualExclusionEnabled = !state.manualExclusionEnabled;
       markMaskDirty();
       setReviewed(currentRecord(), false);
-      resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+      refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
     const blinkId = `manual:${role}`;
     const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
     blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
     blink.classList.toggle("active", state.blinkCandidateIds.has(blinkId));
+    if (state.blinkCandidateIds.has(blinkId)) row.classList.add(`blink-${role}`);
     blink.addEventListener("click", () => {
       if (state.blinkCandidateIds.has(blinkId)) state.blinkCandidateIds.delete(blinkId);
       else state.blinkCandidateIds.add(blinkId);
@@ -40,36 +54,55 @@ function renderCandidates() {
     remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", isApply ? deleteManualMask : deleteManualExclusion);
     if (!isApply) {
-      const forced = document.createElement("input"); forced.type = "checkbox"; forced.checked = state.manualExclusionForced;
-      forced.setAttribute("aria-label", t("candidates.forced"));
-      forced.addEventListener("change", () => {
-        if (isBusy() || state.importing) { forced.checked = state.manualExclusionForced; return; }
-        state.manualExclusionForced = forced.checked; markMaskDirty(); saveDraft();
+      const forced = makeForceToggle(state.manualExclusionForced, () => {
+        if (isBusy() || state.importing) return;
+        state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
       });
-      const forcedLabel = document.createElement("label"); forcedLabel.className = "candidate-forced"; forcedLabel.append(forced, document.createTextNode(t("candidates.forced")));
-      row.append(enabled, blink, label, forcedLabel, remove);
+      row.append(enabled, blink, label, forced, remove);
     } else row.append(enabled, blink, label, remove);
     list.append(row);
   };
   appendManual(applyList, "apply");
   appendManual(excludeList, "exclude");
+  if (hasManualExclusionErase) {
+    const blinkId = "manual:excludeErase";
+    const row = document.createElement("div"); row.className = "candidate-row candidate-row-manual candidate-row-manual-exclude-erase";
+    row.classList.toggle("enabled", state.manualExclusionEraseEnabled);
+    if (state.blinkCandidateIds.has(blinkId)) row.classList.add("blink-apply");
+    const enabled = makeToggle(state.manualExclusionEraseEnabled, t("candidates.manualExcludeEraseToggle"), () => {
+      if (isBusy() || state.importing) return;
+      state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
+      setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
+    });
+    const blink = document.createElement("button"); blink.type = "button"; blink.className = "candidate-blink apply";
+    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
+    blink.classList.toggle("active", state.blinkCandidateIds.has(blinkId));
+    blink.addEventListener("click", () => {
+      if (state.blinkCandidateIds.has(blinkId)) state.blinkCandidateIds.delete(blinkId); else state.blinkCandidateIds.add(blinkId);
+      renderCandidates(); render();
+    });
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
+    remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
+    remove.addEventListener("click", deleteManualExclusionErase);
+    row.append(enabled, blink, label, remove); excludeList.append(row);
+  }
   for (const candidate of state.candidates) {
     const key = candidateMutationKey(state.currentId, candidate.id);
     const deleting = state.candidateDeleting.has(key);
     const role = candidate.role === "exclude" ? "exclude" : "apply";
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-${role}`;
+    row.classList.toggle("enabled", candidate.enabled);
     if (state.blinkCandidateIds.has(candidate.id)) row.classList.add(`blink-${role}`);
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = candidate.enabled; enabled.disabled = deleting || state.candidateBatchPending.has(state.currentId);
-    enabled.setAttribute("aria-label", t("candidates.toggle", { label: candidate.className }));
-    enabled.addEventListener("change", async () => {
-      if (isBusy() || state.importing) { enabled.checked = candidate.enabled; return; }
+    const enabled = makeToggle(candidate.enabled, t("candidates.toggle", { label: candidate.className }), async () => {
+      if (isBusy() || state.importing) return;
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
-      candidate.enabled = enabled.checked;
+      candidate.enabled = !candidate.enabled;
       setReviewed(currentRecord(), false);
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
-    });
+    }, deleting || state.candidateBatchPending.has(state.currentId));
     const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
     blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
     blink.classList.toggle("active", state.blinkCandidateIds.has(candidate.id));
@@ -88,24 +121,20 @@ function renderCandidates() {
     remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
     remove.addEventListener("click", () => deleteCandidate(candidate));
     if (role === "exclude") {
-      const forced = document.createElement("input"); forced.type = "checkbox"; forced.checked = candidate.forced !== false;
-      forced.disabled = deleting || state.candidateBatchPending.has(state.currentId);
-      forced.setAttribute("aria-label", t("candidates.forced"));
-      forced.addEventListener("change", async () => {
-        if (isBusy() || state.importing) { forced.checked = candidate.forced !== false; return; }
+      const forced = makeForceToggle(candidate.forced !== false, async () => {
+        if (isBusy() || state.importing) return;
         const previousForced = candidate.forced !== false;
         const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
-        candidate.forced = forced.checked; setReviewed(currentRecord(), false);
+        candidate.forced = !previousForced; setReviewed(currentRecord(), false);
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
-      });
-      const forcedLabel = document.createElement("label"); forcedLabel.className = "candidate-forced"; forcedLabel.append(forced, document.createTextNode(t("candidates.forced")));
-      row.append(enabled, blink, label, forcedLabel, remove);
+      }, deleting || state.candidateBatchPending.has(state.currentId));
+      row.append(enabled, blink, label, forced, remove);
     } else row.append(enabled, blink, label, remove);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
-  updateCandidateBatchButtons(undefined, undefined, hasManualExclude);
+  updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
 }
 
 function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }
@@ -248,18 +277,40 @@ function deleteManualExclusion() {
   resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
+function deleteManualExclusionErase() {
+  if (!canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas) || isBusy() || state.importing) return;
+  exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+  state.manualExclusionEraseEnabled = true;
+  state.blinkCandidateIds.delete("manual:excludeErase");
+  setReviewed(currentRecord(), false);
+  resetHistoryToCurrentManualMask(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+}
+
+function shouldBlinkNewManual(role) {
+  const ids = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.id);
+  return ids.length > 0 && ids.every((id) => state.blinkCandidateIds.has(id));
+}
+
 async function batchCandidateOperation(spec) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   if (!imageId || isBusy() || state.importing || state.candidateBatchPending.has(imageId)) return;
-  const [role, operation] = spec.split(":");
+  let [role, operation] = spec.split(":");
   const manual = role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas);
+  const manualErase = role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
   if (operation === "blink") {
     const ids = state.candidates.filter((item) => item.role === role).map((item) => item.id);
     if (manual) ids.push(`manual:${role}`);
+    if (manualErase) ids.push("manual:excludeErase");
     const allActive = ids.length && ids.every((id) => state.blinkCandidateIds.has(id));
     ids.forEach((id) => allActive ? state.blinkCandidateIds.delete(id) : state.blinkCandidateIds.add(id));
     renderCandidates(); render(); return;
+  }
+  if (operation === "toggle") {
+    const enabled = state.candidates.filter((item) => item.role === role).map((item) => item.enabled);
+    if (manual) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
+    if (manualErase) enabled.push(state.manualExclusionEraseEnabled);
+    operation = enabled.length && enabled.every(Boolean) ? "disable" : "enable";
   }
   if (operation === "delete" && confirmationRequired("candidateRoleDelete") && !await confirmAction(t("confirm.candidateRoleDelete.title"), t("confirm.candidateRoleDelete.message"), "candidateRoleDelete")) return;
   if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateBatchPending.has(imageId)) return;
@@ -284,6 +335,7 @@ async function batchCandidateOperation(spec) {
           else state.manualExclusionEnabled = operation === "enable";
           markMaskDirty();
         }
+        if (manualErase) { state.manualExclusionEraseEnabled = operation === "enable"; markMaskDirty(); }
       }
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
       setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); renderCandidates(); render();
@@ -399,22 +451,32 @@ function updateHistoryButtons() {
 
 function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
-  copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas);
+  copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
   state.history = []; state.historyIndex = 0; state.activeStroke = null; updateHistoryButtons();
 }
 
-function paintStrokeOnContexts(addContext, exclusionContext, from, to, erase, size) {
-  const target = erase ? exclusionContext : addContext; const opposite = erase ? addContext : exclusionContext;
-  if (erase || !state.manualExclusionForced) { opposite.save(); opposite.globalCompositeOperation = "destination-out"; opposite.lineWidth = size; opposite.lineCap = "round"; opposite.beginPath(); opposite.moveTo(from.x, from.y); opposite.lineTo(to.x, to.y); opposite.stroke(); opposite.restore(); }
-  target.save(); target.globalCompositeOperation = "source-over"; target.strokeStyle = "#ffffff"; target.lineWidth = size; target.lineCap = "round"; target.beginPath(); target.moveTo(from.x, from.y); target.lineTo(to.x, to.y); target.stroke(); target.restore();
+function strokeLine(context, from, to, size, operation = "source-over") {
+  context.save(); context.globalCompositeOperation = operation; context.strokeStyle = "#ffffff"; context.lineWidth = size; context.lineCap = "round";
+  context.beginPath(); context.moveTo(from.x, from.y); context.lineTo(to.x, to.y); context.stroke(); context.restore();
 }
 
-function paintStroke(from, to, erase, size) {
-  paintStrokeOnContexts(addCtx, exclusionCtx, from, to, erase, size);
+function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, from, to, tool, size) {
+  if (tool === "exclude_eraser") { strokeLine(exclusionEraseContext, from, to, size); return; }
+  if (tool === "eraser" || tool === "exclude_brush") {
+    strokeLine(exclusionContext, from, to, size);
+    strokeLine(exclusionEraseContext, from, to, size, "destination-out");
+    return;
+  }
+  strokeLine(addContext, from, to, size);
+  if (!state.manualExclusionForced) strokeLine(exclusionContext, from, to, size, "destination-out");
+}
+
+function paintStroke(from, to, tool, size) {
+  paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, from, to, tool, size);
   markMaskDirty();
 }
 
-function fillAt(point) {
+function fillAt(point, tool = state.tool) {
   if (!state.currentImage) return;
   const width = originalCanvas.width; const height = originalCanvas.height;
   const pixels = originalCtx.getImageData(0, 0, width, height).data;
@@ -423,7 +485,7 @@ function fillAt(point) {
   const generation = state.imageGeneration; const epoch = state.catalogEpoch; const imageId = state.currentId; const record = currentRecord(); const version = imageAssetVersion(record); const revision = Number(record?.candidateRevision || 0);
   const apply = (spans) => {
     if (!catalogRecordMatches(record, epoch, { version, revision }) || !isCurrentGeneration(generation) || state.currentId !== imageId) { state.fillPending = false; return; }
-    applyFillSpans(spans); state.history.splice(state.historyIndex); state.history.push({ tool: "bucket", spans }); trimHistory();
+    applyFillSpans(spans, tool); state.history.splice(state.historyIndex); state.history.push({ tool, spans }); trimHistory();
     state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); renderCandidates(); render();
   };
   if (typeof Worker !== "function") { setStatus(t("error.requestFailed"), "error"); return; }
@@ -436,56 +498,67 @@ function fillAt(point) {
   worker.postMessage({ pixels: pixels.buffer, width, height, x, y, tolerance }, [pixels.buffer]);
 }
 
-function paintFillSpans(addContext, exclusionContext, spans) {
-  addContext.save(); addContext.fillStyle = "#ffffff";
-  if (!state.manualExclusionForced) exclusionContext.save();
-  if (!state.manualExclusionForced) exclusionContext.globalCompositeOperation = "destination-out";
-  for (let index = 0; index < spans.length; index += 3) { const row = spans[index]; const start = spans[index + 1]; const end = spans[index + 2]; addContext.fillRect(start, row, end - start, 1); if (!state.manualExclusionForced) exclusionContext.fillRect(start, row, end - start, 1); }
-  addContext.restore(); if (!state.manualExclusionForced) exclusionContext.restore();
+function paintFillSpans(addContext, exclusionContext, exclusionEraseContext, spans, tool = "bucket") {
+  const target = tool === "exclude_eraser" ? exclusionEraseContext : (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket" ? exclusionContext : addContext);
+  target.save(); target.globalCompositeOperation = "source-over"; target.fillStyle = "#ffffff";
+  if ((tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") || (!state.manualExclusionForced && tool === "bucket")) exclusionEraseContext.save();
+  if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.globalCompositeOperation = "destination-out";
+  else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.save(), exclusionContext.globalCompositeOperation = "destination-out";
+  for (let index = 0; index < spans.length; index += 3) {
+    const row = spans[index]; const start = spans[index + 1]; const width = spans[index + 2] - start;
+    target.fillRect(start, row, width, 1);
+    if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.fillRect(start, row, width, 1);
+    else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.fillRect(start, row, width, 1);
+  }
+  target.restore();
+  if (tool === "eraser" || tool === "exclude_brush" || tool === "exclude_bucket") exclusionEraseContext.restore();
+  else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.restore();
 }
 
-function applyFillSpans(spans) {
-  paintFillSpans(addCtx, exclusionCtx, spans); markMaskDirty(); flushMaskComposition();
+function applyFillSpans(spans, tool = "bucket") {
+  paintFillSpans(addCtx, exclusionCtx, exclusionEraseCtx, spans, tool); markMaskDirty(); flushMaskComposition();
 }
 
-function drawStroke(from, to, erase, size = Number($("#brushSize").value)) {
-  paintStroke(from, to, erase, size);
+function drawStroke(from, to, tool, size = Number($("#brushSize").value)) {
+  paintStroke(from, to, tool, size);
 }
 
 function beginManualStroke(point) {
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
-  drawStroke(point, point, state.tool === "eraser", state.activeStroke.size);
+  if (state.tool === "brush" && shouldBlinkNewManual("apply")) state.blinkCandidateIds.add("manual:apply");
+  if (["eraser", "exclude_brush"].includes(state.tool) && shouldBlinkNewManual("exclude")) state.blinkCandidateIds.add("manual:exclude");
+  drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 
 function appendManualStrokePoint(point) {
   if (!state.activeStroke) return;
   const previous = state.activeStroke.points.at(-1);
   state.activeStroke.points.push({ ...point });
-  drawStroke(previous, point, state.activeStroke.tool === "eraser", state.activeStroke.size);
+  drawStroke(previous, point, state.activeStroke.tool, state.activeStroke.size);
 }
 
-function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx) {
-  if (stroke.tool === "bucket") { paintFillSpans(addContext, exclusionContext, stroke.spans); return; }
-  const erase = stroke.tool === "eraser";
+function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx, exclusionEraseContext = exclusionEraseCtx) {
+  if (["bucket", "exclude_bucket"].includes(stroke.tool)) { paintFillSpans(addContext, exclusionContext, exclusionEraseContext, stroke.spans, stroke.tool); return; }
   const points = stroke.points;
   if (!points.length) return;
-  paintStrokeOnContexts(addContext, exclusionContext, points[0], points[0], erase, stroke.size);
+  paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, points[0], points[0], stroke.tool, stroke.size);
   for (let index = 1; index < points.length; index += 1) {
-    paintStrokeOnContexts(addContext, exclusionContext, points[index - 1], points[index], erase, stroke.size);
+    paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, points[index - 1], points[index], stroke.tool, stroke.size);
   }
 }
 
 function historyWeight(stroke) { return stroke.spans?.byteLength || (stroke.spans?.length || 0) * 4 || (stroke.points?.length || 0) * 16; }
 function trimHistory() {
   while (state.history.length > 12 || state.history.reduce((total, stroke) => total + historyWeight(stroke), 0) > 64 * 1024 * 1024) {
-    replayManualStroke(state.history.shift(), historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"));
+    replayManualStroke(state.history.shift(), historyAddCanvas.getContext("2d"), historyExclusionCanvas.getContext("2d"), historyExclusionEraseCanvas.getContext("2d"));
   }
 }
 
 function rebuildManualMaskFromHistory() {
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  addCtx.drawImage(historyAddCanvas, 0, 0); exclusionCtx.drawImage(historyExclusionCanvas, 0, 0);
+  exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+  addCtx.drawImage(historyAddCanvas, 0, 0); exclusionCtx.drawImage(historyExclusionCanvas, 0, 0); exclusionEraseCtx.drawImage(historyExclusionEraseCanvas, 0, 0);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   markMaskDirty();

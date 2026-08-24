@@ -209,10 +209,10 @@ class JobsMixin:
     def combined_candidate_mask(
         self,
         image_id: str,
-        draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
+        draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
     ) -> np.ndarray | None:
-        add_mask, exclusion_mask = draft or (None, None)
+        add_mask, exclusion_mask, exclusion_erase_mask = draft or (None, None, None)
         with self.image_io_lock(image_id):
             with self.lock:
                 current_record = self.images.get(image_id)
@@ -244,7 +244,7 @@ class JobsMixin:
                         forced_exclude_masks.append(mask)
             result = compose_masks(
                 (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask,
-                forced_exclude_masks, True if manual_exclude_forced is None else manual_exclude_forced,
+                forced_exclude_masks, True if manual_exclude_forced is None else manual_exclude_forced, exclusion_erase_mask,
             )
             with self.lock:
                 current_record = self.images.get(image_id)

@@ -257,10 +257,10 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
+    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
-  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
+  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.top && appbar.status.bottom <= appbar.appbar.bottom, `status stays in the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
@@ -344,14 +344,12 @@ async function assertConnectionStatusLayout(page, width, height, language) {
       inAppbar: connection.top >= appbar.top && connection.bottom <= appbar.bottom,
       gap: settings.left - connection.right,
       settingsHit: document.elementFromPoint(settings.x + settings.width / 2, settings.y + settings.height / 2) === document.querySelector("#settingsButton"),
-      statusLineHidden: document.querySelector("#statusLine").hidden,
       connectionHidden: document.querySelector("#connectionStatus").hidden,
       parentIsAppbar: document.querySelector("#connectionStatus").parentElement === document.querySelector(".appbar"),
       ...dimensions,
     };
   });
   assert.equal(layout.connectionHidden, false, `connection status is visible at ${width}x${height} (${language})`);
-  assert.equal(layout.statusLineHidden, true, `connection status does not use the line below the header at ${width}x${height} (${language})`);
   assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit, true, `connection status stays in the header and settings stays clickable at ${width}x${height} (${language})`);
   assert.ok(layout.gap >= 0 && layout.gap <= 10, `connection status sits immediately left of settings at ${width}x${height} (${language})`);
   assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
@@ -359,18 +357,17 @@ async function assertConnectionStatusLayout(page, width, height, language) {
   await page.evaluate(() => setStatus("Test notification"));
   const general = await page.evaluate(() => {
     const appbar = document.querySelector(".appbar").getBoundingClientRect();
-    const status = document.querySelector("#status").getBoundingClientRect();
-    return { connectionHidden: document.querySelector("#connectionStatus").hidden, statusLineHidden: document.querySelector("#statusLine").hidden, belowAppbar: status.top >= appbar.bottom };
+    const status = document.querySelector("#connectionStatus").getBoundingClientRect();
+    return { connectionHidden: document.querySelector("#connectionStatus").hidden, inAppbar: status.top >= appbar.top && status.bottom <= appbar.bottom };
   });
-  assert.equal(general.connectionHidden, true, `ordinary status hides the appbar connection message at ${width}x${height} (${language})`);
-  assert.equal(general.statusLineHidden, false, `ordinary status remains below the header at ${width}x${height} (${language})`);
-  assert.equal(general.belowAppbar, true, `ordinary status remains outside the header at ${width}x${height} (${language})`);
+  assert.equal(general.connectionHidden, false, `ordinary status uses the header at ${width}x${height} (${language})`);
+  assert.equal(general.inAppbar, true, `ordinary status remains inside the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test error", "error"));
-  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
+  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => clearStatus());
-  assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `clearing status hides both status areas at ${width}x${height} (${language})`);
+  assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden), true, `clearing status hides the header status at ${width}x${height} (${language})`);
 }
 
 async function assertSettingsDialogLayout(page, width, height, language) {
@@ -586,7 +583,7 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
   await page.locator('.gallery-item[data-id="sample"]').click();
   try { await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
   catch (error) {
-    const status = await page.locator("#status").textContent();
+    const status = await page.locator("#connectionStatus").textContent();
     throw new Error(`image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
   }
 }
@@ -617,13 +614,13 @@ async function main() {
     });
     await initialPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
     await initialPage.waitForFunction(() => typeof window.__releaseInitialImages === "function");
-    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "the initial empty catalog has no blank status line");
-    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the hidden status line leaves no 24px gap at 1280x720");
+    assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "the initial empty catalog has no header notice");
+    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the editor has no notification strip gap at 1280x720");
     assert.equal(await initialPage.evaluate(() => typeof setStatus), "function");
     await initialPage.evaluate(() => setStatus("Test notification"));
-    assert.equal(await initialPage.locator("#statusLine").isVisible(), true, "setStatus shows the notification line");
+    assert.equal(await initialPage.locator("#connectionStatus").isVisible(), true, "setStatus shows the header notice");
     await initialPage.evaluate(() => clearStatus());
-    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "clearStatus hides the notification line again");
+    assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
     await initialPage.close();
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -641,7 +638,7 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
-    assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
+    assert.doesNotMatch(await page.locator("#connectionStatus").textContent(), /フォルダを選択してください|Choose an image folder/, "the header never presents the empty-catalog instruction");
     for (const [width, height] of [[1024, 768], [1920, 1080]]) {
       await assertConnectionStatusLayout(page, width, height, "ja");
       await assertConnectionStatusLayout(page, width, height, "en");
@@ -884,6 +881,7 @@ async function main() {
     const manualExclusionVisibility = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages;
       const manualEnabled = state.manualEnabled; const manualExclusionEnabled = state.manualExclusionEnabled;
+      const manualExclusionEraseEnabled = state.manualExclusionEraseEnabled;
       const manualExclusionForced = state.manualExclusionForced; const manualMaskPresent = state.manualMaskPresent;
       const exclusion = document.createElement("canvas"); exclusion.width = addCanvas.width; exclusion.height = addCanvas.height;
       exclusion.getContext("2d").fillRect(0, 0, exclusion.width, exclusion.height);
@@ -895,14 +893,40 @@ async function main() {
       const nonForced = captureCurrentMaskVisibility().manual;
       state.candidates[0].forced = true;
       const forced = captureCurrentMaskVisibility().manual;
+      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+      const forcedErased = captureCurrentMaskVisibility().manual;
       state.candidates = candidates; state.candidateImages = candidateImages;
       state.manualEnabled = manualEnabled; state.manualExclusionEnabled = manualExclusionEnabled;
+      state.manualExclusionEraseEnabled = manualExclusionEraseEnabled;
       state.manualExclusionForced = manualExclusionForced; state.manualMaskPresent = manualMaskPresent;
-      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height); exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
       markMaskDirty(); flushMaskComposition();
-      return { nonForced, forced };
+      return { nonForced, forced, forcedErased };
     });
-    assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false }, "manual add remains visible through a non-forced exclusion but not a forced exclusion");
+    assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false, forcedErased: true }, "manual exclusion erase restores forced exclusions without creating a new mosaic");
+    const restoredHistory = await page.evaluate(async () => {
+      resetCurrentDraft(); state.drafts.delete("sample");
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); saveDraft();
+      const saved = state.drafts.get("sample");
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); state.history = []; state.historyIndex = 0;
+      restoreDraft("sample", state.imageGeneration);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const restored = state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas);
+      restoreSnapshot(0);
+      const undoWorked = !canvasHasPixels(addCtx, addCanvas) && !$("#redoButton").disabled;
+      restoreSnapshot(1);
+      const redoWorked = canvasHasPixels(addCtx, addCanvas);
+      state.drafts.set("sample", saved); resetCurrentDraft(); state.drafts.delete("sample");
+      return { restored, undoWorked, redoWorked };
+    });
+    assert.deepEqual(restoredHistory, { restored: true, undoWorked: true, redoWorked: true }, "manual history survives changing away and back to an image");
+    const exclusionEraseRow = await page.evaluate(() => {
+      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(3, 3, 4, 4); state.manualExclusionEraseEnabled = true; renderCandidates();
+      const row = document.querySelector(".candidate-row-manual-exclude-erase");
+      const result = { present: Boolean(row), enabled: row?.classList.contains("enabled"), toggle: row?.querySelector(".candidate-toggle")?.textContent };
+      exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
+    });
+    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion restore has its own visible ON/OFF row");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });

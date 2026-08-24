@@ -318,16 +318,18 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raise ClientError("編集マスクは有効なPNGではありません。") from exc
 
 
-def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     if raw_draft is None:
-        return None, None
+        return None, None, None
     if not isinstance(raw_draft, dict):
         raise ClientError("手描きマスクの形式が正しくありません。")
     add = raw_draft.get("add") if raw_draft.get("manualEnabled", True) is not False else None
     exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
+    exclusion_erase = raw_draft.get("exclusionErase") if raw_draft.get("manualExclusionEraseEnabled", True) is not False else None
     return (
         _decode_mask(str(add), width, height) if add else None,
         _decode_mask(str(exclusion), width, height) if exclusion else None,
+        _decode_mask(str(exclusion_erase), width, height) if exclusion_erase else None,
     )
 
 
