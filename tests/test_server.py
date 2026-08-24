@@ -69,6 +69,22 @@ from server import (  # noqa: E402
     _schedule_browser_open,
 )
 
+
+class _MetaDevice:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def fake_catalog_torch(load_result=None):
+    return types.SimpleNamespace(
+        device=lambda _name: _MetaDevice(),
+        load=Mock(return_value={} if load_result is None else load_result),
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+    )
+
 def import_images_for_test(state, files):
     """Exercise the binary staging path without retaining the removed JSON API."""
     imported = []
@@ -2021,7 +2037,7 @@ class MozarieTests(unittest.TestCase):
                 SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_l": Mock(return_value=model)}
             )
             with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}), patch.object(
-                catalog_module.torch_module(), "load", return_value={}
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
             ):
                 state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             model.to.assert_called_once_with(device="cpu")
@@ -2036,14 +2052,16 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             state.settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b", "provider": "cpu"})
             constructor = Mock(side_effect=RuntimeError("bad state dict"))
-            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}):
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaises(ClientError) as raised:
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "sam_checkpoint_invalid")
 
             model = Mock(); model.to.side_effect = RuntimeError("out of memory")
             with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}), patch.object(
-                catalog_module.torch_module(), "load", return_value={}
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
             ):
                 with self.assertRaisesRegex(RuntimeError, "out of memory"):
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
@@ -2276,7 +2294,9 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_safetensors_torch = types.ModuleType("safetensors.torch"); fake_safetensors_torch.load_file = load_file
             fake_segment_anything = types.SimpleNamespace(SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_b": vit_b})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 rgb = np.zeros((8, 8, 3), dtype=np.uint8)
                 self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
                 self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
@@ -2296,7 +2316,9 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
             fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaises(ClientError) as raised:
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
@@ -2310,7 +2332,9 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
             fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaisesRegex(RuntimeError, "device"):
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
 
@@ -2451,6 +2475,8 @@ class MozarieTests(unittest.TestCase):
                 "safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam,
             }), patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
                 state, "_sam_predictor_for", return_value=generic
+            ), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
             ):
                 result = state._refine_detected_segments(
                     Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8),
