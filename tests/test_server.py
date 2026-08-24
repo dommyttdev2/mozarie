@@ -591,6 +591,20 @@ class MozarieTests(unittest.TestCase):
 
         self.assertEqual(tuple(np.asarray(output)[0, 0]), (255, 0, 0, 255))
 
+    def test_mosaic_average_ignores_unmasked_pixels_in_its_block(self):
+        rgb = np.array([[[10, 0, 0], [250, 0, 0]], [[30, 0, 0], [250, 0, 0]]], dtype=np.uint8)
+        mask = np.array([[255, 0], [255, 0]], dtype=np.uint8)
+        output = np.asarray(server_module._apply_mosaic_to_image(Image.fromarray(rgb), mask, 2))
+        self.assertEqual(tuple(output[0, 0]), (20, 0, 0))
+        self.assertEqual(tuple(output[1, 0]), (20, 0, 0))
+        self.assertEqual(tuple(output[0, 1]), (250, 0, 0))
+
+    def test_mosaic_keeps_an_empty_partial_block_unchanged(self):
+        image = Image.fromarray(np.arange(15, dtype=np.uint8).reshape(3, 5))
+        mask = np.zeros((3, 5), dtype=np.uint8); mask[:2, :2] = 255
+        output = np.asarray(server_module._apply_mosaic_to_image(image, mask, 2))
+        self.assertTrue(np.array_equal(output[:, 4], np.asarray(image)[:, 4]))
+
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
         output = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT).format(record)

@@ -9,8 +9,8 @@ Mozarie is a local Windows app for reviewing image sets and applying mosaic edit
 ## Features
 
 - Load individual images or folders, detect current or all images, and pause, resume, or cancel long jobs.
-- Review, hide, clear, and batch-edit candidates; correct masks with the brush, eraser, or boundary tool.
-- Save copies or overwrite sources after confirmation. Supported source metadata is carried into the rendered result.
+- Review, hide, clear, and batch-edit candidates; correct masks with the brush, exclusion brush, exclusion eraser, or boundary tool.
+- Save the current image, mosaicked images, or reviewed images as copies, or overwrite sources after confirmation.
 
 ## Setup
 
@@ -57,7 +57,7 @@ yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simpli
 1. Import images or a folder.
 2. Run automatic detection for the current image or all images.
 3. Review ranges and correct them when needed. Hand exclusions cover the detected hand outline. Each exclusion has its own **Force exclusion** switch; forced exclusions stay out of the mosaic even when adding more mosaic range.
-4. Save a copy or overwrite the source. Copy names are suffixed automatically when needed.
+4. Choose the save target, then save a copy or overwrite the source. Copy names are suffixed automatically when needed.
 
 Choose a supported GPU in **Settings > Detection** for GPU processing. After the first completed detection, the progress view estimates remaining time excluding pauses. If GPU memory is full, set parallel processing to 1, choose another GPU, or switch to CPU.
 
