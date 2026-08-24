@@ -41,9 +41,21 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
-  const lightDismiss = (dialog, close) => dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) close();
-  });
+  const lightDismiss = (dialog, close) => {
+    let backdropPointerId = null;
+    const isBackdrop = (event) => {
+      if (event.target !== dialog) return false;
+      const rect = dialog.getBoundingClientRect();
+      return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+    dialog.addEventListener("pointerdown", (event) => { backdropPointerId = event.isPrimary && event.button === 0 && isBackdrop(event) ? event.pointerId : null; });
+    dialog.addEventListener("pointerup", (event) => {
+      const shouldClose = backdropPointerId === event.pointerId && isBackdrop(event);
+      backdropPointerId = null;
+      if (shouldClose) close();
+    });
+    dialog.addEventListener("pointercancel", () => { backdropPointerId = null; });
+  };
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#updateToast").addEventListener("click", () => { void openSettings().then(() => selectSettingsTab("info")); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
@@ -222,6 +234,7 @@ function bindEvents() {
     $("#mosaicHelpDialog").showModal();
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
+  lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());
   $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {

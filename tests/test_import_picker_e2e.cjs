@@ -15,6 +15,23 @@ const contentTypes = {
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
 
+async function dialogPointerPoints(page, selector) {
+  return page.locator(selector).evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return {
+      inside: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+      outside: { x: Math.max(2, rect.left - 12), y: rect.top + Math.min(20, rect.height / 2) },
+    };
+  });
+}
+
+async function pointerGesture(page, start, end = start) {
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y);
+  await page.mouse.up();
+}
+
 function startFixtureServer() {
   const detectRequests = [];
   const applyRequests = [];
@@ -1201,18 +1218,77 @@ async function main() {
     for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#processingProgress", "#applyProgress"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-label"), `${selector} must have an accessible name`);
     }
-    for (const selector of ["#confirmDialog", "#detectDialog", "#settingsDialog", "#modelHelpDialog", "#applyDialog"]) {
-      await page.locator(selector).evaluate((dialog) => {
-        if (!dialog.open) dialog.showModal();
-        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
+    const dismissFromBackdrop = async (selector) => {
+      await page.locator(selector).evaluate((dialog) => { if (!dialog.open) dialog.showModal(); });
+      const { outside } = await dialogPointerPoints(page, selector);
+      await pointerGesture(page, outside);
       await page.waitForFunction((target) => document.querySelector(target).open === false, selector);
-    }
-    await page.locator("#processingDialog").evaluate((dialog) => {
-      dialog.showModal();
-      dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      dialog.dispatchEvent(new Event("cancel", { bubbles: false, cancelable: true }));
+    };
+    await dismissFromBackdrop("#mosaicHelpDialog");
+    await dismissFromBackdrop("#modelHelpDialog");
+    await dismissFromBackdrop("#applyDialog");
+    await page.locator("#settingsDialog").evaluate((dialog) => { if (!dialog.open) dialog.showModal(); });
+    const settingsPoints = await dialogPointerPoints(page, "#settingsDialog");
+    await pointerGesture(page, settingsPoints.inside, settingsPoints.outside);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "dragging from settings content to its backdrop must not close it");
+    await pointerGesture(page, settingsPoints.outside, settingsPoints.inside);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "dragging from the backdrop into settings content must not close it");
+    await pointerGesture(page, settingsPoints.outside);
+    await page.waitForFunction(() => !document.querySelector("#settingsDialog").open);
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.showModal());
+    await page.locator("#settingsCloseButton").click();
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "settings close button still closes the dialog");
+    await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
+    const mosaicHelpPoints = await dialogPointerPoints(page, "#mosaicHelpDialog");
+    await page.mouse.click(mosaicHelpPoints.outside.x, mosaicHelpPoints.outside.y, { button: "right" });
+    assert.equal(await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.open), true, "right-clicking a dismissible backdrop must not close the dialog");
+    await page.locator("#mosaicHelpCloseButton").click();
+    await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#mosaicHelpDialog").open);
+
+    await page.evaluate(() => { state.pendingDetectionTargetIds = ["sample"]; $("#detectDialog").showModal(); });
+    const detectPoints = await dialogPointerPoints(page, "#detectDialog");
+    await pointerGesture(page, detectPoints.outside);
+    await page.waitForFunction(() => !document.querySelector("#detectDialog").open);
+    assert.deepEqual(await page.evaluate(() => state.pendingDetectionTargetIds), [], "detect backdrop dismissal clears its pending target IDs");
+
+    await page.evaluate(() => {
+      window.__confirmBackdropResult = undefined;
+      void confirmAction("Backdrop", "Dismiss").then((accepted) => { window.__confirmBackdropResult = accepted; });
     });
+    const confirmPoints = await dialogPointerPoints(page, "#confirmDialog");
+    await pointerGesture(page, confirmPoints.outside);
+    await page.waitForFunction(() => window.__confirmBackdropResult !== undefined);
+    assert.equal(await page.evaluate(() => window.__confirmBackdropResult), false, "confirm backdrop dismissal keeps the cancel result");
+
+    await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.showModal());
+    const downloadPoints = await dialogPointerPoints(page, "#modelDownloadDialog");
+    await pointerGesture(page, downloadPoints.outside);
+    assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.open), true, "model download confirmation keeps its existing backdrop lock");
+    await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.close());
+    await page.evaluate(() => modelDownloadConfirmation("sam"));
+    await page.locator("#modelDownloadStart").click();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadClose").disabled);
+    const runningDownloadPoints = await dialogPointerPoints(page, "#modelDownloadDialog");
+    await pointerGesture(page, runningDownloadPoints.outside);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.open), true, "a running model download ignores backdrop and Escape dismissal");
+    await page.locator("#modelDownloadCancel").click();
+    await page.waitForFunction(() => !document.querySelector("#modelDownloadClose").disabled);
+    await page.locator("#modelDownloadClose").click();
+
+    await page.locator("#applyDialog").evaluate((dialog) => { state.applyRunning = true; dialog.showModal(); });
+    const applyPoints = await dialogPointerPoints(page, "#applyDialog");
+    await pointerGesture(page, applyPoints.outside);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#applyDialog").evaluate((dialog) => dialog.open), true, "a running save ignores backdrop and Escape dismissal");
+    await page.locator("#applyDialog").evaluate((dialog) => { state.applyRunning = false; dialog.close(); });
+
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.showModal());
+    const processingPoints = await dialogPointerPoints(page, "#processingDialog");
+    await pointerGesture(page, processingPoints.outside);
+    await page.keyboard.press("Escape");
     assert.equal(await page.locator("#processingDialog").getAttribute("open"), "", "processing dialog must ignore backdrop and Escape dismissal");
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
