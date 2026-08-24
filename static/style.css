@@ -97,7 +97,7 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .candidate-section-actions > [data-candidate-batch="apply:delete"], .candidate-section-actions > [data-candidate-batch="exclude:delete"] { margin-left: auto; }
 .nested-choice { margin-left: 22px; }
 .target-choices { display: flex; gap: 5px; align-items: center; min-width: 0; margin: 8px 0 4px; padding: 0; border: 0; font-size: 12px; }
-.target-choices legend { width: auto; margin: 0 3px 0 0; color: #c0c8d0; font-size: 12px; }
+.target-choices-label { margin-right: 3px; color: #c0c8d0; font-size: 12px; line-height: 27px; white-space: nowrap; }
 .target-chip { position: relative; display: inline-flex; min-width: 0; min-height: 27px; align-items: center; justify-content: center; padding: 2px 9px; border: 1px solid #4a535d; border-radius: 4px; background: #282e35; color: #aeb8c2; cursor: pointer; line-height: 1; user-select: none; white-space: nowrap; }
 .target-chip.is-selected { border-color: #42a98f; background: #235242; color: #e2fff3; }
 .target-chip input { position: absolute; inline-size: 1px; block-size: 1px; margin: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); }

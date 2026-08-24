@@ -118,11 +118,11 @@
       </div>
       <section class="detection-settings">
         <h2 data-i18n="detection.title">検出設定</h2>
-        <fieldset class="target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
-          <legend data-i18n="detection.targets">対象</legend>
+        <div class="target-choices" role="group" data-i18n-aria-label="detection.targets" aria-label="対象">
+          <span class="target-choices-label" data-i18n="detection.targets">対象</span>
           <label class="target-chip"><input id="detectTargetPenis" type="checkbox" checked><span>penis</span></label>
           <label class="target-chip"><input id="detectTargetPussy" type="checkbox" checked><span>pussy</span></label>
-        </fieldset>
+        </div>
         <p id="detectionTargetValidation" class="target-validation" role="alert" hidden></p>
         <label class="threshold-control" for="confidence">
           <span data-i18n="detection.confidence">判定しきい値</span>
@@ -218,11 +218,11 @@
          <span data-i18n="detectDialog.parallelism">同時処理数</span>
          <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2" data-i18n-aria-label="detectDialog.parallelism" aria-label="同時処理数">
        </label>
-      <fieldset class="target-choices dialog-target-choices" data-i18n-aria-label="detection.targets" aria-label="対象">
-        <legend data-i18n="detection.targets">対象</legend>
+      <div class="target-choices dialog-target-choices" role="group" data-i18n-aria-label="detection.targets" aria-label="対象">
+        <span class="target-choices-label" data-i18n="detection.targets">対象</span>
         <label class="target-chip"><input id="dialogTargetPenis" type="checkbox" checked><span>penis</span></label>
         <label class="target-chip"><input id="dialogTargetPussy" type="checkbox" checked><span>pussy</span></label>
-      </fieldset>
+      </div>
        <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
