@@ -84,17 +84,28 @@ class GenericYoloSegmenter(BaseOnnxModel):
         targets = targets or {"penis", "pussy"}
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         prediction, prototype = self._outputs(self.run(tensor))
+        rows = self._prediction_rows(prediction)
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []
         classes: list[str] = []
         coefficients: list[np.ndarray] = []
         class_count = len(self.class_names)
-        for row in self._prediction_rows(prediction):
-            class_id = int(np.argmax(row[4:4 + class_count]))
+        class_ids_for_rows = np.argmax(rows[:, 4:4 + class_count], axis=1)
+        scores_for_rows = rows[np.arange(len(rows)), 4 + class_ids_for_rows]
+        mapped_names = np.asarray([
+            "pussy" if name in {"pussy", "vagina"} else "penis" if name == "penis" else ""
+            for name in self.class_names
+        ], dtype=object)
+        selected_rows = np.flatnonzero(
+            (mapped_names[class_ids_for_rows] != "") & (scores_for_rows >= confidence)
+        )
+        for row_index in selected_rows:
+            row = rows[row_index]
+            class_id = int(class_ids_for_rows[row_index])
             raw_name = self.class_names[class_id]
             class_name = "pussy" if raw_name in {"pussy", "vagina"} else "penis" if raw_name == "penis" else None
-            score = float(row[4 + class_id])
-            if class_name not in targets or score < confidence:
+            score = float(scores_for_rows[row_index])
+            if class_name not in targets:
                 continue
             box = restore_box(row[:4], transform, xywh=True)
             if box is None:

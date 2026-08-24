@@ -7,6 +7,7 @@
   "folder.pickFolder": "フォルダーを選択",
   "status.progress": "処理状況",
   "status.progressCount": "{completed} / {total}",
+  "status.preparingModels": "モデルを準備中",
   "status.eta": "残り約 {duration}",
   "duration.hour": "{count}時間",
   "duration.minute": "{count}分",

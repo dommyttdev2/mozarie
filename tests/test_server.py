@@ -2020,10 +2020,13 @@ class MozarieTests(unittest.TestCase):
             fake_segment_anything = types.SimpleNamespace(
                 SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_l": Mock(return_value=model)}
             )
-            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
+            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}), patch.object(
+                catalog_module.torch_module(), "load", return_value={}
+            ):
                 state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             model.to.assert_called_once_with(device="cpu")
-            fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
+            fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=None)
+            model.load_state_dict.assert_called_once_with({}, strict=True, assign=True)
 
     def test_sam_constructor_checkpoint_error_is_a_client_error_but_device_error_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2039,7 +2042,9 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(raised.exception.error_code, "sam_checkpoint_invalid")
 
             model = Mock(); model.to.side_effect = RuntimeError("out of memory")
-            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}):
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}), patch.object(
+                catalog_module.torch_module(), "load", return_value={}
+            ):
                 with self.assertRaisesRegex(RuntimeError, "out of memory"):
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
 
@@ -2050,6 +2055,16 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(data["error"], "out of memory: invalid checkpoint")
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
         self.assertEqual(data["params"], {"model": "vit_b"})
+
+    def test_detection_model_preparation_phase_tracks_real_loading_only(self):
+        state = self.new_state(); state.job = server_module.Job(kind="detect", state="running")
+        state._set_detection_model_preparation(True)
+        state._set_detection_model_preparation(True)
+        self.assertEqual(state.job.as_dict()["phase"], "preparing_models")
+        state._set_detection_model_preparation(False)
+        self.assertEqual(state.job.as_dict()["phase"], "preparing_models")
+        state._set_detection_model_preparation(False)
+        self.assertEqual(state.job.as_dict()["phase"], "")
 
     def test_job_active_elapsed_excludes_paused_time(self):
         state = self.new_state()
@@ -2267,7 +2282,7 @@ class MozarieTests(unittest.TestCase):
                 self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
             load_file.assert_called_once_with(str(checkpoint), device="cpu")
             vit_b.assert_called_once_with(checkpoint=None)
-            model.load_state_dict.assert_called_once_with(state_dict, strict=True)
+            model.load_state_dict.assert_called_once_with(state_dict, strict=True, assign=True)
             model.to.assert_called_once_with(device="cpu")
             fake_segment_anything.SamPredictor.assert_called_once_with(model)
             predictor.set_image.assert_called_once()
@@ -2442,7 +2457,7 @@ class MozarieTests(unittest.TestCase):
                     [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
                 )
 
-            model.load_state_dict.assert_called_once_with({}, strict=True)
+            model.load_state_dict.assert_called_once_with({}, strict=True, assign=True)
             model.to.assert_not_called()
             generic.predict.assert_called_once()
             self.assertTrue(np.any(result[0]["_confirmed_hand"]))
@@ -2815,21 +2830,25 @@ class MozarieTests(unittest.TestCase):
             record = self._record(image_path, 12, 12)
             state = self.new_state()
             state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            state.settings["detection"]["mode"] = "high_precision"
             detector_mask = np.zeros((12, 12), dtype=np.uint8); detector_mask[2:10, 2:10] = 255
             refined_mask = detector_mask.copy(); refined_mask[2:6, 2:6] = 0
             fluid_mask = np.zeros((12, 12), dtype=np.uint8); fluid_mask[7:9, 7:9] = 255
             segments = [{"class_name": "penis", "confidence": 0.8, "mask": detector_mask, "source": "target"}]
 
-            def refine(_models, _record, _rgb, detected):
+            def refine(_rgb, detected, _predictor):
                 detected[0]["mask"] = refined_mask
                 detected[0]["_apply_mask"] = refined_mask
                 detected[0]["exclusions"] = {"fluid": fluid_mask}
                 return detected
 
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
-                state, "_refine_detected_segments", side_effect=refine
-            ), patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
-                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [])
+            ), patch.object(state, "_sam_predictor_for", return_value=Mock()), patch.object(
+                state, "_high_precision_segments_with_predictor", side_effect=refine
+            ), patch.object(
+                state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, server_module.CandidateRole.EXCLUDE)

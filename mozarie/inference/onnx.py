@@ -7,6 +7,7 @@ import ctypes
 import importlib.util
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import cv2
@@ -40,7 +41,7 @@ _register_torch_dll_directory()
 import onnxruntime as ort
 
 preload_dlls = getattr(ort, "preload_dlls", None)
-if preload_dlls is not None:
+if preload_dlls is not None and "torch" not in sys.modules:
     preload_dlls()
 
 

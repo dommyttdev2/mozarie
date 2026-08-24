@@ -185,6 +185,7 @@
   "status.loadingImages": "Loading image...",
   "status.progress": "Progress",
   "status.progressCount": "{completed}/{total}",
+  "status.preparingModels": "Preparing models",
   "status.eta": "about {duration} left",
   "duration.hour": "{count}h",
   "duration.minute": "{count}m",

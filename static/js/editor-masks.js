@@ -41,6 +41,7 @@ function renderCandidates() {
     });
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId);
+    row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = role;
     if (state.blinkCandidateIds.has(blinkId)) row.classList.add(`blink-${role}`);
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
@@ -70,6 +71,7 @@ function renderCandidates() {
       setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     });
     const blink = makeDisplay(blinkId);
+    row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = "exclude";
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
@@ -93,6 +95,7 @@ function renderCandidates() {
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     }, deleting || state.candidateBatchPending.has(state.currentId));
     const blink = makeDisplay(candidate.id);
+    row.dataset.candidateBlinkId = candidate.id; row.dataset.candidateBlinkRole = role;
     const label = document.createElement("span"); label.className = "candidate-label";
     const name = document.createElement("span"); name.className = "candidate-class"; name.textContent = candidate.className;
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
@@ -134,13 +137,23 @@ function candidateDisplayIdsForRole(role) {
 function syncCandidateDisplayButtons() {
   document.querySelectorAll("[data-candidate-display-toggle]").forEach((button) => {
     const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle);
-    const active = ids.length > 0 && ids.every((id) => candidateDisplayMode(id) !== "off");
-    button.setAttribute("aria-pressed", String(active));
+    const normalCount = ids.filter((id) => candidateDisplayMode(id) === "normal").length;
+    button.setAttribute("aria-pressed", normalCount === ids.length && ids.length ? "true" : normalCount ? "mixed" : "false");
   });
   document.querySelectorAll("[data-candidate-effective-toggle]").forEach((button) => {
     const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle);
-    const active = ids.length > 0 && ids.every((id) => candidateDisplayMode(id) === "effective");
-    button.setAttribute("aria-pressed", String(active));
+    const effectiveCount = ids.filter((id) => candidateDisplayMode(id) === "effective").length;
+    button.setAttribute("aria-pressed", effectiveCount === ids.length && ids.length ? "true" : effectiveCount ? "mixed" : "false");
+  });
+  document.querySelectorAll("[data-candidate-display-id]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(candidateDisplayMode(button.dataset.candidateDisplayId) === "normal"));
+  });
+  document.querySelectorAll("[data-candidate-effective-id]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(candidateDisplayMode(button.dataset.candidateEffectiveId) === "effective"));
+  });
+  document.querySelectorAll("[data-candidate-blink-id]").forEach((row) => {
+    const active = candidateDisplayMode(row.dataset.candidateBlinkId) !== "off";
+    row.classList.toggle(`blink-${row.dataset.candidateBlinkRole}`, active);
   });
 }
 
@@ -149,13 +162,13 @@ function setCandidateDisplayMode(ids, mode) {
     if (mode === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); }
     else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, mode); }
   });
-  renderCandidates(); render();
+  syncCandidateDisplayButtons(); render();
 }
 
 function toggleCandidateDisplay(role) {
   const ids = candidateDisplayIdsForRole(role);
   if (!ids.length) return;
-  const active = ids.every((id) => candidateDisplayMode(id) !== "off");
+  const active = ids.every((id) => candidateDisplayMode(id) === "normal");
   setCandidateDisplayMode(ids, active ? "off" : "normal");
 }
 
@@ -163,22 +176,22 @@ function toggleCandidateEffective(role) {
   const ids = candidateDisplayIdsForRole(role);
   if (!ids.length) return;
   const active = ids.every((id) => candidateDisplayMode(id) === "effective");
-  setCandidateDisplayMode(ids, active ? "normal" : "effective");
+  setCandidateDisplayMode(ids, active ? "off" : "effective");
 }
 
 function candidateDisplayToggle(id) {
   const button = document.createElement("button"); button.type = "button"; button.className = "candidate-display-toggle";
-  const active = candidateDisplayMode(id) !== "off";
-  button.textContent = t("candidates.show"); button.title = t("candidates.displayHelp"); button.setAttribute("aria-label", t("candidates.displayHelp")); button.setAttribute("aria-pressed", String(active));
-  button.addEventListener("click", () => setCandidateDisplayMode([id], active ? "off" : "normal"));
+  button.dataset.candidateDisplayId = id;
+  button.textContent = t("candidates.show"); button.title = t("candidates.displayHelp"); button.setAttribute("aria-label", t("candidates.displayHelp")); button.setAttribute("aria-pressed", String(candidateDisplayMode(id) === "normal"));
+  button.addEventListener("click", () => setCandidateDisplayMode([id], candidateDisplayMode(id) === "normal" ? "off" : "normal"));
   return button;
 }
 
 function candidateEffectiveToggle(id) {
   const button = document.createElement("button"); button.type = "button"; button.className = "candidate-effective-toggle";
-  const active = candidateDisplayMode(id) === "effective";
-  button.textContent = t("candidates.applied"); button.title = t("candidates.displayEffective"); button.setAttribute("aria-label", t("candidates.displayEffective")); button.setAttribute("aria-pressed", String(active));
-  button.addEventListener("click", () => setCandidateDisplayMode([id], active ? "normal" : "effective"));
+  button.dataset.candidateEffectiveId = id;
+  button.textContent = t("candidates.applied"); button.title = t("candidates.displayEffective"); button.setAttribute("aria-label", t("candidates.displayEffective")); button.setAttribute("aria-pressed", String(candidateDisplayMode(id) === "effective"));
+  button.addEventListener("click", () => setCandidateDisplayMode([id], candidateDisplayMode(id) === "effective" ? "off" : "effective"));
   return button;
 }
 

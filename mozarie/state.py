@@ -20,16 +20,7 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     # PyTorch emits a process-wide warning while merely enumerating an older
     # adapter. The Settings check reports that incompatibility itself.
     with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"Found GPU\d+ .*which is of compute capability.*",
-            category=UserWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r"\s*.*with CUDA capability sm_\d+ is not compatible with the current PyTorch installation.*",
-            category=UserWarning,
-        )
+        warnings.simplefilter("ignore", UserWarning)
         if not cuda.is_available():
             return []
         arch_list = cuda.get_arch_list()

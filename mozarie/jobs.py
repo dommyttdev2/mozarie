@@ -270,6 +270,17 @@ class JobsMixin:
                 self.job.current = current
                 self.job.completed = len(self.job.completed_image_ids)
 
+    def _set_detection_model_preparation(
+        self,
+        active: bool,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        """Expose only real model/session loading time to detection progress."""
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation) and self.job.kind == "detect":
+                self.job.preparing_models = max(0, self.job.preparing_models + (1 if active else -1))
+
     def _mark_image_completed(
         self,
         image_id: str,

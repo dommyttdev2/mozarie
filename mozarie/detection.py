@@ -65,7 +65,11 @@ class DetectionMixin:
         with self.lock:
             if self.models is not None:
                 return self.models
-        models = self._load_detection_models()
+        self._set_detection_model_preparation(True)
+        try:
+            models = self._load_detection_models()
+        finally:
+            self._set_detection_model_preparation(False)
         with self.lock:
             self.models = models
         return models
@@ -73,9 +77,13 @@ class DetectionMixin:
     def _ensure_hand_model(self, models: DetectionModels) -> HandDetector:
         with self.inference_lock:
             if models.hand is None:
-                model_path = self._configured_model_path("hand_detection", "手の検出")
-                provider = str(self.settings["models"].get("provider", "gpu"))
-                models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
+                self._set_detection_model_preparation(True)
+                try:
+                    model_path = self._configured_model_path("hand_detection", "手の検出")
+                    provider = str(self.settings["models"].get("provider", "gpu"))
+                    models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
+                finally:
+                    self._set_detection_model_preparation(False)
             return models.hand
 
     def _detect_worker(
@@ -202,23 +210,19 @@ class DetectionMixin:
         hand_model = self._ensure_hand_model(models)
         return hand_model.detect_boxes(rgb, HAND_CONFIDENCE)
 
-    def _refine_detected_segments(
+    def _hand_refinement_context(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Collect hand evidence before optional outline refinement.
-
-        This stage deliberately does not change APPLY masks: SAM finalizes them
-        first, then the same hand evidence is published as an EXCLUDE mask.
-        """
+    ) -> tuple[list[dict[str, Any]], np.ndarray, list[tuple[int, int, int, int]]]:
+        """Gather all non-SAM hand evidence before the single SAM section."""
         rgb = np.asarray(rgb)
         detected = [segment for segment in segments if segment["class_name"] in TARGET_CLASSES]
         shape = rgb.shape[:2]
-        hand_boxes = self._hand_boxes(models, rgb)
         hand_mask = np.zeros(shape, dtype=np.uint8)
+        fallback_boxes: list[tuple[int, int, int, int]] = []
+        hand_boxes = self._hand_boxes(models, rgb)
         if hand_boxes:
-            specialist = bool(self.settings["models"].get("hand_segmentation_enabled"))
             fallback_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
-            if specialist:
+            if self.settings["models"].get("hand_segmentation_enabled"):
                 try:
                     with self.hand_segmentation_lock:
                         specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
@@ -238,20 +242,12 @@ class DetectionMixin:
                     # detection unavailable. CUDA/provider RuntimeError is not
                     # caught here and remains visible to the caller.
                     pass
-            if fallback_boxes:
-                with self.sam_lock:
-                    predictor = self._sam_predictor_for(record, rgb)
-                    for padded_box in fallback_boxes:
-                        masks, scores, _ = predictor.predict(
-                            point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
-                        )
-                        confirmed = accepted_hand_sam_mask(masks, scores, shape, padded_box)
-                        if confirmed is not None:
-                            hand_mask = np.maximum(hand_mask, confirmed)
+        return detected, hand_mask, fallback_boxes
 
+    @staticmethod
+    def _attach_hand_evidence(segments: list[dict[str, Any]], detected: list[dict[str, Any]], hand_mask: np.ndarray) -> list[dict[str, Any]]:
         for segment in detected:
-            original_mask = np.asarray(segment["mask"]).copy()
-            segment["_detector_mask"] = original_mask
+            segment["_detector_mask"] = np.asarray(segment["mask"]).copy()
             segment["_confirmed_hand"] = hand_mask
         if np.any(hand_mask):
             if detected:
@@ -259,6 +255,34 @@ class DetectionMixin:
             else:
                 segments.append({"class_name": "__hand_exclusion__", "image_exclusions": {"hand": hand_mask}})
         return segments
+
+    @staticmethod
+    def _apply_sam_hand_fallback(
+        predictor: Any, fallback_boxes: list[tuple[int, int, int, int]], shape: tuple[int, int], hand_mask: np.ndarray,
+    ) -> np.ndarray:
+        for padded_box in fallback_boxes:
+            masks, scores, _ = predictor.predict(
+                point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
+            )
+            confirmed = accepted_hand_sam_mask(masks, scores, shape, padded_box)
+            if confirmed is not None:
+                hand_mask = np.maximum(hand_mask, confirmed)
+        return hand_mask
+
+    def _refine_detected_segments(
+        self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Collect hand evidence before optional outline refinement.
+
+        This stage deliberately does not change APPLY masks: SAM finalizes them
+        first, then the same hand evidence is published as an EXCLUDE mask.
+        """
+        detected, hand_mask, fallback_boxes = self._hand_refinement_context(models, record, rgb, segments)
+        if fallback_boxes:
+            with self.sam_lock:
+                predictor = self._sam_predictor_for(record, rgb)
+                hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
+        return self._attach_hand_evidence(segments, detected, hand_mask)
 
     def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
@@ -278,11 +302,16 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Refine detector regions with semantic SAM prompts, keeping weak results untouched."""
-        if not segments:
+        if not any(segment.get("class_name") in TARGET_CLASSES for segment in segments):
             return segments
         with self.sam_lock:
             predictor = self._sam_predictor_for(record, rgb)
-            for segment in segments:
+            return self._high_precision_segments_with_predictor(rgb, segments, predictor)
+
+    def _high_precision_segments_with_predictor(
+        self, rgb: np.ndarray, segments: list[dict[str, Any]], predictor: Any,
+    ) -> list[dict[str, Any]]:
+        for segment in segments:
                 if segment.get("class_name") not in TARGET_CLASSES:
                     continue
                 source_mask = (np.asarray(segment.get("_detector_mask", segment["mask"])) > 0).astype(np.uint8)
@@ -343,9 +372,18 @@ class DetectionMixin:
             with Image.open(record.path) as image:
                 rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB")).copy()
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
-        segments = self._refine_detected_segments(models, record, rgb, segments)
-        if mode == "high_precision":
-            segments = self._high_precision_segments(models, record, rgb, segments)
+        detected, hand_mask, fallback_boxes = self._hand_refinement_context(models, record, rgb, segments)
+        needs_high_precision = mode == "high_precision" and bool(detected)
+        if fallback_boxes or needs_high_precision:
+            with self.sam_lock:
+                predictor = self._sam_predictor_for(record, rgb)
+                if fallback_boxes:
+                    hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, rgb.shape[:2], hand_mask)
+                segments = self._attach_hand_evidence(segments, detected, hand_mask)
+                if needs_high_precision:
+                    segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
+        else:
+            segments = self._attach_hand_evidence(segments, detected, hand_mask)
         segments = self._finalize_exclusions(rgb, segments)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
