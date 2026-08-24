@@ -1,77 +1,86 @@
-[日本語](README.ja.md)
+<p align="center"><img src="static/images/long_logo.png" alt="Mozarie" width="400"></p>
 
-# Mozarie
+[English](README.en.md) · [最新版](https://github.com/norqis/mozarie/releases/latest) · [不具合を報告](https://github.com/norqis/mozarie/issues)
 
-Mozarie is a local Windows app for reviewing image sets and applying mosaic edits. It proposes genital-area masks, keeps the final decision with you, and saves PNG, JPEG, and WebP results.
+Mozarieは、画像のモザイク範囲をローカルで検出・確認・修正して保存できるWindowsアプリです。候補の採用、除外、手書き修正、保存先はすべて自分で決められます。
 
-[Latest release](https://github.com/norqis/mozarie/releases/latest) · [Setup](#setup) · [Model downloads](#model-downloads)
+## 主な機能
 
-## Features
+- PNG、JPEG、WebPの画像・フォルダーを読み込み、現在の画像または全画像を自動検出
+- 検出候補を表示・除外・削除し、モザイク／除外ブラシ、消しゴム、境界ツールで修正
+- 手の領域を除外し、候補ごとの強制除外でモザイクより優先
+- 現在画像、モザイクあり、確認済みから選んでコピー保存または元画像へ上書き
 
-- Load individual images or folders, detect current or all images, and pause, resume, or cancel long jobs.
-- Review, hide, clear, and batch-edit candidates; correct masks with the brush, eraser, or boundary tool.
-- Save copies or overwrite sources after confirmation. Supported source metadata is carried into the rendered result.
+## インストール
 
-## Setup
+### 動作環境
 
-1. Install Python 3.11 or newer on Windows.
-2. Install dependencies:
+- Windows
+- Python 3.11以降
 
-   ```powershell
-   python -m pip install -r requirements.txt
-   ```
+### セットアップ
 
-3. Prepare a compatible primary-model `.onnx` file.
-4. Start Mozarie:
+```powershell
+python -m pip install -r requirements.txt
+```
 
-   ```powershell
-   .\run.bat
-   ```
+### 起動
 
-5. In **Settings > Detection**, use **Browse** to select the primary model. Use **Download** for SAM and hand models, or select files you already have. Load images, run detection, review ranges, then save.
+```powershell
+.\run.bat
+```
 
-Downloads are opt-in. Mozarie writes supported files to the full project path `models\` and checks the downloaded size and pinned SHA-256 before making a file available. This detects changes to the pinned download, but cannot absolutely guarantee that a file is harmless. It does not re-check model files during startup or detection.
+初回起動後、**設定 > 検出**で基本モデルを指定します。
 
-## Model downloads
+## モデル
 
-| Feature | File to select | Download / source |
+### アプリからダウンロード
+
+設定 > 検出で、使う項目の**ダウンロード**を押します。SAMは選択中の種類だけを取得します。
+
+| 用途 | ファイル | 配布元 |
 | --- | --- | --- |
-| Required genital detection | A compatible `.onnx` file | Select it with **Browse** in Settings. |
-| Optional outline refinement, boundary tool, hand exclusion | `sam_vit_b_01ec64.pth`, `sam_vit_l_0b3195.pth`, or `sam_vit_h_4b8939.pth` | Download the selected type in Mozarie or use the [official SAM checkpoints](https://github.com/facebookresearch/segment-anything#model-checkpoints). Installed under `Mozarie\models\`. |
-| Optional anime hand detector | `hand_detect_v1.0_s.onnx` | Download in Mozarie, or use the [pinned source](https://huggingface.co/deepghs/anime_hand_detection/resolve/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s/model.onnx). Installed at `Mozarie\models\ultralytics\anime-hand-v1.0-s.onnx`. |
-| Optional HandSegNet hand outline | `handsegnet_vit_b_best.safetensors` | Download in Mozarie, or use the [pinned source](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/resolve/77ff734683306141e56aef9d491958a82508b41a/handsegnet_vit_b_best.safetensors). Installed at `Mozarie\models\handsegnet\handsegnet_vit_b_best.safetensors`. |
+| 輪郭補正・境界ツール・手の除外 | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
+| アニメ調の手検出 | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
+| 手の輪郭補正 | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
 
-The primary model needs a 1280 input, a rank-3 prediction output with a 43-channel axis, and a rank-4 prototype output with 32 channels. Its class order is `anus`, `nipple`, `penis`, `vagina`, `female face`, `male face`, `pubic hair`.
+### 自分で用意するモデル
 
-The SAM file must match the selected `vit_b`, `vit_l`, or `vit_h` type. HandSegNet is optional and available only while hand detection is on. NTD11 and Sensitive are optional supplemental models.
+| 用途 | 用意するもの | 配布元・指定方法 |
+| --- | --- | --- |
+| 基本の性器検出 | 互換性のある`.onnx` | **参照**から指定します。1280入力、43チャンネルの検出出力、32チャンネルのプロトタイプ出力に対応しています。 |
+| NTD11補助検出 | `ntd11_anime_nsfw_segm_v5-variant1.onnx` | [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456)から取得し、**参照**から指定します。 |
+| Sensitive補助検出 | `sensitive_detect_v07.pt`を変換したONNX | [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)から取得し、変換後のONNXを**参照**から指定します。 |
 
-NTD11 is an optional supplemental ONNX model. Select `ntd11_anime_nsfw_segm_v5-variant1.onnx` from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456). Download `sensitive_detect_v07.pt` from the [Sensitive source](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40) and convert it to ONNX.
+Sensitiveの変換:
 
 ```powershell
 python -m pip install ultralytics
 yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu
 ```
 
-## Use
+モデルの配布条件・ライセンスは、各配布元と[第三者ライセンス・モデル配布元](THIRD_PARTY_NOTICES.md)を確認してください。
 
-1. Import images or a folder.
-2. Run automatic detection for the current image or all images.
-3. Review ranges and correct them when needed. Hand exclusions cover the detected hand outline. Each exclusion has its own **Force exclusion** switch; forced exclusions stay out of the mosaic even when adding more mosaic range.
-4. Save a copy or overwrite the source. Copy names are suffixed automatically when needed.
+## 使い方
 
-Choose a supported GPU in **Settings > Detection** for GPU processing. After the first completed detection, the progress view estimates remaining time excluding pauses. If GPU memory is full, set parallel processing to 1, choose another GPU, or switch to CPU.
+1. 画像またはフォルダーを読み込みます。
+2. 現在の画像または全画像に自動検出を実行します。
+3. 右側の候補を確認し、必要に応じてブラシ、消しゴム、境界ツールで修正します。
+4. 保存対象を選び、コピー保存または元画像への上書きを行います。
 
-## Updates
+GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメモリが不足した場合は、同時処理数を下げるかCPUへ切り替えてください。
 
-Use **Check for updates** in Settings, or run `update.bat`. Close Mozarie before applying an update. Settings, model paths, cache, and working images stay local.
+## 更新
 
-## Troubleshooting
+設定の**更新を確認**、または`update.bat`を使います。適用前にMozarieを終了してください。設定、モデル、作業中の画像は更新しても残ります。
 
-- **A model cannot load:** confirm the selected file and SAM type.
-- **GPU memory or CUDA/provider error:** reduce parallel processing, select CPU, or install a compatible ONNX Runtime GPU and PyTorch environment.
-- **Need help:** open a [GitHub issue](https://github.com/norqis/mozarie/issues) with the error text and provider.
+## 困ったとき
 
-## Development
+- **モデルを読み込めない:** ファイル形式と、SAMの種類・ファイルの組み合わせを確認してください。
+- **GPUまたはCUDAのエラー:** 同時処理数を下げる、別のGPUを選ぶ、またはCPUへ切り替えてください。
+- **解決しない:** エラー文を添えて[Issues](https://github.com/norqis/mozarie/issues)へ報告してください。
+
+## 開発
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -79,6 +88,6 @@ npm ci
 npm test
 ```
 
-## License
+## ライセンス
 
-Mozarie is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party and model-source notices.
+Mozarieは[MIT License](LICENSE)で公開しています。第三者コンポーネントとモデル配布元は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)を確認してください。

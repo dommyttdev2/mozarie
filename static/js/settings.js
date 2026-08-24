@@ -114,7 +114,7 @@ function setFluidExclusionEnabled(enabled) {
 const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
 
 function normaliseToolPosition(position) { return TOOL_POSITIONS.has(position) ? position : "left"; }
-function toolRailItems() { return ["#brushTool", "#eraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
+function toolRailItems() { return ["#brushTool", "#eraserTool", "#excludeEraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
 
 function setToolRailTabStop(activeItem = null) {
   const items = toolRailItems().filter((item) => !item.disabled);
@@ -124,10 +124,9 @@ function setToolRailTabStop(activeItem = null) {
 }
 
 function applyToolPosition(position) {
-  const nextPosition = normaliseToolPosition(position);
   closeBoundaryModeMenu();
-  stage.dataset.toolPosition = nextPosition;
-  toolRail.setAttribute("aria-orientation", ["left", "right"].includes(nextPosition) ? "vertical" : "horizontal");
+  delete stage.dataset.toolPosition;
+  toolRail.setAttribute("aria-orientation", "horizontal");
   setToolRailTabStop(document.activeElement);
 }
 
@@ -206,7 +205,6 @@ function setSettingsForm(settings, status = null) {
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
   $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
-  $("#settingsToolPosition").value = normaliseToolPosition(settings.display.tool_position);
   applyToolPosition(settings.display.tool_position);
   state.mosaicPreviewEnabled = settings.display.mosaic_preview;
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
@@ -257,7 +255,7 @@ function settingsPayload() {
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
-      tool_position: $("#settingsToolPosition").value,
+      tool_position: state.settings.display.tool_position,
     },
     importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
@@ -322,6 +320,9 @@ async function openSettings() {
 async function saveSettings(event) {
   event.preventDefault();
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
+  if (!validateDetectionTargets(detectionTargets())) {
+    result.textContent = t("error.detectionTargetsRequired"); result.classList.add("error"); return;
+  }
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;

@@ -41,9 +41,21 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
-  const lightDismiss = (dialog, close) => dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) close();
-  });
+  const lightDismiss = (dialog, close) => {
+    let backdropPointerId = null;
+    const isBackdrop = (event) => {
+      if (event.target !== dialog) return false;
+      const rect = dialog.getBoundingClientRect();
+      return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+    };
+    dialog.addEventListener("pointerdown", (event) => { backdropPointerId = event.isPrimary && event.button === 0 && isBackdrop(event) ? event.pointerId : null; });
+    dialog.addEventListener("pointerup", (event) => {
+      const shouldClose = backdropPointerId === event.pointerId && isBackdrop(event);
+      backdropPointerId = null;
+      if (shouldClose) close();
+    });
+    dialog.addEventListener("pointercancel", () => { backdropPointerId = null; });
+  };
   $("#settingsButton").addEventListener("click", () => { void openSettings(); });
   $("#updateToast").addEventListener("click", () => { void openSettings().then(() => selectSettingsTab("info")); });
   $("#settingsCloseButton").addEventListener("click", () => $("#settingsDialog").close());
@@ -115,7 +127,7 @@ function bindEvents() {
   $("#detectAllButton").addEventListener("click", detectAll);
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
-  $("#removeCurrentImageButton").addEventListener("click", () => setHidden(currentRecord(), true));
+  $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
   $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
@@ -134,6 +146,8 @@ function bindEvents() {
   $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
+  document.querySelectorAll("[data-candidate-display-toggle]").forEach((button) => button.addEventListener("click", () => toggleCandidateDisplay(button.dataset.candidateDisplayToggle)));
+  document.querySelectorAll("[data-candidate-effective-toggle]").forEach((button) => button.addEventListener("click", () => toggleCandidateEffective(button.dataset.candidateEffectiveToggle)));
   $("#settingsLanguage").addEventListener("change", async (event) => {
     const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
     const actions = Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked]));
@@ -151,11 +165,13 @@ function bindEvents() {
     overviewQueryTimer = setTimeout(() => renderOverview(), 120);
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
-  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#mosaicEraserTool").addEventListener("click", () => setTool("mosaic_eraser")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#excludeEraserTool").addEventListener("click", () => setTool("exclude_eraser"));
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
   });
   $("#bucketTool").addEventListener("click", () => setTool("bucket"));
+  $("#excludeBucketTool").addEventListener("click", () => setTool("exclude_bucket"));
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
   $("#boundaryBrushTool").addEventListener("click", () => setTool("boundary_brush"));
@@ -176,9 +192,14 @@ function bindEvents() {
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
   $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
   $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
+  document.querySelectorAll(".target-chip input").forEach((input) => input.addEventListener("change", () => {
+    syncDetectionTargetSwitch(input);
+    if (input.id.startsWith("dialog")) validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
+    else validateDetectionTargets(detectionTargets(), $("#detectionTargetValidation"));
+  }));
   $("#detectForm").addEventListener("submit", startDetectionFromDialog);
-  $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
-  $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
+  $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
+  $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
   $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
   const grid = $(".studio-grid");
@@ -207,6 +228,13 @@ function bindEvents() {
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
+  $("#mosaicHelpButton").addEventListener("click", () => {
+    $("#mosaicHelpDialog").showModal();
+  });
+  $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
+  lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());
+  $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {
     const paused = state.browserSave ? state.browserSave.paused : state.job?.state === "paused";
@@ -245,7 +273,7 @@ function bindEvents() {
     if (image) setReviewed(image, !isReviewed(image));
     closeCatalogContextMenu();
   });
-  $("#removeImageMenuItem").addEventListener("click", () => { setHidden(state.images.find((image) => image.id === state.contextMenuImageId), true); closeCatalogContextMenu(); });
+  $("#removeImageMenuItem").addEventListener("click", () => { const image = state.images.find((item) => item.id === state.contextMenuImageId); if (image) setHidden(image, !isHidden(image)); closeCatalogContextMenu(); });
   $("#gallery").addEventListener("dragenter", (event) => {
     if (!event.dataTransfer?.types?.includes("Files")) return;
     event.preventDefault(); setGalleryDropOverlay(true);
@@ -267,8 +295,8 @@ function bindEvents() {
     }
     if (event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
-    const point = clampPoint(pointFromEvent(event));
-    state.drawing = true; state.pointer = point; state.hover = point;
+    const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
+    state.drawing = true; state.pointer = point; state.hover = rawPoint;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
@@ -284,7 +312,6 @@ function bindEvents() {
           if (state.polygonPoints.length === 4 && polygonIsValid()) {
             addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
             state.polygonPoints = [];
-            setStatusKey("status.boundaryReady");
           }
         }
         state.drawing = false;
@@ -292,17 +319,17 @@ function bindEvents() {
       updateBoundaryActions(); render(); return;
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
-    if (state.tool === "bucket") { state.drawing = false; fillAt(point); return; }
-    beginManualStroke(point); render();
+    if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
+    beginManualStroke(rawPoint); render();
   });
   const processPointerMove = (event) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
     }
-    state.hover = clampPoint(pointFromEvent(event));
+    state.hover = pointFromEvent(event);
     if (state.drawing && (event.buttons & 1)) {
-      const point = state.hover;
+      const point = clampPoint(state.hover);
       if (state.tool === "boundary") {
         state.boundaryPoint = point;
         state.boundaryDragging ||= boundaryDragStarted(event);
@@ -317,7 +344,7 @@ function bindEvents() {
         }
       } else if (state.tool === "boundary_brush") {
         appendBoundaryBrushPoint(point);
-      } else { appendManualStrokePoint(point); state.pointer = point; }
+      } else { appendManualStrokePoint(state.hover); state.pointer = state.hover; }
     }
     render();
   };
@@ -335,14 +362,13 @@ function bindEvents() {
       if (state.polygonPoints.length === 4 && polygonIsValid()) {
         addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
         state.polygonPoints = [];
-        setStatusKey("status.boundaryReady");
       }
       state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = state.tool === "eraser" ? "cell" : "crosshair";
+    canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
     if (wasDrawing && manualStrokeStarted) completeManualStroke();
     if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
     if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;
@@ -352,13 +378,11 @@ function bindEvents() {
       if (boundaryDragging && roi) {
         addBoundaryDraft({ type: "rectangle", roi, point: pointForRoi(roi) });
         state.boundaryRoi = null;
-        setStatusKey("status.boundaryReady");
       } else {
         const draft = rectangleDraftAt(point);
         if (draft) {
           draft.point = point;
           state.boundaryActiveId = draft.id;
-          setStatusKey("status.boundaryReady");
         }
       }
     }
@@ -366,7 +390,7 @@ function bindEvents() {
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));
-  canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
+  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
@@ -427,7 +451,6 @@ async function initialise() {
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
   document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));
-  setInterval(() => { if (state.blinkCandidateIds.size) render(); }, 160);
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");

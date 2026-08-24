@@ -1,18 +1,17 @@
 function setTool(tool) {
   if (isBusy() || state.importing) return;
   const focusedInBoundaryMenu = closeBoundaryModeMenu();
-  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush", "bucket"]);
+  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush", "bucket", "exclude_bucket"]);
   if (!boundaryTools.has(tool)) clearBoundaryInteraction();
   else if (state.tool !== tool) clearBoundaryConstruction();
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#eraserTool", "eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#mosaicEraserTool", "mosaic_eraser"], ["#eraserTool", "eraser"], ["#excludeEraserTool", "exclude_eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"], ["#excludeBucketTool", "exclude_bucket"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
-  $("#bucketToleranceControl").hidden = tool !== "bucket";
-  canvas.style.cursor = tool === "eraser" ? "cell" : "crosshair";
-  if (boundaryTools.has(tool) && state.boundaryDrafts.length) setStatusKey("status.boundaryReady");
+  $("#bucketToleranceControl").hidden = !["bucket", "exclude_bucket"].includes(tool);
+  canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(tool) ? "cell" : "crosshair";
   updateBoundaryActions(); render();
   if (focusedInBoundaryMenu) focusCanvas();
 }
@@ -72,7 +71,8 @@ function resetCurrentDraft() {
   if (!state.currentImage) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-  state.manualMaskPresent = false; state.manualEnabled = true;
+  exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+  state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
   resetHistoryToCurrentManualMask(); refreshMaskStatus(true); render();
 }
 
@@ -151,6 +151,7 @@ function openCatalogContextMenu(event, imageId) {
   state.contextMenuImageId = imageId;
   state.contextMenuOrigin = event.currentTarget || document.activeElement;
   $("#toggleReviewMenuItem").textContent = t(isReviewed(image) ? "context.unreview" : "context.review");
+  $("#removeImageMenuItem").textContent = t(isHidden(image) ? "editor.show" : "editor.hide");
   const menu = $("#catalogContextMenu");
   menu.style.left = `${event.clientX}px`;
   menu.style.top = `${event.clientY}px`;

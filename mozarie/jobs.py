@@ -47,6 +47,7 @@ class JobsMixin:
 
 
     def request_cancel(self) -> Job:
+        cancelled = False
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
                 raise ClientError("キャンセルできる処理はありません。")
@@ -65,7 +66,11 @@ class JobsMixin:
                     self.job.state = "cancelled"
                     self.job.ended_at = time.time()
                     self.job.current = ""
-                return self.job
+                    cancelled = True
+                job = self.job
+        if cancelled:
+            self._release_gpu_job_memory()
+        return job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
         if not isinstance(image_ids, list):
@@ -181,6 +186,7 @@ class JobsMixin:
             time.sleep(0.1)
 
     def _cancel_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        cancelled = False
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation):
                 self._resume_job_clock()
@@ -188,21 +194,38 @@ class JobsMixin:
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
+                cancelled = True
+        if cancelled:
+            self._release_gpu_job_memory()
+
+    def _release_gpu_job_memory(self) -> None:
+        """Return unused PyTorch allocator memory after a terminal GPU job."""
+        if self.settings["models"]["provider"] != "gpu":
+            return
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def combined_candidate_mask(
         self,
         image_id: str,
-        draft: tuple[np.ndarray | None, np.ndarray | None] | None = None,
+        draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
+        removed_candidate_ids: set[str] | None = None,
     ) -> np.ndarray | None:
-        add_mask, exclusion_mask = draft or (None, None)
+        if draft is None:
+            add_mask, exclusion_mask, exclusion_erase_mask = None, None, None
+        else:
+            add_mask, exclusion_mask, *remaining = draft
+            exclusion_erase_mask = remaining[0] if remaining else None
         with self.image_io_lock(image_id):
             with self.lock:
                 current_record = self.images.get(image_id)
                 if current_record is None:
                     raise ClientError("画像が見つかりません。")
                 record = replace(current_record)
-                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+                removed_candidate_ids = removed_candidate_ids or set()
+                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
                 revision = self._candidate_revision(image_id)
                 catalog_generation = self.catalog_generation
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
@@ -227,7 +250,7 @@ class JobsMixin:
                         forced_exclude_masks.append(mask)
             result = compose_masks(
                 (record.height, record.width), apply_masks, exclude_masks, add_mask, exclusion_mask,
-                forced_exclude_masks, True if manual_exclude_forced is None else manual_exclude_forced,
+                forced_exclude_masks, True if manual_exclude_forced is None else manual_exclude_forced, exclusion_erase_mask,
             )
             with self.lock:
                 current_record = self.images.get(image_id)
@@ -246,6 +269,17 @@ class JobsMixin:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.current = current
                 self.job.completed = len(self.job.completed_image_ids)
+
+    def _set_detection_model_preparation(
+        self,
+        active: bool,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        """Expose only real model/session loading time to detection progress."""
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation) and self.job.kind == "detect":
+                self.job.preparing_models = max(0, self.job.preparing_models + (1 if active else -1))
 
     def _mark_image_completed(
         self,
@@ -356,6 +390,7 @@ class JobsMixin:
         return sorted(failures, key=lambda failure: failure[0])
 
     def _finish_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        finished = False
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -367,17 +402,33 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
+            finished = True
+        if finished:
+            self._release_gpu_job_memory()
         LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        if not isinstance(exc, ClientError) and any(
-            marker in str(exc).lower()
-            for marker in ("out of memory", "failed to allocate memory", "bfcarena")
-        ):
-            exc = ClientError(
-                "GPUメモリが不足しました。同時処理数を1に下げるか、別のGPUまたはCPUを選んでください。",
-                "gpu_out_of_memory",
-            )
+        if not isinstance(exc, ClientError):
+            message = str(exc).lower()
+            if any(marker in message for marker in (
+                "no kernel image is available", "does not include kernels for this gpu", "not compatible with the current pytorch installation",
+            )):
+                exc = ClientError(
+                    "選択したGPUは、インストール済みのPyTorchでは実行できません。設定で対応状況を確認してください。",
+                    "gpu_unsupported",
+                )
+            elif any(marker in message for marker in ("out of memory", "failed to allocate memory", "bfcarena")):
+                if self.settings["models"]["provider"] == "gpu":
+                    if int(self.settings["detection"]["parallelism"]) > 1:
+                        text = "GPUメモリを確保できませんでした。同時実行数を1に下げて、もう一度実行してください。"
+                    else:
+                        text = "GPUメモリを確保できませんでした。他のGPUアプリを閉じて、もう一度実行してください。"
+                    exc = ClientError(text, "gpu_out_of_memory")
+                else:
+                    exc = ClientError(
+                        "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
+                        "memory_allocation_failed",
+                    )
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -390,5 +441,6 @@ class JobsMixin:
             self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}
             self.job.current = ""
             self.job.active_count = 0
+        self._release_gpu_job_memory()
         LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind),
                      exc_info=(type(exc), exc, exc.__traceback__))

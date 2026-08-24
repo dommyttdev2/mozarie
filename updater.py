@@ -33,7 +33,7 @@ MANAGED_FILES = (
     ".gitattributes",
     ".gitignore",
     "LICENSE",
-    "README.ja.md",
+    "README.en.md",
     "README.md",
     "requirements.txt",
     "run.bat",

@@ -80,13 +80,13 @@ SOURCE_LABELS = {
     "ntd11": "NTD11補助モデル",
     "sensitive": "Sensitive補助モデル",
     "boundary": "境界選択",
-    "hand_exclusion": "手を除外",
-    "fluid_exclusion": "白い体液候補",
+    "hand_exclusion": "手",
+    "fluid_exclusion": "白い液",
 }
 REFINEMENT_LABELS = {
     "hand": "手の重なりを除外",
-    "fluid": "白い体液候補を検出",
-    "hand_fluid": "手の重なりを除外・白い体液候補を検出",
+    "fluid": "白い液を検出",
+    "hand_fluid": "手の重なりを除外・白い液を検出",
 }
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
@@ -227,6 +227,7 @@ class Job:
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
     active_count: int = 0
+    preparing_models: int = 0
     remove_after_save: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -248,6 +249,7 @@ class Job:
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
             "activeCount": self.active_count,
+            "phase": "preparing_models" if self.preparing_models else "",
             "removeAfterSave": self.remove_after_save,
         }
 

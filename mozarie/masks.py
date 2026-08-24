@@ -13,8 +13,9 @@ def compose_masks(
     manual_exclude: np.ndarray | None = None,
     forced_exclude_masks: list[np.ndarray] | None = None,
     manual_exclude_forced: bool = True,
+    exclusion_erase: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Compose automatic masks, then let manual add restore non-forced exclusions."""
+    """Compose automatic masks, allowing explicit removal of exclusion pixels."""
 
     result = np.zeros(shape, dtype=np.uint8)
     for mask in apply_masks:
@@ -30,15 +31,23 @@ def compose_masks(
         if manual_exclude.shape != shape:
             raise ValueError("manual exclude mask dimensions do not match the source image")
         exclusions = np.maximum(exclusions, np.asarray(manual_exclude > 0, dtype=np.uint8) * 255)
+    if exclusion_erase is not None:
+        if exclusion_erase.shape != shape:
+            raise ValueError("exclusion erase mask dimensions do not match the source image")
+        exclusions[np.asarray(exclusion_erase) > 0] = 0
     result[exclusions > 0] = 0
     if manual_add is not None:
         if manual_add.shape != shape:
             raise ValueError("manual add mask dimensions do not match the source image")
         result = np.maximum(result, np.asarray(manual_add > 0, dtype=np.uint8) * 255)
+    forced_exclusions = np.zeros(shape, dtype=np.uint8)
     for mask in forced_exclude_masks or []:
         if mask.shape != shape:
             raise ValueError("forced exclude mask dimensions do not match the source image")
-        result[np.asarray(mask) > 0] = 0
+        forced_exclusions = np.maximum(forced_exclusions, np.asarray(mask > 0, dtype=np.uint8) * 255)
     if manual_exclude is not None and manual_exclude_forced:
-        result[manual_exclude > 0] = 0
+        forced_exclusions = np.maximum(forced_exclusions, np.asarray(manual_exclude > 0, dtype=np.uint8) * 255)
+    if exclusion_erase is not None:
+        forced_exclusions[np.asarray(exclusion_erase) > 0] = 0
+    result[forced_exclusions > 0] = 0
     return result

@@ -1,0 +1,93 @@
+<p align="center"><img src="static/images/long_logo.png" alt="Mozarie" width="400"></p>
+
+[日本語](README.md) · [Latest release](https://github.com/norqis/mozarie/releases/latest) · [Report an issue](https://github.com/norqis/mozarie/issues)
+
+Mozarie is a local Windows app for detecting, reviewing, editing, and saving mosaic areas in images. You decide which candidates to apply or exclude, make manual corrections, and choose where to save.
+
+## Key features
+
+- Load PNG, JPEG, and WebP images or folders; run automatic detection on the current image or the whole set.
+- Show, exclude, remove, and edit candidates with mosaic/exclusion brushes, erasers, and the boundary tool.
+- Exclude hand areas and force an exclusion to take priority over mosaic areas.
+- Save the current image, mosaicked images, or reviewed images as copies, or overwrite the source.
+
+## Installation
+
+### Requirements
+
+- Windows
+- Python 3.11 or later
+
+### Setup
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+### Run
+
+```powershell
+.\run.bat
+```
+
+After the first start, choose a primary model in **Settings > Detection**.
+
+## Models
+
+### Download in the app
+
+In **Settings > Detection**, select **Download** for the model you need. Mozarie downloads only the selected SAM type.
+
+| Use | File | Source |
+| --- | --- | --- |
+| Contour refinement, boundary tool, hand exclusion | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
+| Anime-style hand detection | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
+| Hand contour refinement | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
+
+### Prepare yourself
+
+| Use | What to prepare | Source and selection |
+| --- | --- | --- |
+| Primary genital detection | A compatible `.onnx` file | Select it with **Browse**. Mozarie supports a 1280 input, a 43-channel detection output, and a 32-channel prototype output. |
+| NTD11 supplemental detection | `ntd11_anime_nsfw_segm_v5-variant1.onnx` | Download it from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456), then select it with **Browse**. |
+| Sensitive supplemental detection | ONNX converted from `sensitive_detect_v07.pt` | Download [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40), convert it, then select the ONNX file with **Browse**. |
+
+Convert Sensitive:
+
+```powershell
+python -m pip install ultralytics
+yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu
+```
+
+Review the source terms and licenses for each model and the [third-party notices and model sources](THIRD_PARTY_NOTICES.md).
+
+## Use
+
+1. Import images or a folder.
+2. Run automatic detection for the current image or all images.
+3. Review the candidates at right and correct them with brushes, erasers, or the boundary tool when needed.
+4. Choose a save target, then save a copy or overwrite the source.
+
+To use GPU processing, select a GPU in **Settings > Detection**. If GPU memory runs out, lower parallel processing or switch to CPU.
+
+## Updates
+
+Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before applying an update. Your settings, models, and working images remain in place.
+
+## Troubleshooting
+
+- **A model cannot load:** Check the file format and the selected SAM type/file combination.
+- **GPU or CUDA error:** Lower parallel processing, select another GPU, or switch to CPU.
+- **Still stuck:** Include the error text in a [GitHub issue](https://github.com/norqis/mozarie/issues).
+
+## Development
+
+```powershell
+python -m unittest discover -s tests -v
+npm ci
+npm test
+```
+
+## License
+
+Mozarie is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components and model sources.

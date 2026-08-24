@@ -268,29 +268,44 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
         raise ClientError("マスクと画像サイズが一致しません。")
     width, height = image.size
 
+    # Calculate each block from pixels that will actually receive mosaic.  This
+    # intentionally excludes nearby excluded/unselected pixels from the colour
+    # average, so the editor preview and saved image do not bleed across masks.
+    selected = mask > 0
+    blocks_x = math.ceil(width / block_size)
+    block_ids = ((np.arange(height)[:, None] // block_size) * blocks_x + (np.arange(width)[None, :] // block_size)).ravel()
+    block_count = math.ceil(height / block_size) * blocks_x
+    selected_flat = selected.ravel()
+    counts = np.bincount(block_ids, weights=selected_flat.astype(np.int64), minlength=block_count).astype(np.int64)
+    valid = counts > 0
+
     if original_mode == "RGBA":
-        target_size = (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size)))
-        alpha = image_array[..., 3].astype(np.float32) / 255.0
-        premultiplied = image_array[..., :3].astype(np.float32) * alpha[..., None]
-        small_premultiplied = cv2.resize(premultiplied, target_size, interpolation=cv2.INTER_AREA)
-        small_alpha = cv2.resize(alpha, target_size, interpolation=cv2.INTER_AREA)
-        pixelated_premultiplied = cv2.resize(small_premultiplied, (width, height), interpolation=cv2.INTER_NEAREST)
-        pixelated_alpha = cv2.resize(small_alpha, (width, height), interpolation=cv2.INTER_NEAREST)
-        pixelated_rgb = np.divide(
-            pixelated_premultiplied,
-            pixelated_alpha[..., None],
-            out=np.zeros_like(pixelated_premultiplied),
-            where=pixelated_alpha[..., None] > 0,
-        )
         output = image_array.copy()
-        output[..., :3] = np.where(mask[..., None] > 0, np.clip(np.rint(pixelated_rgb), 0, 255).astype(np.uint8), image_array[..., :3])
+        alpha = image_array[..., 3].astype(np.int64).ravel()
+        weights = alpha * selected_flat.astype(np.int64)
+        alpha_sums = np.bincount(block_ids, weights=weights, minlength=block_count).astype(np.int64)
+        rgb = image_array[..., :3].reshape(-1, 3).astype(np.int64)
+        colors = np.zeros((block_count, 3), dtype=np.uint8)
+        alpha_valid = alpha_sums > 0
+        for channel in range(3):
+            sums = np.bincount(block_ids, weights=rgb[:, channel] * weights, minlength=block_count).astype(np.int64)
+            colors[alpha_valid, channel] = ((sums[alpha_valid] + alpha_sums[alpha_valid] // 2) // alpha_sums[alpha_valid]).astype(np.uint8)
+        target = colors[block_ids].reshape(height, width, 3)
+        output[..., :3] = np.where((selected & alpha_valid[block_ids].reshape(height, width))[..., None], target, output[..., :3])
         return Image.fromarray(output)
 
-    pixelated = image.resize(
-        (max(1, math.ceil(width / block_size)), max(1, math.ceil(height / block_size))),
-        Image.Resampling.BOX,
-    ).resize((width, height), Image.Resampling.NEAREST)
-    output = np.where(mask[..., None] > 0, np.asarray(pixelated), image_array) if original_mode == "RGB" else np.where(mask > 0, np.asarray(pixelated), image_array)
+    channels = 1 if original_mode == "L" else 3
+    values = image_array.reshape(-1, channels).astype(np.int64) if channels > 1 else image_array.reshape(-1, 1).astype(np.int64)
+    colors = np.zeros((block_count, channels), dtype=np.uint8)
+    for channel in range(channels):
+        sums = np.bincount(block_ids, weights=values[:, channel] * selected_flat, minlength=block_count).astype(np.int64)
+        colors[valid, channel] = ((sums[valid] + counts[valid] // 2) // counts[valid]).astype(np.uint8)
+    target = colors[block_ids].reshape(height, width, channels)
+    if original_mode == "L":
+        output = image_array.copy()
+        output[selected] = target[..., 0][selected]
+    else:
+        output = np.where(selected[..., None], target, image_array)
     return Image.fromarray(output)
 
 
@@ -318,16 +333,18 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raise ClientError("編集マスクは有効なPNGではありません。") from exc
 
 
-def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     if raw_draft is None:
-        return None, None
+        return None, None, None
     if not isinstance(raw_draft, dict):
         raise ClientError("手描きマスクの形式が正しくありません。")
     add = raw_draft.get("add") if raw_draft.get("manualEnabled", True) is not False else None
     exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
+    exclusion_erase = raw_draft.get("exclusionErase") if raw_draft.get("manualExclusionEraseEnabled", True) is not False else None
     return (
         _decode_mask(str(add), width, height) if add else None,
         _decode_mask(str(exclusion), width, height) if exclusion else None,
+        _decode_mask(str(exclusion_erase), width, height) if exclusion_erase else None,
     )
 
 

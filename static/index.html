@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="mozarie-token" content="{{SESSION_TOKEN}}">
   <title data-i18n="app.title">Mozarie</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="appbar">
-    <div class="brand" data-i18n="app.brand">Mozarie</div>
+    <img class="brand-logo" src="/logo.png" alt="" aria-hidden="true">
     <div class="appbar-commands"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button><button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button></div>
     <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
@@ -26,11 +26,10 @@
       </div>
     </div>
     <div class="appbar-spacer" aria-hidden="true"></div>
-    <div id="connectionStatus" class="appbar-status error" role="alert" hidden></div>
+    <div id="connectionStatus" class="appbar-status" role="status" aria-live="polite" hidden></div>
     <button id="settingsButton" type="button" data-i18n="settings.open">設定</button>
   </header>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
-  <div id="statusLine" class="status-line" hidden><div id="status" class="status" aria-live="polite"></div></div>
 
   <main class="studio-grid">
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
@@ -60,16 +59,23 @@
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div id="canvasStage" class="canvas-stage">
-        <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="vertical" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
-          <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
-          <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="消しゴム" title="消しゴム" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+        <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="horizontal" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
+          <div class="tool-pair" role="group" aria-label="モザイク編集" data-i18n-aria-label="editor.mosaicTools">
+            <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイクブラシ" title="モザイクブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+            <button id="mosaicEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク消しゴム" title="モザイク消しゴム" data-i18n-aria-label="editor.mosaicEraser" data-i18n-title="editor.mosaicEraser"><span aria-hidden="true"></span></button>
+          </div>
+          <div class="tool-pair" role="group" aria-label="除外編集" data-i18n-aria-label="editor.exclusionTools">
+            <button id="eraserTool" class="tool icon-button tool-icon tool-icon-brush" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+            <button id="excludeEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser"><span aria-hidden="true"></span></button>
+          </div>
           <div class="boundary-tool-menu">
             <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" data-toolbar-item aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
             <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
               <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
-              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="塗りつぶし" title="塗りつぶし" data-i18n-aria-label="boundary.fill" data-i18n-title="boundary.fill">▣</button>
+              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
+              <button id="excludeBucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>
@@ -77,11 +83,12 @@
           <button id="undoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
           <button id="redoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
           <button id="mosaicPreviewButton" class="tool icon-button active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
-        </div>
+        <span class="tool-separator" aria-hidden="true"></span>
         <div class="canvas-settings-bar" data-i18n-aria-label="editor.settings" aria-label="編集設定">
           <label class="numeric-control" for="brushSize"><span data-i18n="editor.brushSize">ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48" data-i18n-aria-label="editor.brushSize" aria-label="ブラシ径"><output id="brushSizeValue">48 px</output></label>
-          <label class="numeric-control block-control" for="divisor"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
+          <div class="numeric-control block-control"><span class="block-control-heading"><label for="divisor" data-i18n="editor.blockSize">モザイク粗さ</label><button id="mosaicHelpButton" class="help-button" type="button" data-i18n-aria-label="mosaicHelp.title" data-i18n-title="mosaicHelp.title" aria-label="モザイク粗さ" title="モザイク粗さ"></button></span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></div>
           <label id="bucketToleranceControl" class="numeric-control" for="bucketTolerance" hidden><span data-i18n="editor.bucketTolerance">許容値</span><input id="bucketTolerance" type="number" min="0" max="255" value="20"></label>
+        </div>
         </div>
         <div class="canvas-navigation-bar" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
           <output id="currentFileName" class="current-file-name" data-i18n-dynamic>画像未選択</output><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
@@ -111,21 +118,26 @@
       </div>
       <section class="detection-settings">
         <h2 data-i18n="detection.title">検出設定</h2>
+        <div class="target-choices" role="group" data-i18n-aria-label="detection.targets" aria-label="対象">
+          <span class="target-choices-label" data-i18n="detection.targets">対象</span>
+          <label class="target-chip"><input id="detectTargetPenis" type="checkbox" checked><span>penis</span></label>
+          <label class="target-chip"><input id="detectTargetPussy" type="checkbox" checked><span>pussy</span></label>
+        </div>
+        <p id="detectionTargetValidation" class="target-validation" role="alert" hidden></p>
         <label class="threshold-control" for="confidence">
           <span data-i18n="detection.confidence">判定しきい値</span>
           <output id="confidenceValue">0.50</output>
         </label>
         <input id="confidence" type="range" min="0.10" max="1.00" step="0.01" value="0.50">
         <p class="muted" data-i18n="detection.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-        <div class="target-choices"><label><input id="detectTargetPenis" type="checkbox" checked> penis</label><label><input id="detectTargetPussy" type="checkbox" checked> pussy</label></div>
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:enable" type="button">ON</button><button data-candidate-batch="apply:disable" type="button">OFF</button><button data-candidate-batch="apply:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="apply:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:enable" type="button">ON</button><button data-candidate-batch="exclude:disable" type="button">OFF</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -140,7 +152,7 @@
           <button id="batchModeButton" type="button" aria-pressed="false" disabled data-i18n="selection.batchMode">一括編集</button>
         </div>
         <div class="overview-filters" data-i18n-aria-label="overview.filters" aria-label="一覧の絞り込み">
-          <button class="overview-filter active" type="button" data-overview-filter="all" aria-pressed="true" data-i18n="overview.filterAll">全体</button>
+          <button class="overview-filter active" type="button" data-overview-filter="all" aria-pressed="true" data-i18n="overview.filterAll">すべて</button>
           <button class="overview-filter" type="button" data-overview-filter="unreviewed" aria-pressed="false" data-i18n="overview.filterUnreviewed">未確認</button>
           <button class="overview-filter" type="button" data-overview-filter="reviewed" aria-pressed="false" data-i18n="overview.filterReviewed">確認済</button>
           <button class="overview-filter" type="button" data-overview-filter="masked" aria-pressed="false" data-i18n="overview.filterMasked">モザイクあり</button>
@@ -171,17 +183,14 @@
     <button class="gallery-item" type="button" aria-haspopup="menu">
       <img loading="lazy" alt="">
       <span class="gallery-review-badge"></span>
-      <div class="gallery-name"></div>
-      <div class="gallery-meta"></div>
+      <span class="catalog-card-footer"><span class="gallery-name"></span><span class="gallery-meta"></span></span>
     </button>
   </template>
 
   <template id="overviewItemTemplate">
     <button class="overview-item" type="button">
       <img loading="lazy" alt="">
-      <span class="overview-item-name"></span>
-      <span class="overview-item-path"></span>
-      <span class="overview-item-state"></span>
+      <span class="overview-review-badge"></span><span class="catalog-card-footer"><span class="overview-item-name"></span><span class="overview-item-dimensions"></span></span>
     </button>
   </template>
 
@@ -209,6 +218,11 @@
          <span data-i18n="detectDialog.parallelism">同時処理数</span>
          <input id="detectParallelism" type="number" min="1" max="4" step="1" value="2" data-i18n-aria-label="detectDialog.parallelism" aria-label="同時処理数">
        </label>
+      <div class="target-choices dialog-target-choices" role="group" data-i18n-aria-label="detection.targets" aria-label="対象">
+        <span class="target-choices-label" data-i18n="detection.targets">対象</span>
+        <label class="target-chip"><input id="dialogTargetPenis" type="checkbox" checked><span>penis</span></label>
+        <label class="target-chip"><input id="dialogTargetPussy" type="checkbox" checked><span>pussy</span></label>
+      </div>
        <label class="form-row">
         <span data-i18n="detection.confidence">判定しきい値</span>
         <span class="threshold-dialog-control">
@@ -217,7 +231,7 @@
         </span>
        </label>
       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-      <div class="target-choices"><label><input id="dialogTargetPenis" type="checkbox" checked> penis</label><label><input id="dialogTargetPussy" type="checkbox" checked> pussy</label></div>
+      <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
         <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>
@@ -252,7 +266,7 @@
           <section class="model-card model-card-required"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsTargetTitle" data-i18n="settings.targetModel">基本モデル</h4></div><button type="button" class="help-button" data-model-help="target" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button></div><span class="inline-field"><input id="settingsTargetModel" type="text" spellcheck="false" data-i18n-aria-label="settings.targetModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="target_segmentation" data-model-input="settingsTargetModel" data-i18n="settings.browseModel">参照</button></span></section>
           <section id="settingsNtd11Card" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsNtd11Title" data-i18n="settings.ntd11Model">NTD11</h4><button type="button" data-model-download="ntd11" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="ntd11" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsNtd11Toggle" type="checkbox" role="switch" aria-labelledby="settingsNtd11Title" data-model-toggle="ntd11"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsNtd11Model" type="text" spellcheck="false" data-i18n-aria-label="settings.ntd11Model" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="ntd11" data-model-input="settingsNtd11Model" data-i18n="settings.browseModel">参照</button></span></section>
           <section id="settingsSensitiveCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsSensitiveTitle" data-i18n="settings.sensitiveModel">Sensitive</h4><button type="button" data-model-download="sensitive" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="sensitive" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsSensitiveToggle" type="checkbox" role="switch" aria-labelledby="settingsSensitiveTitle" data-model-toggle="sensitive"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsSensitiveModel" type="text" spellcheck="false" data-i18n-aria-label="settings.sensitiveModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="sensitive" data-model-input="settingsSensitiveModel" data-i18n="settings.browseModel">参照</button></span></section>
-          <section id="settingsPrecisionCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsPrecisionTitle" data-i18n="settings.precisionModel">自動検出の輪郭を補正</h4><button type="button" data-model-download="sam" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="precision" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsPrecisionToggle" type="checkbox" role="switch" aria-labelledby="settingsPrecisionTitle" data-precision-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div>
+          <section id="settingsPrecisionCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsPrecisionTitle" data-i18n="settings.precisionModel">輪郭を補正</h4><button type="button" data-model-download="sam" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="precision" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsPrecisionToggle" type="checkbox" role="switch" aria-labelledby="settingsPrecisionTitle" data-precision-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div>
             <fieldset id="settingsSamVariants" class="sam-variants"><legend><span data-i18n="settings.samType">輪郭抽出モデルの種類</span><button type="button" class="help-button" data-model-help="samType" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button></legend>
               <label class="sam-variant"><input type="radio" name="settingsSamVariant" value="vit_b"><span class="sam-variant-name">vit_b</span><span data-i18n="settings.samVariant.vitB">高速 · VRAM少なめ · 375 MB</span><output class="sam-variant-status" data-sam-status="vit_b"></output></label>
               <label class="sam-variant"><input type="radio" name="settingsSamVariant" value="vit_l"><span class="sam-variant-name">vit_l</span><span data-i18n="settings.samVariant.vitL">中速 · VRAM中程度 · 1.25 GB</span><output class="sam-variant-status" data-sam-status="vit_l"></output></label>
@@ -264,14 +278,13 @@
         </section>
         <section class="settings-model-section" aria-labelledby="settingsExclusionHeading">
           <h3 id="settingsExclusionHeading" class="settings-section-heading" data-i18n="settings.exclusionProcessing">除外処理</h3>
-          <section id="settingsHandCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandTitle" data-i18n="settings.handModel">手を除外</h4><button type="button" data-model-download="hand_detection" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="hand" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandToggle" type="checkbox" role="switch" aria-labelledby="settingsHandTitle" data-model-toggle="hand_detection"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_detection" data-model-input="settingsHandModel" data-i18n="settings.browseModel">参照</button></span></section>
+          <section id="settingsHandCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandTitle" data-i18n="settings.handModel">手</h4><button type="button" data-model-download="hand_detection" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="hand" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandToggle" type="checkbox" role="switch" aria-labelledby="settingsHandTitle" data-model-toggle="hand_detection"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_detection" data-model-input="settingsHandModel" data-i18n="settings.browseModel">参照</button></span></section>
           <section id="settingsHandSegmentationCard" class="model-card"><div class="model-card-heading"><div class="model-card-title"><h4 id="settingsHandSegmentationTitle" data-i18n="settings.handSegmentationModel">HandSegNet anime SDXL</h4><button type="button" data-model-download="hand_segmentation" data-i18n="modelDownload.download">ダウンロード</button></div><button type="button" class="help-button" data-model-help="handSegmentation" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsHandSegmentationToggle" type="checkbox" role="switch" aria-labelledby="settingsHandSegmentationTitle" data-model-toggle="hand_segmentation"><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div><span class="inline-field"><input id="settingsHandSegmentationModel" type="text" spellcheck="false" data-i18n-aria-label="settings.handSegmentationModel" data-i18n-placeholder="settings.modelPathPlaceholder" placeholder="パスを指定してください"><button type="button" data-model-picker="hand_segmentation" data-model-input="settingsHandSegmentationModel" data-i18n="settings.browseModel">参照</button></span></section>
-          <section id="settingsFluidCard" class="model-card"><div class="model-card-heading"><h4 id="settingsFluidTitle" data-i18n="settings.fluidExclusion">白い体液候補を検出</h4><button type="button" class="help-button" data-model-help="fluid" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsFluidToggle" type="checkbox" role="switch" aria-labelledby="settingsFluidTitle" data-fluid-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div></section>
+          <section id="settingsFluidCard" class="model-card"><div class="model-card-heading"><h4 id="settingsFluidTitle" data-i18n="settings.fluidExclusion">白い液</h4><button type="button" class="help-button" data-model-help="fluid" data-i18n-aria-label="settings.helpInfo" data-i18n-title="settings.helpInfo" aria-label="説明" title="説明"></button><label class="model-switch"><input id="settingsFluidToggle" type="checkbox" role="switch" aria-labelledby="settingsFluidTitle" data-fluid-toggle><span class="model-switch-track" aria-hidden="true"><span class="model-switch-knob"></span></span><span class="model-switch-state" data-switch-state>OFF</span></label></div></section>
         </section>
         <output id="settingsModelStatus" class="fixed-note"></output>
       </section>
       <section id="settingsPanelDisplay" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabDisplay" data-settings-panel="display" hidden>
-        <label class="form-row"><span data-i18n="settings.toolPosition">ツールバーの位置</span><select id="settingsToolPosition"><option value="left" data-i18n="settings.toolPositionLeft">左</option><option value="top" data-i18n="settings.toolPositionTop">上</option><option value="right" data-i18n="settings.toolPositionRight">右</option><option value="bottom" data-i18n="settings.toolPositionBottom">下</option></select></label>
         <label class="form-row"><span data-i18n="settings.applyColor">適用範囲の色</span><input id="settingsApplyColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.excludeColor">除外範囲の色</span><input id="settingsExcludeColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
@@ -310,6 +323,7 @@
   <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount">
     <form id="applyForm" class="dialog-body">
       <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
+      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="current" data-i18n="apply.targetCurrent">この画像</option><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
@@ -322,6 +336,7 @@
         </div>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
         <label class="choice-row"><input id="removeAfterSave" type="checkbox"><span data-i18n="apply.removeAfterSave">完了後、一覧から削除</span></label>
+        <label id="removeOnlyMaskedRow" class="choice-row nested-choice"><input id="removeOnlyMasked" type="checkbox" checked><span data-i18n="apply.removeOnlyMasked">モザイクがある画像のみ対象</span></label>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize"></output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">対応するメタデータを引き継ぎます。同名時は自動連番です。</p>
       </fieldset>
@@ -339,6 +354,8 @@
       </div>
     </form>
   </dialog>
+
+  <dialog id="mosaicHelpDialog" class="modal-dialog" aria-labelledby="mosaicHelpTitle"><section class="dialog-body"><h2 id="mosaicHelpTitle" data-i18n="mosaicHelp.title">モザイク粗さ</h2><p data-i18n="mosaicHelp.guideline">モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。</p><p class="mosaic-guideline-links"><a href="https://booth.pm/guidelines" target="_blank" rel="noreferrer">BOOTH</a> / <a href="https://www.pixiv.net/terms/?page=guideline" target="_blank" rel="noreferrer">pixiv</a> / <a href="https://terms.dmm.co.jp/doujin_regulation" target="_blank" rel="noreferrer">FANZA</a> / <a href="https://www.dlsite.com/home/mosaic" target="_blank" rel="noreferrer">DLsite</a></p><div class="dialog-actions"><button id="mosaicHelpCloseButton" type="button" data-i18n="dialog.close">閉じる</button></div></section></dialog>
 
   <dialog id="processingDialog" class="modal-dialog processing-dialog" closedby="none" aria-labelledby="processingTitle" aria-describedby="processingProgressText processingCurrent">
     <section class="dialog-body">

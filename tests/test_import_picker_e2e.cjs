@@ -9,10 +9,28 @@ const staticRoot = path.join(root, "static");
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
+
+async function dialogPointerPoints(page, selector) {
+  return page.locator(selector).evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return {
+      inside: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+      outside: { x: Math.max(2, rect.left - 12), y: rect.top + Math.min(20, rect.height / 2) },
+    };
+  });
+}
+
+async function pointerGesture(page, start, end = start) {
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y);
+  await page.mouse.up();
+}
 
 function startFixtureServer() {
   const detectRequests = [];
@@ -257,11 +275,17 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#status"), statusHidden: document.querySelector("#statusLine").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
+    const logo = box(".brand-logo"); const appbar = box(".appbar");
+    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, noBrandText: !document.querySelector(".brand"), logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
-  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.bottom, `status stays outside the header at ${width}x${height}`);
+  if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.top && appbar.status.bottom <= appbar.appbar.bottom, `status stays in the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
+  assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
+  assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
+  assert.equal(appbar.noBrandText && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, true, `header uses only the logo at ${width}x${height}`);
+  await page.locator("#mosaicHelpButton").focus();
+  assert.equal(await page.locator("#mosaicHelpButton").evaluate((button) => document.activeElement === button), true, `mosaic help accepts keyboard focus at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
       const pane = document.querySelector("#galleryPane").getBoundingClientRect();
@@ -344,33 +368,31 @@ async function assertConnectionStatusLayout(page, width, height, language) {
       inAppbar: connection.top >= appbar.top && connection.bottom <= appbar.bottom,
       gap: settings.left - connection.right,
       settingsHit: document.elementFromPoint(settings.x + settings.width / 2, settings.y + settings.height / 2) === document.querySelector("#settingsButton"),
-      statusLineHidden: document.querySelector("#statusLine").hidden,
       connectionHidden: document.querySelector("#connectionStatus").hidden,
       parentIsAppbar: document.querySelector("#connectionStatus").parentElement === document.querySelector(".appbar"),
+      rightAligned: getComputedStyle(document.querySelector("#connectionStatus")).textAlign === "right",
       ...dimensions,
     };
   });
   assert.equal(layout.connectionHidden, false, `connection status is visible at ${width}x${height} (${language})`);
-  assert.equal(layout.statusLineHidden, true, `connection status does not use the line below the header at ${width}x${height} (${language})`);
-  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit, true, `connection status stays in the header and settings stays clickable at ${width}x${height} (${language})`);
+  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit && layout.rightAligned, true, `connection status stays right-aligned in the header and settings stays clickable at ${width}x${height} (${language})`);
   assert.ok(layout.gap >= 0 && layout.gap <= 10, `connection status sits immediately left of settings at ${width}x${height} (${language})`);
   assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test notification"));
   const general = await page.evaluate(() => {
     const appbar = document.querySelector(".appbar").getBoundingClientRect();
-    const status = document.querySelector("#status").getBoundingClientRect();
-    return { connectionHidden: document.querySelector("#connectionStatus").hidden, statusLineHidden: document.querySelector("#statusLine").hidden, belowAppbar: status.top >= appbar.bottom };
+    const status = document.querySelector("#connectionStatus").getBoundingClientRect();
+    return { connectionHidden: document.querySelector("#connectionStatus").hidden, inAppbar: status.top >= appbar.top && status.bottom <= appbar.bottom };
   });
-  assert.equal(general.connectionHidden, true, `ordinary status hides the appbar connection message at ${width}x${height} (${language})`);
-  assert.equal(general.statusLineHidden, false, `ordinary status remains below the header at ${width}x${height} (${language})`);
-  assert.equal(general.belowAppbar, true, `ordinary status remains outside the header at ${width}x${height} (${language})`);
+  assert.equal(general.connectionHidden, false, `ordinary status uses the header at ${width}x${height} (${language})`);
+  assert.equal(general.inAppbar, true, `ordinary status remains inside the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test error", "error"));
-  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
+  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => clearStatus());
-  assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden && document.querySelector("#statusLine").hidden), true, `clearing status hides both status areas at ${width}x${height} (${language})`);
+  assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden), true, `clearing status hides the header status at ${width}x${height} (${language})`);
 }
 
 async function assertSettingsDialogLayout(page, width, height, language) {
@@ -393,6 +415,8 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   assert.equal(layout.fits, true, `settings does not overflow at ${width}x${height} (${language})`);
   assert.equal(layout.reset && layout.save && layout.close, true, `settings controls own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#settingsTabModels").click();
+  const precisionTitle = language === "ja" ? "輪郭を補正" : "Refine contours";
+  assert.equal(await page.locator("#settingsPrecisionTitle").textContent(), precisionTitle, `contour refinement has the concise title at ${width}x${height} (${language})`);
   const expectedPathPlaceholder = language === "ja" ? "パスを指定してください" : "Specify a path";
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
@@ -408,6 +432,7 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   };
   for (const [key, [model, file, href]] of Object.entries(helpExpectations)) {
     const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
+    if (key === "precision") assert.equal(await page.locator("#modelHelpTitle").textContent(), precisionTitle, `contour refinement help shares the concise title at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
     if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
@@ -556,7 +581,6 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   await page.locator("#settingsCloseButton").click();
 }
 async function assertToolRailLayout(page, position) {
-  await page.locator("#canvasStage").evaluate((stage, selected) => { stage.dataset.toolPosition = selected; }, position);
   const boxes = await page.evaluate(() => {
     const read = (selector) => {
       const box = document.querySelector(selector).getBoundingClientRect();
@@ -564,21 +588,15 @@ async function assertToolRailLayout(page, position) {
     };
     return { rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar") };
   });
-  assert.equal(overlaps(boxes.rail, boxes.settings), false, `${position} rail must not overlap editor settings`);
+  assert.equal(overlaps(boxes.rail, boxes.settings), true, "tool settings are integrated into the top editor toolbar");
   assert.equal(overlaps(boxes.rail, boxes.navigation), false, `${position} rail must not overlap image navigation`);
-  if (position === "bottom") {
-    assert.ok(Math.abs(boxes.rail.y - boxes.navigation.y) <= 2, "bottom tools and image navigation share one compact row");
-    assert.ok(boxes.rail.x + boxes.rail.width <= boxes.navigation.x, "bottom navigation uses the horizontal space beside the tools");
-  }
+  assert.ok(boxes.rail.y <= boxes.settings.y, "toolbar is fixed at the editor top");
   await page.locator("#boundaryTool").click();
   const menu = await page.locator("#boundaryModeMenu").evaluate((element) => {
     const box = element.getBoundingClientRect();
     return { x: box.x, y: box.y, width: box.width, height: box.height };
   });
-  if (position === "left") assert.ok(menu.x >= boxes.rail.x + boxes.rail.width, "left rail menu opens right");
-  if (position === "right") assert.ok(menu.x + menu.width <= boxes.rail.x, "right rail menu opens left");
-  if (position === "top") assert.ok(menu.y >= boxes.rail.y + boxes.rail.height, "top rail menu opens down");
-  if (position === "bottom") assert.ok(menu.y + menu.height <= boxes.rail.y, "bottom rail menu opens up");
+  assert.ok(menu.width > 0 && menu.height > 0, "toolbar boundary menu opens");
   await page.keyboard.press("Escape");
 }
 
@@ -586,7 +604,7 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
   await page.locator('.gallery-item[data-id="sample"]').click();
   try { await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
   catch (error) {
-    const status = await page.locator("#status").textContent();
+    const status = await page.locator("#connectionStatus").textContent();
     throw new Error(`image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
   }
 }
@@ -617,13 +635,13 @@ async function main() {
     });
     await initialPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
     await initialPage.waitForFunction(() => typeof window.__releaseInitialImages === "function");
-    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "the initial empty catalog has no blank status line");
-    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the hidden status line leaves no 24px gap at 1280x720");
+    assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "the initial empty catalog has no header notice");
+    assert.equal(await initialPage.locator("#canvasStage").evaluate((stage) => Math.round(stage.getBoundingClientRect().height)), 672, "the editor has no notification strip gap at 1280x720");
     assert.equal(await initialPage.evaluate(() => typeof setStatus), "function");
     await initialPage.evaluate(() => setStatus("Test notification"));
-    assert.equal(await initialPage.locator("#statusLine").isVisible(), true, "setStatus shows the notification line");
+    assert.equal(await initialPage.locator("#connectionStatus").isVisible(), true, "setStatus shows the header notice");
     await initialPage.evaluate(() => clearStatus());
-    assert.equal(await initialPage.locator("#statusLine").isHidden(), true, "clearStatus hides the notification line again");
+    assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
     await initialPage.close();
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -641,7 +659,12 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
-    assert.doesNotMatch(await page.locator("#status").textContent(), /フォルダを選択してください|Choose an image folder/, "the status line never presents the empty-catalog instruction");
+    const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
+    assert.equal(favicon.status(), 200, "favicon is delivered by the static server");
+    assert.match(favicon.headers()["content-type"] || "", /^image\/(?:x-icon|vnd\.microsoft\.icon)/, "favicon uses an icon MIME type");
+    assert.ok((await favicon.body()).length > 0, "favicon response has icon data");
+    assert.equal(await page.locator('link[rel="icon"]').getAttribute("href"), "/favicon.ico", "document uses the real favicon asset");
+    assert.doesNotMatch(await page.locator("#connectionStatus").textContent(), /フォルダを選択してください|Choose an image folder/, "the header never presents the empty-catalog instruction");
     for (const [width, height] of [[1024, 768], [1920, 1080]]) {
       await assertConnectionStatusLayout(page, width, height, "ja");
       await assertConnectionStatusLayout(page, width, height, "en");
@@ -884,6 +907,7 @@ async function main() {
     const manualExclusionVisibility = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages;
       const manualEnabled = state.manualEnabled; const manualExclusionEnabled = state.manualExclusionEnabled;
+      const manualExclusionEraseEnabled = state.manualExclusionEraseEnabled;
       const manualExclusionForced = state.manualExclusionForced; const manualMaskPresent = state.manualMaskPresent;
       const exclusion = document.createElement("canvas"); exclusion.width = addCanvas.width; exclusion.height = addCanvas.height;
       exclusion.getContext("2d").fillRect(0, 0, exclusion.width, exclusion.height);
@@ -895,14 +919,84 @@ async function main() {
       const nonForced = captureCurrentMaskVisibility().manual;
       state.candidates[0].forced = true;
       const forced = captureCurrentMaskVisibility().manual;
+      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+      const forcedErased = captureCurrentMaskVisibility().manual;
       state.candidates = candidates; state.candidateImages = candidateImages;
       state.manualEnabled = manualEnabled; state.manualExclusionEnabled = manualExclusionEnabled;
+      state.manualExclusionEraseEnabled = manualExclusionEraseEnabled;
       state.manualExclusionForced = manualExclusionForced; state.manualMaskPresent = manualMaskPresent;
-      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height); exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
       markMaskDirty(); flushMaskComposition();
-      return { nonForced, forced };
+      return { nonForced, forced, forcedErased };
     });
-    assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false }, "manual add remains visible through a non-forced exclusion but not a forced exclusion");
+    assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false, forcedErased: true }, "manual exclusion erase restores forced exclusions without creating a new mosaic");
+    const restoredHistory = await page.evaluate(async () => {
+      resetCurrentDraft(); state.drafts.delete("sample");
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); saveDraft();
+      const saved = state.drafts.get("sample");
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); state.history = []; state.historyIndex = 0;
+      restoreDraft("sample", state.imageGeneration);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const restored = state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas);
+      restoreSnapshot(0);
+      const undoWorked = !canvasHasPixels(addCtx, addCanvas) && !$("#redoButton").disabled;
+      restoreSnapshot(1);
+      const redoWorked = canvasHasPixels(addCtx, addCanvas);
+      state.drafts.set("sample", saved); resetCurrentDraft(); state.drafts.delete("sample");
+      return { restored, undoWorked, redoWorked };
+    });
+    assert.deepEqual(restoredHistory, { restored: true, undoWorked: true, redoWorked: true }, "manual history survives changing away and back to an image");
+    const mosaicEraserHistory = await page.evaluate(() => {
+      const candidates = state.candidates; const candidateImages = state.candidateImages; const tool = state.tool;
+      const automatic = document.createElement("canvas"); automatic.width = addCanvas.width; automatic.height = addCanvas.height; automatic.getContext("2d").fillRect(2, 2, 8, 8);
+      state.candidates = [{ id: "automatic-range", role: "apply", enabled: true, className: "Automatic" }]; state.candidateImages = new Map([["automatic-range", automatic]]);
+      const manual = document.createElement("canvas"); manual.width = manual.height = 64;
+      const exclusion = document.createElement("canvas"); exclusion.width = exclusion.height = 64;
+      const exclusionErase = document.createElement("canvas"); exclusionErase.width = exclusionErase.height = 64;
+      const from = { x: 16, y: 16 }; const to = { x: 48, y: 48 };
+      paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "brush", 12);
+      const added = canvasHasPixels(manual.getContext("2d"), manual);
+      paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "mosaic_eraser", 12);
+      const erased = !canvasHasPixels(manual.getContext("2d"), manual);
+      const point = { x: Math.floor(addCanvas.width / 2), y: Math.floor(addCanvas.height / 2) };
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); resetHistoryToCurrentManualMask(); state.tool = "brush";
+      beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
+      state.tool = "mosaic_eraser"; beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
+      const historyTools = state.history.map((stroke) => stroke.tool);
+      restoreSnapshot(1); const undo = state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas); restoreSnapshot(2); const redo = state.historyIndex === 2;
+      const automaticUnchanged = state.candidates[0].enabled && canvasHasPixels(automatic.getContext("2d"), automatic);
+      state.candidates = candidates; state.candidateImages = candidateImages; state.tool = tool; resetHistoryToCurrentManualMask(); renderCandidates();
+      return { added, erased, undo, redo, automaticUnchanged, historyTools };
+    });
+    assert.deepEqual(mosaicEraserHistory, { added: true, erased: true, undo: true, redo: true, automaticUnchanged: true, historyTools: ["brush", "mosaic_eraser"] }, `mosaic eraser removes only manual mosaic strokes and participates in undo/redo: ${JSON.stringify(mosaicEraserHistory)}`);
+    const exclusionEraseRow = await page.evaluate(() => {
+      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(3, 3, 4, 4); state.manualExclusionEraseEnabled = true; renderCandidates();
+      const row = document.querySelector(".candidate-row-manual-exclude-erase");
+      const result = { present: Boolean(row), enabled: row?.classList.contains("enabled"), toggle: row?.querySelector(".candidate-toggle")?.textContent };
+      exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
+    });
+    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion erase has its own visible ON/OFF row");
+    const manualBlinkStartsWithSection = await page.evaluate(() => {
+      const candidates = state.candidates; const candidateImages = state.candidateImages;
+      const blinkCandidateIds = state.blinkCandidateIds;
+      const candidateMask = document.createElement("canvas"); candidateMask.width = addCanvas.width; candidateMask.height = addCanvas.height;
+      candidateMask.getContext("2d").fillRect(0, 0, 8, 8);
+      const tool = state.tool;
+      state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
+      state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
+      state.blinkCandidateIds = new Set(); renderCandidates();
+      document.querySelector('[data-candidate-display-toggle="apply"]').click();
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
+      const row = document.querySelector(".candidate-row-manual-apply");
+      const result = {
+        manualBlink: state.blinkCandidateIds.has("manual:apply"),
+        rowBlinking: row?.classList.contains("blink-selected"),
+      };
+      state.candidates = candidates; state.candidateImages = candidateImages; state.blinkCandidateIds = blinkCandidateIds; state.tool = tool;
+      deleteManualMask(); renderCandidates();
+      return result;
+    });
+    assert.deepEqual(manualBlinkStartsWithSection, { manualBlink: true, rowBlinking: true }, "a first manual mosaic stroke joins an enabled section blink");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
@@ -953,7 +1047,7 @@ async function main() {
     for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#currentFileName", "#previousImageButton", "#imagePosition", "#nextImageButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
-    for (const position of ["left", "top", "right", "bottom"]) await assertToolRailLayout(page, position);
+    await assertToolRailLayout(page, "top");
     await page.locator("#canvasStage").evaluate((stage) => { stage.dataset.toolPosition = "left"; });
     for (const [language, labels] of [["ja", ["削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
       await page.evaluate((locale) => loadTranslations(locale), language);
@@ -1125,18 +1219,77 @@ async function main() {
     for (const selector of ["#detectConfidenceRange", "#detectConfidenceNumber", "#detectParallelism", "#processingProgress", "#applyProgress"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-label"), `${selector} must have an accessible name`);
     }
-    for (const selector of ["#confirmDialog", "#detectDialog", "#settingsDialog", "#modelHelpDialog", "#applyDialog"]) {
-      await page.locator(selector).evaluate((dialog) => {
-        if (!dialog.open) dialog.showModal();
-        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
+    const dismissFromBackdrop = async (selector) => {
+      await page.locator(selector).evaluate((dialog) => { if (!dialog.open) dialog.showModal(); });
+      const { outside } = await dialogPointerPoints(page, selector);
+      await pointerGesture(page, outside);
       await page.waitForFunction((target) => document.querySelector(target).open === false, selector);
-    }
-    await page.locator("#processingDialog").evaluate((dialog) => {
-      dialog.showModal();
-      dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      dialog.dispatchEvent(new Event("cancel", { bubbles: false, cancelable: true }));
+    };
+    await dismissFromBackdrop("#mosaicHelpDialog");
+    await dismissFromBackdrop("#modelHelpDialog");
+    await dismissFromBackdrop("#applyDialog");
+    await page.locator("#settingsDialog").evaluate((dialog) => { if (!dialog.open) dialog.showModal(); });
+    const settingsPoints = await dialogPointerPoints(page, "#settingsDialog");
+    await pointerGesture(page, settingsPoints.inside, settingsPoints.outside);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "dragging from settings content to its backdrop must not close it");
+    await pointerGesture(page, settingsPoints.outside, settingsPoints.inside);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "dragging from the backdrop into settings content must not close it");
+    await pointerGesture(page, settingsPoints.outside);
+    await page.waitForFunction(() => !document.querySelector("#settingsDialog").open);
+    await page.locator("#settingsDialog").evaluate((dialog) => dialog.showModal());
+    await page.locator("#settingsCloseButton").click();
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "settings close button still closes the dialog");
+    await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
+    const mosaicHelpPoints = await dialogPointerPoints(page, "#mosaicHelpDialog");
+    await page.mouse.click(mosaicHelpPoints.outside.x, mosaicHelpPoints.outside.y, { button: "right" });
+    assert.equal(await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.open), true, "right-clicking a dismissible backdrop must not close the dialog");
+    await page.locator("#mosaicHelpCloseButton").click();
+    await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#mosaicHelpDialog").open);
+
+    await page.evaluate(() => { state.pendingDetectionTargetIds = ["sample"]; $("#detectDialog").showModal(); });
+    const detectPoints = await dialogPointerPoints(page, "#detectDialog");
+    await pointerGesture(page, detectPoints.outside);
+    await page.waitForFunction(() => !document.querySelector("#detectDialog").open);
+    assert.deepEqual(await page.evaluate(() => state.pendingDetectionTargetIds), [], "detect backdrop dismissal clears its pending target IDs");
+
+    await page.evaluate(() => {
+      window.__confirmBackdropResult = undefined;
+      void confirmAction("Backdrop", "Dismiss").then((accepted) => { window.__confirmBackdropResult = accepted; });
     });
+    const confirmPoints = await dialogPointerPoints(page, "#confirmDialog");
+    await pointerGesture(page, confirmPoints.outside);
+    await page.waitForFunction(() => window.__confirmBackdropResult !== undefined);
+    assert.equal(await page.evaluate(() => window.__confirmBackdropResult), false, "confirm backdrop dismissal keeps the cancel result");
+
+    await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.showModal());
+    const downloadPoints = await dialogPointerPoints(page, "#modelDownloadDialog");
+    await pointerGesture(page, downloadPoints.outside);
+    assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.open), true, "model download confirmation keeps its existing backdrop lock");
+    await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.close());
+    await page.evaluate(() => modelDownloadConfirmation("sam"));
+    await page.locator("#modelDownloadStart").click();
+    await page.waitForFunction(() => document.querySelector("#modelDownloadClose").disabled);
+    const runningDownloadPoints = await dialogPointerPoints(page, "#modelDownloadDialog");
+    await pointerGesture(page, runningDownloadPoints.outside);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#modelDownloadDialog").evaluate((dialog) => dialog.open), true, "a running model download ignores backdrop and Escape dismissal");
+    await page.locator("#modelDownloadCancel").click();
+    await page.waitForFunction(() => !document.querySelector("#modelDownloadClose").disabled);
+    await page.locator("#modelDownloadClose").click();
+
+    await page.locator("#applyDialog").evaluate((dialog) => { state.applyRunning = true; dialog.showModal(); });
+    const applyPoints = await dialogPointerPoints(page, "#applyDialog");
+    await pointerGesture(page, applyPoints.outside);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#applyDialog").evaluate((dialog) => dialog.open), true, "a running save ignores backdrop and Escape dismissal");
+    await page.locator("#applyDialog").evaluate((dialog) => { state.applyRunning = false; dialog.close(); });
+
+    await page.locator("#processingDialog").evaluate((dialog) => dialog.showModal());
+    const processingPoints = await dialogPointerPoints(page, "#processingDialog");
+    await pointerGesture(page, processingPoints.outside);
+    await page.keyboard.press("Escape");
     assert.equal(await page.locator("#processingDialog").getAttribute("open"), "", "processing dialog must ignore backdrop and Escape dismissal");
     await page.locator("#processingDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator(".help-button").first().textContent(), "", "help buttons use an information icon instead of a question mark");
@@ -1198,6 +1351,152 @@ async function main() {
     await page.locator('.overview-item[data-id="sample-two"]').click();
     await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
+
+    const catalogCardsAndHidden = await page.evaluate(() => {
+      const box = (node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }; };
+      const image = state.images.find((item) => item.id === "sample");
+      setHidden(image, true); state.galleryFilter = "all"; renderGallery(true);
+      const galleryCard = document.querySelector('.gallery-item[data-id="sample"]'); const galleryImage = galleryCard.querySelector("img"); const galleryFooter = galleryCard.querySelector(".catalog-card-footer");
+      const allIncludesHidden = Boolean(galleryCard) && galleryCard.classList.contains("hidden");
+      state.galleryFilter = "hidden"; renderGallery(true); const hiddenOnly = document.querySelectorAll(".gallery-item").length === 1;
+      const gallery = { card: box(galleryCard), image: box(galleryImage), footer: box(galleryFooter), name: box(galleryCard.querySelector(".gallery-name")), meta: box(galleryCard.querySelector(".gallery-meta")) };
+      state.galleryFilter = "all"; setViewMode("overview"); state.overviewFilter = "all"; renderOverview(true);
+      const overviewCard = document.querySelector('.overview-item[data-id="sample"]'); const overviewImage = overviewCard.querySelector("img"); const overviewFooter = overviewCard.querySelector(".catalog-card-footer");
+      const overviewIncludesHidden = overviewCard.classList.contains("hidden");
+      const result = {
+        allIncludesHidden, hiddenOnly, overviewIncludesHidden,
+        gallery,
+        overview: { card: box(overviewCard), image: box(overviewImage), footer: box(overviewFooter), name: box(overviewCard.querySelector(".overview-item-name")), meta: box(overviewCard.querySelector(".overview-item-dimensions")) },
+      };
+      setHidden(image, false); state.galleryFilter = "all"; setViewMode("edit"); return result;
+    });
+    assert.deepEqual({ all: catalogCardsAndHidden.allIncludesHidden, hidden: catalogCardsAndHidden.hiddenOnly, overview: catalogCardsAndHidden.overviewIncludesHidden }, { all: true, hidden: true, overview: true }, "All includes dimmed hidden cards while Hidden isolates them");
+    for (const [name, card] of Object.entries({ gallery: catalogCardsAndHidden.gallery, overview: catalogCardsAndHidden.overview })) {
+      assert.equal(card.footer.height, 32, `${name} card footer has one shared 32px row`);
+      assert.ok(card.image.left - card.card.left >= 5 && card.image.right <= card.card.right - 5 && card.image.top - card.card.top >= 5, `${name} preview stays inside the card border`);
+      assert.ok(Math.abs(card.name.top - card.meta.top) <= 1 && Math.abs(card.name.bottom - card.meta.bottom) <= 1, `${name} filename and dimensions share one baseline row: ${JSON.stringify(card)}`);
+    }
+
+    for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
+      await page.setViewportSize({ width, height: 768 }); await page.evaluate((locale) => loadTranslations(locale), language);
+      const editor = await page.evaluate(() => {
+        const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; };
+        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions > button")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, text: node.textContent }; });
+        const candidateOverflow = [...document.querySelectorAll(".candidate-section-actions, .candidate-row")].some((node) => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight);
+        const candidateHit = [...document.querySelectorAll(".candidate-section-actions > button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); });
+        const targetChoices = document.querySelector(".candidate-pane .target-choices"); const targetPane = document.querySelector(".candidate-pane"); const targetBounds = targetChoices.getBoundingClientRect(); const paneBounds = targetPane.getBoundingClientRect(); const targetInputs = [...targetChoices.querySelectorAll('input[type="checkbox"]')]; const targetChips = [...targetChoices.querySelectorAll(".target-chip")]; const targetLabel = targetChoices.querySelector(".target-choices-label").getBoundingClientRect();
+        const blockHeading = document.querySelector(".block-control-heading"); const blockLabel = blockHeading.querySelector('label[for="divisor"]'); const blockHelp = document.querySelector("#mosaicHelpButton"); const headingBox = blockHeading.getBoundingClientRect(); const labelBox = blockLabel.getBoundingClientRect(); const helpBox = blockHelp.getBoundingClientRect();
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, targets: { count: targetInputs.length, native: targetInputs.every((input) => input.type === "checkbox"), oneLine: new Set([targetLabel.top, ...targetChips.map((item) => item.getBoundingClientRect().top)].map(Math.round)).size === 1, centered: targetChips.every((chip) => Math.abs((chip.getBoundingClientRect().top + chip.getBoundingClientRect().bottom) / 2 - (targetLabel.top + targetLabel.bottom) / 2) <= 1), withinPane: targetBounds.left >= paneBounds.left && targetBounds.right <= paneBounds.right, compact: targetChips.every((chip) => { const rect = chip.getBoundingClientRect(); return rect.height >= 26 && rect.height <= 28; }), selected: targetChips.every((chip) => chip.classList.contains("is-selected")), tracksAbsent: !targetChoices.querySelector(".target-switch-track") }, overviewAll: document.querySelector('[data-overview-filter="all"]').textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
+      });
+      assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
+      assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
+      assert.equal(editor.overviewAll, language === "ja" ? "すべて" : "All", `overview All is localized at ${width}/${language}`);
+      assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
+      assert.equal(editor.help.parent, "block-control-heading", `mosaic help follows the block-size label at ${width}/${language}`);
+      assert.equal(editor.help.nestedInLabel, false, `mosaic help is not nested in the block-size label at ${width}/${language}`);
+      assert.equal(editor.help.followsLabel && editor.help.fitsHeading, true, `mosaic help sits immediately after the block-size label at ${width}/${language}`);
+      assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
+      assert.ok(editor.controls.every((control) => control.width > 0 && control.height >= 25 && control.height <= 28), `candidate section controls use compact buttons at ${width}/${language}`);
+      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "表示" : "Show")).length, 2, `both candidate sections expose a display button at ${width}/${language}`);
+      assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
+      assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
+      assert.equal(editor.targets.count === 2 && editor.targets.native && editor.targets.oneLine && editor.targets.centered && editor.targets.withinPane && editor.targets.compact && editor.targets.selected && editor.targets.tracksAbsent, true, `target label and chips stay compact and aligned at ${width}/${language}`);
+      if (width === 1024 && language === "ja") {
+        const penis = page.locator("#detectTargetPenis"); const pussy = page.locator("#detectTargetPussy");
+        await penis.focus(); await penis.press("Space");
+        assert.equal(await penis.isChecked(), false, "keyboard toggles the penis target off");
+        assert.equal(await page.locator("#detectTargetPenis").evaluate((input) => input.closest(".target-chip").classList.contains("is-selected")), false, "an unselected target uses the neutral chip");
+        await pussy.focus(); await pussy.press("Space");
+        const zeroTargets = await page.evaluate(() => ({ targets: settingsPayload().detection.targets, visible: !document.querySelector("#detectionTargetValidation").hidden, text: document.querySelector("#detectionTargetValidation").textContent }));
+        assert.deepEqual(zeroTargets.targets, [], "settings payload preserves an explicit empty target selection");
+        assert.equal(zeroTargets.visible && zeroTargets.text === "penis または pussy を選択してください。", true, "empty target selection shows localized inline validation");
+        await penis.focus(); await penis.press("Space"); await pussy.focus(); await pussy.press("Space");
+      }
+      await page.locator("#mosaicHelpButton").click();
+      const mosaicHelp = await page.locator("#mosaicHelpDialog").evaluate((dialog) => {
+        const links = [...dialog.querySelectorAll(".mosaic-guideline-links a")];
+        const row = dialog.querySelector(".mosaic-guideline-links");
+        return {
+          guideline: dialog.querySelector('[data-i18n="mosaicHelp.guideline"]').textContent,
+          noFormula: !dialog.querySelector("#mosaicHelpFormula, #mosaicHelpBlock"),
+          links: links.map((link) => ({ text: link.textContent, href: link.href, target: link.target, rel: link.rel })),
+          oneLine: getComputedStyle(row).whiteSpace === "nowrap" && row.scrollWidth <= row.clientWidth,
+        };
+      });
+      const guideline = language === "ja"
+        ? "モザイクの既定値は、以下のサイトのガイドラインを基準に、画像の長辺の1/100（最低4 px）に設定しています。"
+        : "The default mosaic setting uses the following sites' guidelines as a reference: 1/100 of the image's long edge (minimum 4 px).";
+      assert.equal(mosaicHelp.guideline, guideline, `mosaic help gives the localized default at ${width}/${language}`);
+      assert.equal(mosaicHelp.noFormula, true, `mosaic help omits implementation formula details at ${width}/${language}`);
+      assert.deepEqual(mosaicHelp.links, [
+        { text: "BOOTH", href: "https://booth.pm/guidelines", target: "_blank", rel: "noreferrer" },
+        { text: "pixiv", href: "https://www.pixiv.net/terms/?page=guideline", target: "_blank", rel: "noreferrer" },
+        { text: "FANZA", href: "https://terms.dmm.co.jp/doujin_regulation", target: "_blank", rel: "noreferrer" },
+        { text: "DLsite", href: "https://www.dlsite.com/home/mosaic", target: "_blank", rel: "noreferrer" },
+      ], `mosaic help keeps the requested guideline links in order at ${width}/${language}`);
+      assert.equal(mosaicHelp.oneLine, true, `mosaic guideline links remain on one line at ${width}/${language}`);
+      await page.locator("#mosaicHelpCloseButton").click();
+    }
+    const candidateDisplaySemantics = await page.evaluate(() => {
+      const candidates = state.candidates; const images = state.candidateImages; const removed = state.removedCandidateIds; const currentId = state.currentId;
+      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
+      state.currentId = "sample"; state.candidates = [{ id: "radio-candidate", role: "apply", enabled: true, className: "Radio" }, { id: "radio-exclusion", role: "exclude", enabled: true, className: "Exclude" }]; state.candidateImages = new Map([["radio-candidate", mask], ["radio-exclusion", mask]]); state.removedCandidateIds = new Set(); renderCandidates();
+      const apply = document.querySelector('.candidate-row-apply'); const exclude = document.querySelector('.candidate-row-exclude'); const applyButtons = [...apply.querySelectorAll('button')]; const excludeButtons = [...exclude.querySelectorAll('button')];
+      window.__candidateDisplayTestState = { candidates, images, removed, currentId };
+      const box = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
+      return { apply: applyButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), exclude: excludeButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), rows: [box(apply), box(exclude)] };
+    });
+    assert.deepEqual(candidateDisplaySemantics.apply.map((button) => button.text), ["Show", "Applied", "ON", "×"], "mosaic rows keep their one-line action order");
+    assert.deepEqual(candidateDisplaySemantics.exclude.map((button) => button.text), ["Show", "Force ON", "ON", "×"], `exclusion rows keep their one-line action order: ${JSON.stringify(candidateDisplaySemantics.exclude)}`);
+    assert.ok(Math.abs(candidateDisplaySemantics.rows[0].height - candidateDisplaySemantics.rows[1].height) <= 1 && candidateDisplaySemantics.rows.every((row) => row.height >= 36 && row.height <= 40), `candidate rows share one compact height: ${JSON.stringify(candidateDisplaySemantics.rows)}`);
+    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus(); await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
+    const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
+    assert.deepEqual(candidateDisplayKeyboard, { display: "false", effective: "true", mode: "effective" }, "Applied replaces normal display with exclusion-aware display");
+    await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
+    const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
+    assert.deepEqual(candidateDisplayStopped, { display: "false", effective: "false", mode: "off" }, "pressing Applied again stops only that candidate highlight");
+    await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
+    const sharedBlinkColors = await page.evaluate(async () => {
+      const saved = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, ids: state.blinkCandidateIds, modes: state.blinkModes, phase: state.blinkPhase, manual: state.manualMaskPresent };
+      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
+      addCtx.fillRect(0, 0, 4, 4); exclusionCtx.fillRect(0, 0, 4, 4); state.manualMaskPresent = true;
+      state.candidates = [{ id: "blink-auto-apply", role: "apply", enabled: true, className: "Auto apply" }, { id: "blink-auto-exclude", role: "exclude", enabled: true, className: "Auto exclude" }];
+      state.candidateImages = new Map([["blink-auto-apply", mask], ["blink-auto-exclude", mask]]); state.removedCandidateIds = new Set(); state.blinkCandidateIds = new Set(["blink-auto-apply", "manual:apply", "manual:exclude"]); state.blinkModes = new Map([...state.blinkCandidateIds].map((id) => [id, "normal"])); state.blinkPhase = true;
+      renderCandidates(); syncCandidateDisplayButtons(); await new Promise((resolve) => setTimeout(resolve, 80));
+      state.blinkCandidateIds.add("blink-auto-exclude"); state.blinkModes.set("blink-auto-exclude", "normal"); renderCandidates(); syncCandidateDisplayButtons();
+      const color = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
+      const lit = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
+      state.blinkPhase = false; syncCandidateDisplayButtons(); const dark = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.blinkCandidateIds = saved.ids; state.blinkModes = saved.modes; state.blinkPhase = saved.phase; state.manualMaskPresent = saved.manual; renderCandidates(); syncCandidateDisplayButtons();
+      return { lit, dark };
+    });
+    assert.deepEqual(sharedBlinkColors.lit, { autoApply: "rgba(238, 78, 78, 0.3)", manualApply: "rgba(238, 78, 78, 0.3)", autoExclude: "rgba(50, 184, 220, 0.28)", manualExclude: "rgba(50, 184, 220, 0.28)" }, "auto and manual candidate highlights share one red/blue blink phase even when enabled at different times");
+    assert.equal(Object.values(sharedBlinkColors.dark).every((color) => !color.includes("238, 78, 78") && !color.includes("50, 184, 220")), true, "all candidate highlight colors turn off together");
+    const targetModes = await page.evaluate(() => {
+      state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
+      setReviewed(state.images.find((image) => image.id === "sample"), true);
+      state.currentId = "sample-two";
+      return ["current", "masked", "reviewed"].map((mode) => ({ mode, ids: saveTargets(mode), count: saveTargets(mode).length }));
+    });
+    assert.deepEqual(targetModes, [{ mode: "current", ids: ["sample-two"], count: 1 }, { mode: "masked", ids: ["sample", "sample-two"], count: 2 }, { mode: "reviewed", ids: ["sample"], count: 1 }], "save target modes select explicit current, mosaicked, and reviewed IDs");
+    const editorHistoryAndDisplay = await page.evaluate(async () => {
+      const original = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, history: state.history, index: state.historyIndex, baseRemoved: state.historyRemovedCandidateIds, baseCandidates: state.historyCandidateIds, settings: state.settings.confirmations.candidateDelete };
+      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 16, 16);
+      const candidate = { id: "history-candidate", role: "apply", enabled: true, className: "History", color: "#fff" };
+      state.candidates = [candidate]; state.candidateImages = new Map([[candidate.id, mask]]); state.removedCandidateIds = new Set(); state.settings.confirmations.candidateDelete = false; resetHistoryToCurrentManualMask();
+      await deleteCandidate(candidate); const afterDelete = state.removedCandidateIds.has(candidate.id) && state.history.length === 1 && currentRecord().candidateCount === 0;
+      restoreSnapshot(0); const undo = !state.removedCandidateIds.has(candidate.id); restoreSnapshot(1); const redo = state.removedCandidateIds.has(candidate.id);
+      for (let index = 0; index < 13; index += 1) recordHistoryOperation({ kind: "removeCandidates", ids: [`trim-${index}`] });
+      const trimmed = state.history.length === 12 && state.historyRemovedCandidateIds.has("trim-0");
+      state.removedCandidateIds.delete(candidate.id);
+      renderCandidates();
+      document.querySelector('[data-candidate-effective-toggle="apply"]').click();
+      const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
+      state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
+      return { afterDelete, undo, redo, trimmed, effective, cleared };
+    });
+    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: true }, `soft deletion keeps undo/redo and trimmed history while display state clears on navigation: ${JSON.stringify(editorHistoryAndDisplay)}`);
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);

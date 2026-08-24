@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from .core import *
 from .image_io import *
 from . import image_io as _image_io
@@ -480,39 +482,66 @@ class CatalogMixin:
                 LOGGER.warning("Could not clear cache entry %s: %s", child, exc)
 
     def _invalidate_sam_cache(self) -> None:
+        """Discard cached per-image embeddings while retaining loaded models."""
         with self.sam_lock:
+            if self.sam_predictor is not None:
+                self.sam_predictor.reset_image()
             self.sam_image_id = None
         with self.hand_segmentation_lock:
+            if self.hand_segmentation_predictor is not None:
+                self.hand_segmentation_predictor.reset_image()
             self.hand_segmentation_image_id = None
 
     def invalidate_sam_image(self, image_id: str) -> None:
         with self.sam_lock:
             if self.sam_image_id == image_id:
+                if self.sam_predictor is not None:
+                    self.sam_predictor.reset_image()
                 self.sam_image_id = None
         with self.hand_segmentation_lock:
             if self.hand_segmentation_image_id == image_id:
+                if self.hand_segmentation_predictor is not None:
+                    self.hand_segmentation_predictor.reset_image()
                 self.hand_segmentation_image_id = None
 
     def _sam_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
         with self.sam_lock:
             if self.sam_predictor is None:
                 sam_path = self._configured_sam_path()
+                self._set_detection_model_preparation(True)
                 try:
-                    from segment_anything import SamPredictor, sam_model_registry
-                except ImportError as exc:
-                    raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
-                model_type = self.settings["models"]["sam_model_type"]
-                provider = self.settings["models"]["provider"]
-                if provider == "gpu" and not torch_module().cuda.is_available():
-                    raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
-                try:
-                    model = sam_model_registry[model_type](checkpoint=str(sam_path))
-                except RuntimeError as exc:
-                    # The constructor validates checkpoint tensors. Do not
-                    # catch model.to() failures such as device OOM below.
-                    raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
-                device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
-                model.to(device=device)
+                    try:
+                        from segment_anything import SamPredictor, sam_model_registry
+                        torch = torch_module()
+                        with torch.device("meta"):
+                            model = sam_model_registry[self.settings["models"]["sam_model_type"]](checkpoint=None)
+                        state_dict = torch.load(str(sam_path), map_location="cpu", mmap=True, weights_only=True)
+                        model.load_state_dict(state_dict, strict=True, assign=True)
+                    except ImportError as exc:
+                        raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
+                    except RuntimeError as exc:
+                        raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
+                    provider = self.settings["models"]["provider"]
+                    if provider == "gpu" and not torch.cuda.is_available():
+                        raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
+                    device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
+                    if provider == "gpu":
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*Found GPU\d+",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*NVIDIA .* with CUDA capability sm_\d+ is not compatible with the current PyTorch installation",
+                                category=UserWarning,
+                            )
+                            model.to(device=device)
+                    else:
+                        model.to(device=device)
+                finally:
+                    self._set_detection_model_preparation(False)
                 self.sam_predictor = SamPredictor(model)
 
             if self.sam_image_id != record.image_id:
@@ -532,24 +561,41 @@ class CatalogMixin:
                     raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "hand_segmentation_invalid")
                 if path.suffix.lower() != ".safetensors":
                     raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
+                self._set_detection_model_preparation(True)
                 try:
-                    from safetensors.torch import load_file
-                    from segment_anything import SamPredictor, sam_model_registry
-                    state_dict = load_file(str(path), device="cpu")
-                    model = sam_model_registry["vit_b"](checkpoint=None)
-                    model.load_state_dict(state_dict, strict=True)
-                except ImportError as exc:
-                    raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
-                except Exception as exc:
-                    raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
-                provider = self.settings["models"]["provider"]
-                if provider == "gpu" and not torch_module().cuda.is_available():
-                    raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "hand_segmentation_invalid")
-                device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
-                try:
-                    model.to(device=device)
-                except RuntimeError:
-                    raise
+                    try:
+                        from safetensors.torch import load_file
+                        from segment_anything import SamPredictor, sam_model_registry
+                        torch = torch_module()
+                        state_dict = load_file(str(path), device="cpu")
+                        with torch.device("meta"):
+                            model = sam_model_registry["vit_b"](checkpoint=None)
+                        model.load_state_dict(state_dict, strict=True, assign=True)
+                    except ImportError as exc:
+                        raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
+                    except Exception as exc:
+                        raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
+                    provider = self.settings["models"]["provider"]
+                    if provider == "gpu" and not torch.cuda.is_available():
+                        raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "hand_segmentation_invalid")
+                    device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
+                    if provider == "gpu":
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*Found GPU\d+",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*NVIDIA .* with CUDA capability sm_\d+ is not compatible with the current PyTorch installation",
+                                category=UserWarning,
+                            )
+                            model.to(device=device)
+                    else:
+                        model.to(device=device)
+                finally:
+                    self._set_detection_model_preparation(False)
                 self.hand_segmentation_predictor = SamPredictor(model)
             if self.hand_segmentation_image_id != record.image_id:
                 self.hand_segmentation_predictor.set_image(rgb)

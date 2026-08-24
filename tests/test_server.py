@@ -69,6 +69,22 @@ from server import (  # noqa: E402
     _schedule_browser_open,
 )
 
+
+class _MetaDevice:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def fake_catalog_torch(load_result=None):
+    return types.SimpleNamespace(
+        device=lambda _name: _MetaDevice(),
+        load=Mock(return_value={} if load_result is None else load_result),
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+    )
+
 def import_images_for_test(state, files):
     """Exercise the binary staging path without retaining the removed JSON API."""
     imported = []
@@ -590,6 +606,20 @@ class MozarieTests(unittest.TestCase):
         )
 
         self.assertEqual(tuple(np.asarray(output)[0, 0]), (255, 0, 0, 255))
+
+    def test_mosaic_average_ignores_unmasked_pixels_in_its_block(self):
+        rgb = np.array([[[10, 0, 0], [250, 0, 0]], [[30, 0, 0], [250, 0, 0]]], dtype=np.uint8)
+        mask = np.array([[255, 0], [255, 0]], dtype=np.uint8)
+        output = np.asarray(server_module._apply_mosaic_to_image(Image.fromarray(rgb), mask, 2))
+        self.assertEqual(tuple(output[0, 0]), (20, 0, 0))
+        self.assertEqual(tuple(output[1, 0]), (20, 0, 0))
+        self.assertEqual(tuple(output[0, 1]), (250, 0, 0))
+
+    def test_mosaic_keeps_an_empty_partial_block_unchanged(self):
+        image = Image.fromarray(np.arange(15, dtype=np.uint8).reshape(3, 5))
+        mask = np.zeros((3, 5), dtype=np.uint8); mask[:2, :2] = 255
+        output = np.asarray(server_module._apply_mosaic_to_image(image, mask, 2))
+        self.assertTrue(np.array_equal(output[:, 4], np.asarray(image)[:, 4]))
 
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
@@ -2006,10 +2036,13 @@ class MozarieTests(unittest.TestCase):
             fake_segment_anything = types.SimpleNamespace(
                 SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_l": Mock(return_value=model)}
             )
-            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
+            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             model.to.assert_called_once_with(device="cpu")
-            fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=str(checkpoint))
+            fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=None)
+            model.load_state_dict.assert_called_once_with({}, strict=True, assign=True)
 
     def test_sam_constructor_checkpoint_error_is_a_client_error_but_device_error_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2019,13 +2052,17 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             state.settings["models"].update({"sam_checkpoint": str(checkpoint), "sam_model_type": "vit_b", "provider": "cpu"})
             constructor = Mock(side_effect=RuntimeError("bad state dict"))
-            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}):
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": constructor})}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaises(ClientError) as raised:
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "sam_checkpoint_invalid")
 
             model = Mock(); model.to.side_effect = RuntimeError("out of memory")
-            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}):
+            with patch.dict(sys.modules, {"segment_anything": types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaisesRegex(RuntimeError, "out of memory"):
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
 
@@ -2036,6 +2073,16 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(data["error"], "out of memory: invalid checkpoint")
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
         self.assertEqual(data["params"], {"model": "vit_b"})
+
+    def test_detection_model_preparation_phase_tracks_real_loading_only(self):
+        state = self.new_state(); state.job = server_module.Job(kind="detect", state="running")
+        state._set_detection_model_preparation(True)
+        state._set_detection_model_preparation(True)
+        self.assertEqual(state.job.as_dict()["phase"], "preparing_models")
+        state._set_detection_model_preparation(False)
+        self.assertEqual(state.job.as_dict()["phase"], "preparing_models")
+        state._set_detection_model_preparation(False)
+        self.assertEqual(state.job.as_dict()["phase"], "")
 
     def test_job_active_elapsed_excludes_paused_time(self):
         state = self.new_state()
@@ -2065,6 +2112,53 @@ class MozarieTests(unittest.TestCase):
                         state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
                     self.assertEqual(state.job.state, "error")
                     self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+
+    def test_detection_reports_an_unsupported_gpu_architecture(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(state, "_release_gpu_job_memory") as release:
+            state._fail_job(RuntimeError("no kernel image is available for execution on the device"))
+        self.assertEqual(state.job.error_code, "gpu_unsupported")
+        self.assertIn("PyTorch", state.job.error)
+        release.assert_called_once_with()
+
+    def test_terminal_gpu_job_empties_the_pytorch_cache(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        cuda = Mock(); cuda.is_available.return_value = True
+        with patch.dict(jobs_module.sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}):
+            state._finish_job()
+        cuda.empty_cache.assert_called_once_with()
+
+    def test_terminal_gpu_job_does_not_import_torch_just_to_empty_its_cache(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(jobs_module.sys, "modules", {}):
+            state._finish_job()
+
+    def test_invalidate_sam_image_releases_only_that_image_embeddings(self):
+        state = self.new_state()
+        state.sam_predictor = Mock()
+        state.hand_segmentation_predictor = Mock()
+        state.sam_image_id = "current"
+        state.hand_segmentation_image_id = "current"
+        state.invalidate_sam_image("other")
+        state.sam_predictor.reset_image.assert_not_called()
+        state.hand_segmentation_predictor.reset_image.assert_not_called()
+        state.invalidate_sam_image("current")
+        state.sam_predictor.reset_image.assert_called_once_with()
+        state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+
+    def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "cpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(state, "_release_gpu_job_memory"):
+            state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
+        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertNotIn("GPU", state.job.error)
 
     def test_detection_worker_maps_plain_exception_ort_oom(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2200,13 +2294,15 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_safetensors_torch = types.ModuleType("safetensors.torch"); fake_safetensors_torch.load_file = load_file
             fake_segment_anything = types.SimpleNamespace(SamPredictor=Mock(return_value=predictor), sam_model_registry={"vit_b": vit_b})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_safetensors_torch, "segment_anything": fake_segment_anything}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 rgb = np.zeros((8, 8, 3), dtype=np.uint8)
                 self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
                 self.assertIs(state._hand_segmentation_predictor_for(record, rgb), predictor)
             load_file.assert_called_once_with(str(checkpoint), device="cpu")
             vit_b.assert_called_once_with(checkpoint=None)
-            model.load_state_dict.assert_called_once_with(state_dict, strict=True)
+            model.load_state_dict.assert_called_once_with(state_dict, strict=True, assign=True)
             model.to.assert_called_once_with(device="cpu")
             fake_segment_anything.SamPredictor.assert_called_once_with(model)
             predictor.set_image.assert_called_once()
@@ -2220,7 +2316,9 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
             fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaises(ClientError) as raised:
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
@@ -2234,7 +2332,9 @@ class MozarieTests(unittest.TestCase):
             fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
             fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
             fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
-            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}):
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
+            ):
                 with self.assertRaisesRegex(RuntimeError, "device"):
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
 
@@ -2375,13 +2475,15 @@ class MozarieTests(unittest.TestCase):
                 "safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam,
             }), patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), patch.object(
                 state, "_sam_predictor_for", return_value=generic
+            ), patch.object(
+                catalog_module, "torch_module", return_value=fake_catalog_torch()
             ):
                 result = state._refine_detected_segments(
                     Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8),
                     [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
                 )
 
-            model.load_state_dict.assert_called_once_with({}, strict=True)
+            model.load_state_dict.assert_called_once_with({}, strict=True, assign=True)
             model.to.assert_not_called()
             generic.predict.assert_called_once()
             self.assertTrue(np.any(result[0]["_confirmed_hand"]))
@@ -2754,21 +2856,25 @@ class MozarieTests(unittest.TestCase):
             record = self._record(image_path, 12, 12)
             state = self.new_state()
             state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            state.settings["detection"]["mode"] = "high_precision"
             detector_mask = np.zeros((12, 12), dtype=np.uint8); detector_mask[2:10, 2:10] = 255
             refined_mask = detector_mask.copy(); refined_mask[2:6, 2:6] = 0
             fluid_mask = np.zeros((12, 12), dtype=np.uint8); fluid_mask[7:9, 7:9] = 255
             segments = [{"class_name": "penis", "confidence": 0.8, "mask": detector_mask, "source": "target"}]
 
-            def refine(_models, _record, _rgb, detected):
+            def refine(_rgb, detected, _predictor):
                 detected[0]["mask"] = refined_mask
                 detected[0]["_apply_mask"] = refined_mask
                 detected[0]["exclusions"] = {"fluid": fluid_mask}
                 return detected
 
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
-                state, "_refine_detected_segments", side_effect=refine
-            ), patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
-                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [])
+            ), patch.object(state, "_sam_predictor_for", return_value=Mock()), patch.object(
+                state, "_high_precision_segments_with_predictor", side_effect=refine
+            ), patch.object(
+                state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, server_module.CandidateRole.EXCLUDE)

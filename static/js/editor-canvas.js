@@ -1,20 +1,23 @@
 function canvasSizeForImage(image) {
-  for (const target of [addCanvas, exclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
+  exclusionEraseCtx.clearRect(0, 0, image.width, image.height);
   state.maskDirty = true;
   state.manualMaskPresent = false;
   state.manualEnabled = true;
+  state.manualExclusionEnabled = true;
+  state.manualExclusionEraseEnabled = true;
 }
 
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
-  state.manualMaskPresent = false; state.manualEnabled = true;
+  state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
   state.maskDirty = false;
-  addCanvas.width = exclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = 1;
-  addCanvas.height = exclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = 1;
+  addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = historyExclusionEraseCanvas.width = 1;
+  addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = historyExclusionEraseCanvas.height = 1;
   $("#emptyState").hidden = false;
   $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
@@ -25,6 +28,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) saveDraft();
+  if (state.currentId !== imageId) clearCandidateBlink();
   cancelFillWork();
   abortCatalogLoads();
   const generation = ++state.imageGeneration;
@@ -69,7 +73,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#currentFileName").textContent = record.relativePath;
     updateCandidateStatus();
     renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
-    state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
+    state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "center", inline: "nearest" });
     state.overviewNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     prefetchNeighbors(record);
   } catch (error) {
@@ -254,12 +258,13 @@ async function reconcileCurrentCandidates(imageId, generation) {
   state.candidateImages = bundle.candidateImages;
   const record = state.images.find((image) => image.id === imageId);
   if (record) {
-    record.candidateCount = bundle.candidates.length;
-    record.enabledCandidateCount = bundle.candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+    const visible = bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
+    record.candidateCount = visible.length;
+    record.enabledCandidateCount = visible.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
     record.candidateRevision = bundle.candidateRevision;
   }
   invalidateCandidateBundles(imageId);
-  refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
+  refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   return true;
 }
 
@@ -273,8 +278,9 @@ function canvasHasPixels(context, target) {
 function syncCandidateRecord(imageId, candidates) {
   const record = state.images.find((image) => image.id === imageId);
   if (!record) return;
-  record.candidateCount = candidates.length;
-  record.enabledCandidateCount = candidates.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
+  const visible = candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
+  record.candidateCount = visible.length;
+  record.enabledCandidateCount = visible.filter((candidate) => candidate.enabled && candidate.role !== "exclude").length;
 }
 
 function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, state.candidates); }
@@ -298,13 +304,14 @@ async function refreshCandidateRecord(imageId, syncMask = false) {
 function updateCandidateStatus() {
   const status = $("#candidateStatus");
   if (!state.currentId) { status.textContent = t("candidates.unselected"); return; }
+  const visibleCount = state.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id)).length;
   if (state.manualMaskPresent) {
-    status.textContent = state.candidates.length
-      ? t("candidates.countWithManual", { count: state.candidates.length })
+    status.textContent = visibleCount
+      ? t("candidates.countWithManual", { count: visibleCount })
       : t("candidates.manualOnly");
     return;
   }
-  status.textContent = state.candidates.length ? t("candidates.count", { count: state.candidates.length }) : t("candidates.none");
+  status.textContent = visibleCount ? t("candidates.count", { count: visibleCount }) : t("candidates.none");
 }
 
 function saveDraft() {
@@ -312,8 +319,9 @@ function saveDraft() {
   flushMaskComposition();
   const hasAdd = canvasHasPixels(addCtx, addCanvas);
   const hasExclusion = canvasHasPixels(exclusionCtx, exclusionCanvas);
+  const hasExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
   const defaultManualExclusionForced = state.settings?.detection?.exclude_forced_default !== false;
-  if (!hasAdd && !hasExclusion && state.manualExclusionForced === defaultManualExclusionForced) {
+  if (!hasAdd && !hasExclusion && !hasExclusionErase && state.history.length === 0 && state.removedCandidateIds.size === 0 && state.manualExclusionForced === defaultManualExclusionForced) {
     state.drafts.delete(state.currentId);
     return;
   }
@@ -321,9 +329,21 @@ function saveDraft() {
   state.drafts.set(state.currentId, {
     add: hasAdd ? addCanvas.toDataURL("image/png") : "",
     exclusion: hasExclusion ? exclusionCanvas.toDataURL("image/png") : "",
-    manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualMaskPresent: state.manualMaskPresent,
+    exclusionErase: hasExclusionErase ? exclusionEraseCanvas.toDataURL("image/png") : "",
+    manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled, manualMaskPresent: state.manualMaskPresent,
     manualExclusionForced: state.manualExclusionForced,
+    candidateRevision: Number(currentRecord()?.candidateRevision || 0),
     visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
+    removedCandidateIds: [...state.removedCandidateIds],
+    history: state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })),
+    historyIndex: state.historyIndex,
+    historyBase: {
+      add: canvasHasPixels(historyAddCanvas.getContext("2d"), historyAddCanvas) ? historyAddCanvas.toDataURL("image/png") : "",
+      exclusion: canvasHasPixels(historyExclusionCanvas.getContext("2d"), historyExclusionCanvas) ? historyExclusionCanvas.toDataURL("image/png") : "",
+      exclusionErase: canvasHasPixels(historyExclusionEraseCanvas.getContext("2d"), historyExclusionEraseCanvas) ? historyExclusionEraseCanvas.toDataURL("image/png") : "",
+      removedCandidateIds: [...(state.historyRemovedCandidateIds || [])],
+      candidateIds: [...(state.historyCandidateIds || [])],
+    },
   });
 }
 
@@ -332,25 +352,48 @@ function restoreDraft(imageId, generation) {
   state.history = []; state.historyIndex = 0; state.activeStroke = null;
   state.manualEnabled = draft?.manualEnabled !== false;
   state.manualExclusionEnabled = draft?.manualExclusionEnabled !== false;
+  state.manualExclusionEraseEnabled = draft?.manualExclusionEraseEnabled !== false;
   state.manualExclusionForced = draft?.manualExclusionForced ?? draft?.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false);
   state.manualMaskPresent = false;
+  const candidateRevisionMatches = !draft || Number(draft.candidateRevision) === Number(currentRecord()?.candidateRevision || 0);
+  state.removedCandidateIds = new Set(candidateRevisionMatches ? (draft?.removedCandidateIds || []) : []);
   if (!draft) { resetHistoryToCurrentManualMask(); updateCandidateStatus(); renderCandidates(); return; }
   const addImagePromise = draft.add ? loadImage(draft.add) : Promise.resolve(null);
   const exclusionImagePromise = draft.exclusion ? loadImage(draft.exclusion) : Promise.resolve(null);
+  const exclusionEraseImagePromise = draft.exclusionErase ? loadImage(draft.exclusionErase) : Promise.resolve(null);
+  const historyAddImagePromise = draft.historyBase?.add ? loadImage(draft.historyBase.add) : Promise.resolve(null);
+  const historyExclusionImagePromise = draft.historyBase?.exclusion ? loadImage(draft.historyBase.exclusion) : Promise.resolve(null);
+  const historyExclusionEraseImagePromise = draft.historyBase?.exclusionErase ? loadImage(draft.historyBase.exclusionErase) : Promise.resolve(null);
   const restoreToken = ++state.historyRestoreToken;
-  Promise.all([addImagePromise, exclusionImagePromise]).then(([addImage, exclusionImage]) => {
+  Promise.all([addImagePromise, exclusionImagePromise, exclusionEraseImagePromise, historyAddImagePromise, historyExclusionImagePromise, historyExclusionEraseImagePromise]).then(([addImage, exclusionImage, exclusionEraseImage, historyAddImage, historyExclusionImage, historyExclusionEraseImage]) => {
     if (state.currentId !== imageId || state.imageGeneration !== generation || state.historyRestoreToken !== restoreToken) return;
     if (addImage) addCtx.drawImage(addImage, 0, 0);
     if (exclusionImage) exclusionCtx.drawImage(exclusionImage, 0, 0);
+    if (exclusionEraseImage) exclusionEraseCtx.drawImage(exclusionEraseImage, 0, 0);
     state.manualMaskPresent = draft.manualMaskPresent ?? canvasHasPixels(addCtx, addCanvas);
-    resetHistoryToCurrentManualMask();
-    refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render();
+    if (Array.isArray(draft.history) && draft.historyBase) {
+      historyAddCanvas.getContext("2d").clearRect(0, 0, historyAddCanvas.width, historyAddCanvas.height);
+      historyExclusionCanvas.getContext("2d").clearRect(0, 0, historyExclusionCanvas.width, historyExclusionCanvas.height);
+      historyExclusionEraseCanvas.getContext("2d").clearRect(0, 0, historyExclusionEraseCanvas.width, historyExclusionEraseCanvas.height);
+      if (historyAddImage) historyAddCanvas.getContext("2d").drawImage(historyAddImage, 0, 0);
+      if (historyExclusionImage) historyExclusionCanvas.getContext("2d").drawImage(historyExclusionImage, 0, 0);
+      if (historyExclusionEraseImage) historyExclusionEraseCanvas.getContext("2d").drawImage(historyExclusionEraseImage, 0, 0);
+      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
+      const candidateOperation = (stroke) => ["removeCandidates", "restoreCandidates", "addCandidates"].includes(stroke.kind);
+      state.history = candidateRevisionMatches ? originalHistory : originalHistory.filter((stroke) => !candidateOperation(stroke));
+      state.historyRemovedCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.removedCandidateIds || []) : []);
+      state.historyCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id)) : state.candidates.map((candidate) => candidate.id));
+      const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
+      state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
+      rebuildManualMaskFromHistory(); updateHistoryButtons();
+    } else resetHistoryToCurrentManualMask();
+    refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   });
 }
 
 function fitImage() {
   if (!state.currentImage) return;
-  const inset = { left: 76, right: 20, top: 58, bottom: 62 };
+  const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
   const width = Math.max(1, stage.clientWidth - inset.left - inset.right);
   const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
@@ -375,31 +418,57 @@ function rebuildMosaicPreview() {
   if (!state.currentImage) return;
   originalCanvas.width = state.currentImage.width; originalCanvas.height = state.currentImage.height;
   originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height); originalCtx.drawImage(state.currentImage, 0, 0);
-  const blockSize = calculatedBlockSize();
-  mosaicSourceCanvas.width = Math.max(1, Math.ceil(state.currentImage.width / blockSize));
-  mosaicSourceCanvas.height = Math.max(1, Math.ceil(state.currentImage.height / blockSize));
-  mosaicSourceCtx.imageSmoothingEnabled = true;
-  mosaicSourceCtx.clearRect(0, 0, mosaicSourceCanvas.width, mosaicSourceCanvas.height);
-  mosaicSourceCtx.drawImage(state.currentImage, 0, 0, mosaicSourceCanvas.width, mosaicSourceCanvas.height);
-  mosaicCtx.imageSmoothingEnabled = false;
-  mosaicCtx.clearRect(0, 0, mosaicCanvas.width, mosaicCanvas.height);
-  mosaicCtx.drawImage(mosaicSourceCanvas, 0, 0, mosaicCanvas.width, mosaicCanvas.height);
+  flushMaskComposition();
+  const generation = ++state.mosaicPreviewGeneration;
+  const source = originalCtx.getImageData(0, 0, originalCanvas.width, originalCanvas.height);
+  const maskPixels = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data;
+  const mask = new Uint8Array(originalCanvas.width * originalCanvas.height);
+  for (let index = 0; index < mask.length; index += 1) mask[index] = maskPixels[index * 4 + 3];
+  state.mosaicWorker?.terminate?.();
+  if (typeof Worker !== "function") return;
+  const worker = state.mosaicWorker = new Worker("/js/masked-mosaic-worker.js");
+  worker.onmessage = ({ data }) => {
+    worker.terminate(); if (state.mosaicWorker === worker) state.mosaicWorker = null;
+    if (data.generation !== state.mosaicPreviewGeneration || !state.currentImage) return;
+    mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0); render();
+  };
+  worker.onerror = () => { worker.terminate(); if (state.mosaicWorker === worker) state.mosaicWorker = null; };
+  worker.postMessage({ source: source.data.buffer, mask: mask.buffer, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation }, [source.data.buffer, mask.buffer]);
+}
+
+function requestMosaicPreview() {
+  if (!state.currentImage || state.mosaicPreviewRequested) return;
+  state.mosaicPreviewRequested = true;
+  requestAnimationFrame(() => { state.mosaicPreviewRequested = false; rebuildMosaicPreview(); });
+}
+
+function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId = "") {
+  effectiveExclusionCtx.clearRect(0, 0, effectiveExclusionCanvas.width, effectiveExclusionCanvas.height);
+  for (const candidate of state.candidates) {
+    if (state.removedCandidateIds.has(candidate.id)) continue;
+    if (candidate.id !== omittedCandidateId && candidate.enabled && candidate.role === "exclude" && (!forcedOnly || candidate.forced)) effectiveExclusionCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  }
+  if (state.manualExclusionEnabled && (!forcedOnly || state.manualExclusionForced)) effectiveExclusionCtx.drawImage(exclusionCanvas, 0, 0);
+  if (state.manualExclusionEraseEnabled) {
+    effectiveExclusionCtx.save(); effectiveExclusionCtx.globalCompositeOperation = "destination-out";
+    effectiveExclusionCtx.drawImage(exclusionEraseCanvas, 0, 0); effectiveExclusionCtx.restore();
+  }
+  target.drawImage(effectiveExclusionCanvas, 0, 0);
 }
 
 function composeCurrentMask() {
   if (!state.currentImage) return;
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   for (const candidate of state.candidates) {
+    if (state.removedCandidateIds.has(candidate.id)) continue;
     if (candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   }
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx);
   combinedCtx.globalCompositeOperation = "source-over";
   if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx, true);
   combinedCtx.globalCompositeOperation = "source-over";
   state.maskDirty = false;
 }
@@ -411,8 +480,7 @@ function sourceVisibleAfterExclusion(source) {
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   combinedCtx.drawImage(source, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx);
   combinedCtx.globalCompositeOperation = "source-over";
   return canvasHasPixels(combinedCtx, combinedCanvas);
 }
@@ -422,15 +490,14 @@ function manualSourceVisibleAfterExclusion(source) {
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   combinedCtx.drawImage(source, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx, true);
   combinedCtx.globalCompositeOperation = "source-over";
   return canvasHasPixels(combinedCtx, combinedCanvas);
 }
 
 function captureCurrentMaskVisibility() {
   const candidateIds = state.candidates
-    .filter((candidate) => candidate.role !== "exclude")
+    .filter((candidate) => candidate.role !== "exclude" && !state.removedCandidateIds.has(candidate.id))
     .filter((candidate) => {
       const image = state.candidateImages.get(candidate.id);
       return image && sourceVisibleAfterExclusion(image);
@@ -444,16 +511,15 @@ function captureCurrentMaskVisibility() {
 function maskStatusWithoutCandidate(candidateId) {
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
   for (const candidate of state.candidates) {
+    if (state.removedCandidateIds.has(candidate.id)) continue;
     if (candidate.id !== candidateId && candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
   }
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx, false, candidateId);
   combinedCtx.globalCompositeOperation = "source-over";
   if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
   combinedCtx.globalCompositeOperation = "destination-out";
-  for (const candidate of state.candidates) if (candidate.id !== candidateId && candidate.enabled && candidate.role === "exclude" && candidate.forced) combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled && state.manualExclusionForced) combinedCtx.drawImage(exclusionCanvas, 0, 0);
+  drawEffectiveExclusions(combinedCtx, true, candidateId);
   combinedCtx.globalCompositeOperation = "source-over";
   const hasMask = canvasHasPixels(combinedCtx, combinedCanvas);
   markMaskDirty(); flushMaskComposition();
@@ -484,12 +550,12 @@ function paintMosaicPreview() {
 }
 
 function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "eraser", "boundary_brush"].includes(state.tool)) return;
+  if (!state.hover || !state.currentImage || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
   ctx.save();
-  if (state.tool === "eraser") ctx.setLineDash([6, 4]);
+  if (["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool)) ctx.setLineDash([6, 4]);
   ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = state.tool === "boundary_brush" ? "#50d589" : "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
   ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#111316"; ctx.lineWidth = 1; ctx.stroke();
   ctx.restore();
@@ -570,7 +636,6 @@ function completeBoundaryBrushStroke() {
   state.boundaryBrushStroke = null;
   if (!stroke?.roi) return;
   addBoundaryDraft({ type: "brush", points: stroke.points.map((point) => ({ ...point })), radius: stroke.radius, roi: stroke.roi, point: pointForRoi(stroke.roi) });
-  setStatusKey("status.boundaryReady");
 }
 
 function rectsTouch(first, second) {
@@ -738,26 +803,29 @@ function drawPolygonBoundary() {
 }
 
 function drawCandidateBlinkOverlay() {
-  if (!state.blinkCandidateIds.size || !state.currentImage || performance.now() % 400 > 200) return;
+  if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
   blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
-  const paintMask = (image, color) => {
+  const paintMask = (image, color, effective = false) => {
     if (!image) return;
     blinkCtx.save();
     blinkCtx.drawImage(image, 0, 0);
+    if (effective) { blinkCtx.globalCompositeOperation = "destination-in"; blinkCtx.drawImage(combinedCanvas, 0, 0); }
     blinkCtx.globalCompositeOperation = "source-in";
     blinkCtx.fillStyle = color;
     blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
     blinkCtx.restore();
   };
-  if (state.blinkCandidateIds.has("manual:apply")) paintMask(addCanvas, settings.apply_color);
+  if (state.blinkCandidateIds.has("manual:apply")) paintMask(addCanvas, settings.apply_color, state.blinkModes.get("manual:apply") === "effective");
   if (state.blinkCandidateIds.has("manual:exclude")) paintMask(exclusionCanvas, settings.exclude_color);
+  if (state.blinkCandidateIds.has("manual:excludeErase")) paintMask(exclusionEraseCanvas, settings.apply_color);
   for (const candidate of state.candidates) {
+    if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
     const image = state.candidateImages.get(candidate.id);
     if (!image) continue;
-    paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color);
+    paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color, state.blinkModes.get(candidate.id) === "effective");
   }
   ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();

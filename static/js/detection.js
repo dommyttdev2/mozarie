@@ -3,12 +3,24 @@ function detectionParallelism() {
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
 function detectionTargets(prefix = "detectTarget") {
-  const selected = ["penis", "pussy"].filter((name) => $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked === true);
-  return selected.length ? selected : (state.settings?.detection?.targets || ["penis", "pussy"]);
+  return ["penis", "pussy"].filter((name) => $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked === true);
 }
 function setDetectionTargets(targets, prefix = "detectTarget") {
   const selected = new Set(targets || ["penis", "pussy"]);
-  for (const name of ["penis", "pussy"]) $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked = selected.has(name);
+  for (const name of ["penis", "pussy"]) {
+    const input = $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`); input.checked = selected.has(name); syncDetectionTargetSwitch(input);
+  }
+}
+
+function syncDetectionTargetSwitch(input) {
+  const label = input.closest(".target-chip");
+  label?.classList.toggle("is-selected", input.checked);
+}
+
+function validateDetectionTargets(targetClasses, target = null) {
+  const message = targetClasses.length ? "" : t("error.detectionTargetsRequired");
+  if (target) { target.textContent = message; target.hidden = !message; }
+  return !message;
 }
 
 function normaliseImportParallelism(value) {
@@ -27,16 +39,17 @@ function openDetectionDialog(imageIds) {
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
+  validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
   $("#detectDialog").showModal();
 }
 
 async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {
   if (!imageIds.length || isBusy() || state.importing) return;
+  if (!validateDetectionTargets(targetClasses, $("#detectionTargetValidation"))) return;
   state.detectionStarting = true;
   updateActionButtons();
   try {
-    if (!targetClasses.length) throw new Error("penis または pussy を選択してください。");
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
@@ -54,6 +67,7 @@ async function startDetectionFromDialog(event) {
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
   const targetClasses = detectionTargets("dialogTarget");
+  if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation"))) return;
   setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
@@ -84,7 +98,7 @@ async function saveCurrent() {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const record = state.images.find((image) => image.id === imageId);
   if (isBusy() || state.importing || state.currentId !== imageId || !record || !imageHasMask(record)) return;
-  await openApplyDialog([imageId]);
+  await openApplyDialog({ initialMode: "current" });
 }
 
 async function saveAll() {
@@ -92,6 +106,5 @@ async function saveAll() {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (isBusy() || state.importing) return;
   saveDraft(); refreshMaskStatus();
-  const imageIds = saveTargets();
-  if (imageIds.length) await openApplyDialog(imageIds);
+  if (saveTargets("masked").length) await openApplyDialog({ initialMode: "masked" });
 }

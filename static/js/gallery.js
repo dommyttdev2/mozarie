@@ -50,9 +50,9 @@ function renderGallery(force = false) {
     observeThumbnail(preview, image, "gallery");
     preview.alt = image.relativePath;
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
-    item.querySelector(".gallery-meta").textContent = `${image.width} x ${image.height}${image.candidateCount ? ` / ${t("gallery.candidates", { count: image.candidateCount })}` : ""}`;
+    item.querySelector(".gallery-meta").textContent = `${image.width} × ${image.height}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
-    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
+    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : "";
     item.onclick = () => selectCatalogImage(image.id);
     item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
@@ -70,10 +70,10 @@ function renderGallery(force = false) {
 }
 
 function imageMatchesGalleryFilter(image) {
-  if (state.galleryFilter !== "hidden" && isHidden(image)) return false;
+  if (state.galleryFilter === "hidden") return isHidden(image);
+  if (state.galleryFilter !== "all" && isHidden(image)) return false;
   if (state.galleryFilter === "masked") return imageHasMask(image);
   if (state.galleryFilter === "unmasked") return !imageHasMask(image);
-  if (state.galleryFilter === "hidden") return isHidden(image);
   if (state.galleryFilter === "reviewed") return isReviewed(image);
   if (state.galleryFilter === "unreviewed") return !isReviewed(image);
   return true;
@@ -102,8 +102,8 @@ function overviewImages() {
   const query = state.overviewQuery.trim().toLowerCase();
   const folder = state.overviewFolder;
   return state.images.filter((image) => {
-    if (state.overviewFilter !== "hidden" && isHidden(image)) return false;
     if (state.overviewFilter === "hidden" && !isHidden(image)) return false;
+    if (state.overviewFilter !== "all" && state.overviewFilter !== "hidden" && isHidden(image)) return false;
     if (state.overviewFilter === "unreviewed" && isReviewed(image)) return false;
     if (state.overviewFilter === "reviewed" && !isReviewed(image)) return false;
     if (state.overviewFilter === "masked" && !imageHasMask(image)) return false;
@@ -173,20 +173,20 @@ function renderOverview(force = false) {
     const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
     item.classList.toggle("current", current);
     item.classList.toggle("batch-selected", batchSelected);
+    item.classList.toggle("hidden", isHidden(image));
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
     if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
     const preview = item.querySelector("img");
     observeThumbnail(preview, image, "overview");
     preview.alt = image.relativePath;
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
-    item.querySelector(".overview-item-path").textContent = image.relativePath;
-    const statuses = [];
-    statuses.push(isReviewed(image) ? t("overview.stateReviewed") : t("overview.stateUnreviewed"));
-    if (imageHasMask(image)) statuses.push(t("overview.stateMasked"));
-    const stateLabel = item.querySelector(".overview-item-state");
-    stateLabel.textContent = statuses.join(" / ");
-    stateLabel.classList.toggle("reviewed", isReviewed(image));
-    stateLabel.classList.toggle("masked", imageHasMask(image));
+    item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
+    item.querySelector(".overview-review-badge").textContent = isReviewed(image) ? t("review.reviewedBadge") : "";
+    item.title = image.relativePath;
+    const states = [image.relativePath];
+    if (isReviewed(image)) states.push(t("overview.stateReviewed"));
+    if (imageHasMask(image)) states.push(t("overview.stateMasked"));
+    item.setAttribute("aria-label", states.join("、"));
     item.onclick = (event) => selectOverviewImage(image.id, event);
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     grid.append(item);

@@ -9,16 +9,16 @@ const state = {
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
-  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(),
-  pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null,
+  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
+  pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true,
+  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false,
   outputDirectoryPicking: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
-  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true,
+  manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true, manualExclusionEraseEnabled: true,
   galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
@@ -38,17 +38,22 @@ const toolRail = $("#canvasToolRail");
 const ctx = canvas.getContext("2d");
 const addCanvas = document.createElement("canvas");
 const exclusionCanvas = document.createElement("canvas");
+const exclusionEraseCanvas = document.createElement("canvas");
+const effectiveExclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
 const mosaicCanvas = document.createElement("canvas");
 const mosaicSourceCanvas = document.createElement("canvas");
 const originalCanvas = document.createElement("canvas");
 const historyAddCanvas = document.createElement("canvas");
 const historyExclusionCanvas = document.createElement("canvas");
+const historyExclusionEraseCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
 const boundaryOverlayCanvas = document.createElement("canvas");
 const blinkCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
 const exclusionCtx = exclusionCanvas.getContext("2d");
+const exclusionEraseCtx = exclusionEraseCanvas.getContext("2d");
+const effectiveExclusionCtx = effectiveExclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
 const mosaicCtx = mosaicCanvas.getContext("2d");
 const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
@@ -98,6 +103,7 @@ async function loadTranslations(languageOverride = null) {
   if (sectionHeadings[1]) sectionHeadings[1].textContent = t("candidates.excludeRanges");
   renderModelStatus();
   renderLocalizedDynamicState();
+  document.querySelectorAll(".target-chip input").forEach((input) => syncDetectionTargetSwitch(input));
   updateBoundaryActions();
   renderCatalogViews(); renderCandidates(); render();
   return true;
@@ -149,6 +155,7 @@ function formatDuration(seconds) {
 }
 
 function progressText(job) {
+  if (job.kind === "detect" && job.state === "running" && job.phase === "preparing_models") return t("status.preparingModels");
   const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
   if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
   const key = `${job.kind}:${job.startedAt || ""}`;
@@ -165,6 +172,7 @@ function progressText(job) {
 
 function processingCurrentPath(job) {
   if (job?.kind !== "detect") return job?.current || "";
+  if (job.phase === "preparing_models") return "";
   const imageIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
   const completedIds = new Set(Array.isArray(job.completedImageIds) ? job.completedImageIds : []);
   const targetIds = new Set(imageIds);
@@ -202,21 +210,14 @@ function closeProcessing() {
 
 function renderStatus() {
   const status = state.status;
-  const element = $("#status");
   const message = status ? (status.key ? t(status.key, status.params) : status.message) : "";
-  const connectionStatus = $("#connectionStatus");
-  const headerError = Boolean(message) && status?.kind === "error";
-  connectionStatus.textContent = headerError ? message : "";
-  connectionStatus.hidden = !headerError;
-  if (headerError) {
-    element.textContent = "";
-    element.className = "status";
-    $("#statusLine").hidden = true;
-    return;
-  }
-  element.textContent = message;
-  element.className = `status ${status?.kind || ""}`;
-  $("#statusLine").hidden = !message;
+  const headerStatus = $("#connectionStatus");
+  headerStatus.textContent = message;
+  headerStatus.className = `appbar-status ${status?.kind || ""}`;
+  const isError = status?.kind === "error";
+  headerStatus.setAttribute("role", isError ? "alert" : "status");
+  headerStatus.setAttribute("aria-live", isError ? "assertive" : "polite");
+  headerStatus.hidden = !message;
 }
 
 function renderLocalizedDynamicState() {
@@ -270,7 +271,10 @@ function abortCatalogLoads() {
 function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
-function saveTargets() { return state.images.filter((image) => !isHidden(image) && imageHasMask(image)).map((image) => image.id); }
+function saveTargets(mode = "masked") {
+  if (mode === "current") return state.currentId && imageHasMask(currentRecord()) ? [state.currentId] : [];
+  return state.images.filter((image) => !isHidden(image) && imageHasMask(image) && (mode !== "reviewed" || isReviewed(image))).map((image) => image.id);
+}
 function normaliseReviewRoot(value) { return String(value || "").trim().replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
 function reviewStoragePrefix() { return state.reviewRoot ? `mozarie.reviewed.v1:${state.reviewRoot}:` : ""; }
 function reviewPath(image) { return String(image?.relativePath || "").replaceAll("\\", "/").toLowerCase(); }
@@ -447,7 +451,10 @@ function updateActionButtons() {
   detectAllButton.disabled = running || state.images.length === 0;
   $("#detectCurrentButton").disabled = running || !hasImage;
   $("#clearCurrentMasksButton").disabled = running || !hasImage || !(current.candidateCount || state.manualMaskPresent || imageHasMask(current));
-  $("#removeCurrentImageButton").disabled = running || !hasImage;
+  const visibilityButton = $("#removeCurrentImageButton");
+  visibilityButton.disabled = running || !hasImage;
+  const visibilityLabel = t(current && isHidden(current) ? "editor.show" : "editor.hide");
+  visibilityButton.textContent = visibilityLabel; visibilityButton.title = visibilityLabel; visibilityButton.setAttribute("aria-label", visibilityLabel);
   for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = running || state.images.length === 0;
   $("#batchModeButton").disabled = locked || state.images.length === 0;
   $("#galleryFilter").disabled = running;
@@ -477,8 +484,21 @@ function updateActionButtons() {
 
 function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), hasManualExclude = false) {
   for (const button of document.querySelectorAll("[data-candidate-batch]")) {
-    const [role] = button.dataset.candidateBatch.split(":");
+    const [role, operation] = button.dataset.candidateBatch.split(":");
     const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
+    button.disabled = locked || !hasRoleCandidate;
+    if (operation === "toggle") {
+      const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
+      if (role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas)) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
+      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
+      const active = enabled.length > 0 && enabled.every(Boolean);
+      button.textContent = t(active ? "settings.on" : "settings.off");
+      button.setAttribute("aria-pressed", String(active));
+    }
+  }
+  for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) {
+    const role = button.dataset.candidateDisplayToggle || button.dataset.candidateEffectiveToggle;
+    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role).length > 0;
     button.disabled = locked || !hasRoleCandidate;
   }
 }
@@ -533,7 +553,7 @@ function resetCatalog(images, root) {
   state.overviewFolder = "";
   loadReviewedPaths();
   state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null; state.maskStatus.clear();
-  state.candidates = []; state.candidateImages = new Map(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; state.blinkCandidateIds.clear(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
+  state.candidates = []; state.candidateImages = new Map(); state.drafts.clear(); state.selectedImageIds.clear(); state.selectionAnchorId = null; state.batchMode = false; clearCandidateBlink(); state.contextMenuImageId = null; state.contextMenuOrigin = null; clearBoundaryInteraction();
   state.candidateUpdateChains.clear(); state.candidateUpdateVersions.clear(); state.candidateDeleting.clear(); state.candidateBatchPending.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));

@@ -58,17 +58,22 @@ class TargetSegmenter(BaseOnnxModel):
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         prediction, prototype = self._outputs(self.run(tensor))
         rows = self._prediction_rows(prediction)
+        if rows.shape[1] < 4 + len(CLASS_NAMES) + 32:
+            return []
+        class_ids_for_rows = np.argmax(rows[:, 4:4 + len(CLASS_NAMES)], axis=1)
+        scores_for_rows = rows[np.arange(len(rows)), 4 + class_ids_for_rows]
+        target_class = np.isin(class_ids_for_rows, (2, 3))
+        selected_rows = np.flatnonzero(target_class & (scores_for_rows >= confidence))
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []
         class_ids: list[int] = []
         coefficients: list[np.ndarray] = []
-        for row in rows:
-            if row.shape[0] < 4 + len(CLASS_NAMES) + 32:
-                continue
-            class_id = int(np.argmax(row[4:4 + len(CLASS_NAMES)]))
-            score = float(row[4 + class_id])
-            class_name = "penis" if class_id == 2 else "pussy" if class_id == 3 else None
-            if class_name not in targets or score < confidence:
+        for row_index in selected_rows:
+            row = rows[row_index]
+            class_id = int(class_ids_for_rows[row_index])
+            score = float(scores_for_rows[row_index])
+            class_name = "penis" if class_id == 2 else "pussy"
+            if class_name not in targets:
                 continue
             box = restore_box(row[:4], transform, xywh=True)
             if box is None:
