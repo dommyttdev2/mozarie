@@ -926,7 +926,7 @@ async function main() {
       const result = { present: Boolean(row), enabled: row?.classList.contains("enabled"), toggle: row?.querySelector(".candidate-toggle")?.textContent };
       exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
     });
-    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion restore has its own visible ON/OFF row");
+    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion erase has its own visible ON/OFF row");
     const manualBlinkStartsWithSection = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages;
       const blinkCandidateIds = state.blinkCandidateIds;
