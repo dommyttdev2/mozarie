@@ -35,7 +35,16 @@ class OnnxAdapterTests(unittest.TestCase):
             ), patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[cuda_session, cpu_session]) as create:
                 self.assertIs(create_session(path, "gpu", 2), cuda_session)
                 self.assertIs(create_session(path, "cpu"), cpu_session)
-            self.assertEqual(create.call_args_list[0].kwargs["providers"], [("CUDAExecutionProvider", {"device_id": 2}), "CPUExecutionProvider"])
+            self.assertEqual(create.call_args_list[0].kwargs["providers"], [(
+                "CUDAExecutionProvider",
+                {
+                    "device_id": 2,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "cudnn_conv_algo_search": "DEFAULT",
+                    "cudnn_conv_use_max_workspace": "0",
+                    "do_copy_in_default_stream": "1",
+                },
+            ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
 
     def test_target_decoder_identifies_reversed_outputs_and_channel_first_rows(self) -> None:

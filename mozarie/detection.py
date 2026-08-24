@@ -101,51 +101,54 @@ class DetectionMixin:
             models = self._ensure_models()
 
             def claim_and_run(index: int, record: ImageRecord) -> None:
-                self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
-                if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
-                    self._discard_candidates(candidates)
-                    return
                 try:
-                    image_lock = self.image_io_lock(record.image_id)
-                except ClientError:
-                    self._discard_candidates(candidates)
-                    raise
-                with image_lock:
+                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                    candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
+                    if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                        self._discard_candidates(candidates)
+                        return
                     try:
-                        self._assert_record_stat_matches(record)
+                        image_lock = self.image_io_lock(record.image_id)
                     except ClientError:
                         self._discard_candidates(candidates)
                         raise
-                    with self.lock:
-                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                or not self._job_is_current(job_generation, catalog_generation)
-                                or self.images.get(record.image_id) is not record):
+                    with image_lock:
+                        try:
+                            self._assert_record_stat_matches(record)
+                        except ClientError:
                             self._discard_candidates(candidates)
-                            return
-                        boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
-                        stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
-                    try:
-                        for candidate in candidates:
-                            final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                            if candidate.mask_path.name.startswith(".mozarie-pending-"):
-                                os.replace(candidate.mask_path, final_path)
-                                candidate.mask_path = final_path
-                    except Exception:
-                        self._discard_candidates(candidates)
-                        raise
-                    with self.lock:
-                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                or not self._job_is_current(job_generation, catalog_generation)
-                                or self.images.get(record.image_id) is not record):
+                            raise
+                        with self.lock:
+                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                    or not self._job_is_current(job_generation, catalog_generation)
+                                    or self.images.get(record.image_id) is not record):
+                                self._discard_candidates(candidates)
+                                return
+                            boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
+                            stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
+                        try:
+                            for candidate in candidates:
+                                final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                                if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                                    os.replace(candidate.mask_path, final_path)
+                                    candidate.mask_path = final_path
+                        except Exception:
                             self._discard_candidates(candidates)
-                            return
-                        self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                        self._touch_candidates(record.image_id)
-                        self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
-                    for path in stale_paths:
-                        path.unlink(missing_ok=True)
-                self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                            raise
+                        with self.lock:
+                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                    or not self._job_is_current(job_generation, catalog_generation)
+                                    or self.images.get(record.image_id) is not record):
+                                self._discard_candidates(candidates)
+                                return
+                            self.candidates[record.image_id] = [*boundary_candidates, *candidates]
+                            self._touch_candidates(record.image_id)
+                            self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
+                        for path in stale_paths:
+                            path.unlink(missing_ok=True)
+                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                finally:
+                    self.invalidate_sam_image(record.image_id)
 
             failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
             if failures:

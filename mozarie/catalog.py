@@ -480,17 +480,26 @@ class CatalogMixin:
                 LOGGER.warning("Could not clear cache entry %s: %s", child, exc)
 
     def _invalidate_sam_cache(self) -> None:
+        """Discard cached per-image embeddings while retaining loaded models."""
         with self.sam_lock:
+            if self.sam_predictor is not None:
+                self.sam_predictor.reset_image()
             self.sam_image_id = None
         with self.hand_segmentation_lock:
+            if self.hand_segmentation_predictor is not None:
+                self.hand_segmentation_predictor.reset_image()
             self.hand_segmentation_image_id = None
 
     def invalidate_sam_image(self, image_id: str) -> None:
         with self.sam_lock:
             if self.sam_image_id == image_id:
+                if self.sam_predictor is not None:
+                    self.sam_predictor.reset_image()
                 self.sam_image_id = None
         with self.hand_segmentation_lock:
             if self.hand_segmentation_image_id == image_id:
+                if self.hand_segmentation_predictor is not None:
+                    self.hand_segmentation_predictor.reset_image()
                 self.hand_segmentation_image_id = None
 
     def _sam_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:

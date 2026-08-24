@@ -3,17 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
+import os
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+
+_dll_directory_handles: list[object] = []
+
+
+def _register_torch_dll_directory() -> None:
+    """Keep PyTorch's CUDA runtime DLLs visible to ONNX Runtime on Windows."""
+    if os.name != "nt":
+        return
+    torch_spec = importlib.util.find_spec("torch")
+    if torch_spec is None or torch_spec.origin is None:
+        return
+    directory = Path(torch_spec.origin).parent / "lib"
+    if directory.is_dir():
+        _dll_directory_handles.append(os.add_dll_directory(str(directory)))
+
+
+_register_torch_dll_directory()
+
 import onnxruntime as ort
-
-
-_preload_dlls = getattr(ort, "preload_dlls", None)
-if _preload_dlls is not None:
-    _preload_dlls()
 
 
 @dataclass(frozen=True)
@@ -33,7 +49,16 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
         return ["CPUExecutionProvider"]
     if "CUDAExecutionProvider" not in available:
         raise RuntimeError("CUDAExecutionProvider is unavailable. Select CPU or install ONNX Runtime GPU.")
-    return [("CUDAExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+    return [(
+        "CUDAExecutionProvider",
+        {
+            "device_id": int(gpu_device),
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_algo_search": "DEFAULT",
+            "cudnn_conv_use_max_workspace": "0",
+            "do_copy_in_default_stream": "1",
+        },
+    ), "CPUExecutionProvider"]
 
 
 def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.InferenceSession:

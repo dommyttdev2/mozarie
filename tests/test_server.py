@@ -2066,6 +2066,46 @@ class MozarieTests(unittest.TestCase):
                     self.assertEqual(state.job.state, "error")
                     self.assertEqual(state.job.error_code, "gpu_out_of_memory")
 
+    def test_detection_reports_an_unsupported_gpu_architecture(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(state, "_release_gpu_job_memory") as release:
+            state._fail_job(RuntimeError("no kernel image is available for execution on the device"))
+        self.assertEqual(state.job.error_code, "gpu_unsupported")
+        self.assertIn("PyTorch", state.job.error)
+        release.assert_called_once_with()
+
+    def test_terminal_gpu_job_empties_the_pytorch_cache(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        cuda = Mock(); cuda.is_available.return_value = True
+        with patch.object(jobs_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            state._finish_job()
+        cuda.empty_cache.assert_called_once_with()
+
+    def test_invalidate_sam_image_releases_only_that_image_embeddings(self):
+        state = self.new_state()
+        state.sam_predictor = Mock()
+        state.hand_segmentation_predictor = Mock()
+        state.sam_image_id = "current"
+        state.hand_segmentation_image_id = "current"
+        state.invalidate_sam_image("other")
+        state.sam_predictor.reset_image.assert_not_called()
+        state.hand_segmentation_predictor.reset_image.assert_not_called()
+        state.invalidate_sam_image("current")
+        state.sam_predictor.reset_image.assert_called_once_with()
+        state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+
+    def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "cpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(state, "_release_gpu_job_memory"):
+            state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
+        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertNotIn("GPU", state.job.error)
+
     def test_detection_worker_maps_plain_exception_ort_oom(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
