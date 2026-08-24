@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from .core import *
 from .image_io import *
 from . import image_io as _image_io
@@ -525,7 +527,16 @@ class CatalogMixin:
                     device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
                     if provider == "gpu":
                         with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", UserWarning)
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*Found GPU\d+",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*NVIDIA .* with CUDA capability sm_\d+ is not compatible with the current PyTorch installation",
+                                category=UserWarning,
+                            )
                             model.to(device=device)
                     else:
                         model.to(device=device)
@@ -570,7 +581,16 @@ class CatalogMixin:
                     device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
                     if provider == "gpu":
                         with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", UserWarning)
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*Found GPU\d+",
+                                category=UserWarning,
+                            )
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r"\s*NVIDIA .* with CUDA capability sm_\d+ is not compatible with the current PyTorch installation",
+                                category=UserWarning,
+                            )
                             model.to(device=device)
                     else:
                         model.to(device=device)
