@@ -393,7 +393,7 @@ function restoreDraft(imageId, generation) {
 
 function fitImage() {
   if (!state.currentImage) return;
-  const inset = { left: 20, right: 20, top: 58, bottom: 62 };
+  const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
   const width = Math.max(1, stage.clientWidth - inset.left - inset.right);
   const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);

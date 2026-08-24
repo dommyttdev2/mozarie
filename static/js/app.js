@@ -311,7 +311,7 @@ function bindEvents() {
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
-    beginManualStroke(point); render();
+    beginManualStroke(rawPoint); render();
   });
   const processPointerMove = (event) => {
     if (isBusy() || state.importing) return;
@@ -335,7 +335,7 @@ function bindEvents() {
         }
       } else if (state.tool === "boundary_brush") {
         appendBoundaryBrushPoint(point);
-      } else { appendManualStrokePoint(point); state.pointer = point; }
+      } else { appendManualStrokePoint(state.hover); state.pointer = state.hover; }
     }
     render();
   };
@@ -381,7 +381,7 @@ function bindEvents() {
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));
-  canvas.addEventListener("pointerleave", () => { state.hover = null; render(); });
+  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
