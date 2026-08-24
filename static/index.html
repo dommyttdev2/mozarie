@@ -60,17 +60,22 @@
 
     <section class="editor-pane" data-i18n-aria-label="editor.aria">
       <div id="canvasStage" class="canvas-stage">
-        <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="vertical" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
-          <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="ブラシ" title="ブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
-          <button id="eraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
-          <button id="excludeEraserTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser">⊕</button>
+        <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="horizontal" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
+          <div class="tool-pair" role="group" aria-label="モザイク編集" data-i18n-aria-label="editor.mosaicTools">
+            <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイクブラシ" title="モザイクブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+            <button id="mosaicEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク消しゴム" title="モザイク消しゴム" data-i18n-aria-label="editor.mosaicEraser" data-i18n-title="editor.mosaicEraser"><span aria-hidden="true"></span></button>
+          </div>
+          <div class="tool-pair" role="group" aria-label="除外編集" data-i18n-aria-label="editor.exclusionTools">
+            <button id="eraserTool" class="tool icon-button tool-icon tool-icon-brush" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+            <button id="excludeEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser"><span aria-hidden="true"></span></button>
+          </div>
           <div class="boundary-tool-menu">
             <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" data-toolbar-item aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
             <div id="boundaryModeMenu" class="boundary-mode-menu" hidden role="group" aria-label="境界の形状" data-i18n-aria-label="boundary.modeLabel">
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
               <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
-              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="塗りつぶし" title="塗りつぶし" data-i18n-aria-label="boundary.fill" data-i18n-title="boundary.fill">▣</button>
+              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
               <button id="excludeBucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             </div>
           </div>
@@ -124,11 +129,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><select data-candidate-display="apply" data-i18n-aria-label="candidates.display" aria-label="表示"><option value="off" data-i18n="candidates.displayOff">停止</option><option value="normal" data-i18n="candidates.displayBlink">点滅</option><option value="effective" data-i18n="candidates.displayEffective">除外反映</option></select><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><fieldset class="candidate-display-choice" data-candidate-display="apply" title="候補ハイライトの表示方法" data-i18n-title="candidates.displayHelp"><legend class="sr-only" data-i18n="candidates.display">表示</legend><label><input type="radio" name="candidate-display-apply" value="off" checked><span data-i18n="candidates.displayOff">表示なし</span></label><label><input type="radio" name="candidate-display-apply" value="normal"><span data-i18n="candidates.displayBlink">点滅</span></label><label><input type="radio" name="candidate-display-apply" value="effective"><span data-i18n="candidates.displayEffective">除外反映</span></label></fieldset><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><select data-candidate-display="exclude" data-i18n-aria-label="candidates.display" aria-label="表示"><option value="off" data-i18n="candidates.displayOff">停止</option><option value="normal" data-i18n="candidates.displayBlink">点滅</option></select><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><fieldset class="candidate-display-choice" data-candidate-display="exclude" title="候補ハイライトの表示方法" data-i18n-title="candidates.displayHelp"><legend class="sr-only" data-i18n="candidates.display">表示</legend><label><input type="radio" name="candidate-display-exclude" value="off" checked><span data-i18n="candidates.displayOff">表示なし</span></label><label><input type="radio" name="candidate-display-exclude" value="normal"><span data-i18n="candidates.displayBlink">点滅</span></label></fieldset><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>

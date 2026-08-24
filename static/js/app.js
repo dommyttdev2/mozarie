@@ -134,13 +134,10 @@ function bindEvents() {
   $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
-  document.querySelectorAll("[data-candidate-display]").forEach((select) => select.addEventListener("change", () => {
-    const role = select.dataset.candidateDisplay; const mode = select.value;
-    const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
-    if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
-    if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
-    ids.forEach((id) => { if (mode === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); } else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, mode); } });
-    renderCandidates(); render();
+  document.querySelectorAll("[data-candidate-display]").forEach((group) => group.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.type !== "radio" || !input.checked) return;
+    setCandidateDisplayMode(candidateDisplayIdsForRole(group.dataset.candidateDisplay), input.value);
   }));
   $("#settingsLanguage").addEventListener("change", async (event) => {
     const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
@@ -159,7 +156,7 @@ function bindEvents() {
     overviewQueryTimer = setTimeout(() => renderOverview(), 120);
   });
   $("#overviewFolder").addEventListener("change", (event) => { state.overviewFolder = event.target.value; renderOverview(); });
-  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
+  $("#brushTool").addEventListener("click", () => setTool("brush")); $("#mosaicEraserTool").addEventListener("click", () => setTool("mosaic_eraser")); $("#eraserTool").addEventListener("click", () => setTool("eraser"));
   $("#excludeEraserTool").addEventListener("click", () => setTool("exclude_eraser"));
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
@@ -359,7 +356,7 @@ function bindEvents() {
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = ["eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
+    canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
     if (wasDrawing && manualStrokeStarted) completeManualStroke();
     if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
     if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;

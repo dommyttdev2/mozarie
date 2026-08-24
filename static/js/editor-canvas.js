@@ -550,12 +550,12 @@ function paintMosaicPreview() {
 }
 
 function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
+  if (!state.hover || !state.currentImage || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
   ctx.save();
-  if (state.tool === "eraser") ctx.setLineDash([6, 4]);
+  if (["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool)) ctx.setLineDash([6, 4]);
   ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = state.tool === "boundary_brush" ? "#50d589" : "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
   ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#111316"; ctx.lineWidth = 1; ctx.stroke();
   ctx.restore();

@@ -2,11 +2,11 @@ function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
-  if (!state.currentId) { updateCandidateBatchButtons(false); return; }
+  if (!state.currentId) { syncCandidateDisplayChoices(); updateCandidateBatchButtons(false); return; }
   const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
   const hasManualExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
   if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude && !hasManualExclusionErase) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayChoices(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
@@ -24,15 +24,7 @@ function renderCandidates() {
     button.disabled = disabled; button.setAttribute("aria-pressed", String(forced)); button.setAttribute("aria-label", text);
     button.textContent = text; button.addEventListener("click", onChange); return button;
   };
-  const makeDisplay = (id, role) => {
-    const select = document.createElement("select"); select.className = "candidate-display";
-    const modes = role === "apply" ? [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"], ["effective", "candidates.displayEffective"]] : [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"]];
-    select.setAttribute("aria-label", t("candidates.display"));
-    for (const [value, label] of modes) { const option = document.createElement("option"); option.value = value; option.textContent = t(label); select.append(option); }
-    select.value = state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
-    select.addEventListener("change", () => { if (select.value === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); } else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, select.value); } renderCandidates(); render(); });
-    return select;
-  };
+  const makeDisplay = (id, role) => candidateDisplayChoice(id, role);
   const appendManual = (list, role) => {
     const isApply = role === "apply";
     const exists = isApply ? state.manualMaskPresent : hasManualExclude;
@@ -61,8 +53,8 @@ function renderCandidates() {
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       });
-      row.append(enabled, blink, label, forced, remove);
-    } else row.append(enabled, blink, label, remove);
+      row.append(label, remove, candidateRowControls(enabled, blink, forced));
+    } else row.append(label, remove, candidateRowControls(enabled, blink));
     list.append(row);
   };
   appendManual(applyList, "apply");
@@ -82,7 +74,7 @@ function renderCandidates() {
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
-    row.append(enabled, blink, label, remove); excludeList.append(row);
+    row.append(label, remove, candidateRowControls(enabled, blink)); excludeList.append(row);
   }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -119,12 +111,64 @@ function renderCandidates() {
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
-      row.append(enabled, blink, label, forced, remove);
-    } else row.append(enabled, blink, label, remove);
+      row.append(label, remove, candidateRowControls(enabled, blink, forced));
+    } else row.append(label, remove, candidateRowControls(enabled, blink));
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
-  updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
+  syncCandidateDisplayChoices(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
+}
+
+function candidateRowControls(...controls) {
+  const row = document.createElement("div"); row.className = "candidate-row-controls"; row.append(...controls); return row;
+}
+
+function candidateDisplayModes(role) {
+  return role === "apply"
+    ? [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"], ["effective", "candidates.displayEffective"]]
+    : [["off", "candidates.displayOff"], ["normal", "candidates.displayBlink"]];
+}
+
+function candidateDisplayMode(id) {
+  return state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
+}
+
+function candidateDisplayIdsForRole(role) {
+  const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
+  if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
+  if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
+  if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) ids.push("manual:excludeErase");
+  return ids;
+}
+
+function syncCandidateDisplayChoices() {
+  document.querySelectorAll("[data-candidate-display]").forEach((group) => {
+    const ids = candidateDisplayIdsForRole(group.dataset.candidateDisplay);
+    const mode = ids.length && ids.every((id) => candidateDisplayMode(id) === candidateDisplayMode(ids[0])) ? candidateDisplayMode(ids[0]) : "off";
+    const input = group.querySelector(`input[value="${mode}"]`);
+    if (input) input.checked = true;
+  });
+}
+
+function setCandidateDisplayMode(ids, mode) {
+  ids.forEach((id) => {
+    if (mode === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); }
+    else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, mode); }
+  });
+  renderCandidates(); render();
+}
+
+function candidateDisplayChoice(id, role) {
+  const group = document.createElement("fieldset"); group.className = "candidate-display-choice";
+  group.title = t("candidates.displayHelp"); group.setAttribute("aria-label", t("candidates.display"));
+  const name = `candidate-display-${id}`;
+  for (const [value, label] of candidateDisplayModes(role)) {
+    const option = document.createElement("label"); const input = document.createElement("input"); const text = document.createElement("span");
+    input.type = "radio"; input.name = name; input.value = value; input.checked = candidateDisplayMode(id) === value;
+    input.addEventListener("change", () => { if (input.checked) setCandidateDisplayMode([id], value); });
+    text.textContent = t(label); option.append(input, text); group.append(option);
+  }
+  return group;
 }
 
 function candidateMutationKey(imageId, candidateId) { return `${imageId}:${candidateId}`; }
@@ -422,6 +466,7 @@ function strokeLine(context, from, to, size, operation = "source-over") {
 }
 
 function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, from, to, tool, size) {
+  if (tool === "mosaic_eraser") { strokeLine(addContext, from, to, size + 2, "destination-out"); return; }
   if (tool === "exclude_eraser") { strokeLine(exclusionEraseContext, from, to, size); return; }
   if (tool === "eraser") {
     strokeLine(exclusionContext, from, to, size);

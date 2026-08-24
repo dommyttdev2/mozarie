@@ -923,6 +923,29 @@ async function main() {
       return { restored, undoWorked, redoWorked };
     });
     assert.deepEqual(restoredHistory, { restored: true, undoWorked: true, redoWorked: true }, "manual history survives changing away and back to an image");
+    const mosaicEraserHistory = await page.evaluate(() => {
+      const candidates = state.candidates; const candidateImages = state.candidateImages; const tool = state.tool;
+      const automatic = document.createElement("canvas"); automatic.width = addCanvas.width; automatic.height = addCanvas.height; automatic.getContext("2d").fillRect(2, 2, 8, 8);
+      state.candidates = [{ id: "automatic-range", role: "apply", enabled: true, className: "Automatic" }]; state.candidateImages = new Map([["automatic-range", automatic]]);
+      const manual = document.createElement("canvas"); manual.width = manual.height = 64;
+      const exclusion = document.createElement("canvas"); exclusion.width = exclusion.height = 64;
+      const exclusionErase = document.createElement("canvas"); exclusionErase.width = exclusionErase.height = 64;
+      const from = { x: 16, y: 16 }; const to = { x: 48, y: 48 };
+      paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "brush", 12);
+      const added = canvasHasPixels(manual.getContext("2d"), manual);
+      paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "mosaic_eraser", 12);
+      const erased = !canvasHasPixels(manual.getContext("2d"), manual);
+      const point = { x: Math.floor(addCanvas.width / 2), y: Math.floor(addCanvas.height / 2) };
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); resetHistoryToCurrentManualMask(); state.tool = "brush";
+      beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
+      state.tool = "mosaic_eraser"; beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
+      const historyTools = state.history.map((stroke) => stroke.tool);
+      restoreSnapshot(1); const undo = state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas); restoreSnapshot(2); const redo = state.historyIndex === 2;
+      const automaticUnchanged = state.candidates[0].enabled && canvasHasPixels(automatic.getContext("2d"), automatic);
+      state.candidates = candidates; state.candidateImages = candidateImages; state.tool = tool; resetHistoryToCurrentManualMask(); renderCandidates();
+      return { added, erased, undo, redo, automaticUnchanged, historyTools };
+    });
+    assert.deepEqual(mosaicEraserHistory, { added: true, erased: true, undo: true, redo: true, automaticUnchanged: true, historyTools: ["brush", "mosaic_eraser"] }, `mosaic eraser removes only manual mosaic strokes and participates in undo/redo: ${JSON.stringify(mosaicEraserHistory)}`);
     const exclusionEraseRow = await page.evaluate(() => {
       exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(3, 3, 4, 4); state.manualExclusionEraseEnabled = true; renderCandidates();
       const row = document.querySelector(".candidate-row-manual-exclude-erase");
@@ -939,7 +962,7 @@ async function main() {
       state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
       state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
       state.blinkCandidateIds = new Set(); renderCandidates();
-      const display = document.querySelector('[data-candidate-display="apply"]'); display.value = "normal"; display.dispatchEvent(new Event("change", { bubbles: true }));
+      const display = document.querySelector('[data-candidate-display="apply"] input[value="normal"]'); display.checked = true; display.dispatchEvent(new Event("change", { bubbles: true }));
       beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
       const row = document.querySelector(".candidate-row-manual-apply");
       const result = {
@@ -1251,13 +1274,20 @@ async function main() {
       await page.setViewportSize({ width, height: 768 }); await page.evaluate((locale) => loadTranslations(locale), language);
       const editor = await page.evaluate(() => {
         const box = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; };
-        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-display")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height }; });
-        return { toolbar, stage, controls, help: { label: document.querySelector("#mosaicHelpButton").getAttribute("aria-label"), title: document.querySelector("#mosaicHelpButton").title }, toolPosition: document.querySelector("#settingsToolPosition") };
+        const toolbar = box("#canvasToolRail"); const stage = box("#canvasStage"); const controls = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice")].map((node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, radios: node.querySelectorAll('input[type="radio"]').length }; });
+        const candidateOverflow = [...document.querySelectorAll(".candidate-section-actions, .candidate-row")].some((node) => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight);
+        const candidateHit = [...document.querySelectorAll(".candidate-section-actions .candidate-display-choice label")].every((label) => { const rect = label.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return label === target || label.contains(target); });
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: document.querySelector("#mosaicHelpButton").getAttribute("aria-label"), title: document.querySelector("#mosaicHelpButton").title }, toolPosition: document.querySelector("#settingsToolPosition") };
       });
       assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
       assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
-      assert.ok(editor.controls.every((control) => control.width >= 70 && control.width <= 75), `candidate display selects remain compact at ${width}/${language}`);
+      assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
+      assert.ok(editor.controls.every((control) => control.width > 0 && control.radios >= 2), `candidate display controls use visible native radio choices at ${width}/${language}`);
+      assert.equal(editor.controls.length, 2, `both candidate sections have a display control at ${width}/${language}`);
+      assert.ok(Math.abs(editor.controls[0].width - editor.controls[1].width) <= 1 && Math.abs(editor.controls[0].height - editor.controls[1].height) <= 1 && editor.controls.every((control) => control.height >= 25 && control.height <= 28), `candidate section display controls share one compact size at ${width}/${language}`);
+      assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
+      assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
       await page.locator("#mosaicHelpButton").click();
       const mosaicHelp = await page.locator("#mosaicHelpDialog").evaluate((dialog) => {
         const links = [...dialog.querySelectorAll(".mosaic-guideline-links a")];
@@ -1281,6 +1311,24 @@ async function main() {
       assert.equal(mosaicHelp.oneLine, true, `mosaic guideline links remain on one line at ${width}/${language}`);
       await page.locator("#mosaicHelpCloseButton").click();
     }
+    const candidateDisplaySemantics = await page.evaluate(() => {
+      const candidates = state.candidates; const images = state.candidateImages; const removed = state.removedCandidateIds; const currentId = state.currentId;
+      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
+      state.currentId = "sample"; state.candidates = [{ id: "radio-candidate", role: "apply", enabled: true, className: "Radio" }, { id: "radio-exclusion", role: "exclude", enabled: true, className: "Exclude" }]; state.candidateImages = new Map([["radio-candidate", mask], ["radio-exclusion", mask]]); state.removedCandidateIds = new Set(); renderCandidates();
+      const group = document.querySelector('.candidate-row-apply .candidate-display-choice'); const radios = [...group.querySelectorAll('input[type="radio"]')];
+      window.__candidateDisplayTestState = { candidates, images, removed, currentId };
+      const box = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
+      return { fieldset: group.tagName, label: group.getAttribute("aria-label"), types: radios.map((radio) => radio.type), names: new Set(radios.map((radio) => radio.name)).size, values: radios.map((radio) => radio.value), displays: [box(document.querySelector('.candidate-row-apply .candidate-display-choice')), box(document.querySelector('.candidate-row-exclude .candidate-display-choice'))] };
+    });
+    assert.equal(candidateDisplaySemantics.fieldset, "FIELDSET", "candidate display uses a native fieldset");
+    assert.equal(candidateDisplaySemantics.label, "Candidate highlight", "candidate display has a clear accessible name");
+    assert.deepEqual({ types: candidateDisplaySemantics.types, names: candidateDisplaySemantics.names, values: candidateDisplaySemantics.values }, { types: ["radio", "radio", "radio"], names: 1, values: ["off", "normal", "effective"] }, "candidate display uses one labelled native radio group");
+    assert.ok(Math.abs(candidateDisplaySemantics.displays[0].width - candidateDisplaySemantics.displays[1].width) <= 1 && Math.abs(candidateDisplaySemantics.displays[0].height - candidateDisplaySemantics.displays[1].height) <= 1 && candidateDisplaySemantics.displays.every((display) => display.height >= 25 && display.height <= 28), "candidate rows keep matching full-width display controls");
+    const effectiveRadio = page.locator('.candidate-row-apply .candidate-display-choice input[value="effective"]');
+    await effectiveRadio.focus(); await effectiveRadio.press("ArrowLeft");
+    const candidateDisplayKeyboard = await page.evaluate(() => ({ normal: document.querySelector('.candidate-row-apply .candidate-display-choice input[value="normal"]').checked, mode: state.blinkModes.get("radio-candidate") }));
+    assert.deepEqual(candidateDisplayKeyboard, { normal: true, mode: "normal" }, "candidate display radio arrows update the existing blink mode");
+    await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
     const targetModes = await page.evaluate(() => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
       setReviewed(state.images.find((image) => image.id === "sample"), true);
@@ -1298,7 +1346,8 @@ async function main() {
       for (let index = 0; index < 13; index += 1) recordHistoryOperation({ kind: "removeCandidates", ids: [`trim-${index}`] });
       const trimmed = state.history.length === 12 && state.historyRemovedCandidateIds.has("trim-0");
       state.removedCandidateIds.delete(candidate.id);
-      const display = document.querySelector('[data-candidate-display="apply"]'); display.value = "effective"; display.dispatchEvent(new Event("change", { bubbles: true }));
+      renderCandidates();
+      const display = document.querySelector('[data-candidate-display="apply"] input[value="effective"]'); display.checked = true; display.dispatchEvent(new Event("change", { bubbles: true }));
       const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
       state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
       return { afterDelete, undo, redo, trimmed, effective, cleared };
