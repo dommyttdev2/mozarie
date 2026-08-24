@@ -55,13 +55,22 @@ function syncApplyMode() {
   $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning;
 }
 
-async function openApplyDialog(imageIds) {
+function refreshApplyTargets() {
+  const mode = $("#applyTargetMode").value;
+  state.applyTargetMode = mode; state.applyTargetIds = saveTargets(mode);
+  $("#applyTargetCount").textContent = t("apply.target", { count: state.applyTargetIds.length });
+  syncApplyMode();
+}
+
+async function openApplyDialog(options = {}) {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
-  if (!imageIds.length || isBusy() || state.importing) return;
+  const initialMode = Array.isArray(options) ? "current" : (options.initialMode || "masked");
+  if (isBusy() || state.importing) return;
   saveDraft();
-  state.applyTargetIds = imageIds;
+  $("#applyTargetMode").value = initialMode;
+  refreshApplyTargets();
+  if (!state.applyTargetIds.length) return;
   state.applyRunning = false;
-  $("#applyTargetCount").textContent = t("apply.target", { count: imageIds.length });
   $("#applyDivisor").value = $("#divisor").value;
   updateBlockSizeDisplay();
   $("#applyProgressPanel").hidden = true;
@@ -83,6 +92,7 @@ function draftPayload(imageIds) {
       exclusion: draft.manualExclusionEnabled === false ? "" : draft.exclusion,
       exclusionErase: draft.manualExclusionEraseEnabled === false ? "" : draft.exclusionErase,
       manualExclusionForced: draft.manualExclusionForced ?? draft.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false),
+      removedCandidateIds: draft.removedCandidateIds || [],
     };
   }
   return drafts;

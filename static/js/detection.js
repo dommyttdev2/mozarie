@@ -84,7 +84,7 @@ async function saveCurrent() {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const record = state.images.find((image) => image.id === imageId);
   if (isBusy() || state.importing || state.currentId !== imageId || !record || !imageHasMask(record)) return;
-  await openApplyDialog([imageId]);
+  await openApplyDialog({ initialMode: "current" });
 }
 
 async function saveAll() {
@@ -92,6 +92,5 @@ async function saveAll() {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (isBusy() || state.importing) return;
   saveDraft(); refreshMaskStatus();
-  const imageIds = saveTargets();
-  if (imageIds.length) await openApplyDialog(imageIds);
+  if (saveTargets("masked").length) await openApplyDialog({ initialMode: "masked" });
 }

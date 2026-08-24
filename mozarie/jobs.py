@@ -211,6 +211,7 @@ class JobsMixin:
         image_id: str,
         draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
+        removed_candidate_ids: set[str] | None = None,
     ) -> np.ndarray | None:
         if draft is None:
             add_mask, exclusion_mask, exclusion_erase_mask = None, None, None
@@ -223,7 +224,8 @@ class JobsMixin:
                 if current_record is None:
                     raise ClientError("画像が見つかりません。")
                 record = replace(current_record)
-                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled]
+                removed_candidate_ids = removed_candidate_ids or set()
+                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
                 revision = self._candidate_revision(image_id)
                 catalog_generation = self.catalog_generation
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]

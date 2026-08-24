@@ -553,7 +553,6 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   await page.locator("#settingsCloseButton").click();
 }
 async function assertToolRailLayout(page, position) {
-  await page.locator("#canvasStage").evaluate((stage, selected) => { stage.dataset.toolPosition = selected; }, position);
   const boxes = await page.evaluate(() => {
     const read = (selector) => {
       const box = document.querySelector(selector).getBoundingClientRect();
@@ -561,21 +560,15 @@ async function assertToolRailLayout(page, position) {
     };
     return { rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar") };
   });
-  assert.equal(overlaps(boxes.rail, boxes.settings), false, `${position} rail must not overlap editor settings`);
+  assert.equal(overlaps(boxes.rail, boxes.settings), true, "tool settings are integrated into the top editor toolbar");
   assert.equal(overlaps(boxes.rail, boxes.navigation), false, `${position} rail must not overlap image navigation`);
-  if (position === "bottom") {
-    assert.ok(Math.abs(boxes.rail.y - boxes.navigation.y) <= 2, "bottom tools and image navigation share one compact row");
-    assert.ok(boxes.rail.x + boxes.rail.width <= boxes.navigation.x, "bottom navigation uses the horizontal space beside the tools");
-  }
+  assert.ok(boxes.rail.y <= boxes.settings.y, "toolbar is fixed at the editor top");
   await page.locator("#boundaryTool").click();
   const menu = await page.locator("#boundaryModeMenu").evaluate((element) => {
     const box = element.getBoundingClientRect();
     return { x: box.x, y: box.y, width: box.width, height: box.height };
   });
-  if (position === "left") assert.ok(menu.x >= boxes.rail.x + boxes.rail.width, "left rail menu opens right");
-  if (position === "right") assert.ok(menu.x + menu.width <= boxes.rail.x, "right rail menu opens left");
-  if (position === "top") assert.ok(menu.y >= boxes.rail.y + boxes.rail.height, "top rail menu opens down");
-  if (position === "bottom") assert.ok(menu.y + menu.height <= boxes.rail.y, "bottom rail menu opens up");
+  assert.ok(menu.width > 0 && menu.height > 0, "toolbar boundary menu opens");
   await page.keyboard.press("Escape");
 }
 
@@ -998,7 +991,7 @@ async function main() {
     for (const selector of ["#canvasStage", ".canvas-tool-rail", ".canvas-settings-bar", "#currentFileName", "#previousImageButton", "#imagePosition", "#nextImageButton", "#reviewAndNextButton", "#saveButton"]) {
       assert.equal(await page.locator(selector).isVisible(), true, `${selector} must be visible on desktop`);
     }
-    for (const position of ["left", "top", "right", "bottom"]) await assertToolRailLayout(page, position);
+    await assertToolRailLayout(page, "top");
     await page.locator("#canvasStage").evaluate((stage) => { stage.dataset.toolPosition = "left"; });
     for (const [language, labels] of [["ja", ["削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
       await page.evaluate((locale) => loadTranslations(locale), language);

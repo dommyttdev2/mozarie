@@ -78,11 +78,12 @@
           <button id="undoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
           <button id="redoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
           <button id="mosaicPreviewButton" class="tool icon-button active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイク表示" title="モザイク表示" data-i18n-aria-label="editor.mosaicPreview" data-i18n-title="editor.mosaicPreview">▦</button>
-        </div>
+        <span class="tool-separator" aria-hidden="true"></span>
         <div class="canvas-settings-bar" data-i18n-aria-label="editor.settings" aria-label="編集設定">
           <label class="numeric-control" for="brushSize"><span data-i18n="editor.brushSize">ブラシ径</span><input id="brushSize" type="range" min="1" max="500" value="48" data-i18n-aria-label="editor.brushSize" aria-label="ブラシ径"><output id="brushSizeValue">48 px</output></label>
           <label class="numeric-control block-control" for="divisor"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-prefix">1 /</span><input id="divisor" type="number" min="1" max="10000" value="100"><output id="blockSizeValue"></output></label>
-          <label id="bucketToleranceControl" class="numeric-control" for="bucketTolerance" hidden><span data-i18n="editor.bucketTolerance">許容値</span><input id="bucketTolerance" type="number" min="0" max="255" value="20"></label>
+          <button id="mosaicHelpButton" class="help-button" type="button" aria-label="モザイク粗さの説明" title="モザイク粗さの説明"></button><label id="bucketToleranceControl" class="numeric-control" for="bucketTolerance" hidden><span data-i18n="editor.bucketTolerance">許容値</span><input id="bucketTolerance" type="number" min="0" max="255" value="20"></label>
+        </div>
         </div>
         <div class="canvas-navigation-bar" data-i18n-aria-label="navigation.aria" aria-label="画像移動">
           <output id="currentFileName" class="current-file-name" data-i18n-dynamic>画像未選択</output><output id="reviewStatus" class="review-status" data-i18n-dynamic>未確認</output>
@@ -122,11 +123,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-batch="apply:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="apply:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><select data-candidate-display="apply" aria-label="表示"><option value="off">停止</option><option value="normal">点滅</option><option value="effective">除外反映</option></select><button data-candidate-batch="apply:blink" type="button" hidden aria-hidden="true"></button><button data-candidate-batch="apply:delete" type="button">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-batch="exclude:blink" type="button" data-i18n="candidates.blinkAll" data-i18n-aria-label="candidates.blinkAll" aria-label="点滅 ON/OFF">点滅 ON/OFF</button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><select data-candidate-display="exclude" aria-label="表示"><option value="off">停止</option><option value="normal">点滅</option></select><button data-candidate-batch="exclude:blink" type="button" hidden aria-hidden="true"></button><button data-candidate-batch="exclude:delete" type="button">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -180,9 +181,7 @@
   <template id="overviewItemTemplate">
     <button class="overview-item" type="button">
       <img loading="lazy" alt="">
-      <span class="overview-item-name"></span>
-      <span class="overview-item-path"></span>
-      <span class="overview-item-state"></span>
+      <span class="overview-review-badge"></span><span class="overview-item-name"></span><span class="overview-item-dimensions"></span>
     </button>
   </template>
 
@@ -272,7 +271,6 @@
         <output id="settingsModelStatus" class="fixed-note"></output>
       </section>
       <section id="settingsPanelDisplay" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabDisplay" data-settings-panel="display" hidden>
-        <label class="form-row"><span data-i18n="settings.toolPosition">ツールバーの位置</span><select id="settingsToolPosition"><option value="left" data-i18n="settings.toolPositionLeft">左</option><option value="top" data-i18n="settings.toolPositionTop">上</option><option value="right" data-i18n="settings.toolPositionRight">右</option><option value="bottom" data-i18n="settings.toolPositionBottom">下</option></select></label>
         <label class="form-row"><span data-i18n="settings.applyColor">適用範囲の色</span><input id="settingsApplyColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.excludeColor">除外範囲の色</span><input id="settingsExcludeColor" type="color"></label>
         <label class="form-row"><span data-i18n="settings.opacity">オーバーレイの濃さ</span><input id="settingsOpacity" type="number" min="0" max="1" step="0.01"></label>
@@ -311,6 +309,7 @@
   <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount">
     <form id="applyForm" class="dialog-body">
       <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
+      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="current" data-i18n="apply.targetCurrent">この画像</option><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
@@ -341,6 +340,8 @@
       </div>
     </form>
   </dialog>
+
+  <dialog id="mosaicHelpDialog" class="modal-dialog" aria-labelledby="mosaicHelpTitle"><section class="dialog-body"><h2 id="mosaicHelpTitle">モザイク粗さ</h2><p id="mosaicHelpFormula"></p><p id="mosaicHelpBlock" class="muted"></p><p>BOOTH: 細部を視覚的に不明瞭にし、不可逆・輪郭を含む・透過不可。最低4px、長辺400px以上では長辺の約1/100。</p><p><a href="https://booth.pm/guidelines" target="_blank" rel="noreferrer">BOOTH ガイドライン</a></p><div class="dialog-actions"><button id="mosaicHelpCloseButton" type="button">閉じる</button></div></section></dialog>
 
   <dialog id="processingDialog" class="modal-dialog processing-dialog" closedby="none" aria-labelledby="processingTitle" aria-describedby="processingProgressText processingCurrent">
     <section class="dialog-body">

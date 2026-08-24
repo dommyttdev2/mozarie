@@ -95,6 +95,7 @@ class SavingMixin:
         record = self.image_snapshot(image_id)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         manual_exclude_forced = draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True))
+        removed_candidate_ids = {str(value) for value in draft.get("removedCandidateIds", [])} if isinstance(draft, dict) else set()
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
         output_path: Path | None = None
@@ -116,7 +117,7 @@ class SavingMixin:
                     if revision != current_revision:
                         raise ClientError("候補が変更されました。保存をやり直してください。")
                     catalog_generation = self.catalog_generation
-                    candidates = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
+                    candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.candidate_id not in removed_candidate_ids]
                     if copy_to_default:
                         configured_output_directory = Path(self.settings["saving"]["default_output_directory"]).resolve()
                 # A candidate can disappear between the metadata snapshot and the
@@ -358,9 +359,11 @@ class SavingMixin:
                             manual_exclude_forced = draft_manual_exclusion_forced(
                                 draft_or_mask, self.settings["detection"].get("exclude_forced_default", True),
                             )
+                            removed_candidate_ids = {str(value) for value in draft_or_mask.get("removedCandidateIds", [])} if isinstance(draft_or_mask, dict) else set()
                             mask = self.combined_candidate_mask(
                                 record.image_id, draft_masks,
                                 manual_exclude_forced=manual_exclude_forced,
+                                removed_candidate_ids=removed_candidate_ids,
                             )
                     except Exception:
                         raise

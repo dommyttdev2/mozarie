@@ -134,6 +134,14 @@ function bindEvents() {
   $("#selectionClearButton").addEventListener("click", () => { state.batchMode = false; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   $("#batchModeButton").addEventListener("click", () => { state.batchMode = true; clearBatchSelection(); renderOverview(); updateSelectionActionBar(); });
   document.querySelectorAll("[data-candidate-batch]").forEach((button) => button.addEventListener("click", () => { void batchCandidateOperation(button.dataset.candidateBatch); }));
+  document.querySelectorAll("[data-candidate-display]").forEach((select) => select.addEventListener("change", () => {
+    const role = select.dataset.candidateDisplay; const mode = select.value;
+    const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
+    if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
+    if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
+    ids.forEach((id) => { if (mode === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); } else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, mode); } });
+    renderCandidates(); render();
+  }));
   $("#settingsLanguage").addEventListener("change", async (event) => {
     const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value]));
     const actions = Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked]));
@@ -209,6 +217,14 @@ function bindEvents() {
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
+  $("#mosaicHelpButton").addEventListener("click", () => {
+    const record = currentRecord(); const size = calculatedBlockSize(record);
+    $("#mosaicHelpFormula").textContent = `Mozarie: max(4, ceil(長辺 / ${mosaicDivisor()}))`;
+    $("#mosaicHelpBlock").textContent = record ? `この画像: ${size} × ${size} px` : "画像を選択するとブロック寸法を表示します。";
+    $("#mosaicHelpDialog").showModal();
+  });
+  $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
   $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {

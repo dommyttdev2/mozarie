@@ -24,6 +24,14 @@ function renderCandidates() {
     button.disabled = disabled; button.setAttribute("aria-pressed", String(forced)); button.setAttribute("aria-label", text);
     button.textContent = text; button.addEventListener("click", onChange); return button;
   };
+  const makeDisplay = (id, role) => {
+    const select = document.createElement("select"); select.className = "candidate-display";
+    const modes = role === "apply" ? [["off", "停止"], ["normal", "点滅"], ["effective", "除外反映"]] : [["off", "停止"], ["normal", "点滅"]];
+    for (const [value, label] of modes) { const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option); }
+    select.value = state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
+    select.addEventListener("change", () => { if (select.value === "off") { state.blinkCandidateIds.delete(id); state.blinkModes.delete(id); } else { state.blinkCandidateIds.add(id); state.blinkModes.set(id, select.value); } renderCandidates(); render(); });
+    return select;
+  };
   const appendManual = (list, role) => {
     const isApply = role === "apply";
     const exists = isApply ? state.manualMaskPresent : hasManualExclude;
@@ -39,15 +47,8 @@ function renderCandidates() {
       refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
     const blinkId = `manual:${role}`;
-    const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
-    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
-    blink.classList.toggle("active", state.blinkCandidateIds.has(blinkId));
+    const blink = makeDisplay(blinkId, role);
     if (state.blinkCandidateIds.has(blinkId)) row.classList.add(`blink-${role}`);
-    blink.addEventListener("click", () => {
-      if (state.blinkCandidateIds.has(blinkId)) state.blinkCandidateIds.delete(blinkId);
-      else state.blinkCandidateIds.add(blinkId);
-      renderCandidates(); render();
-    });
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
@@ -75,13 +76,7 @@ function renderCandidates() {
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
       setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); renderCandidates(); render();
     });
-    const blink = document.createElement("button"); blink.type = "button"; blink.className = "candidate-blink apply";
-    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
-    blink.classList.toggle("active", state.blinkCandidateIds.has(blinkId));
-    blink.addEventListener("click", () => {
-      if (state.blinkCandidateIds.has(blinkId)) state.blinkCandidateIds.delete(blinkId); else state.blinkCandidateIds.add(blinkId);
-      renderCandidates(); render();
-    });
+    const blink = makeDisplay(blinkId, "exclude");
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
@@ -89,6 +84,7 @@ function renderCandidates() {
     row.append(enabled, blink, label, remove); excludeList.append(row);
   }
   for (const candidate of state.candidates) {
+    if (state.removedCandidateIds.has(candidate.id)) continue;
     const key = candidateMutationKey(state.currentId, candidate.id);
     const deleting = state.candidateDeleting.has(key);
     const role = candidate.role === "exclude" ? "exclude" : "apply";
@@ -103,14 +99,7 @@ function renderCandidates() {
       setReviewed(currentRecord(), false);
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     }, deleting || state.candidateBatchPending.has(state.currentId));
-    const blink = document.createElement("button"); blink.type = "button"; blink.className = `candidate-blink ${role}`;
-    blink.textContent = "◉"; blink.title = t("candidates.blink"); blink.setAttribute("aria-label", blink.title);
-    blink.classList.toggle("active", state.blinkCandidateIds.has(candidate.id));
-    blink.addEventListener("click", () => {
-      if (state.blinkCandidateIds.has(candidate.id)) state.blinkCandidateIds.delete(candidate.id);
-      else state.blinkCandidateIds.add(candidate.id);
-      renderCandidates(); render();
-    });
+    const blink = makeDisplay(candidate.id, role);
     const label = document.createElement("span"); label.className = "candidate-label";
     const name = document.createElement("span"); name.className = "candidate-class"; name.textContent = candidate.className;
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
@@ -221,42 +210,9 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
 async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
   if (confirmationRequired("candidateDelete") && !await confirmAction(t("confirm.candidateDelete.title"), t("confirm.candidateDelete.message"), "candidateDelete")) return;
-  const imageId = state.currentId;
-  setReviewed(currentRecord(), false);
-  const generation = state.imageGeneration;
-  const mutationKey = candidateMutationKey(imageId, candidate.id);
-  const version = nextCandidateMutationVersion(mutationKey);
-  const remainingCandidates = state.candidates.filter((item) => item.id !== candidate.id);
-  const remainingMaskStatus = maskStatusWithoutCandidate(candidate.id);
-  state.candidateDeleting.add(mutationKey); renderCandidates();
-  const send = async () => {
-    try {
-      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, { method: "DELETE" });
-      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
-      syncCandidateRecord(imageId, remainingCandidates);
-      state.maskStatus.set(imageId, remainingMaskStatus);
-      if (state.currentId === imageId && isCurrentGeneration(generation)) {
-        state.candidates = remainingCandidates;
-        releaseCandidateBitmap(candidate.id);
-        retainCurrentCandidateBundle(imageId, result.candidateRevision);
-        updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
-      } else {
-        try { await refreshCandidateRecord(imageId, true); } catch { /* The known deletion is already reflected locally. */ }
-      }
-      renderCatalogViews();
-    } catch (error) {
-      if (state.currentId === imageId && isCurrentGeneration(generation) && state.candidateUpdateVersions.get(mutationKey) === version) {
-        try { await reconcileCurrentCandidates(imageId, generation); } catch { /* Keep the existing coherent row. */ }
-        setStatus(error.message, "error");
-      }
-    } finally {
-      if (state.candidateUpdateVersions.get(mutationKey) === version) {
-        state.candidateDeleting.delete(mutationKey);
-        if (state.currentId === imageId && isCurrentGeneration(generation)) renderCandidates();
-      }
-    }
-  };
-  return enqueueCandidateMutation(imageId, send);
+  state.removedCandidateIds.add(candidate.id);
+  recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] });
+  markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
 }
 
 function deleteManualMask() {
@@ -287,7 +243,7 @@ function deleteManualExclusionErase() {
 }
 
 function shouldBlinkNewManual(role) {
-  const ids = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.id);
+  const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
   return ids.length > 0 && ids.every((id) => state.blinkCandidateIds.has(id));
 }
 
@@ -299,7 +255,7 @@ async function batchCandidateOperation(spec) {
   const manual = role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas);
   const manualErase = role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
   if (operation === "blink") {
-    const ids = state.candidates.filter((item) => item.role === role).map((item) => item.id);
+    const ids = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id)).map((item) => item.id);
     if (manual) ids.push(`manual:${role}`);
     if (manualErase) ids.push("manual:excludeErase");
     const allActive = ids.length && ids.every((id) => state.blinkCandidateIds.has(id));
@@ -307,14 +263,21 @@ async function batchCandidateOperation(spec) {
     renderCandidates(); render(); return;
   }
   if (operation === "toggle") {
-    const enabled = state.candidates.filter((item) => item.role === role).map((item) => item.enabled);
+    const enabled = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id)).map((item) => item.enabled);
     if (manual) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
     if (manualErase) enabled.push(state.manualExclusionEraseEnabled);
     operation = enabled.length && enabled.every(Boolean) ? "disable" : "enable";
   }
   if (operation === "delete" && confirmationRequired("candidateRoleDelete") && !await confirmAction(t("confirm.candidateRoleDelete.title"), t("confirm.candidateRoleDelete.message"), "candidateRoleDelete")) return;
   if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateBatchPending.has(imageId)) return;
-  const changed = state.candidates.filter((item) => item.role === role);
+  const changed = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id));
+  if (operation === "delete") {
+    const ids = changed.map((item) => item.id);
+    ids.forEach((id) => state.removedCandidateIds.add(id));
+    if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids });
+    markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+    return;
+  }
   state.candidateBatchPending.add(imageId);
   const send = async () => {
     try {
@@ -452,6 +415,7 @@ function updateHistoryButtons() {
 function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
   copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
+  state.historyRemovedCandidateIds = new Set(state.removedCandidateIds || []);
   state.history = []; state.historyIndex = 0; state.activeStroke = null; updateHistoryButtons();
 }
 
@@ -538,6 +502,8 @@ function appendManualStrokePoint(point) {
 }
 
 function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx, exclusionEraseContext = exclusionEraseCtx) {
+  if (stroke.kind === "removeCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.add(id)); return; }
+  if (stroke.kind === "restoreCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.delete(id)); return; }
   if (["bucket", "exclude_bucket"].includes(stroke.tool)) { paintFillSpans(addContext, exclusionContext, exclusionEraseContext, stroke.spans, stroke.tool); return; }
   const points = stroke.points;
   if (!points.length) return;
@@ -554,11 +520,18 @@ function trimHistory() {
   }
 }
 
+function recordHistoryOperation(operation) {
+  state.history.splice(state.historyIndex);
+  state.history.push(operation); trimHistory(); state.historyIndex = state.history.length;
+  updateHistoryButtons();
+}
+
 function rebuildManualMaskFromHistory() {
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
   addCtx.drawImage(historyAddCanvas, 0, 0); exclusionCtx.drawImage(historyExclusionCanvas, 0, 0); exclusionEraseCtx.drawImage(historyExclusionEraseCanvas, 0, 0);
+  state.removedCandidateIds = new Set(state.historyRemovedCandidateIds || []);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   markMaskDirty();

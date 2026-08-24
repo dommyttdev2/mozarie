@@ -124,10 +124,9 @@ function setToolRailTabStop(activeItem = null) {
 }
 
 function applyToolPosition(position) {
-  const nextPosition = normaliseToolPosition(position);
   closeBoundaryModeMenu();
-  stage.dataset.toolPosition = nextPosition;
-  toolRail.setAttribute("aria-orientation", ["left", "right"].includes(nextPosition) ? "vertical" : "horizontal");
+  delete stage.dataset.toolPosition;
+  toolRail.setAttribute("aria-orientation", "horizontal");
   setToolRailTabStop(document.activeElement);
 }
 
@@ -206,7 +205,6 @@ function setSettingsForm(settings, status = null) {
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
   $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
-  $("#settingsToolPosition").value = normaliseToolPosition(settings.display.tool_position);
   applyToolPosition(settings.display.tool_position);
   state.mosaicPreviewEnabled = settings.display.mosaic_preview;
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
@@ -257,7 +255,7 @@ function settingsPayload() {
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
       overlay_opacity: Number($("#settingsOpacity").value), mosaic_preview: $("#settingsMosaicPreview").checked,
-      tool_position: $("#settingsToolPosition").value,
+      tool_position: state.settings.display.tool_position,
     },
     importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
