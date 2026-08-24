@@ -212,7 +212,11 @@ class JobsMixin:
         draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
     ) -> np.ndarray | None:
-        add_mask, exclusion_mask, exclusion_erase_mask = draft or (None, None, None)
+        if draft is None:
+            add_mask, exclusion_mask, exclusion_erase_mask = None, None, None
+        else:
+            add_mask, exclusion_mask, *remaining = draft
+            exclusion_erase_mask = remaining[0] if remaining else None
         with self.image_io_lock(image_id):
             with self.lock:
                 current_record = self.images.get(image_id)
