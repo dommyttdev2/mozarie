@@ -2080,9 +2080,16 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"]["provider"] = "gpu"
         state.job = server_module.Job(kind="detect", state="running")
         cuda = Mock(); cuda.is_available.return_value = True
-        with patch.object(jobs_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+        with patch.dict(jobs_module.sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}):
             state._finish_job()
         cuda.empty_cache.assert_called_once_with()
+
+    def test_terminal_gpu_job_does_not_import_torch_just_to_empty_its_cache(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = server_module.Job(kind="detect", state="running")
+        with patch.object(jobs_module.sys, "modules", {}):
+            state._finish_job()
 
     def test_invalidate_sam_image_releases_only_that_image_embeddings(self):
         state = self.new_state()

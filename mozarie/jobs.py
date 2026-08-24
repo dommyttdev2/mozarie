@@ -202,8 +202,8 @@ class JobsMixin:
         """Return unused PyTorch allocator memory after a terminal GPU job."""
         if self.settings["models"]["provider"] != "gpu":
             return
-        torch = torch_module()
-        if torch.cuda.is_available():
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def combined_candidate_mask(
