@@ -25,6 +25,8 @@ def make_source(root: Path, version: str = "1.2.0") -> Path:
     (root / "server.py").write_text("new server", encoding="utf-8")
     (root / "run.bat").write_text("new run", encoding="utf-8")
     (root / "requirements.txt").write_text("Pillow\n", encoding="utf-8")
+    (root / "README.md").write_text("new Japanese readme", encoding="utf-8")
+    (root / "README.en.md").write_text("new English readme", encoding="utf-8")
     (root / "mozarie").mkdir()
     (root / "mozarie" / "core.py").write_text("new core", encoding="utf-8")
     (root / "static").mkdir()
@@ -40,6 +42,8 @@ def make_install(root: Path, version: str = "1.1.0") -> Path:
     (root / "server.py").write_text("old server", encoding="utf-8")
     (root / "run.bat").write_text("old run", encoding="utf-8")
     (root / "requirements.txt").write_text("Pillow\n", encoding="utf-8")
+    (root / "README.md").write_text("old Japanese readme", encoding="utf-8")
+    (root / "README.en.md").write_text("old English readme", encoding="utf-8")
     (root / "mozarie").mkdir()
     (root / "mozarie" / "core.py").write_text("old core", encoding="utf-8")
     (root / "static").mkdir()
@@ -239,6 +243,8 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.tempfile.mkdtemp", return_value=str(backup)):
                 updater.apply_update(source, install)
             self.assertEqual((install / "server.py").read_text(encoding="utf-8"), "new server")
+            self.assertEqual((install / "README.md").read_text(encoding="utf-8"), "new Japanese readme")
+            self.assertEqual((install / "README.en.md").read_text(encoding="utf-8"), "new English readme")
             self.assertEqual((install / "config/defaults.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual((install / "config/local.json").read_text(encoding="utf-8"), '{"mine": true}')
             self.assertEqual((install / "models/model.onnx").read_bytes(), b"model")
@@ -293,7 +299,8 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "mozarie/core.py").read_text(encoding="utf-8"), "old core")
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "old app")
             self.assertEqual((install / "updater.py").read_text(encoding="utf-8"), "old updater")
-            self.assertFalse((install / "README.md").exists())
+            self.assertEqual((install / "README.md").read_text(encoding="utf-8"), "old Japanese readme")
+            self.assertEqual((install / "README.en.md").read_text(encoding="utf-8"), "old English readme")
             self.assertFalse(backup.exists())
 
     def test_apply_preserves_backup_when_rollback_is_incomplete(self):
