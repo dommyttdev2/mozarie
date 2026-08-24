@@ -14,6 +14,7 @@ input[type="text"], input[type="number"], select { min-width: 0; height: 32px; b
 input[type="range"] { accent-color: #4bb99d; }
 
 .brand { color: #d5f2e9; font-size: 17px; font-weight: 700; white-space: nowrap; }
+.brand-logo { width: 28px; height: 28px; flex: 0 0 28px; object-fit: contain; }
 .numeric-control { color: #c0c8d0; white-space: nowrap; }
 .picker-menu, .batch-more-menu { position: fixed; z-index: 20; display: none; gap: 4px; min-width: 200px; padding: 5px; border: 1px solid #4a535d; border-radius: 4px; background: #20252b; box-shadow: 0 8px 22px #0009; }
 .picker-menu { position-anchor: --source-picker; inset: auto; left: anchor(left); top: anchor(bottom); margin-top: 6px; }

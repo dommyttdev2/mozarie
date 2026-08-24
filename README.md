@@ -1,3 +1,5 @@
+<p align="center"><img src="static/images/long_logo.png" alt="Mozarie" width="400"></p>
+
 [日本語](README.ja.md)
 
 # Mozarie

@@ -9,6 +9,7 @@ const staticRoot = path.join(root, "static");
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
@@ -257,11 +258,15 @@ async function assertDesktopLayout(page, width, height) {
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
-    return { appbar: box(".appbar"), settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
+    const logo = box(".brand-logo"); const brand = box(".brand"); const appbar = box(".appbar");
+    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, brand, logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
   if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.top && appbar.status.bottom <= appbar.appbar.bottom, `status stays in the header at ${width}x${height}`);
   assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
+  assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
+  assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
+  assert.ok(appbar.logo.left < appbar.brand.left && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, `brand logo stays immediately left of the app name at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
       const pane = document.querySelector("#galleryPane").getBoundingClientRect();
@@ -631,6 +636,11 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
+    assert.equal(favicon.status(), 200, "favicon is delivered by the static server");
+    assert.match(favicon.headers()["content-type"] || "", /^image\/(?:x-icon|vnd\.microsoft\.icon)/, "favicon uses an icon MIME type");
+    assert.ok((await favicon.body()).length > 0, "favicon response has icon data");
+    assert.equal(await page.locator('link[rel="icon"]').getAttribute("href"), "/favicon.ico", "document uses the real favicon asset");
     assert.doesNotMatch(await page.locator("#connectionStatus").textContent(), /フォルダを選択してください|Choose an image folder/, "the header never presents the empty-catalog instruction");
     for (const [width, height] of [[1024, 768], [1920, 1080]]) {
       await assertConnectionStatusLayout(page, width, height, "ja");
