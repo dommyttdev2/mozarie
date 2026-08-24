@@ -211,6 +211,9 @@ function renderStatus() {
   const headerStatus = $("#connectionStatus");
   headerStatus.textContent = message;
   headerStatus.className = `appbar-status ${status?.kind || ""}`;
+  const isError = status?.kind === "error";
+  headerStatus.setAttribute("role", isError ? "alert" : "status");
+  headerStatus.setAttribute("aria-live", isError ? "assertive" : "polite");
   headerStatus.hidden = !message;
 }
 
