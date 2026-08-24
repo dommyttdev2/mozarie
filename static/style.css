@@ -83,7 +83,8 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .candidate-display-toggle[aria-pressed="true"], .candidate-effective-toggle[aria-pressed="true"] { border-color: #42a98f; background: #235242; color: #e2fff3; }
 .candidate-forced { color: #9ee5f2; white-space: nowrap; }
 .candidate-forced[aria-pressed="true"] { border-color: #347f95; background: #173641; }
-.candidate-pane.blink-active.blink-phase .candidate-row.blink-selected { box-shadow: inset 0 0 0 1px #84dec5; }
+.candidate-pane.blink-active.blink-phase .candidate-row.blink-selected[data-candidate-blink-role="apply"] { background: rgba(238, 78, 78, 0.30); }
+.candidate-pane.blink-active.blink-phase .candidate-row.blink-selected[data-candidate-blink-role="exclude"] { background: rgba(50, 184, 220, 0.28); }
 .candidate-label { display: flex; min-width: 0; align-items: center; gap: 7px; } .candidate-class { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .candidate-conf { flex: 0 0 auto; color: #98a2ad; font-size: 12px; white-space: nowrap; }
 .candidate-row-manual .candidate-label { color: #d9e7e2; }
 .candidate-row-manual-exclude .candidate-label { color: #9ee5f2; }

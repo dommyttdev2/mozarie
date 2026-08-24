@@ -1456,6 +1456,23 @@ async function main() {
     const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
     assert.deepEqual(candidateDisplayStopped, { display: "false", effective: "false", mode: "off" }, "pressing Applied again stops only that candidate highlight");
     await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
+    const sharedBlinkColors = await page.evaluate(async () => {
+      const saved = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, ids: state.blinkCandidateIds, modes: state.blinkModes, phase: state.blinkPhase, manual: state.manualMaskPresent };
+      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
+      addCtx.fillRect(0, 0, 4, 4); exclusionCtx.fillRect(0, 0, 4, 4); state.manualMaskPresent = true;
+      state.candidates = [{ id: "blink-auto-apply", role: "apply", enabled: true, className: "Auto apply" }, { id: "blink-auto-exclude", role: "exclude", enabled: true, className: "Auto exclude" }];
+      state.candidateImages = new Map([["blink-auto-apply", mask], ["blink-auto-exclude", mask]]); state.removedCandidateIds = new Set(); state.blinkCandidateIds = new Set(["blink-auto-apply", "manual:apply", "manual:exclude"]); state.blinkModes = new Map([...state.blinkCandidateIds].map((id) => [id, "normal"])); state.blinkPhase = true;
+      renderCandidates(); syncCandidateDisplayButtons(); await new Promise((resolve) => setTimeout(resolve, 80));
+      state.blinkCandidateIds.add("blink-auto-exclude"); state.blinkModes.set("blink-auto-exclude", "normal"); renderCandidates(); syncCandidateDisplayButtons();
+      const color = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
+      const lit = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
+      state.blinkPhase = false; syncCandidateDisplayButtons(); const dark = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+      state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.blinkCandidateIds = saved.ids; state.blinkModes = saved.modes; state.blinkPhase = saved.phase; state.manualMaskPresent = saved.manual; renderCandidates(); syncCandidateDisplayButtons();
+      return { lit, dark };
+    });
+    assert.deepEqual(sharedBlinkColors.lit, { autoApply: "rgba(238, 78, 78, 0.3)", manualApply: "rgba(238, 78, 78, 0.3)", autoExclude: "rgba(50, 184, 220, 0.28)", manualExclude: "rgba(50, 184, 220, 0.28)" }, "auto and manual candidate highlights share one red/blue blink phase even when enabled at different times");
+    assert.equal(Object.values(sharedBlinkColors.dark).every((color) => !color.includes("238, 78, 78") && !color.includes("50, 184, 220")), true, "all candidate highlight colors turn off together");
     const targetModes = await page.evaluate(() => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
       setReviewed(state.images.find((image) => image.id === "sample"), true);
