@@ -41,8 +41,8 @@ python -m pip install -r requirements.txt
 | 用途 | ファイル | 配布元 |
 | --- | --- | --- |
 | 輪郭補正・境界ツール・手の除外 | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
-| アニメ調の手検出 | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
-| 手の輪郭補正 | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
+| アニメ調の手検出 | ONNX | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection) |
+| 手の輪郭補正 | safetensors | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 ### 自分で用意するモデル
 

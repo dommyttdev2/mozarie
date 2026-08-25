@@ -427,9 +427,9 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect", ".pt → .onnx", "https://huggingface.co/sugarknight/sensitive-detect"],
-    precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
-    hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
-    handSegmentation: ["HandSegNet anime SDXL", "handsegnet_vit_b_best.safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a"],
+    precision: ["Meta Segment Anything (SAM)", ".pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
+    hand: ["deepghs/anime_hand_detection", ".onnx", "https://huggingface.co/deepghs/anime_hand_detection"],
+    handSegmentation: ["HandSegNet anime SDXL", ".safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl"],
   };
   for (const [key, [model, file, href]] of Object.entries(helpExpectations)) {
     const button = page.locator(`[data-model-help="${key}"]`); await button.scrollIntoViewIfNeeded(); await button.click();
@@ -605,7 +605,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   const handSegmentationHelp = page.locator('[data-model-help="handSegmentation"]');
   await handSegmentationHelp.focus();
   await handSegmentationHelp.click();
-  assert.equal(await page.locator("#modelHelpFile").textContent(), "handsegnet_vit_b_best.safetensors", `HandSeg help names its required file at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelHelpFile").textContent(), ".safetensors", `HandSeg help names its format at ${width}x${height} (${language})`);
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#modelHelpDialog").isVisible(), false, `Escape closes HandSeg help at ${width}x${height} (${language})`);
   assert.equal(await handSegmentationHelp.evaluate((button) => document.activeElement === button), true, `Escape restores focus to HandSeg help at ${width}x${height} (${language})`);
@@ -765,7 +765,7 @@ async function main() {
     assert.equal(await page.locator("#settingsHandSegmentationCard .model-card-note").count(), 0, "HandSeg matches the other model cards without an inline explanation");
     assert.equal(await page.locator("#settingsHandSegmentationCard a").count(), 0, "HandSeg keeps download information out of Settings");
     await page.locator('[data-model-help="handSegmentation"]').click();
-    assert.equal(await page.locator("#modelHelpFile").textContent(), "handsegnet_vit_b_best.safetensors", "HandSeg help names its required file");
+    assert.equal(await page.locator("#modelHelpFile").textContent(), ".safetensors", "HandSeg help names its format");
     await page.locator("#modelHelpCloseButton").click();
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
@@ -831,7 +831,8 @@ async function main() {
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector}`);
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "individual confirmation has one semantic item");
-    assert.equal(await page.locator("#modelDownloadItems code").textContent(), "models\\sam_vit_l_0b3195.pth", "individual confirmation shows the full relative destination");
+    assert.equal(await page.locator("#modelDownloadItems code").count(), 0, "download confirmation does not expose internal destination paths");
+    assert.match(await page.locator("#modelDownloadItems strong").textContent(), /SAM.*vit_l/, "individual confirmation identifies the selected SAM variant");
     assert.match(await page.locator("#modelDownloadSecurity").textContent(), /SHA-256/, "confirmation explains the pinned checksum boundary");
     const statusesBeforeSamDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
@@ -848,8 +849,8 @@ async function main() {
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 3, "Download all lists three separate models");
-    assert.equal(await page.locator("#modelDownloadItems code").allTextContents().then((items) => items.some((item) => item.includes("sam_vit_l_0b3195.pth"))), true, "Download all lists only the selected SAM variant");
-    assert.doesNotMatch(await page.locator("#modelDownloadDialog").textContent(), /;\s*models\\/, "Download all does not join destinations with semicolons");
+    assert.equal((await page.locator("#modelDownloadItems strong").allTextContents()).some((item) => /SAM.*vit_l/.test(item)), true, "Download all lists only the selected SAM variant");
+    assert.doesNotMatch(await page.locator("#modelDownloadDialog").textContent(), /models\\|\.pth|\.onnx|\.safetensors/, "Download all does not expose internal filenames or paths");
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsHandSegmentationModel").value.includes("models\\handsegnet\\handsegnet_vit_b_best.safetensors"));
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "all", samType: "vit_l" }, "Download all uses the selected SAM type without browser-provided URLs or paths");

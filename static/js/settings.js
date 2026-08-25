@@ -441,14 +441,14 @@ function setModelDownloadGuide(command = "") {
 }
 
 const MODEL_DOWNLOAD_INFO = {
-  target: { name: "01miku/anime-nsfw-segm-yolo26", target: ".onnx", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26" },
-  hand_detection: { name: "deepghs/anime_hand_detection / hand_detect_v1.0_s", target: "models\\ultralytics\\anime-hand-v1.0-s.onnx", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s" },
-  hand_segmentation: { name: "HandSegNet anime SDXL", target: "models\\handsegnet\\handsegnet_vit_b_best.safetensors", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a" },
-  sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
-  sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", target: "models\\sam_vit_l_0b3195.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth" },
-  sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", target: "models\\sam_vit_h_4b8939.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", target: { ja: "NTD11のZIP → .pt → .onnx", en: "NTD11 ZIP → .pt → .onnx" }, source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
-  sensitive: { name: "sugarknight/sensitive-detect", target: ".pt → .onnx", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect" },
+  target: { name: "01miku/anime-nsfw-segm-yolo26", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26" },
+  hand_detection: { name: "deepghs/anime_hand_detection", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection" },
+  hand_segmentation: { name: "HandSegNet anime SDXL", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl" },
+  sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
+  sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
+  sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
+  sensitive: { name: "sugarknight/sensitive-detect", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect" },
 };
 
 function renderModelDownloadItems(keys) {
@@ -458,11 +458,9 @@ function renderModelDownloadItems(keys) {
     const item = document.createElement("li"); item.className = "model-download-item";
     const name = document.createElement("strong"); name.textContent = info.name;
     const details = document.createElement("dl"); details.className = "model-download-details";
-    const targetLabel = document.createElement("dt"); targetLabel.textContent = t("modelDownload.destination");
-    const target = document.createElement("dd"); const code = document.createElement("code"); code.textContent = typeof info.target === "object" ? info.target[$("#settingsLanguage")?.value || "ja"] : info.target; target.append(code);
     const sourceLabel = document.createElement("dt"); sourceLabel.textContent = t("modelDownload.source");
     const source = document.createElement("dd"); const link = document.createElement("a"); link.href = info.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = info.source; source.append(link);
-    details.append(targetLabel, target, sourceLabel, source); item.append(name, details); list.append(item);
+    details.append(sourceLabel, source); item.append(name, details); list.append(item);
   }
 }
 

@@ -41,8 +41,8 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | Use | File | Source |
 | --- | --- | --- |
 | Contour refinement, boundary tool, hand exclusion | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
-| Anime-style hand detection | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
-| Hand contour refinement | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
+| Anime-style hand detection | ONNX | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection) |
+| Hand contour refinement | safetensors | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 ### Prepare yourself
 
