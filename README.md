@@ -48,16 +48,25 @@ python -m pip install -r requirements.txt
 
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
-| 基本の性器検出 | 互換性のある`.onnx` | **参照**から指定します。1280入力、43チャンネルの検出出力、32チャンネルのプロトタイプ出力に対応しています。 |
-| NTD11補助検出 | `ntd11_anime_nsfw_segm_v5-variant1.onnx` | [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456)から取得し、**参照**から指定します。 |
+| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [固定配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)から取得し、**参照**から指定します。変換は不要です。 |
+| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | `sensitive_detect_v07.pt`を変換したONNX | [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)から取得し、変換後のONNXを**参照**から指定します。 |
+
+NTD11の変換:
+
+```powershell
+python -m pip install "ultralytics==8.4.75"
+yolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+```
 
 Sensitiveの変換:
 
 ```powershell
-python -m pip install ultralytics
-yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu
+python -m pip install "ultralytics==8.4.75"
+yolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
+
+変換すると同じフォルダーに同名の`.onnx`が生成されます。設定でそのONNXを指定し、モデルの状態が有効であることを確認してから検出を実行してください。
 
 モデルの配布条件・ライセンスは、各配布元と[第三者ライセンス・モデル配布元](THIRD_PARTY_NOTICES.md)を確認してください。
 

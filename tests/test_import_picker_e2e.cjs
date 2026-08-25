@@ -395,7 +395,7 @@ async function assertConnectionStatusLayout(page, width, height, language) {
   assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden), true, `clearing status hides the header status at ${width}x${height} (${language})`);
 }
 
-async function assertSettingsDialogLayout(page, width, height, language) {
+async function assertSettingsDialogLayout(page, width, height, language, modelDownloadRequests) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
   await page.locator("#settingsTabGeneral").click();
@@ -417,16 +417,17 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   await page.locator("#settingsTabModels").click();
   const precisionTitle = language === "ja" ? "輪郭を補正" : "Refine contours";
   assert.equal(await page.locator("#settingsPrecisionTitle").textContent(), precisionTitle, `contour refinement has the concise title at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsHandTitle").textContent(), language === "ja" ? "手 (anime_hand_detection)" : "Hands (anime_hand_detection)", `hand detector label identifies its model at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsHandSegmentationTitle").textContent(), language === "ja" ? "手 (HandSegNet anime SDXL)" : "Hands (HandSegNet anime SDXL)", `hand segmentation label identifies its model at ${width}x${height} (${language})`);
   const expectedPathPlaceholder = language === "ja" ? "パスを指定してください" : "Specify a path";
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
   const helpExpectations = {
-    target: [language === "ja" ? "基本モデル" : "Primary model", ".onnx", ""],
-    ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.com/models/1313556?modelVersionId=2350456"],
+    target: ["01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx"],
+    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
-    samType: ["Meta Segment Anything (SAM) vit_b", "sam_vit_b_01ec64.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
     handSegmentation: ["HandSegNet anime SDXL", "handsegnet_vit_b_best.safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a"],
   };
@@ -436,14 +437,14 @@ async function assertSettingsDialogLayout(page, width, height, language) {
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
     if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
-      ? "1280入力、rank-3の43チャンネル予測出力とrank-4の32チャンネルプロトタイプ出力を持つONNXを指定します。"
-      : "Use a 1280-input ONNX with rank-3 43-channel predictions and rank-4 32-channel prototypes.", `${key} help states the neutral file contract at ${width}x${height} (${language})`);
+      ? "固定配布元のnsfw-anime-xl-x1280.onnxを指定します。変換は不要です。"
+      : "Use nsfw-anime-xl-x1280.onnx from the fixed source. No conversion is required.", `${key} help states the fixed model contract at ${width}x${height} (${language})`);
     if (href) {
       assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
       assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
     } else assert.equal(await page.locator("#modelHelpSource").isVisible(), false, `${key} help hides an unavailable source at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
-    if (key === "sensitive") {
+    if (key === "ntd11" || key === "sensitive") {
       const helpCommandLayout = await page.locator("#modelHelpDialog").evaluate((dialog) => {
         const pre = dialog.querySelector("#modelHelpCommand"); const button = dialog.querySelector("#modelHelpCopy");
         const preBox = pre.getBoundingClientRect(); const buttonBox = button.getBoundingClientRect();
@@ -455,9 +456,9 @@ async function assertSettingsDialogLayout(page, width, height, language) {
           fits: dialog.scrollWidth <= dialog.clientWidth,
         };
       });
-      assert.equal(helpCommandLayout.buttonBelow && helpCommandLayout.noOverlap && helpCommandLayout.hit && helpCommandLayout.actionsFollowPre && helpCommandLayout.fits, true, `help command and copy control are separate and usable at ${width}x${height} (${language})`);
+      assert.equal(helpCommandLayout.buttonBelow && helpCommandLayout.noOverlap && helpCommandLayout.hit && helpCommandLayout.actionsFollowPre && helpCommandLayout.fits, true, `${key} help command and copy control are separate and usable at ${width}x${height} (${language})`);
       await page.locator("#modelHelpCopy").click();
-      assert.match(await page.locator("#modelHelpCopyResult").textContent(), /コピーしました|Copied/, `Sensitive help command can be copied at ${width}x${height} (${language})`);
+      assert.match(await page.locator("#modelHelpCopyResult").textContent(), /コピーしました|Copied/, `${key} help command can be copied at ${width}x${height} (${language})`);
     }
     await page.locator("#modelHelpCloseButton").click();
   }
@@ -493,17 +494,47 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   })), true, `download source links own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
   assert.equal(await allDownload.evaluate((button) => document.activeElement === button), true, `closing download confirmation restores focus at ${width}x${height} (${language})`);
+  const targetDownload = page.locator('[data-model-download="target"]');
+  const requestsBeforePreparation = modelDownloadRequests.length;
+  await targetDownload.scrollIntoViewIfNeeded(); await targetDownload.click();
+  assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
+    ? "基本モデルは固定配布元からnsfw-anime-xl-x1280.onnxをそのまま取得し、「参照」から指定してください。変換は不要です。"
+    : "Download nsfw-anime-xl-x1280.onnx directly from the fixed source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `primary model opens the preparation dialog at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx", `primary model keeps its pinned source link at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
+  for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
   const ntd11Download = page.locator('[data-model-download="ntd11"]');
   await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
+  const ntdCommand = language === "ja"
+    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意の性器検出モデルです。配布元から animeNSFWDetection_v50Variant1.zip を取得・展開し、ntd11_anime_nsfw_segm_v5-variant1.onnx を「参照」から指定してください。"
-    : "NTD11 is an optional genital detector that supplements areas missed by the primary model. Download and extract animeNSFWDetection_v50Variant1.zip from the source, then select ntd11_anime_nsfw_segm_v5-variant1.onnx with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。"
+    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
-  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", `NTD11 download keeps its source link at ${width}x${height} (${language})`);
-  assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `NTD11 download has no conversion command at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556?modelVersionId=2350456", `NTD11 download keeps its source link at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadCommand").textContent(), ntdCommand, `NTD11 download shows its conversion command at ${width}x${height} (${language})`);
+  for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector} at ${width}x${height} (${language})`);
+  await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
+  await page.locator("#modelDownloadCopy").click();
+  assert.equal(await page.evaluate(() => window.__copiedCommand), ntdCommand, `NTD11 copies its exact command at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
   const sensitiveDownload = page.locator('[data-model-download="sensitive"]');
   await sensitiveDownload.scrollIntoViewIfNeeded(); await sensitiveDownload.click();
+  const sensitiveCommand = language === "ja"
+    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\sensitive_detect_v07.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
+  assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
+    ? "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からsensitive_detect_v07.ptを取得し、ONNXへ変換して、生成した.onnxを「参照」から指定してください。"
+    : "Sensitive is an optional model that supplements areas missed by the primary model. Get sensitive_detect_v07.pt from the source, convert it to ONNX, then select the generated .onnx file with Browse.", `Sensitive download explains preparation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadCommand").textContent(), sensitiveCommand, `Sensitive download shows its conversion command at ${width}x${height} (${language})`);
+  for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `Sensitive hides ${selector} at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadCopy").click();
+  assert.equal(await page.evaluate(() => window.__copiedCommand), sensitiveCommand, `Sensitive copies its exact command at ${width}x${height} (${language})`);
+  assert.equal(modelDownloadRequests.length, requestsBeforePreparation, `preparation dialogs make no API requests at ${width}x${height} (${language})`);
   const downloadCommandLayout = await page.locator("#modelDownloadDialog").evaluate((dialog) => {
     const pre = dialog.querySelector("#modelDownloadCommand"); const button = dialog.querySelector("#modelDownloadCopy");
     const preBox = pre.getBoundingClientRect(); const buttonBox = button.getBoundingClientRect();
@@ -517,9 +548,12 @@ async function assertSettingsDialogLayout(page, width, height, language) {
   });
   assert.equal(downloadCommandLayout.buttonBelow && downloadCommandLayout.noOverlap && downloadCommandLayout.hit && downloadCommandLayout.actionsFollowPre && downloadCommandLayout.fits, true, `download command and copy control are separate and usable at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
-  const samHelp = page.locator('[data-model-help="samType"]');
-  await samHelp.scrollIntoViewIfNeeded();
-  assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
+  await page.locator('[data-model-download="sam"]').click();
+  assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルをダウンロード" : "Download model", `supported model restores the download title at ${width}x${height} (${language})`);
+  for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector} at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
+  assert.equal(await page.locator('[data-model-help="samType"]').count(), 0, `SAM variants have no separate help control at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsSamVariants legend").count(), 0, `SAM variants omit the redundant heading at ${width}x${height} (${language})`);
   const handTrack = page.locator("#settingsHandCard .model-switch-track");
   if (!await page.locator("#settingsHandToggle").isChecked()) await handTrack.click();
   await page.waitForFunction(() => !document.querySelector("#settingsHandSegmentationToggle").disabled);
@@ -760,8 +794,8 @@ async function main() {
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Unknown VRAM"));
     assert.doesNotMatch(await page.locator("#settingsGpuDevice").textContent(), /VRAM: - GB/, "an unknown VRAM value omits the VRAM fragment");
-    await page.locator('[data-model-help="samType"]').click();
-    assert.equal(await page.locator("#modelHelpFile").textContent(), "sam_vit_l_0b3195.pth", "SAM help follows the selected model type");
+    await page.locator('[data-model-help="precision"]').click();
+    assert.equal(await page.locator("#modelHelpSamTable").isVisible(), true, "contour help includes the SAM type comparison");
     await page.locator("#modelHelpCloseButton").click();
     const targetBeforeCancel = await page.locator("#settingsTargetModel").inputValue();
     const statusBeforeCancel = await page.locator("#settingsResult").textContent();
@@ -770,25 +804,31 @@ async function main() {
     await cancelResponse;
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
     assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
-    assert.equal(await page.locator("[data-model-download]").count(), 6, "only downloadable models and the section expose download actions");
+    assert.equal(await page.locator("[data-model-download]").count(), 7, "model preparation and downloadable models expose their actions");
+    const requestsBeforeModelPreparation = modelDownloadRequests.length;
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意の性器検出モデルです。配布元から animeNSFWDetection_v50Variant1.zip を取得・展開し、ntd11_anime_nsfw_segm_v5-variant1.onnx を「参照」から指定してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
-    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.com/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
-    assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, "NTD11 download does not show an unrelated conversion command");
+    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
+    for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "sensitive_detect_v07.pt を配布元から取得し、ONNXへ変換してください。", "Sensitive download message stays concise");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からsensitive_detect_v07.ptを取得し、ONNXへ変換して、生成した.onnxを「参照」から指定してください。", "Sensitive download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40", "Sensitive download links to its pinned source");
-    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu', "Sensitive download shows its conversion commands");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "Sensitive download shows its conversion commands");
     await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
     await page.locator("#modelDownloadCopy").click();
     assert.match(await page.locator("#modelDownloadCopyResult").textContent(), /コピーしました|Copied/, "conversion command copy reports success locally");
     assert.match(await page.evaluate(() => window.__copiedCommand), /yolo export/, "conversion command copy uses the Clipboard API");
+    assert.equal(modelDownloadRequests.length, requestsBeforeModelPreparation, "preparation dialogs make no download API requests");
     assert.doesNotMatch(`${await page.locator("#modelDownloadMessage").textContent()} ${await page.locator("#modelDownloadStatus").textContent()}`, /MIT|ライセンスのまま|変換済みONNX|already converted/i, "Sensitive download omits implementation and license rationale");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sam"]').click();
+    assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルをダウンロード", "supported model restores the download title");
+    for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector}`);
     assert.equal(modelDownloadRequests.length, 0, "opening a download confirmation does not start a request");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "individual confirmation has one semantic item");
     assert.equal(await page.locator("#modelDownloadItems code").textContent(), "models\\sam_vit_l_0b3195.pth", "individual confirmation shows the full relative destination");
@@ -1016,10 +1056,10 @@ async function main() {
     });
     assert.equal(legacyDraftManualExclusion, false, "a legacy draft inherits the configured manual-exclusion default");
     await assertDesktopLayout(page, 1024, 768);
-    await assertSettingsDialogLayout(page, 1024, 768, "ja");
+    await assertSettingsDialogLayout(page, 1024, 768, "ja", modelDownloadRequests);
     await page.evaluate(() => loadTranslations("en"));
     await assertDesktopLayout(page, 1920, 1080);
-    await assertSettingsDialogLayout(page, 1920, 1080, "en");
+    await assertSettingsDialogLayout(page, 1920, 1080, "en", modelDownloadRequests);
     await page.evaluate(() => loadTranslations("ja"));
     await page.setViewportSize({ width: 1024, height: 768 });
     await page.locator("#settingsButton").click();
