@@ -3273,7 +3273,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
 
-    def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
+    def test_high_precision_refinement_drops_all_targets_when_sam_is_incompatible(self):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
@@ -3287,9 +3287,70 @@ class MozarieTests(unittest.TestCase):
             mask = np.zeros((12, 12), dtype=np.uint8); mask[3:9, 3:9] = 255
             segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "target"}
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
-                refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
-            self.assertTrue(np.array_equal(refined["mask"], mask))
-            self.assertEqual(refined["refinement"], "sam_fallback")
+                refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), [segment])
+            self.assertEqual(refined, [])
+
+    def test_high_precision_refinement_keeps_non_targets_and_drops_only_failed_targets(self):
+        state = self.new_state()
+        source = np.zeros((12, 12), dtype=np.uint8); source[2:10, 2:10] = 255
+        good = source.astype(bool); good[2:4, 2:4] = False
+        bad = np.zeros_like(good)
+        predictor = Mock()
+        predictor.predict.side_effect = [
+            (np.asarray([good]), np.asarray([0.8]), None),
+            (np.asarray([bad]), np.asarray([0.99]), None),
+        ]
+        non_target = {"class_name": "__hand_exclusion__", "mask": np.ones((12, 12), dtype=np.uint8), "source": "hand_exclusion"}
+        segments = [
+            non_target,
+            {"class_name": "penis", "mask": source.copy(), "confidence": 0.8, "source": "target"},
+            {"class_name": "pussy", "mask": source.copy(), "confidence": 0.8, "source": "target"},
+        ]
+        refined = state._high_precision_segments_with_predictor(np.zeros((12, 12, 3), dtype=np.uint8), segments, predictor)
+        self.assertEqual(len(refined), 2)
+        self.assertIs(refined[0], non_target)
+        self.assertEqual(refined[1]["class_name"], "penis")
+        self.assertEqual(refined[1]["refinement"], "sam_high_precision")
+
+    def test_high_precision_refinement_drops_target_without_sam_prompt(self):
+        state = self.new_state()
+        source = np.zeros((12, 12), dtype=np.uint8); source[3:9, 3:9] = 255
+        segment = {"class_name": "penis", "mask": source, "confidence": 0.8, "source": "target"}
+        non_target = {"class_name": "__hand_exclusion__", "image_exclusions": {}}
+        predictor = Mock()
+        with patch.object(detection_module, "sam_refinement_prompts", return_value=(
+            np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.int32),
+        )):
+            refined = state._high_precision_segments_with_predictor(
+                np.zeros((12, 12, 3), dtype=np.uint8), [segment, non_target], predictor
+            )
+        self.assertEqual(refined, [non_target])
+        predictor.predict.assert_not_called()
+
+    def test_high_precision_detection_emits_no_candidates_when_all_targets_fail(self):
+        class FakePredictor:
+            def predict(self, **_kwargs):
+                masks = np.zeros((1, 12, 12), dtype=bool)
+                masks[0, :2, :2] = True
+                return masks, np.asarray([0.99]), None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            target_mask = np.zeros((12, 12), dtype=np.uint8); target_mask[3:9, 3:9] = 255
+            segments = [
+                {"class_name": "penis", "mask": target_mask.copy(), "confidence": 0.8, "source": "target"},
+                {"class_name": "pussy", "mask": target_mask.copy(), "confidence": 0.8, "source": "target"},
+            ]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_sam_predictor_for", return_value=FakePredictor()
+            ):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            self.assertEqual(candidates, [])
+            self.assertEqual(list((state.cache_dir / record.image_id).glob(".mozarie-pending-*")), [])
 
     def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
         state = self.new_state()

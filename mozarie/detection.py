@@ -342,7 +342,7 @@ class DetectionMixin:
     def _high_precision_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Refine detector regions with semantic SAM prompts, keeping weak results untouched."""
+        """Keep target regions only when semantic SAM refinement succeeds."""
         if not any(segment.get("class_name") in TARGET_CLASSES for segment in segments):
             return segments
         with self.sam_lock:
@@ -352,55 +352,56 @@ class DetectionMixin:
     def _high_precision_segments_with_predictor(
         self, rgb: np.ndarray, segments: list[dict[str, Any]], predictor: Any,
     ) -> list[dict[str, Any]]:
+        refined_segments: list[dict[str, Any]] = []
         for segment in segments:
-                if segment.get("class_name") not in TARGET_CLASSES:
-                    continue
-                source_mask = (np.asarray(segment.get("_detector_mask", segment["mask"])) > 0).astype(np.uint8)
-                hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
-                coordinates = np.argwhere(source_mask > 0)
-                if not len(coordinates):
-                    continue
-                top, left = coordinates.min(axis=0)
-                bottom, right = coordinates.max(axis=0) + 1
-                height, width = source_mask.shape
-                padding = max(2, int(max(bottom - top, right - left) * 0.05))
-                roi = (max(0, int(left - padding)), max(0, int(top - padding)),
-                       min(width, int(right + padding)), min(height, int(bottom + padding)))
-                prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
-                if not len(prompt_points):
-                    segment["refinement"] = "sam_fallback"
-                    continue
-                masks, scores, logits = predictor.predict(
-                    point_coords=prompt_points,
-                    point_labels=labels,
-                    box=np.asarray(roi, dtype=np.float32),
-                    multimask_output=True,
+            if segment.get("class_name") not in TARGET_CLASSES:
+                refined_segments.append(segment)
+                continue
+            source_mask = (np.asarray(segment.get("_detector_mask", segment["mask"])) > 0).astype(np.uint8)
+            hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
+            coordinates = np.argwhere(source_mask > 0)
+            if not len(coordinates):
+                continue
+            top, left = coordinates.min(axis=0)
+            bottom, right = coordinates.max(axis=0) + 1
+            height, width = source_mask.shape
+            padding = max(2, int(max(bottom - top, right - left) * 0.05))
+            roi = (max(0, int(left - padding)), max(0, int(top - padding)),
+                   min(width, int(right + padding)), min(height, int(bottom + padding)))
+            prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
+            if not len(prompt_points):
+                continue
+            masks, scores, logits = predictor.predict(
+                point_coords=prompt_points,
+                point_labels=labels,
+                box=np.asarray(roi, dtype=np.float32),
+                multimask_output=True,
+            )
+            clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
+            selected = select_semantic_sam_mask(clipped_masks, scores, source_mask, hand_mask, prompt_points, labels)
+            if selected is None:
+                continue
+            refined, selected_index = selected
+            hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
+            if hand_overlap and logits is not None and len(logits) > selected_index:
+                retry_masks, retry_scores, _ = predictor.predict(
+                    point_coords=prompt_points, point_labels=labels, box=np.asarray(roi, dtype=np.float32),
+                    mask_input=np.asarray(logits[selected_index:selected_index + 1]), multimask_output=False,
                 )
-                clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
-                selected = select_semantic_sam_mask(clipped_masks, scores, source_mask, hand_mask, prompt_points, labels)
-                if selected is None:
-                    segment["refinement"] = "sam_fallback"
-                    continue
-                refined, selected_index = selected
-                hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
-                if hand_overlap and logits is not None and len(logits) > selected_index:
-                    retry_masks, retry_scores, _ = predictor.predict(
-                        point_coords=prompt_points, point_labels=labels, box=np.asarray(roi, dtype=np.float32),
-                        mask_input=np.asarray(logits[selected_index:selected_index + 1]), multimask_output=False,
-                    )
-                    retry = select_semantic_sam_mask(np.asarray([clip_mask_to_roi(mask, roi) for mask in retry_masks]), retry_scores, source_mask, hand_mask, prompt_points, labels)
-                    if retry is not None:
-                        retry_mask = retry[0]
-                        retry_hand = int(np.count_nonzero((retry_mask > 0) & (hand_mask > 0)))
-                        source_area = max(1, int(np.count_nonzero(source_mask)))
-                        retained = int(np.count_nonzero((refined > 0) & (source_mask > 0))) / source_area
-                        retry_retained = int(np.count_nonzero((retry_mask > 0) & (source_mask > 0))) / source_area
-                        if retry_hand < hand_overlap and retry_retained >= retained and retry_retained >= 0.50:
-                            refined = retry_mask
-                segment["mask"] = refined
-                segment["_apply_mask"] = refined
-                segment["refinement"] = "sam_high_precision"
-        return segments
+                retry = select_semantic_sam_mask(np.asarray([clip_mask_to_roi(mask, roi) for mask in retry_masks]), retry_scores, source_mask, hand_mask, prompt_points, labels)
+                if retry is not None:
+                    retry_mask = retry[0]
+                    retry_hand = int(np.count_nonzero((retry_mask > 0) & (hand_mask > 0)))
+                    source_area = max(1, int(np.count_nonzero(source_mask)))
+                    retained = int(np.count_nonzero((refined > 0) & (source_mask > 0))) / source_area
+                    retry_retained = int(np.count_nonzero((retry_mask > 0) & (source_mask > 0))) / source_area
+                    if retry_hand < hand_overlap and retry_retained >= retained and retry_retained >= 0.50:
+                        refined = retry_mask
+            segment["mask"] = refined
+            segment["_apply_mask"] = refined
+            segment["refinement"] = "sam_high_precision"
+            refined_segments.append(segment)
+        return refined_segments
 
     def _detect_image(
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
