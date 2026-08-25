@@ -425,7 +425,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   }
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx"],
-    ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "animeNSFWDetection_v50Variant1.zip → ntd11_anime_nsfw_segm_v5-variant1.pt → ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
+    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
@@ -508,11 +508,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   const ntd11Download = page.locator('[data-model-download="ntd11"]');
   await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
   const ntdCommand = language === "ja"
-    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたntd11_anime_nsfw_segm_v5-variant1.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
-    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\ntd11_anime_nsfw_segm_v5-variant1.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
+    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redでv5.0-variant1 ZIPをダウンロード・展開し、ntd11_anime_nsfw_segm_v5-variant1.ptをONNXへ変換して、生成した.onnxを「参照」から指定してください。"
-    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract the v5.0-variant1 ZIP from Civitai.red, convert ntd11_anime_nsfw_segm_v5-variant1.pt to ONNX, then select the generated .onnx file with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。"
+    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556?modelVersionId=2350456", `NTD11 download keeps its source link at ${width}x${height} (${language})`);
@@ -809,10 +809,10 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redでv5.0-variant1 ZIPをダウンロード・展開し、ntd11_anime_nsfw_segm_v5-variant1.ptをONNXへ変換して、生成した.onnxを「参照」から指定してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
     assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556?modelVersionId=2350456", "NTD11 download links to its source");
-    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたntd11_anime_nsfw_segm_v5-variant1.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();

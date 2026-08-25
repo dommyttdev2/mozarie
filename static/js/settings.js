@@ -447,7 +447,7 @@ const MODEL_DOWNLOAD_INFO = {
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
   sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", target: "models\\sam_vit_l_0b3195.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth" },
   sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", target: "models\\sam_vit_h_4b8939.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", target: "animeNSFWDetection_v50Variant1.zip → ntd11_anime_nsfw_segm_v5-variant1.pt → ntd11_anime_nsfw_segm_v5-variant1.onnx", source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", target: { ja: "NTD11のZIP → .pt → .onnx", en: "NTD11 ZIP → .pt → .onnx" }, source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
   sensitive: { name: "sugarknight/sensitive-detect / sensitive_detect_v07", target: "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40" },
 };
 
@@ -459,7 +459,7 @@ function renderModelDownloadItems(keys) {
     const name = document.createElement("strong"); name.textContent = info.name;
     const details = document.createElement("dl"); details.className = "model-download-details";
     const targetLabel = document.createElement("dt"); targetLabel.textContent = t("modelDownload.destination");
-    const target = document.createElement("dd"); const code = document.createElement("code"); code.textContent = info.target; target.append(code);
+    const target = document.createElement("dd"); const code = document.createElement("code"); code.textContent = typeof info.target === "object" ? info.target[$("#settingsLanguage")?.value || "ja"] : info.target; target.append(code);
     const sourceLabel = document.createElement("dt"); sourceLabel.textContent = t("modelDownload.source");
     const source = document.createElement("dd"); const link = document.createElement("a"); link.href = info.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = info.source; source.append(link);
     details.append(targetLabel, target, sourceLabel, source); item.append(name, details); list.append(item);
@@ -477,7 +477,7 @@ async function refreshModelDownload() {
 function modelPreparationCommand(key) {
   const english = $("#settingsLanguage")?.value === "en";
   const path = key === "ntd11"
-    ? (english ? "path\\to\\downloaded\\ntd11_anime_nsfw_segm_v5-variant1.pt" : "ダウンロードしたntd11_anime_nsfw_segm_v5-variant1.ptのパス")
+    ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
     : (english ? "path\\to\\downloaded\\sensitive_detect_v07.pt" : "ダウンロードしたsensitive_detect_v07.ptのパス");
   return `python -m pip install "ultralytics==8.4.75"\nyolo export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
 }

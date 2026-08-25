@@ -295,7 +295,7 @@
   "modelDownload.source": "Source",
   "modelDownload.security": "Size and SHA-256 are checked. This does not guarantee safety.",
   "modelDownload.target": "Download nsfw-anime-xl-x1280.onnx directly from the fixed source, then select it with Browse. No conversion is required.",
-  "modelDownload.ntd11": "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract the v5.0-variant1 ZIP from Civitai.red, convert ntd11_anime_nsfw_segm_v5-variant1.pt to ONNX, then select the generated .onnx file with Browse.",
+  "modelDownload.ntd11": "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse.",
   "modelDownload.sensitive": "Sensitive is an optional model that supplements areas missed by the primary model. Get sensitive_detect_v07.pt from the source, convert it to ONNX, then select the generated .onnx file with Browse.",
   "modelDownload.sourceLink": "Open pinned source",
   "settings.samModel": "Outline extraction model",

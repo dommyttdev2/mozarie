@@ -287,7 +287,7 @@
   "modelDownload.source": "配布元",
   "modelDownload.security": "サイズとSHA-256を確認します。安全性を保証するものではありません。",
   "modelDownload.target": "基本モデルは固定配布元からnsfw-anime-xl-x1280.onnxをそのまま取得し、「参照」から指定してください。変換は不要です。",
-  "modelDownload.ntd11": "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redでv5.0-variant1 ZIPをダウンロード・展開し、ntd11_anime_nsfw_segm_v5-variant1.ptをONNXへ変換して、生成した.onnxを「参照」から指定してください。",
+  "modelDownload.ntd11": "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。",
   "modelDownload.sensitive": "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からsensitive_detect_v07.ptを取得し、ONNXへ変換して、生成した.onnxを「参照」から指定してください。",
   "modelDownload.sourceLink": "固定配布元を開く",
   "settings.precisionModel": "輪郭を補正",
