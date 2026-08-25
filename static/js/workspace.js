@@ -3,6 +3,32 @@
 state.workspaceDraftChains = new Map();
 state.workspaceDraftTimers = new Map();
 
+const DIRECTORY_DB = "mozarie-directory-catalogs";
+async function directoryCatalogStore() {
+  if (!window.indexedDB) return null;
+  return new Promise((resolve) => {
+    const request = indexedDB.open(DIRECTORY_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("directories", { keyPath: "catalogId" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+}
+async function catalogForDirectoryHandle(handle) {
+  const db = await directoryCatalogStore();
+  if (db) {
+    const rows = await new Promise((resolve) => { const request = db.transaction("directories").objectStore("directories").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
+    for (const row of rows) {
+      try { if (await row.handle?.isSameEntry?.(handle)) { db.close(); return row.catalogId; } } catch { /* revoked handles are ignored */ }
+    }
+    db.close();
+  }
+  const created = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({}) });
+  if (!db || !created.catalogId) return created.catalogId || null;
+  const writeDb = await directoryCatalogStore();
+  if (writeDb) { try { writeDb.transaction("directories", "readwrite").objectStore("directories").put({ catalogId: created.catalogId, handle }); } catch { /* persistence remains optional */ } writeDb.close(); }
+  return created.catalogId;
+}
+
 function workspaceDraftPayload(draft) {
   if (!draft) return { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateRevision: 0 };
   return {

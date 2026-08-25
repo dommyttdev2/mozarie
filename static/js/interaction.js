@@ -313,7 +313,7 @@ async function importFiles(files) {
         if (!isSupportedImageFile(file)) continue;
         const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.webkitRelativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
-        const data = await importSingleFile(entry, clientKey);
+        const data = await importSingleFile(entry, clientKey, session.catalogId);
         const result = { entry, clientKey, data };
         // Keep source access for each committed upload, including a later
         // cancellation or an unrelated upload failure.
@@ -335,7 +335,7 @@ async function importFiles(files) {
     }
     if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
     const latest = await api("/api/images");
-    state.images = latest.images;
+    state.workspacePersistence = latest.workspace === true; state.images = latest.images;
     if (session.cancelled) {
       pruneSourceAccess(); renderCatalogViews();
       setStatusKey("status.importCancelled", { completed: session.completed });
@@ -345,14 +345,14 @@ async function importFiles(files) {
   } catch (error) {
     try {
       const latest = await api("/api/images");
-      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.images = latest.images; renderCatalogViews(); }
+      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspace === true; state.images = latest.images; renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
     if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
   }
   finally { finishImportSession(session); }
 }
 
-async function importSingleFile(entry, clientKey) {
+async function importSingleFile(entry, clientKey, catalogId = null) {
   const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   const response = await fetch("/api/import/file", {
     method: "POST",
@@ -362,6 +362,7 @@ async function importSingleFile(entry, clientKey) {
       "X-Mozarie-Name": encodeURIComponent(entry.file.name),
       "X-Mozarie-Relative-Path": encodeURIComponent(entry.relativePath),
       "X-Mozarie-Client-Key": encodeURIComponent(clientKey),
+      ...(catalogId ? { "X-Mozarie-Catalog-Id": encodeURIComponent(catalogId) } : {}),
     },
     body: entry.file,
   });
@@ -376,7 +377,7 @@ async function importSingleFile(entry, clientKey) {
 
 function beginImportSession() {
   if (isBusy() || state.importing) return null;
-  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0 };
+  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0, catalogId: null };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
@@ -407,6 +408,8 @@ async function importFileHandles(handles, session = beginImportSession()) {
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
+  session.catalogId = await catalogForDirectoryHandle(directoryHandle);
+  if (!session.catalogId) throw new Error(t("error.requestFailed"));
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
   async function collect(handle, relativePath = "", parentHandle = null) {

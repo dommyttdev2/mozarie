@@ -319,6 +319,7 @@ class JobsMixin:
             exclude_masks: list[np.ndarray] = []
             forced_exclude_masks: list[np.ndarray] = []
             for candidate in candidates:
+                self.materialize_candidate_mask(candidate, image_id)
                 try:
                     with Image.open(candidate.mask_path) as mask_image:
                         mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)

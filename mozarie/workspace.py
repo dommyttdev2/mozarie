@@ -23,7 +23,7 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class WorkspaceStore:
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "workspaces.sqlite3"
@@ -42,7 +42,7 @@ class WorkspaceStore:
                 CREATE TABLE IF NOT EXISTS images (
                     catalog_id TEXT NOT NULL REFERENCES catalogs(catalog_id) ON DELETE CASCADE,
                     relative_path TEXT NOT NULL, image_id TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, source_hash TEXT NOT NULL DEFAULT '',
                     hidden INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0,
                     candidate_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
                     PRIMARY KEY(catalog_id, relative_path)
@@ -66,6 +66,12 @@ class WorkspaceStore:
                     updated_at INTEGER NOT NULL
                 );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(images)")}
+            if "source_hash" not in columns:
+                db.execute("ALTER TABLE images ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
+            version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if version_row and int(version_row["value"]) > self.VERSION:
+                raise RuntimeError("workspace database is newer than this Mozarie version")
             db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
 
     def _connect(self) -> sqlite3.Connection:
@@ -91,7 +97,24 @@ class WorkspaceStore:
             db.execute("INSERT INTO catalogs VALUES(?,?,?,?)", (catalog_id, identity, now, now))
             return catalog_id
 
-    def reconcile_images(self, catalog_id: str, records: list[Any]) -> dict[str, dict[str, Any]]:
+    def ensure_catalog(self, catalog_id: str | None = None) -> str:
+        """Create (or validate) an opaque browser catalogue identity."""
+        if catalog_id is not None and (len(catalog_id) != 32 or any(char not in "0123456789abcdef" for char in catalog_id)):
+            raise ValueError("invalid catalog id")
+        catalog_id = catalog_id or uuid.uuid4().hex
+        identity = f"browser:{catalog_id}"
+        now = time.time_ns()
+        with self._lock, self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO catalogs(catalog_id,identity_hash,created_at,updated_at) VALUES(?,?,?,?)", (catalog_id, identity, now, now))
+            return catalog_id
+
+    def unique_catalog_for_file(self, relative_path: str, source_hash: str) -> str | None:
+        if not source_hash: return None
+        with self._connect() as db:
+            rows = db.execute("SELECT DISTINCT catalog_id FROM images WHERE relative_path=? AND source_hash=?", (relative_path, source_hash)).fetchall()
+        return str(rows[0]["catalog_id"]) if len(rows) == 1 else None
+
+    def reconcile_images(self, catalog_id: str, records: list[Any], source_hashes: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
         """Return durable state by relative path, clearing pixels on source change."""
         now = time.time_ns()
         result: dict[str, dict[str, Any]] = {}
@@ -100,16 +123,17 @@ class WorkspaceStore:
             try:
                 for record in records:
                     row = db.execute("SELECT * FROM images WHERE catalog_id=? AND relative_path=?", (catalog_id, record.relative_path)).fetchone()
+                    source_hash = (source_hashes or {}).get(record.relative_path, "")
                     if row is None:
                         image_id = uuid.uuid4().hex
-                        db.execute("INSERT INTO images(catalog_id,relative_path,image_id,size_bytes,mtime_ns,updated_at) VALUES(?,?,?,?,?,?)",
-                                   (catalog_id, record.relative_path, image_id, record.size_bytes, record.mtime_ns, now))
+                        db.execute("INSERT INTO images(catalog_id,relative_path,image_id,size_bytes,mtime_ns,source_hash,updated_at) VALUES(?,?,?,?,?,?,?)",
+                                   (catalog_id, record.relative_path, image_id, record.size_bytes, record.mtime_ns, source_hash, now))
                         result[record.relative_path] = {"image_id": image_id, "hidden": False, "reviewed": False, "revision": 0, "changed": False}
                         continue
-                    changed = int(row["size_bytes"]) != record.size_bytes or int(row["mtime_ns"]) != record.mtime_ns
+                    changed = (bool(source_hash) and row["source_hash"] != source_hash) or (not source_hash and (int(row["size_bytes"]) != record.size_bytes or int(row["mtime_ns"]) != record.mtime_ns))
                     if changed:
-                        db.execute("UPDATE images SET size_bytes=?,mtime_ns=?,reviewed=0,candidate_revision=0,updated_at=? WHERE image_id=?",
-                                   (record.size_bytes, record.mtime_ns, now, row["image_id"]))
+                        db.execute("UPDATE images SET size_bytes=?,mtime_ns=?,source_hash=?,reviewed=0,candidate_revision=0,updated_at=? WHERE image_id=?",
+                                   (record.size_bytes, record.mtime_ns, source_hash, now, row["image_id"]))
                         db.execute("DELETE FROM candidates WHERE image_id=?", (row["image_id"],))
                         db.execute("DELETE FROM manual_edits WHERE image_id=?", (row["image_id"],))
                     result[record.relative_path] = {"image_id": row["image_id"], "hidden": bool(row["hidden"]), "reviewed": False if changed else bool(row["reviewed"]), "revision": 0 if changed else int(row["candidate_revision"]), "changed": changed}
@@ -162,16 +186,19 @@ class WorkspaceStore:
             rows = db.execute("SELECT * FROM candidates WHERE image_id=? AND deleted=0", (image_id,)).fetchall()
         if not image: return 0, []
         if not rows: return int(image["candidate_revision"]), []
-        directory.mkdir(parents=True, exist_ok=True)
         candidates = []
         for row in rows:
             raw = row["mask_png"]
             if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n"): continue
             path = directory / f"{row['candidate_id']}.png"
-            try: path.write_bytes(raw)
-            except OSError: continue
             candidates.append(candidate_factory(row, path))
         return int(image["candidate_revision"]), candidates
+
+    def candidate_png(self, image_id: str, candidate_id: str) -> bytes | None:
+        with self._connect() as db:
+            row = db.execute("SELECT mask_png FROM candidates WHERE image_id=? AND candidate_id=? AND deleted=0", (image_id, candidate_id)).fetchone()
+        raw = row["mask_png"] if row else None
+        return raw if isinstance(raw, bytes) and raw.startswith(b"\x89PNG\r\n\x1a\n") else None
 
     def save_manual(self, image_id: str, payload: dict[str, Any], decoder: Any) -> None:
         add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))

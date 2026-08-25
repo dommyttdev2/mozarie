@@ -63,7 +63,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.catalog_id: str | None = None
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
-        self.import_lock = threading.Lock()
+        self.import_lock = threading.RLock()
         self.active_import_count = 0
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None

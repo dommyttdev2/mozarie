@@ -235,8 +235,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self._reject_unread_request(exc)
                 try:
                     with STATE.import_staging_gate:
-                        staged_path = self._read_binary_body_to_file()
+                        staged_path, source_hash = self._read_binary_body_to_file()
                         try:
+                            requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                            if requested_catalog and STATE.catalog_id != requested_catalog:
+                                STATE.activate_browser_catalog(requested_catalog)
+                            elif not STATE.catalog_id:
+                                candidate = STATE.workspace_store.unique_catalog_for_file(relative_path.replace("\\", "/"), source_hash)
+                                STATE.activate_browser_catalog(candidate)
                             _images, imported = STATE.import_image_file_for_api(
                                 staged_path,
                                 name=name,
@@ -244,6 +250,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                 client_key=client_key,
                                 include_images=False,
                                 transfer_active=True,
+                                source_hash=source_hash,
                             )
                         finally:
                             staged_path.unlink(missing_ok=True)
@@ -255,7 +262,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
-                self._json({"images": images})
+                self._json({"images": images, "workspace": True})
+            elif path == "/api/workspace/catalog":
+                self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId"))})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
@@ -426,7 +435,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             raise ClientError("JSONオブジェクトが必要です。")
         return payload
 
-    def _read_binary_body_to_file(self) -> Path:
+    def _read_binary_body_to_file(self) -> tuple[Path, str]:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None or not raw_length.isdigit():
             raise ClientError("リクエストサイズが不正です。")
@@ -437,6 +446,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         staging_dir.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         remaining = content_length
+        digest = hashlib.sha256()
         try:
             with tempfile.NamedTemporaryFile(dir=staging_dir, suffix=".upload.tmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
@@ -445,11 +455,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     if not chunk:
                         raise ClientError("画像データを最後まで読み込めません。")
                     handle.write(chunk)
+                    digest.update(chunk)
                     remaining -= len(chunk)
                 handle.flush()
             result = temporary_path
             temporary_path = None
-            return result
+            return result, digest.hexdigest()
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
