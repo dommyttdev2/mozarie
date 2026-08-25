@@ -49,7 +49,7 @@ python -m pip install -r requirements.txt
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
 | 基本の性器検出 | 配布元のONNX | [配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26)から取得し、**参照**から指定します。変換は不要です。 |
-| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
+| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
 
 NTD11の変換:

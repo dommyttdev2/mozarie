@@ -447,7 +447,7 @@ const MODEL_DOWNLOAD_INFO = {
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/models/1313556" },
   sensitive: { name: "sugarknight/sensitive-detect", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect" },
 };
 

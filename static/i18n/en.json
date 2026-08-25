@@ -296,7 +296,6 @@
   "modelDownload.target": "Get the primary model ONNX from the source, then select it with Browse. No conversion is required.",
   "modelDownload.ntd11": "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse.",
   "modelDownload.sensitive": "Sensitive is an optional model that supplements areas missed by the primary model. Get a Sensitive .pt file from the source, convert it to ONNX, then select it with Browse.",
-  "modelDownload.sourceLink": "Open pinned source",
   "settings.samModel": "Outline extraction model",
   "settings.samVariant.vitB": "Fast · Lower VRAM · 375 MB",
   "settings.samVariant.vitL": "Medium · Medium VRAM · 1.25 GB",
