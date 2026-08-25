@@ -16,11 +16,10 @@ Mozarie is distributed under the [MIT License](LICENSE). The following direct ru
 
 ## Model Weights
 
-No model weights are included in this repository. When the user explicitly chooses Download in Mozarie, SAM and hand-model files are fetched from the fixed sources below and accepted only after their recorded size and SHA-256 match. That check detects changes to the pinned download; it is not an absolute guarantee that a file is harmless. Downloads are not performed at startup or while detecting. The primary model is linked to a fixed file for manual download and selection; NTD11 remains user-supplied after conversion to ONNX. Their provenance, terms, license obligations, and permitted uses must be verified separately by the person who provides them.
+No model weights are included in this repository. When the user explicitly chooses Download in Mozarie, SAM and hand-model files are fetched from the fixed sources below and accepted only after their recorded size and SHA-256 match. That check detects changes to the pinned download; it is not an absolute guarantee that a file is harmless. Downloads are not performed at startup or while detecting. Primary models and NTD11 remain user-supplied ONNX files; their provenance, terms, license obligations, and permitted uses must be verified separately by the person who provides them.
 
 | Model | Pinned source | License / terms |
 | --- | --- | --- |
-| Primary model: `nsfw-anime-xl-x1280.onnx` | [01miku/anime-nsfw-segm-yolo26 at `1697d5d`](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · [direct download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) · 126,350,117 bytes · SHA-256 `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a` | Distribution page: MIT; ONNX metadata: AGPL-3.0 |
 | Anime hand detector ONNX | [deepghs/anime_hand_detection at `dba2c5b`](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) | Provider metadata: `openrail`; review provider terms |
 | SAM checkpoints | [Meta Segment Anything checkpoint source](https://github.com/facebookresearch/segment-anything#model-checkpoints) | Apache-2.0 |
 | HandSegNet anime SDXL | [pinned revision `77ff734`](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) | Apache-2.0 |

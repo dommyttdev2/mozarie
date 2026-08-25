@@ -161,7 +161,6 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .command-wrap .model-help-command { overflow-wrap: anywhere; }
 .copy-result { min-height: 1.2em; color: #9ae0c7; font-size: 12px; }
 .sam-variants { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
-.sam-variants legend { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; color: #c6ced6; font-size: 12px; }
 .sam-variant { display: grid; grid-template-columns: auto 44px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; padding: 7px 8px; border: 1px solid #3f4851; border-radius: 5px; color: #aeb8c2; cursor: pointer; }
 .sam-variant:has(input:checked) { border-color: #42a98f; background: #263d37; color: #e7f7f1; }
 .sam-variant.unacquired:not(:has(input:checked)) > :not(input, .sam-variant-name) { opacity: .68; }

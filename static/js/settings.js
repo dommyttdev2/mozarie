@@ -441,7 +441,7 @@ function setModelDownloadGuide(command = "") {
 }
 
 const MODEL_DOWNLOAD_INFO = {
-  target: { name: "01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", target: "nsfw-anime-xl-x1280.onnx", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx", size: "126,350,117 bytes (120.5 MiB)", sha256: "92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a", license: { ja: "MIT（配布ページ） / AGPL-3.0（ONNX内）", en: "MIT (distribution page) / AGPL-3.0 (inside the ONNX)" } },
+  target: { name: "01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", target: "nsfw-anime-xl-x1280.onnx", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx" },
   hand_detection: { name: "deepghs/anime_hand_detection / hand_detect_v1.0_s", target: "models\\ultralytics\\anime-hand-v1.0-s.onnx", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s" },
   hand_segmentation: { name: "HandSegNet anime SDXL", target: "models\\handsegnet\\handsegnet_vit_b_best.safetensors", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a" },
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
@@ -463,13 +463,6 @@ function renderModelDownloadItems(keys) {
     const sourceLabel = document.createElement("dt"); sourceLabel.textContent = t("modelDownload.source");
     const source = document.createElement("dd"); const link = document.createElement("a"); link.href = info.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = info.source; source.append(link);
     details.append(targetLabel, target, sourceLabel, source); item.append(name, details); list.append(item);
-    for (const [property, label] of [["size", "modelDownload.size"], ["sha256", "modelDownload.sha256"], ["license", "modelDownload.license"]]) {
-      if (!info[property]) continue;
-      const detailLabel = document.createElement("dt"); detailLabel.textContent = t(label);
-      const valueText = typeof info[property] === "object" ? info[property][$("#settingsLanguage")?.value || "ja"] : info[property];
-      const value = document.createElement("dd"); const code = document.createElement("code"); code.textContent = valueText; value.append(code);
-      details.append(detailLabel, value);
-    }
   }
 }
 

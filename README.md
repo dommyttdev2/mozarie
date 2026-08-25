@@ -48,7 +48,7 @@ python -m pip install -r requirements.txt
 
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
-| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [固定配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)（[直接ダウンロード](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)）からそのまま取得し、**参照**から指定します。変換は不要です。126,350,117 bytes（120.5 MiB）、SHA-256: `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a`。 |
+| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [固定配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)から取得し、**参照**から指定します。変換は不要です。 |
 | NTD11補助検出 | `animeNSFWDetection_v50Variant1.zip`内の`ntd11_anime_nsfw_segm_v5-variant1.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.red/models/1313556?modelVersionId=2350456)のv5.0-variant1 ZIPを取得・展開し、この`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | `sensitive_detect_v07.pt`を変換したONNX | [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)から取得し、変換後のONNXを**参照**から指定します。 |
 

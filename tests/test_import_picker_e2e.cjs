@@ -417,6 +417,8 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   await page.locator("#settingsTabModels").click();
   const precisionTitle = language === "ja" ? "輪郭を補正" : "Refine contours";
   assert.equal(await page.locator("#settingsPrecisionTitle").textContent(), precisionTitle, `contour refinement has the concise title at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsHandTitle").textContent(), language === "ja" ? "手 (anime_hand_detection)" : "Hands (anime_hand_detection)", `hand detector label identifies its model at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsHandSegmentationTitle").textContent(), language === "ja" ? "手 (HandSegNet anime SDXL)" : "Hands (HandSegNet anime SDXL)", `hand segmentation label identifies its model at ${width}x${height} (${language})`);
   const expectedPathPlaceholder = language === "ja" ? "パスを指定してください" : "Specify a path";
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
@@ -426,7 +428,6 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "animeNSFWDetection_v50Variant1.zip → ntd11_anime_nsfw_segm_v5-variant1.pt → ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
-    samType: ["Meta Segment Anything (SAM) vit_b", "sam_vit_b_01ec64.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
     handSegmentation: ["HandSegNet anime SDXL", "handsegnet_vit_b_best.safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a"],
   };
@@ -501,9 +502,6 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     : "Download nsfw-anime-xl-x1280.onnx directly from the fixed source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `primary model opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx", `primary model keeps its pinned source link at ${width}x${height} (${language})`);
-  assert.match(await page.locator("#modelDownloadItems").textContent(), /126,350,117 bytes \(120\.5 MiB\)/, `primary model shows its exact size at ${width}x${height} (${language})`);
-  assert.match(await page.locator("#modelDownloadItems").textContent(), /92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a/, `primary model shows its exact SHA-256 at ${width}x${height} (${language})`);
-  assert.match(await page.locator("#modelDownloadItems").textContent(), /MIT.*AGPL-3\.0/, `primary model shows its license notation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
@@ -554,9 +552,8 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルをダウンロード" : "Download model", `supported model restores the download title at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
-  const samHelp = page.locator('[data-model-help="samType"]');
-  await samHelp.scrollIntoViewIfNeeded();
-  assert.equal(await samHelp.evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, `SAM help owns its hit target at ${width}x${height} (${language})`);
+  assert.equal(await page.locator('[data-model-help="samType"]').count(), 0, `SAM variants have no separate help control at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#settingsSamVariants legend").count(), 0, `SAM variants omit the redundant heading at ${width}x${height} (${language})`);
   const handTrack = page.locator("#settingsHandCard .model-switch-track");
   if (!await page.locator("#settingsHandToggle").isChecked()) await handTrack.click();
   await page.waitForFunction(() => !document.querySelector("#settingsHandSegmentationToggle").disabled);
@@ -797,8 +794,8 @@ async function main() {
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Unknown VRAM"));
     assert.doesNotMatch(await page.locator("#settingsGpuDevice").textContent(), /VRAM: - GB/, "an unknown VRAM value omits the VRAM fragment");
-    await page.locator('[data-model-help="samType"]').click();
-    assert.equal(await page.locator("#modelHelpFile").textContent(), "sam_vit_l_0b3195.pth", "SAM help follows the selected model type");
+    await page.locator('[data-model-help="precision"]').click();
+    assert.equal(await page.locator("#modelHelpSamTable").isVisible(), true, "contour help includes the SAM type comparison");
     await page.locator("#modelHelpCloseButton").click();
     const targetBeforeCancel = await page.locator("#settingsTargetModel").inputValue();
     const statusBeforeCancel = await page.locator("#settingsResult").textContent();
