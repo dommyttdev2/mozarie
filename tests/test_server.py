@@ -2098,7 +2098,10 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.as_dict()["activeElapsed"], 30.0)
 
     def test_detection_maps_worker_gpu_memory_errors(self):
-        for message in ("out of memory", "failed to allocate memory", "bfcarena exhausted"):
+        for message in (
+            "out of memory", "failed to allocate memory", "bfcarena exhausted",
+            "Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!",
+        ):
             with self.subTest(message=message):
                 with tempfile.TemporaryDirectory() as directory:
                     source = Path(directory) / "source.png"
@@ -2112,6 +2115,46 @@ class MozarieTests(unittest.TestCase):
                         state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
                     self.assertEqual(state.job.state, "error")
                     self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+
+    def test_torch_oom_uses_effective_parallelism_and_never_exposes_runtime_text(self):
+        torch_oom = type("OutOfMemoryError", (RuntimeError,), {"__module__": "torch.cuda"})
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", parallelism=1)
+        with patch.object(state, "_discard_gpu_models_after_oom") as recover:
+            state._fail_job(torch_oom("Could not allocate tensor with 1073741824 bytes"))
+        self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+        self.assertEqual(state.job.params, {"parallelism": 1})
+        self.assertNotIn("1073741824", state.job.error)
+        self.assertIn("vit_b", state.job.error)
+        recover.assert_called_once_with()
+
+    def test_detection_records_effective_parallelism_for_oom_guidance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]; record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+            with patch.object(state, "_ensure_models", return_value=object()), \
+                 patch.object(state, "_detect_image", side_effect=RuntimeError("cuda out of memory")), \
+                 patch.object(state, "_discard_gpu_models_after_oom"):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 4)
+            self.assertEqual(state.job.parallelism, 1)
+            self.assertEqual(state.job.params, {"parallelism": 1})
+            self.assertNotIn("同時実行数を1に下げる", state.job.error)
+
+    def test_gpu_oom_discards_all_cached_models_once(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running")
+        state.models = object(); state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
+        with patch.object(state, "_release_gpu_cache") as cache:
+            state._fail_job(RuntimeError("cuda out of memory"))
+        self.assertIsNone(state.models)
+        self.assertIsNone(state.sam_predictor)
+        self.assertIsNone(state.hand_segmentation_predictor)
+        cache.assert_called_once_with(provider="gpu", gpu_device=0)
+
+    def test_sam_and_handseg_share_the_default_gpu_lock(self):
+        state = self.new_state()
+        self.assertIs(state.sam_lock, state.hand_segmentation_lock)
 
     def test_detection_reports_an_unsupported_gpu_architecture(self):
         state = self.new_state()
@@ -2150,6 +2193,16 @@ class MozarieTests(unittest.TestCase):
         state.invalidate_sam_image("current")
         state.sam_predictor.reset_image.assert_called_once_with()
         state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+
+    def test_sam_resets_handseg_embedding_before_setting_its_image(self):
+        state = self.new_state()
+        state.hand_segmentation_predictor = Mock(); state.hand_segmentation_image_id = "old"
+        record = Mock(image_id="new")
+        predictor = Mock(); predictor.set_image.return_value = None
+        state.sam_predictor = predictor
+        state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+        state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+        self.assertIsNone(state.hand_segmentation_image_id)
 
     def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
         state = self.new_state()
@@ -2234,6 +2287,20 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state.settings_store, "save", return_value=next_settings):
             state.update_settings(next_settings)
         self.assertIs(state.models, models)
+
+    def test_model_path_change_releases_old_gpu_resources(self):
+        state = self.new_state()
+        state.models = object(); sam = object(); handseg = object()
+        state.sam_predictor = sam; state.hand_segmentation_predictor = handseg
+        next_settings = copy.deepcopy(state.settings)
+        next_settings["models"]["target_segmentation"] = "another.onnx"
+        with patch.object(state.settings_store, "save", return_value=next_settings), \
+             patch.object(state, "_release_gpu_cache") as release:
+            state.update_settings(next_settings)
+        self.assertIsNone(state.models)
+        self.assertIs(state.sam_predictor, sam)
+        self.assertIs(state.hand_segmentation_predictor, handseg)
+        release.assert_called_once_with(provider="gpu", gpu_device=0)
 
     def test_sam_setting_change_keeps_detection_model_cache(self):
         state = self.new_state()
@@ -2322,6 +2389,20 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaises(ClientError) as raised:
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
+
+    def test_hand_segmentation_gpu_oom_is_not_misclassified_as_a_bad_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "handsegnet.safetensors"; checkpoint.write_bytes(b"checkpoint")
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            state = self.new_state(); state.settings["models"].update({"hand_segmentation": str(checkpoint), "provider": "gpu"})
+            model = Mock(); model.load_state_dict.side_effect = RuntimeError("Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!")
+            fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
+            fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
+            fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), \
+                 patch.object(catalog_module, "torch_module", return_value=fake_catalog_torch()):
+                with self.assertRaisesRegex(RuntimeError, "not enough GPU video memory"):
+                    state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
 
     def test_hand_segmentation_device_runtime_error_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2452,6 +2533,17 @@ class MozarieTests(unittest.TestCase):
             )
         generic.predict.assert_called_once()
         self.assertTrue(np.any(result[0]["_confirmed_hand"]))
+
+    def test_handseg_checkpoint_failure_falls_back_only_once_per_job(self):
+        state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        record = Mock(image_id="image")
+        genital = np.zeros((16, 16), dtype=np.uint8); genital[4:12, 4:12] = 255
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), \
+             patch.object(state, "_hand_segmentation_predictor_for", side_effect=ClientError("bad checkpoint", "hand_segmentation_invalid")) as specialist:
+            state._hand_refinement_context(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}])
+            state._hand_refinement_context(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}])
+        specialist.assert_called_once()
 
     def test_hand_segmentation_load_mismatch_falls_back_to_generic_hand_sam(self):
         with tempfile.TemporaryDirectory() as directory:

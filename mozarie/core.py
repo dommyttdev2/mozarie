@@ -227,6 +227,7 @@ class Job:
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
     active_count: int = 0
+    parallelism: int = 0
     preparing_models: int = 0
     remove_after_save: bool = False
 
@@ -249,6 +250,7 @@ class Job:
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
             "activeCount": self.active_count,
+            "parallelism": self.parallelism,
             "phase": "preparing_models" if self.preparing_models else "",
             "removeAfterSave": self.remove_after_save,
         }

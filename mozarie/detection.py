@@ -97,9 +97,11 @@ class DetectionMixin:
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
+        models: DetectionModels | None = None
         try:
             mode = str(self.settings["detection"]["mode"])
             worker_count = min(_read_detection_parallelism(parallelism), len(records))
+            self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                 self._cancel_job(job_generation, catalog_generation)
@@ -160,6 +162,10 @@ class DetectionMixin:
 
             failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
             if failures:
+                # ``claim_and_run`` closes over this variable. Clear the final
+                # Python reference before OOM recovery drops state-owned models.
+                if self._is_gpu_out_of_memory(failures[0][1]):
+                    models = None
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
                 return
             if control is not None and control.cancel_requested.is_set():
@@ -167,6 +173,7 @@ class DetectionMixin:
                 return
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
+            models = None
             self._fail_job(exc, job_generation, catalog_generation)
 
     def _discard_candidates(self, candidates: list[Candidate]) -> None:
@@ -225,23 +232,31 @@ class DetectionMixin:
             if self.settings["models"].get("hand_segmentation_enabled"):
                 try:
                     with self.hand_segmentation_lock:
-                        specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
-                        rejected: list[tuple[int, int, int, int]] = []
-                        for padded_box in fallback_boxes:
-                            masks, _scores, _ = specialist_predictor.predict(
-                                point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
-                            )
-                            confirmed = accepted_specialist_hand_mask(masks, shape, padded_box)
-                            if confirmed is None:
-                                rejected.append(padded_box)
-                            else:
-                                hand_mask = np.maximum(hand_mask, confirmed)
-                        fallback_boxes = rejected
-                except ClientError:
+                        if self._hand_segmentation_failed_job_generation == self.job_generation:
+                            specialist_predictor = None
+                        else:
+                            specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
+                        if specialist_predictor is not None:
+                            rejected: list[tuple[int, int, int, int]] = []
+                            for padded_box in fallback_boxes:
+                                masks, _scores, _ = specialist_predictor.predict(
+                                    point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
+                                )
+                                confirmed = accepted_specialist_hand_mask(masks, shape, padded_box)
+                                if confirmed is None:
+                                    rejected.append(padded_box)
+                                else:
+                                    hand_mask = np.maximum(hand_mask, confirmed)
+                            fallback_boxes = rejected
+                except ClientError as exc:
                     # The optional specialist must never make ordinary hand
-                    # detection unavailable. CUDA/provider RuntimeError is not
-                    # caught here and remains visible to the caller.
-                    pass
+                    # detection unavailable. One failed checkpoint is skipped
+                    # for the rest of this job, not retried for every image.
+                    with self.lock:
+                        already_disabled = self._hand_segmentation_failed_job_generation == self.job_generation
+                        self._hand_segmentation_failed_job_generation = self.job_generation
+                    if not already_disabled:
+                        LOGGER.warning("HandSegNetをこのジョブでは使用しません: %s", exc)
         return detected, hand_mask, fallback_boxes
 
     @staticmethod

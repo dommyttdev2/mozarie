@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 from .core import *
 from .image_io import *
 from . import image_io as _image_io
@@ -7,6 +9,92 @@ from . import image_io as _image_io
 globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
 
 class JobsMixin:
+    @staticmethod
+    def _is_gpu_out_of_memory(exc: BaseException) -> bool:
+        """Recognise the OOM forms emitted by PyTorch and ONNX Runtime."""
+        if exc.__class__.__name__ == "OutOfMemoryError" and "torch" in exc.__class__.__module__:
+            return True
+        message = str(exc).casefold()
+        return any(marker in message for marker in (
+            "cuda out of memory",
+            "out of memory",
+            "could not allocate tensor with",
+            "not enough gpu video memory",
+            "failed to allocate memory",
+            "bfcarena",
+        ))
+
+    def _gpu_oom_client_error(self, exc: BaseException) -> ClientError | None:
+        """Return a localised-by-code error without exposing runtime exception text."""
+        if isinstance(exc, ClientError) or self.settings["models"].get("provider") != "gpu" or not self._is_gpu_out_of_memory(exc):
+            return None
+        with self.lock:
+            parallelism = max(1, int(self.job.parallelism or 1))
+        if parallelism > 1:
+            message = "GPUメモリが不足しました。同時実行数を1に下げるか、他のGPUアプリを閉じてもう一度実行してください。"
+        else:
+            message = "GPUメモリが不足しました。他のGPUアプリを閉じるか、CPUまたは小さいSAMモデル（vit_b）を選択してください。"
+        return ClientError(message, "gpu_out_of_memory", {"parallelism": parallelism})
+
+    @staticmethod
+    def _empty_selected_gpu_cache(torch: Any, gpu_device: int) -> None:
+        cuda = torch.cuda
+        if not cuda.is_available():
+            return
+        device_context = getattr(cuda, "device", None)
+        if callable(device_context):
+            context = device_context(int(gpu_device))
+            if hasattr(context, "__enter__"):
+                with context:
+                    cuda.empty_cache()
+                return
+        cuda.empty_cache()
+
+    def _release_gpu_cache(self, *, provider: str | None = None, gpu_device: int | None = None) -> None:
+        """Collect detached GPU objects and empty the selected PyTorch cache."""
+        gc.collect()
+        selected_provider = provider if provider is not None else str(self.settings["models"].get("provider", "gpu"))
+        if selected_provider != "gpu":
+            return
+        torch = sys.modules.get("torch")
+        if torch is not None:
+            self._empty_selected_gpu_cache(torch, int(gpu_device if gpu_device is not None else self.settings["models"].get("gpu_device", 0)))
+
+    def _discard_gpu_models_after_oom(self) -> None:
+        """Drop every CUDA-backed model/session after all detection workers have stopped."""
+        provider = str(self.settings["models"].get("provider", "gpu"))
+        gpu_device = int(self.settings["models"].get("gpu_device", 0))
+        with self.inference_lock:
+            with self.sam_lock:
+                if self.sam_predictor is not None:
+                    self.sam_predictor.reset_image()
+                self.sam_predictor = None
+                self.sam_image_id = None
+                if self.hand_segmentation_predictor is not None:
+                    self.hand_segmentation_predictor.reset_image()
+                self.hand_segmentation_predictor = None
+                self.hand_segmentation_image_id = None
+            with self.lock:
+                self.models = None
+        self._release_gpu_cache(provider=provider, gpu_device=gpu_device)
+
+    def recover_gpu_oom_for_request(self, exc: BaseException) -> ClientError | None:
+        """Map an interactive inference OOM and make the next request reusable."""
+        client_error = self._gpu_oom_client_error(exc)
+        if client_error is not None:
+            self._discard_gpu_models_after_oom()
+        return client_error
+
+    def _set_job_parallelism(
+        self,
+        parallelism: int,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation):
+                self.job.parallelism = parallelism
+
     def _pause_job_clock(self) -> None:
         if self.job.paused_at is None:
             self.job.paused_at = time.time()
@@ -200,11 +288,7 @@ class JobsMixin:
 
     def _release_gpu_job_memory(self) -> None:
         """Return unused PyTorch allocator memory after a terminal GPU job."""
-        if self.settings["models"]["provider"] != "gpu":
-            return
-        torch = sys.modules.get("torch")
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self._release_gpu_cache()
 
     def combined_candidate_mask(
         self,
@@ -408,6 +492,7 @@ class JobsMixin:
         LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        gpu_oom = self._gpu_oom_client_error(exc)
         if not isinstance(exc, ClientError):
             message = str(exc).lower()
             if any(marker in message for marker in (
@@ -417,18 +502,13 @@ class JobsMixin:
                     "選択したGPUは、インストール済みのPyTorchでは実行できません。設定で対応状況を確認してください。",
                     "gpu_unsupported",
                 )
+            elif gpu_oom is not None:
+                exc = gpu_oom
             elif any(marker in message for marker in ("out of memory", "failed to allocate memory", "bfcarena")):
-                if self.settings["models"]["provider"] == "gpu":
-                    if int(self.settings["detection"]["parallelism"]) > 1:
-                        text = "GPUメモリを確保できませんでした。同時実行数を1に下げて、もう一度実行してください。"
-                    else:
-                        text = "GPUメモリを確保できませんでした。他のGPUアプリを閉じて、もう一度実行してください。"
-                    exc = ClientError(text, "gpu_out_of_memory")
-                else:
-                    exc = ClientError(
-                        "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
-                        "memory_allocation_failed",
-                    )
+                exc = ClientError(
+                    "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
+                    "memory_allocation_failed",
+                )
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -441,6 +521,14 @@ class JobsMixin:
             self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}
             self.job.current = ""
             self.job.active_count = 0
-        self._release_gpu_job_memory()
-        LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind),
-                     exc_info=(type(exc), exc, exc.__traceback__))
+        if gpu_oom is not None:
+            # The traceback can retain partially-created SAM/HandSegNet models.
+            # No traceback is shown for a classified, expected OOM.
+            exc.__traceback__ = None
+            self._discard_gpu_models_after_oom()
+        else:
+            self._release_gpu_job_memory()
+        if isinstance(exc, ClientError):
+            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
+        else:
+            LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind), exc_info=(type(exc), exc, exc.__traceback__))

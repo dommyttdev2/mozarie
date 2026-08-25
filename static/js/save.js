@@ -618,8 +618,9 @@ function isTerminalDetection(job, previous) {
 
 function jobErrorMessage(job) {
   if (!job.errorCode) return job.error || t("error.background");
-  const localized = t(`errorCode.${job.errorCode}`, job.params || {});
-  return localized === `errorCode.${job.errorCode}` ? (job.error || t("error.background")) : localized;
+  const key = errorCodeTranslationKey(job.errorCode, job.params || {});
+  const localized = t(key, job.params || {});
+  return localized === key ? (job.error || t("error.background")) : localized;
 }
 
 async function finishDetectionJob(job) {

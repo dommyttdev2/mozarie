@@ -107,7 +107,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.sam_lock = threading.RLock()
         self.hand_segmentation_predictor: Any | None = None
         self.hand_segmentation_image_id: str | None = None
-        self.hand_segmentation_lock = threading.RLock()
+        # SAM and HandSegNet both retain large CUDA embeddings. One shared
+        # re-entrant lock prevents their peak allocations from overlapping.
+        self.hand_segmentation_lock = self.sam_lock
+        self._hand_segmentation_failed_job_generation: int | None = None
         self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
 
@@ -141,12 +144,17 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if any(settings["models"].get(key) != previous_models.get(key) for key in {"hand_segmentation", "hand_segmentation_enabled", "provider", "gpu_device"}):
                 self.hand_segmentation_predictor = None
                 self.hand_segmentation_image_id = None
+            resource_keys = detection_keys | sam_keys | {"hand_segmentation", "hand_segmentation_enabled"}
+            if (previous_models.get("provider") == "gpu"
+                    and any(settings["models"].get(key) != previous_models.get(key) for key in resource_keys)):
+                self._release_gpu_cache(provider="gpu", gpu_device=int(previous_models.get("gpu_device", 0)))
             return self.settings
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
             if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
+            previous_models = dict(self.settings.get("models", {}))
             try:
                 settings = self.settings_store.default_settings()
                 validate_output_directory_ready(settings["saving"]["default_output_directory"])
@@ -158,6 +166,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self.sam_image_id = None
             self.hand_segmentation_predictor = None
             self.hand_segmentation_image_id = None
+            if previous_models.get("provider") == "gpu":
+                self._release_gpu_cache(provider="gpu", gpu_device=int(previous_models.get("gpu_device", 0)))
             return self.settings
 
     def begin_import_transfer(self) -> None:

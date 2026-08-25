@@ -71,6 +71,11 @@ function t(key, params = {}) {
   return value;
 }
 
+function errorCodeTranslationKey(code, params = {}) {
+  if (code === "gpu_out_of_memory") return `errorCode.gpu_out_of_memory_${Number(params.parallelism) > 1 ? "parallel" : "single"}`;
+  return `errorCode.${code}`;
+}
+
 async function loadTranslations(languageOverride = null) {
   const generation = ++translationGeneration;
   const language = languageOverride === "en" || (!languageOverride && state.settings?.general?.language === "en") ? "en" : "ja";
@@ -118,9 +123,9 @@ function api(path, options = {}) {
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const localized = data.error_code ? t(`errorCode.${data.error_code}`, data.params || {}) : "";
+        const localized = data.error_code ? t(errorCodeTranslationKey(data.error_code, data.params || {}), data.params || {}) : "";
         const message = data.error_code
-          ? (localized && localized !== `errorCode.${data.error_code}` ? localized : t("error.requestFailed"))
+          ? (localized && localized !== errorCodeTranslationKey(data.error_code, data.params || {}) ? localized : t("error.requestFailed"))
           : (data.error || t("error.requestFailed"));
         const error = new Error(message);
         error.status = response.status;
