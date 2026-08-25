@@ -106,7 +106,7 @@ async function flushAllWorkspaceMutations() {
 
 async function loadWorkspaceDraft(imageId) {
   const data = await api(`/api/workspace/manual/${encodeURIComponent(imageId)}`);
-  if (data.draft) state.drafts.set(imageId, data.draft); else state.drafts.delete(imageId);
+  return data.draft || null;
 }
 
 function scheduleManualWorkspaceSave() { setTimeout(() => saveDraft(), 0); }

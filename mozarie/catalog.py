@@ -904,7 +904,6 @@ class CatalogMixin:
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
                 "workspace": self.catalog_id is not None,
-                "workspaceVersion": 1,
             }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:

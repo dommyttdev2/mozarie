@@ -210,7 +210,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "device": inference_device_name(),
                 })
             elif path == "/api/settings":
-                payload = {"settings": STATE.settings, "version": _local_version(), "workspaceVersion": 1}
+                payload = {"settings": STATE.settings, "version": _local_version()}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     payload["status"] = STATE.settings_status()
                 self._json(payload)
@@ -294,7 +294,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
                         finally:
                             staged_path.unlink(missing_ok=True)
-                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional, "workspaceVersion": 1})
+                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional})
                 finally:
                     STATE.end_import_transfer()
                     self._upload_sha256 = None
@@ -303,7 +303,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
-                self._json({"images": images, "workspace": True, "workspaceVersion": 1})
+                self._json({"images": images, "workspace": True})
             elif path == "/api/workspace/catalog":
                 if payload.get("provisional") is True:
                     if payload.get("catalogId"):
@@ -317,7 +317,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId")), "provisional": False})
             elif path == "/api/workspace/catalog/finalize":
                 catalog_id, image_ids = STATE.finalize_browser_catalog()
-                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id), "workspaceVersion": 1})
+                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id)})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})

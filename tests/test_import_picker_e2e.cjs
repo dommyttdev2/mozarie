@@ -692,6 +692,21 @@ async function main() {
   try {
     ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings } = await startFixtureServer());
     browser = await chromium.launch();
+    const settingsFailurePage = await browser.newPage();
+    await settingsFailurePage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/settings?status=0")
+        ? Promise.reject(new Error("settings unavailable"))
+        : fetchOriginal(...args);
+    });
+    await settingsFailurePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await settingsFailurePage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
+    assert.match(await settingsFailurePage.locator("#connectionStatus").textContent(), /settings unavailable/, "initial settings failure is shown in the header");
+    await settingsFailurePage.locator("#settingsButton").click();
+    assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
+    await settingsFailurePage.close();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
       const fetchOriginal = window.fetch;
@@ -979,6 +994,52 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
+    const atomicDraftFailure = await page.evaluate(async () => {
+      const before = {
+        id: state.currentId,
+        image: state.currentImage,
+        candidates: state.candidates,
+        fileName: $("#currentFileName").textContent,
+        empty: $("#emptyState").hidden,
+        addPixels: canvasHasPixels(addCtx, addCanvas),
+      };
+      state.drafts.delete("sample-two");
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/workspace/manual/sample-two")
+        ? Promise.reject(new Error("manual draft rejected"))
+        : fetchOriginal(...args);
+      await selectImage("sample-two", true, { saveCurrentDraft: false });
+      window.fetch = fetchOriginal;
+      return {
+        id: state.currentId === before.id,
+        image: state.currentImage === before.image,
+        candidates: state.candidates === before.candidates,
+        fileName: $("#currentFileName").textContent === before.fileName,
+        empty: $("#emptyState").hidden === before.empty,
+        addPixels: canvasHasPixels(addCtx, addCanvas) === before.addPixels,
+      };
+    });
+    assert.deepEqual(atomicDraftFailure, { id: true, image: true, candidates: true, fileName: true, empty: true, addPixels: true }, "a rejected manual workspace GET preserves the previous editor atomically");
+    const delayedDraftSave = await page.evaluate(async () => {
+      const originalEncoder = canvasToDataUrl;
+      const originalDraft = state.drafts.get(state.currentId);
+      const gates = [];
+      canvasToDataUrl = () => new Promise((resolve) => gates.push(resolve));
+      state.drafts.delete(state.currentId);
+      addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 2, 2);
+      markDraftDirty("add");
+      const first = saveDraft();
+      state.manualExclusionForced = !state.manualExclusionForced;
+      markDraftDirty("add");
+      const second = saveDraft();
+      gates[1]("newer"); gates[0]("older");
+      await Promise.all([first, second]);
+      const result = { latestLayer: state.drafts.get(state.currentId)?.add === "newer", dirty: state.draftDirty };
+      state.drafts.set(state.currentId, originalDraft);
+      canvasToDataUrl = originalEncoder;
+      return result;
+    });
+    assert.deepEqual(delayedDraftSave, { latestLayer: true, dirty: false }, "per-image draft saves commit delayed canvas encodes in capture order");
     const manualExclusionVisibility = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages;
       const manualEnabled = state.manualEnabled; const manualExclusionEnabled = state.manualExclusionEnabled;
@@ -1573,7 +1634,6 @@ async function main() {
     });
     assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
-      const previousPersistence = state.workspacePersistence;
       const draft = (label) => ({
         add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",
         exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true,
@@ -1581,7 +1641,6 @@ async function main() {
         candidateRevision: 0, removedCandidateIds: [], history: [{ kind: "clearManual", role: "apply", label }], historyIndex: 1,
         historyBase: { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [] },
       });
-      state.workspacePersistence = true;
       state.drafts.set("sample", draft("A")); state.drafts.set("sample-two", draft("B"));
       await selectImage("sample", true, { saveCurrentDraft: false });
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1593,7 +1652,6 @@ async function main() {
       restoreSnapshot(0); const undo = state.historyIndex === 0;
       restoreSnapshot(1); const redo = state.historyIndex === 1;
       const bulk = draftPayload(["sample", "sample-two"]);
-      state.workspacePersistence = previousPersistence;
       return { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");

@@ -447,7 +447,10 @@ async function initialise() {
     const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
     $("#settingsVersion").textContent = settings.version;
-  } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
+  } catch (error) {
+    setStatus(error.message, "error");
+    return;
+  }
   await loadTranslations(); bindEvents();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
@@ -455,7 +458,6 @@ async function initialise() {
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");
-    state.workspacePersistence = Boolean(data.workspace);
     if (data.images.length) {
       $("#folderPath").value = data.root || "";
       resetCatalog(data.images, data.root);

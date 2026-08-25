@@ -116,7 +116,7 @@ async function clearCatalog() {
   ++state.imageGeneration;
   updateActionButtons();
   try {
-    if (state.workspacePersistence) await flushAllWorkspaceMutations();
+    await flushAllWorkspaceMutations();
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     clearStoredCatalogState();
@@ -227,7 +227,9 @@ function droppedFile(file, relativePath = file.name, fileHandle = null, parentHa
 }
 
 async function directFilesFromDrop(dataTransfer) {
-  const handles = await Promise.all([...dataTransfer.items].map((item) => item.getAsFileSystemHandle()));
+  const handles = await Promise.all([...dataTransfer.items]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFileSystemHandle()));
   const entries = [];
   async function collectHandle(handle, parent = "", parentHandle = null) {
     const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
@@ -318,18 +320,17 @@ async function importFiles(files) {
       const finalized = await api("/api/workspace/catalog/finalize", { method: "POST", body: JSON.stringify({}) });
       session.catalogId = finalized.catalogId || session.catalogId;
       remapImportedImageIds(finalized.imageIds || {});
-      state.workspacePersistence = Boolean(finalized.workspace);
       state.images = finalized.images || [];
       session.provisional = false;
     }
     const latest = await api("/api/images");
-    state.workspacePersistence = Boolean(latest.workspace); state.images = latest.images;
+    state.images = latest.images;
     loadReviewedPaths();
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
     try {
       const latest = await api("/api/images");
-      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = Boolean(latest.workspace); state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
+      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
     if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
   }
@@ -404,7 +405,7 @@ async function importFileHandles(handles, session = beginImportSession()) {
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
-  if (state.workspacePersistence) await flushAllWorkspaceMutations();
+  await flushAllWorkspaceMutations();
   session.catalogId = await catalogForDirectoryHandle(directoryHandle);
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
