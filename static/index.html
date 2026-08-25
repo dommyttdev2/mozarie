@@ -21,8 +21,6 @@
           <button id="pickImages" type="button" data-i18n="folder.pickImages">画像ファイルを選択</button>
           <button id="pickFolderFiles" type="button" data-i18n="folder.pickFolder">フォルダーを選択</button>
         </div>
-        <input id="importImagesInput" type="file" multiple accept=".png,.jpg,.jpeg,.webp" hidden>
-        <input id="importFolderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.webp" hidden>
       </div>
     </div>
     <div class="appbar-spacer" aria-hidden="true"></div>
@@ -133,11 +131,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">切替</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" data-i18n="settings.on">ON</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">切替</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -391,7 +389,16 @@
     </div>
   </dialog>
 
-  <script src="/js/manifest.js"></script>
-  <script src="/js/loader.js"></script>
+  <script src="/js/core.js"></script>
+  <script src="/js/resources.js"></script>
+  <script src="/js/gallery.js"></script>
+  <script src="/js/workspace.js"></script>
+  <script src="/js/editor-canvas.js"></script>
+  <script src="/js/editor-masks.js"></script>
+  <script src="/js/detection.js"></script>
+  <script src="/js/save.js"></script>
+  <script src="/js/interaction.js"></script>
+  <script src="/js/settings.js"></script>
+  <script src="/js/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,5 @@
 const thumbnailObservers = new Map();
 function thumbnailObserver(scope) {
-  if (typeof IntersectionObserver !== "function") return null;
   if (thumbnailObservers.has(scope)) return thumbnailObservers.get(scope);
   const root = scope === "overview" ? $("#overviewGrid") : $("#gallery");
   const observer = new IntersectionObserver((entries) => { for (const entry of entries) { if (!entry.isIntersecting) continue; observer.unobserve(entry.target); loadThumbnail(entry.target); } }, { root, rootMargin: "320px" });
@@ -13,7 +12,7 @@ function observeThumbnail(image, record, scope = "gallery") {
   if (image.dataset.src !== source) forgetThumbnail(image);
   image.dataset.src = source; image.loading = "lazy"; image.decoding = "async";
   if (image.dataset.loaded === source) return;
-  const observer = thumbnailObserver(scope); if (observer) observer.observe(image); else loadThumbnail(image);
+  thumbnailObserver(scope).observe(image);
 }
 function forgetThumbnail(image) { if (!image) return; for (const observer of thumbnailObservers.values()) observer.unobserve(image); image.removeAttribute?.("src"); image.dataset.src = ""; delete image.dataset.loaded; }
 

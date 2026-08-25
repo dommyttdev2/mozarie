@@ -111,12 +111,6 @@ function bindEvents() {
   $("#settingsFluidToggle").addEventListener("change", () => setFluidExclusionEnabled($("#settingsFluidToggle").checked));
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });
-  for (const inputId of ["#importImagesInput", "#importFolderInput"]) $(inputId).addEventListener("change", (event) => {
-    const input = event.currentTarget;
-    const files = [...input.files];
-    input.value = "";
-    if (files.length) void importFiles(files);
-  });
   document.addEventListener("dragover", (event) => {
     if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
   });
@@ -190,7 +184,7 @@ function bindEvents() {
     if (isBusy() || state.importing) return;
     const divisor = normaliseDivisor($("#divisor").value);
     $("#divisor").value = divisor;
-    rebuildMosaicPreview(); updateBlockSizeDisplay(); render();
+    requestMosaicPreview(); updateBlockSizeDisplay(); render();
   });
   $("#applyDivisor").addEventListener("input", () => { if (!isBusy() && !state.importing) updateBlockSizeDisplay(); });
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
@@ -442,13 +436,15 @@ function bindEvents() {
     if (!menu.matches?.(":popover-open") || menu.contains(event.target)) return;
     closeCatalogContextMenu();
   });
-  window.addEventListener("storage", handleReviewStorageEvent);
 }
 
 async function initialise() {
+  if (typeof window.showOpenFilePicker !== "function" || typeof window.showDirectoryPicker !== "function") {
+    document.body.textContent = "Mozarie を使うには File System Access API 対応ブラウザーが必要です。";
+    return;
+  }
   try {
     const settings = await api("/api/settings?status=0");
-    state.workspaceApiAvailable = settings.workspaceVersion === 1;
     setSettingsForm(settings.settings, settings.status);
     $("#settingsVersion").textContent = settings.version;
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
@@ -459,7 +455,7 @@ async function initialise() {
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");
-    state.workspacePersistence = data.workspaceVersion === 1 && data.workspace === true;
+    state.workspacePersistence = Boolean(data.workspace);
     if (data.images.length) {
       $("#folderPath").value = data.root || "";
       resetCatalog(data.images, data.root);

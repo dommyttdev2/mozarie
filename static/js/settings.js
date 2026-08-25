@@ -192,7 +192,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsHandSegmentationModel").value = settings.models.hand_segmentation || "";
   setModelCardEnabled("hand_segmentation", settings.models.hand_segmentation_enabled);
   setHandSegmentationAvailable(settings.models.hand_detection_enabled);
-  samCheckpointPaths = { vit_b: "", vit_l: "", vit_h: "", ...(settings.models.sam_checkpoints || {}) };
+  samCheckpointPaths = settings.models.sam_checkpoints;
   setPrecisionDetectionEnabled(settings.detection.mode === "high_precision");
   setFluidExclusionEnabled(settings.detection.fluid_exclusion_enabled);
   $("#settingsExcludeForcedDefault").checked = settings.detection.exclude_forced_default !== false;

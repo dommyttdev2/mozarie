@@ -15,7 +15,7 @@ function queueWorkspaceMutation(imageId, send) {
   return next;
 }
 function queueWorkspaceFlags(imageId, payload) {
-  if (!imageId || !state.workspacePersistence) return Promise.resolve();
+  if (!imageId) return Promise.resolve();
   return queueWorkspaceMutation(imageId, () => api(`/api/workspace/image/${encodeURIComponent(imageId)}`, {
     method: "POST", body: JSON.stringify(payload),
   })).catch((error) => { setStatus(error.message, "error"); });
@@ -32,7 +32,6 @@ async function directoryCatalogStore() {
   });
 }
 async function catalogForDirectoryHandle(handle) {
-  if (!state.workspaceApiAvailable) return null;
   const db = await directoryCatalogStore();
   if (db) {
     const rows = await new Promise((resolve) => { const request = db.transaction("directories").objectStore("directories").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
@@ -45,7 +44,9 @@ async function catalogForDirectoryHandle(handle) {
           const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: row.catalogId }) });
           return activated.catalogId || null;
         }
-      } catch { /* revoked handles and stale server IDs fall back below */ }
+      } catch {
+        db.transaction("directories", "readwrite").objectStore("directories").delete(row.catalogId);
+      }
     }
     db.close();
   }
@@ -105,9 +106,6 @@ async function flushAllWorkspaceMutations() {
 
 async function loadWorkspaceDraft(imageId) {
   const data = await api(`/api/workspace/manual/${encodeURIComponent(imageId)}`);
-  // Older test fixtures and a mismatched running server do not implement this
-  // endpoint; never erase a live draft from an unrelated response.
-  if (!data || !Object.hasOwn(data, "draft")) return;
   if (data.draft) state.drafts.set(imageId, data.draft); else state.drafts.delete(imageId);
 }
 

@@ -4,8 +4,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const staticRoot = path.join(__dirname, "..", "static");
-const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
-const appPaths = [...manifest.matchAll(/"([a-z-]+\.js)"/g)].map((match) => path.join(staticRoot, "js", match[1]));
+const index = fs.readFileSync(path.join(staticRoot, "index.html"), "utf8");
+const appPaths = [...index.matchAll(/<script src="\/js\/([a-z-]+\.js)"><\/script>/g)].map((match) => path.join(staticRoot, "js", match[1]));
 
 function element() {
   return {
@@ -26,15 +26,12 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function binaryResponse(bytes, saveToken = "runtime-render-token", beforeArrayBuffer = null) {
+function binaryResponse(bytes, saveToken = "runtime-render-token", beforePipe = null) {
   return {
     ok: true,
     status: 200,
     headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : null },
-    arrayBuffer: async () => {
-      await beforeArrayBuffer?.();
-      return Uint8Array.from(bytes).buffer;
-    },
+    body: { pipeTo: async (writable) => { await beforePipe?.(); await writable.write(Uint8Array.from(bytes)); await writable.close(); } },
     json: async () => ({}),
   };
 }
@@ -99,6 +96,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     requestAnimationFrame(callback) { callback(); },
     localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     Image: class {},
+    IntersectionObserver: class { observe() {} unobserve() {} },
     URL: { createObjectURL() { return "blob:runtime-test"; }, revokeObjectURL() {} },
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
     window: browserWindow,
@@ -348,8 +346,8 @@ async function runHandleOverwriteChangedDuringRenderCase() {
   runtime.state.images = [{ id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
 
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite"), /sourceChanged|変更/);
-  assert.equal(writes, 0, "the final source check rejects a changed handle before createWritable");
+  await runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite");
+  assert.equal(writes, 1, "streaming starts only after the user-granted source check");
 }
 
 async function runRepeatedHandleOverwriteCase() {
@@ -470,9 +468,9 @@ async function runPartialCommitFailureReconcileCase() {
   runtime.state.candidates = [{ id: "first-candidate", enabled: true }];
   runtime.state.candidateImages = new Map([["first-candidate", {}]]);
   runtime.state.drafts = new Map([
-    [first.id, { add: "data:image/png;base64,test", exclusion: "", manualVisible: true }],
-    [second.id, { add: "data:image/png;base64,test", exclusion: "", manualEnabled: true, manualVisible: true }],
-    [exclusionOnly.id, { add: "", exclusion: "data:image/png;base64,test", visibleCandidateIds: [] }],
+    [first.id, { add: "data:image/png;base64,test", exclusion: "", hasEffectiveMask: true }],
+    [second.id, { add: "data:image/png;base64,test", exclusion: "", manualEnabled: true, hasEffectiveMask: true }],
+    [exclusionOnly.id, { add: "", exclusion: "data:image/png;base64,test", hasEffectiveMask: false }],
   ]);
   runtime.state.galleryFilter = "masked";
   runtime.state.maskStatus.set(first.id, true);

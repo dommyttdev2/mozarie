@@ -1,9 +1,13 @@
 function canvasSizeForImage(image) {
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
+  blinkCanvas.width = image.width; blinkCanvas.height = image.height;
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
   exclusionEraseCtx.clearRect(0, 0, image.width, image.height);
   state.maskDirty = true;
+  state.draftDirty = false;
+  state.draftLayerDirty.clear();
+  state.historyBaseDirty = false;
   state.manualMaskPresent = false;
   state.manualEnabled = true;
   state.manualExclusionEnabled = true;
@@ -16,6 +20,9 @@ function clearEditor() {
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
   state.maskDirty = false;
+  state.draftDirty = false;
+  state.draftLayerDirty.clear();
+  state.historyBaseDirty = false;
   addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = historyExclusionEraseCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = historyExclusionEraseCanvas.height = 1;
   $("#emptyState").hidden = false;
@@ -28,10 +35,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   const previousImageId = state.currentId;
-  if (saveCurrentDraft) { saveDraft(); if (state.workspacePersistence) await flushWorkspaceDraft(previousImageId); }
-  if (state.currentId !== imageId) clearCandidateBlink();
-  cancelFillWork();
-  abortCatalogLoads();
+  if (saveCurrentDraft) void saveDraft();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   closeBoundaryModeMenu();
@@ -70,8 +74,13 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     state.imageCache.trim(); state.candidateBundleCache.trim();
     // The server intentionally stores compact masks, not the in-session undo
     // log.  A local draft therefore remains authoritative until reload.
-    if (state.workspacePersistence && !state.drafts.has(imageId)) { await loadWorkspaceDraft(imageId); if (!isCurrentGeneration(generation)) return; }
-    canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
+    if (!state.drafts.has(imageId)) await loadWorkspaceDraft(imageId);
+    await preloadDraftImages(state.drafts.get(imageId));
+    if (!isCurrentGeneration(generation)) return;
+    if (state.currentId !== imageId) clearCandidateBlink();
+    cancelFillWork();
+    abortCatalogLoads();
+    canvasSizeForImage(record); restoreDraft(imageId, generation); prepareOriginalImage(); requestMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
     $("#currentFileName").textContent = record.relativePath;
@@ -268,6 +277,7 @@ async function reconcileCurrentCandidates(imageId, generation) {
     record.candidateRevision = bundle.candidateRevision;
   }
   invalidateCandidateBundles(imageId);
+  markMaskDirty();
   refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   return true;
 }
@@ -291,11 +301,8 @@ function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, sta
 
 function syncStoredMaskStatus(imageId, candidates) {
   const draft = state.drafts.get(imageId);
-  if (!Array.isArray(draft?.visibleCandidateIds)) return;
-  const visibleCandidateIds = new Set(draft.visibleCandidateIds);
-  const hasVisibleCandidate = candidates.some((candidate) => candidate.enabled && visibleCandidateIds.has(candidate.id));
-  const hasManualMask = Boolean(draft.manualVisible && draft.manualEnabled !== false);
-  state.maskStatus.set(imageId, hasVisibleCandidate || hasManualMask);
+  if (!draft) return;
+  state.maskStatus.set(imageId, draft.hasEffectiveMask === true);
 }
 
 async function refreshCandidateRecord(imageId, syncMask = false) {
@@ -318,40 +325,87 @@ function updateCandidateStatus() {
   status.textContent = visibleCount ? t("candidates.count", { count: visibleCount }) : t("candidates.none");
 }
 
-function saveDraft() {
-  if (!state.currentId || !state.currentImage) return;
+function canvasToDataUrl(target) {
+  return new Promise((resolve, reject) => target.toBlob((blob) => {
+    if (!blob) return reject(new Error(t("error.requestFailed")));
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error(t("error.requestFailed")));
+    reader.readAsDataURL(blob);
+  }, "image/png"));
+}
+
+async function preloadDraftImages(draft) {
+  if (!draft) return;
+  await Promise.all([draft.add, draft.exclusion, draft.exclusionErase, draft.historyBase?.add, draft.historyBase?.exclusion, draft.historyBase?.exclusionErase]
+    .filter(Boolean).map(loadImage));
+}
+
+async function saveDraft() {
+  if (!state.currentId || !state.currentImage || !state.draftDirty) return;
+  const imageId = state.currentId;
+  const dirtyLayers = new Set(state.draftLayerDirty);
+  const historyBaseDirty = state.historyBaseDirty;
+  const snapshot = {
+    manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled,
+    manualMaskPresent: state.manualMaskPresent, manualExclusionForced: state.manualExclusionForced,
+    candidateRevision: Number(currentRecord()?.candidateRevision || 0), removedCandidateIds: [...state.removedCandidateIds],
+    history: state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })),
+    historyIndex: state.historyIndex, historyRemovedCandidateIds: [...(state.historyRemovedCandidateIds || [])], historyCandidateIds: [...(state.historyCandidateIds || [])],
+    hasEffectiveMask: hasEffectiveMask(), defaultManualExclusionForced: state.settings?.detection?.exclude_forced_default !== false,
+  };
+  state.draftDirty = false;
+  state.draftLayerDirty.clear();
+  state.historyBaseDirty = false;
   flushMaskComposition();
-  const hasAdd = canvasHasPixels(addCtx, addCanvas);
-  const hasExclusion = canvasHasPixels(exclusionCtx, exclusionCanvas);
-  const hasExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
-  const defaultManualExclusionForced = state.settings?.detection?.exclude_forced_default !== false;
-  if (!hasAdd && !hasExclusion && !hasExclusionErase && state.history.length === 0 && state.removedCandidateIds.size === 0 && state.manualExclusionForced === defaultManualExclusionForced) {
-    state.drafts.delete(state.currentId);
-    if (state.workspacePersistence) void queueWorkspaceDraft(state.currentId);
+  const previous = state.drafts.get(imageId) || {};
+  const layers = {
+    add: [addCtx, addCanvas], exclusion: [exclusionCtx, exclusionCanvas], exclusionErase: [exclusionEraseCtx, exclusionEraseCanvas],
+  };
+  const encoded = {};
+  const encodedHistoryBase = {};
+  const snapshots = [];
+  for (const layer of dirtyLayers) {
+    const [context, target] = layers[layer] || [];
+    if (!target) continue;
+    snapshots.push(Promise.resolve(canvasHasPixels(context, target) ? canvasToDataUrl(target) : "").then((value) => { encoded[layer] = value; }));
+  }
+  if (historyBaseDirty) {
+    for (const [layer, context, target] of [["add", historyAddCanvas.getContext("2d"), historyAddCanvas], ["exclusion", historyExclusionCanvas.getContext("2d"), historyExclusionCanvas], ["exclusionErase", historyExclusionEraseCanvas.getContext("2d"), historyExclusionEraseCanvas]]) {
+      snapshots.push(Promise.resolve(canvasHasPixels(context, target) ? canvasToDataUrl(target) : "").then((value) => { encodedHistoryBase[layer] = value; }));
+    }
+  }
+  await Promise.all(snapshots);
+  const hasAdd = encoded.add ?? previous.add ?? "";
+  const hasExclusion = encoded.exclusion ?? previous.exclusion ?? "";
+  const hasExclusionErase = encoded.exclusionErase ?? previous.exclusionErase ?? "";
+  if (!hasAdd && !hasExclusion && !hasExclusionErase && snapshot.history.length === 0 && snapshot.removedCandidateIds.length === 0 && snapshot.manualExclusionForced === snapshot.defaultManualExclusionForced) {
+    state.drafts.delete(imageId);
+    void queueWorkspaceDraft(imageId);
     return;
   }
-  const visibility = captureCurrentMaskVisibility();
-  state.drafts.set(state.currentId, {
-    add: hasAdd ? addCanvas.toDataURL("image/png") : "",
-    exclusion: hasExclusion ? exclusionCanvas.toDataURL("image/png") : "",
-    exclusionErase: hasExclusionErase ? exclusionEraseCanvas.toDataURL("image/png") : "",
-    manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled, manualMaskPresent: state.manualMaskPresent,
-    hasEffectiveMask: canvasHasPixels(combinedCtx, combinedCanvas),
-    manualExclusionForced: state.manualExclusionForced,
-    candidateRevision: Number(currentRecord()?.candidateRevision || 0),
-    visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,
-    removedCandidateIds: [...state.removedCandidateIds],
-    history: state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })),
-    historyIndex: state.historyIndex,
+  state.drafts.set(imageId, {
+    ...previous,
+    add: hasAdd,
+    exclusion: hasExclusion,
+    exclusionErase: hasExclusionErase,
+    manualEnabled: snapshot.manualEnabled, manualExclusionEnabled: snapshot.manualExclusionEnabled, manualExclusionEraseEnabled: snapshot.manualExclusionEraseEnabled, manualMaskPresent: snapshot.manualMaskPresent,
+    manualExclusionForced: snapshot.manualExclusionForced,
+    candidateRevision: snapshot.candidateRevision,
+    hasEffectiveMask: snapshot.hasEffectiveMask,
+    removedCandidateIds: snapshot.removedCandidateIds,
+    history: snapshot.history,
+    historyIndex: snapshot.historyIndex,
     historyBase: {
-      add: canvasHasPixels(historyAddCanvas.getContext("2d"), historyAddCanvas) ? historyAddCanvas.toDataURL("image/png") : "",
-      exclusion: canvasHasPixels(historyExclusionCanvas.getContext("2d"), historyExclusionCanvas) ? historyExclusionCanvas.toDataURL("image/png") : "",
-      exclusionErase: canvasHasPixels(historyExclusionEraseCanvas.getContext("2d"), historyExclusionEraseCanvas) ? historyExclusionEraseCanvas.toDataURL("image/png") : "",
-      removedCandidateIds: [...(state.historyRemovedCandidateIds || [])],
-      candidateIds: [...(state.historyCandidateIds || [])],
+      ...previous.historyBase,
+      add: encodedHistoryBase.add ?? previous.historyBase?.add ?? "",
+      exclusion: encodedHistoryBase.exclusion ?? previous.historyBase?.exclusion ?? "",
+      exclusionErase: encodedHistoryBase.exclusionErase ?? previous.historyBase?.exclusionErase ?? "",
+      removedCandidateIds: snapshot.historyRemovedCandidateIds,
+      candidateIds: snapshot.historyCandidateIds,
     },
   });
-  if (state.workspacePersistence) void queueWorkspaceDraft(state.currentId);
+  void queueWorkspaceDraft(imageId);
 }
 
 function restoreDraft(imageId, generation) {
@@ -393,7 +447,9 @@ function restoreDraft(imageId, generation) {
       const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
       state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
       rebuildManualMaskFromHistory(); updateHistoryButtons();
+      state.historyBaseDirty = false;
     } else resetHistoryToCurrentManualMask();
+    state.draftDirty = false; state.draftLayerDirty.clear();
     refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
   });
 }
@@ -421,10 +477,22 @@ function resizeRenderCanvas() {
 
 function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; context.setTransform(dpr, 0, 0, dpr, 0, 0); }
 
-function rebuildMosaicPreview() {
+function releaseMosaicPreview() {
+  state.mosaicPreviewGeneration += 1;
+  state.mosaicWorker?.terminate?.();
+  state.mosaicWorker = null;
+  mosaicCanvas.width = mosaicCanvas.height = 1;
+}
+
+function prepareOriginalImage() {
   if (!state.currentImage) return;
   originalCanvas.width = state.currentImage.width; originalCanvas.height = state.currentImage.height;
   originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height); originalCtx.drawImage(state.currentImage, 0, 0);
+}
+
+function rebuildMosaicPreview() {
+  if (!state.mosaicPreviewEnabled || !state.currentImage) return;
+  prepareOriginalImage();
   flushMaskComposition();
   const generation = ++state.mosaicPreviewGeneration;
   const source = originalCtx.getImageData(0, 0, originalCanvas.width, originalCanvas.height);
@@ -444,7 +512,7 @@ function rebuildMosaicPreview() {
 }
 
 function requestMosaicPreview() {
-  if (!state.currentImage || state.mosaicPreviewRequested) return;
+  if (!state.mosaicPreviewEnabled || !state.currentImage || state.mosaicPreviewRequested) return;
   state.mosaicPreviewRequested = true;
   requestAnimationFrame(() => { state.mosaicPreviewRequested = false; rebuildMosaicPreview(); });
 }
@@ -479,40 +547,16 @@ function composeCurrentMask() {
   combinedCtx.globalCompositeOperation = "source-over";
   state.maskDirty = false;
 }
-function markMaskDirty() { state.maskDirty = true; }
+function markDraftDirty(...layers) {
+  state.draftDirty = true;
+  layers.forEach((layer) => state.draftLayerDirty.add(layer));
+}
+function markMaskDirty() { state.maskDirty = true; markDraftDirty(); }
 function flushMaskComposition() { if (state.maskDirty) composeCurrentMask(); }
 
-function sourceVisibleAfterExclusion(source) {
-  combinedCtx.globalCompositeOperation = "source-over";
-  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
-  combinedCtx.drawImage(source, 0, 0);
-  combinedCtx.globalCompositeOperation = "destination-out";
-  drawEffectiveExclusions(combinedCtx);
-  combinedCtx.globalCompositeOperation = "source-over";
+function hasEffectiveMask() {
+  flushMaskComposition();
   return canvasHasPixels(combinedCtx, combinedCanvas);
-}
-
-function manualSourceVisibleAfterExclusion(source) {
-  combinedCtx.globalCompositeOperation = "source-over";
-  combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
-  combinedCtx.drawImage(source, 0, 0);
-  combinedCtx.globalCompositeOperation = "destination-out";
-  drawEffectiveExclusions(combinedCtx, true);
-  combinedCtx.globalCompositeOperation = "source-over";
-  return canvasHasPixels(combinedCtx, combinedCanvas);
-}
-
-function captureCurrentMaskVisibility() {
-  const candidateIds = state.candidates
-    .filter((candidate) => candidate.role !== "exclude" && !state.removedCandidateIds.has(candidate.id))
-    .filter((candidate) => {
-      const image = state.candidateImages.get(candidate.id);
-      return image && sourceVisibleAfterExclusion(image);
-    })
-    .map((candidate) => candidate.id);
-  const manual = state.manualMaskPresent && manualSourceVisibleAfterExclusion(addCanvas);
-  markMaskDirty(); flushMaskComposition();
-  return { candidateIds, manual };
 }
 
 function maskStatusWithoutCandidate(candidateId) {
@@ -537,8 +581,7 @@ function refreshMaskStatus(renderGalleryAfter = false) {
   if (!state.currentId || !state.currentImage) return;
   const record = currentRecord();
   const previous = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : Boolean(record && Number(record.enabledCandidateCount || 0) > 0);
-  markMaskDirty(); flushMaskComposition();
-  const current = canvasHasPixels(combinedCtx, combinedCanvas);
+  const current = hasEffectiveMask();
   state.maskStatus.set(state.currentId, current);
   if (renderGalleryAfter && previous !== current) renderCatalogViews();
   else updateActionButtons();
@@ -811,7 +854,6 @@ function drawPolygonBoundary() {
 
 function drawCandidateBlinkOverlay() {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
-  blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
   const paintMask = (image, color, effective = false) => {

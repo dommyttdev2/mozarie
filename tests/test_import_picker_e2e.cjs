@@ -114,6 +114,22 @@ function startFixtureServer() {
       }));
       return;
     }
+    if (requestPath === "/api/workspace/catalog" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ catalogId: "fixture-catalog", provisional: true, workspace: true }));
+      return;
+    }
+    if (requestPath === "/api/workspace/catalog/finalize" && request.method === "POST") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ catalogId: "fixture-catalog", imageIds: {}, images: [], workspace: true }));
+      return;
+    }
+    if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (requestPath === "/api/job") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(currentJob));
@@ -756,8 +772,8 @@ async function main() {
     await page.evaluate(() => showProcessing({ kind: "detect", state: "paused", total: 3, completed: 2, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "three"] }));
     assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "paused detection keeps the earliest unfinished filename");
     await page.evaluate(() => closeProcessing());
-    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "legacy.png", completedImageIds: ["one"] }));
-    assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "legacy detection jobs fall back to the remembered target ids");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "server.png", imageIds: [], completedImageIds: ["one"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "server.png", "current jobs use the server filename when no current image id is supplied");
     await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 1, completed: 0, current: "optimistic.png", imageIds: ["not-in-catalog"], completedImageIds: [] }));
     assert.equal(await page.locator("#processingCurrent").textContent(), "optimistic.png", "unmapped active detection targets retain the server filename");
     await page.evaluate(() => showProcessing({ kind: "detect", state: "complete", total: 3, completed: 3, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "two", "three"] }));
@@ -975,11 +991,11 @@ async function main() {
       state.candidateImages = new Map([["temporary-exclude", exclusion]]);
       state.candidates = [{ id: "temporary-exclude", role: "exclude", enabled: true, forced: false }];
       state.manualEnabled = true; state.manualExclusionEnabled = false; state.manualExclusionForced = true; state.manualMaskPresent = true;
-      const nonForced = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const nonForced = hasEffectiveMask();
       state.candidates[0].forced = true;
-      const forced = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const forced = hasEffectiveMask();
       exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
-      const forcedErased = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const forcedErased = hasEffectiveMask();
       state.candidates = candidates; state.candidateImages = candidateImages;
       state.manualEnabled = manualEnabled; state.manualExclusionEnabled = manualExclusionEnabled;
       state.manualExclusionEraseEnabled = manualExclusionEraseEnabled;
@@ -991,7 +1007,7 @@ async function main() {
     assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false, forcedErased: true }, "manual exclusion erase restores forced exclusions without creating a new mosaic");
     const restoredHistory = await page.evaluate(async () => {
       resetCurrentDraft(); state.drafts.delete("sample");
-      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); saveDraft();
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); await saveDraft();
       const saved = state.drafts.get("sample");
       addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); state.history = []; state.historyIndex = 0;
       restoreDraft("sample", state.imageGeneration);
@@ -1551,11 +1567,11 @@ async function main() {
       state.removedCandidateIds.delete(candidate.id);
       renderCandidates();
       document.querySelector('[data-candidate-effective-toggle="apply"]').click();
-      const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
+      const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; state.drafts.set("sample-two", { candidateRevision: 0, removedCandidateIds: [] }); await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
       state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
-    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: true }, `soft deletion keeps undo/redo and trimmed history while display state clears on navigation: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
       const previousPersistence = state.workspacePersistence;
       const draft = (label) => ({

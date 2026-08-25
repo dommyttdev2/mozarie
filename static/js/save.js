@@ -67,7 +67,7 @@ async function openApplyDialog(options = {}) {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const initialMode = Array.isArray(options) ? "current" : (options.initialMode || "masked");
   if (isBusy() || state.importing) return;
-  saveDraft();
+  await saveDraft();
   $("#applyTargetMode").value = initialMode;
   refreshApplyTargets();
   if (!state.applyTargetIds.length) return;
@@ -164,21 +164,7 @@ function reconcileStoredMaskStatuses() {
       state.maskStatus.delete(image.id);
       continue;
     }
-    const hasVisibleManualAdd = Boolean(draft.add)
-      && draft.manualEnabled !== false
-      && draft.manualVisible !== false;
-    if (hasVisibleManualAdd) {
-      state.maskStatus.set(image.id, true);
-      continue;
-    }
-    if (!draft.exclusion) {
-      state.maskStatus.delete(image.id);
-      continue;
-    }
-    const excludesAllCandidates = Array.isArray(draft.visibleCandidateIds) && draft.visibleCandidateIds.length === 0;
-    if (Number(image.enabledCandidateCount || 0) === 0 || excludesAllCandidates) {
-      state.maskStatus.set(image.id, false);
-    }
+    state.maskStatus.set(image.id, draft.hasEffectiveMask === true);
   }
 }
 
@@ -222,11 +208,10 @@ async function ensureSaveSources(imageIds, mode, deleteOriginal) {
   }
 }
 
-async function writeSourceHandle(access, bytes) {
+async function writeSourceHandle(access, response) {
   const stream = await access.fileHandle.createWritable({ keepExistingData: false });
   try {
-    await stream.write(bytes);
-    await stream.close();
+    await response.body.pipeTo(stream);
     const file = await access.fileHandle.getFile();
     access.name = file.name;
     access.size = file.size;
@@ -344,9 +329,8 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           });
           if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
-          const bytes = await binary.arrayBuffer();
           await ensureHandlePermission(access, true);
-          await writeSourceHandle(access, bytes);
+          await writeSourceHandle(access, binary);
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
