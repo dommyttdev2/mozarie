@@ -356,14 +356,16 @@ class MozarieTests(unittest.TestCase):
         files = [("same/001.png", buffer.getvalue()), ("same/002.png", buffer.getvalue())]
         first = self.new_state()
         ids = self._import_browser_manifest(first, files)
-        catalog_id = first.catalog_id
+        catalog_id, _ = first.finalize_browser_catalog()
+        assert catalog_id is not None
         first.set_image_flags(ids["same/001.png"], {"hidden": True, "reviewed": True})
 
         # Selecting the same File System Access handle is a full reimport,
         # not an append to the previous session directory.
         repeated_ids = self._import_browser_manifest(first, files, catalog_id)
         self.assertEqual({item["relativePath"] for item in first.list_images()}, {"same/001.png", "same/002.png"})
-        self.assertTrue(first.list_images()[0]["hidden"])
+        repeated = {item["id"]: item for item in first.list_images()}
+        self.assertTrue(repeated[repeated_ids["same/001.png"]]["hidden"])
         self.assertEqual(repeated_ids["same/001.png"], ids["same/001.png"])
 
         reopened = self.new_state()
