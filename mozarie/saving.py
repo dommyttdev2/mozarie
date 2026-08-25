@@ -117,7 +117,14 @@ class SavingMixin:
                     if revision != current_revision:
                         raise ClientError("候補が変更されました。保存をやり直してください。")
                     catalog_generation = self.catalog_generation
-                    candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.candidate_id not in removed_candidate_ids]
+                    # Disabled candidates have no effect on the rendered mask;
+                    # do not decode their full-resolution PNGs for every
+                    # browser-save request.
+                    candidates = [
+                        replace(candidate)
+                        for candidate in self.candidates.get(image_id, [])
+                        if candidate.enabled and candidate.candidate_id not in removed_candidate_ids
+                    ]
                     if copy_to_default:
                         configured_output_directory = Path(self.settings["saving"]["default_output_directory"]).resolve()
                 # A candidate can disappear between the metadata snapshot and the
@@ -126,7 +133,7 @@ class SavingMixin:
                 exclude_masks: list[np.ndarray] = []
                 forced_exclude_masks: list[np.ndarray] = []
                 add_mask, exclusion_mask, exclusion_erase_mask = draft_masks
-                enabled_apply_candidates = [candidate for candidate in candidates if candidate.enabled and candidate.role == CandidateRole.APPLY]
+                enabled_apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
                 if not enabled_apply_candidates and add_mask is None:
                     raise ClientError("保存するモザイク範囲がありません。")
                 for candidate in candidates:
@@ -141,8 +148,6 @@ class SavingMixin:
                         raise ClientError("候補が変更されました。保存をやり直してください。") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                    if not candidate.enabled:
-                        continue
                     if candidate.role == CandidateRole.APPLY:
                         apply_masks.append(candidate_mask)
                     else:
@@ -214,7 +219,7 @@ class SavingMixin:
                 if receipt is not None:
                     if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-                    return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted, "images": self.list_images()}
+                    return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted}
                 token_details = self.browser_save_tokens.get(save_token)
                 if token_details is None:
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
@@ -229,7 +234,7 @@ class SavingMixin:
                     if receipt is not None:
                         if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
                             raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
-                        return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted, "images": self.list_images()}
+                        return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted}
                     token_details = self.browser_save_tokens.get(save_token)
                     record = self.images.get(image_id)
                     if token_details is None:
@@ -326,7 +331,7 @@ class SavingMixin:
                 if rendered_path is not None:
                     rendered_path.unlink(missing_ok=True)
                 self.invalidate_sam_image(image_id)
-                return {"cleared": cleared, "stale": not cleared, "deleted": deleted, "images": self.list_images()}
+                return {"cleared": cleared, "stale": not cleared, "deleted": deleted}
 
 
     def _apply_worker(

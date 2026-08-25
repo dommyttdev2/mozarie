@@ -201,14 +201,16 @@ class DetectionMixin:
                     local_mask = np.asarray(segment["mask"], dtype=np.uint8)
                     if local_mask.shape != (tile_height, tile_width):
                         continue
-                    merge_segment(
+                    merge_tile_segment(
                         tiled_segments,
                         str(segment["class_name"]),
                         float(segment["confidence"]),
-                        restore_tile_mask(local_mask, width, height, x_offset, y_offset),
+                        local_mask,
+                        x_offset,
+                        y_offset,
                         source,
                     )
-            collected.extend(tiled_segments)
+            collected.extend(materialize_tile_mask(segment, width, height) for segment in tiled_segments)
         return arbitrate_segment_sources(collected)
 
     def _hand_boxes(self, models: DetectionModels, rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
