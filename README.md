@@ -41,15 +41,15 @@ python -m pip install -r requirements.txt
 | 用途 | ファイル | 配布元 |
 | --- | --- | --- |
 | 輪郭補正・境界ツール・手の除外 | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
-| アニメ調の手検出 | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
-| 手の輪郭補正 | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
+| アニメ調の手検出 | ONNX | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection) |
+| 手の輪郭補正 | safetensors | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 ### 自分で用意するモデル
 
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
 | 基本の性器検出 | 配布元のONNX | [配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26)から取得し、**参照**から指定します。変換は不要です。 |
-| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
+| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
 
 NTD11の変換:

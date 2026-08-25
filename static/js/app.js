@@ -9,11 +9,11 @@ function modelHelpInfo(key) {
   };
   const models = {
     target: { model: "01miku/anime-nsfw-segm-yolo26", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26") },
-    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.red", "https://civitai.red/models/1313556?modelVersionId=2350456"), command: conversionCommand("ntd11") },
+    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.red", "https://civitai.red/models/1313556"), command: conversionCommand("ntd11") },
     sensitive: { model: "sugarknight/sensitive-detect", file: ".pt → .onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect"), command: conversionCommand("sensitive") },
-    precision: { model: "Meta Segment Anything (SAM)", file: "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
-    hand: { model: "deepghs/anime_hand_detection / hand_detect_v1.0_s", file: "hand_detect_v1.0_s/model.onnx（保存名 anime-hand-v1.0-s.onnx）", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s") },
-    handSegmentation: { model: "HandSegNet anime SDXL", file: "handsegnet_vit_b_best.safetensors", ...source("Hugging Face", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a") },
+    precision: { model: "Meta Segment Anything (SAM)", file: ".pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
+    hand: { model: "deepghs/anime_hand_detection", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection") },
+    handSegmentation: { model: "HandSegNet anime SDXL", file: ".safetensors", ...source("Hugging Face", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl") },
     fluid: { model: t("modelHelp.noAdditionalModel"), file: t("modelHelp.notRequired"), source: "", url: "" },
   };
   return models[key];

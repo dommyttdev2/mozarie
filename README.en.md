@@ -41,15 +41,15 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | Use | File | Source |
 | --- | --- | --- |
 | Contour refinement, boundary tool, hand exclusion | <ul><li><code>sam_vit_b_01ec64.pth</code></li><li><code>sam_vit_l_0b3195.pth</code></li><li><code>sam_vit_h_4b8939.pth</code></li></ul> | [Meta Segment Anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
-| Anime-style hand detection | `anime-hand-v1.0-s.onnx` | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2) |
-| Hand contour refinement | `handsegnet_vit_b_best.safetensors` | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) |
+| Anime-style hand detection | ONNX | [anime_hand_detection](https://huggingface.co/deepghs/anime_hand_detection) |
+| Hand contour refinement | safetensors | [HandSegNet anime SDXL](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl) |
 
 ### Prepare yourself
 
 | Use | What to prepare | Source and selection |
 | --- | --- | --- |
 | Primary genital detection | ONNX from the source | Get it from the [source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26), then select it with **Browse**. No conversion is required. |
-| NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
+| NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from a Sensitive `.pt` file | Get it from the [source](https://huggingface.co/sugarknight/sensitive-detect), convert it, then select the ONNX file with **Browse**. |
 
 Convert NTD11:
