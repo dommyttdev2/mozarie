@@ -5,6 +5,7 @@
 # User-provided model files and per-machine settings
 models/
 config/local.json
+data/
 
 # Python build artifacts and virtual environments
 __pycache__/

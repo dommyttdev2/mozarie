@@ -448,6 +448,7 @@ function bindEvents() {
 async function initialise() {
   try {
     const settings = await api("/api/settings?status=0");
+    state.workspaceApiAvailable = settings.workspaceVersion === 1;
     setSettingsForm(settings.settings, settings.status);
     $("#settingsVersion").textContent = settings.version;
   } catch { /* The defaults below keep the editor usable when settings are unavailable. */ }
@@ -458,6 +459,7 @@ async function initialise() {
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");
+    state.workspacePersistence = data.workspaceVersion === 1 && data.workspace === true;
     if (data.images.length) {
       $("#folderPath").value = data.root || "";
       resetCatalog(data.images, data.root);

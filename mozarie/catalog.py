@@ -9,6 +9,35 @@ from . import image_io as _image_io
 globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
 
 class CatalogMixin:
+    @staticmethod
+    def _candidate_from_workspace(row: Any, path: Path) -> Candidate:
+        return Candidate(
+            candidate_id=str(row["candidate_id"]), class_name=str(row["class_name"]), confidence=row["confidence"], mask_path=path,
+            enabled=bool(row["enabled"]), color=str(row["color"]), source=str(row["source"]), origin=str(row["origin"]),
+            refinement=row["refinement"], role=CandidateRole(str(row["role"])), forced=bool(row["forced"]),
+        )
+
+    def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
+        """Materialise only small PNGs for the active catalogue into the disposable cache."""
+        for record in records:
+            try:
+                revision, candidates = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
+            except Exception:
+                LOGGER.warning("Could not restore workspace state for %s", record.relative_path, exc_info=True)
+                continue
+            if candidates or revision:
+                self.candidates[record.image_id] = candidates
+                self.candidate_revisions[record.image_id] = revision
+
+    def _persist_candidates(self, image_id: str) -> None:
+        """Commit a complete candidate revision before exposing a successful mutation."""
+        record = self.images.get(image_id)
+        if record is None:
+            return
+        if not self.workspace_store.has_image(image_id):
+            return
+        self.workspace_store.replace_candidates(image_id, self._candidate_revision(image_id), self.candidates.get(image_id, []))
+
     def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
         with self.lock:
             previous_ids = tuple(self.images)
@@ -30,6 +59,8 @@ class CatalogMixin:
                 session = self._detach_session_unchecked()
                 self._image_io_locks.clear()
             self._clear_cache()
+            # Cache cleanup intentionally happens before masks are materialised.
+            self._restore_workspace_candidates(records)
             self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
         return self.list_images()
@@ -50,6 +81,85 @@ class CatalogMixin:
     def set_root(self, raw_path: str) -> list[dict[str, Any]]:
         with self.import_lock:
             return self._set_root(raw_path)
+
+    def activate_browser_catalog(self, catalog_id: str | None = None) -> str:
+        with self.import_lock:
+            if catalog_id and not self.workspace_store.catalog_exists(catalog_id):
+                raise ClientError("保存済みのフォルダ状態が見つかりません。")
+            # A directory selection is a full reimport. Even when its handle
+            # maps to the active ID, discard current session files first so
+            # each uploaded relative path reconciles its durable record.
+            self.clear_catalog()
+            try:
+                self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
+                self.browser_catalog_provisional = False
+            except ValueError as exc: raise ClientError("カタログIDが正しくありません。") from exc
+            return self.catalog_id
+
+    def finalize_browser_catalog(self) -> tuple[str | None, dict[str, str]]:
+        """Bind a fallback import after its complete content manifest is known.
+
+        A single filename/hash pair is deliberately insufficient: folders can
+        contain common names such as ``001.png``.  We first import into a fresh
+        browser catalogue, then reuse an existing one only after the complete
+        manifest identifies it unambiguously.
+        """
+        with self.import_lock:
+            with self.lock:
+                if not self.catalog_id or not self.browser_catalog_provisional or not self.browser_import_hashes:
+                    return self.catalog_id, {}
+                self._assert_catalog_mutable()
+                source_catalog = self.catalog_id
+                entries = list(self.browser_import_hashes.items())
+                records = list(self.images.values())
+                hashes = dict(self.browser_import_hashes)
+            target = self.workspace_store.best_catalog_for_manifest(entries, source_catalog)
+            if not target:
+                self.workspace_store.finalize_catalog(source_catalog)
+                with self.lock:
+                    self.browser_catalog_provisional = False
+                    self.browser_import_hashes = {}
+                return source_catalog, {}
+            stored = self.workspace_store.reconcile_images(target, records, hashes)
+            image_id_map = {
+                record.image_id: str(value["image_id"])
+                for record in records if (value := stored.get(record.relative_path)) is not None
+            }
+            with self.lock:
+                # No processing can be active here, so cache files can be
+                # discarded before candidate metadata is lazily rehydrated.
+                self.images = {}
+                self.order = []
+                self.candidates = {}
+                self.candidate_revisions = {}
+                self._image_io_locks.clear()
+                self._clear_browser_save_tokens_unchecked()
+            self._clear_cache()
+            with self.lock:
+                for record in records:
+                    value = stored.get(record.relative_path)
+                    if value is None:
+                        continue
+                    record.image_id = str(value["image_id"])
+                    record.hidden = bool(value["hidden"])
+                    record.reviewed = bool(value["reviewed"])
+                    self.images[record.image_id] = record
+                    self.order.append(record.image_id)
+                    revision, candidates = self.workspace_store.hydrate_candidates(
+                        record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace
+                    )
+                    if candidates or revision:
+                        self.candidates[record.image_id] = candidates
+                        self.candidate_revisions[record.image_id] = revision
+                self.order.sort(key=lambda image_id: self.images[image_id].relative_path.casefold())
+                self.catalog_id = target
+                self.catalog_generation += 1
+                self.browser_catalog_provisional = False
+                self.browser_import_hashes = {}
+            # The target is fully committed before dropping the provisional
+            # rows, so a crash can only retain harmless temporary state.
+            self.workspace_store.delete_catalog(source_catalog)
+            return target, image_id_map
 
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -106,6 +216,16 @@ class CatalogMixin:
                 for worker in workers:
                     worker.result()
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
+        catalog_id = self.workspace_store.catalog_for_root(root)
+        stored = self.workspace_store.reconcile_images(catalog_id, records)
+        for record in records:
+            saved = stored[record.relative_path]
+            record.image_id = str(saved["image_id"])
+            record.hidden = bool(saved["hidden"])
+            record.reviewed = bool(saved["reviewed"])
+        self.catalog_id = catalog_id
+        self.browser_catalog_provisional = False
+        self.browser_import_hashes = {}
         return self._replace_catalog(root, records)
 
     def clear_catalog(self) -> None:
@@ -124,11 +244,17 @@ class CatalogMixin:
                     self.candidate_revisions = {}
                     self._clear_browser_save_tokens_unchecked()
                     self._invalidate_sam_cache()
+                    provisional_catalog = self.catalog_id if self.browser_catalog_provisional else None
+                    self.catalog_id = None
+                    self.browser_import_hashes = {}
+                    self.browser_catalog_provisional = False
                     self.catalog_generation += 1
                     session = self._detach_session_unchecked()
                     self._image_io_locks.clear()
                 self._clear_cache()
                 self._release_detached_session(session)
+                if provisional_catalog:
+                    self.workspace_store.delete_catalog(provisional_catalog)
         self.cleanup_expired_browser_save_tokens()
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
@@ -338,6 +464,8 @@ class CatalogMixin:
                 for record in records:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
+                    self._persist_candidates(record.image_id)
+                self.workspace_store.delete_manual([record.image_id for record in records])
             self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
 
@@ -363,6 +491,7 @@ class CatalogMixin:
         *,
         include_images: bool = True,
         transfer_active: bool = False,
+        source_hash: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
             raise ClientError("追加する画像がありません。")
@@ -414,15 +543,34 @@ class CatalogMixin:
                 final_paths: list[Path] = []
                 try:
                     imported: list[dict[str, str]] = []
+                    catalog_relative_paths = {
+                        record.relative_path.casefold()
+                        for record in self.images.values()
+                        if record.source_kind != "session"
+                    }
+                    used_relative_paths = set(catalog_relative_paths)
                     for temporary, name, width, height, client_key in pending:
-                        destination = unique_session_import_destination(destination_dir / name)
+                        relative = Path(name)
+                        base_stem, suffix = relative.stem, relative.suffix
+                        if relative.as_posix().casefold() in catalog_relative_paths:
+                            index = 1
+                            while relative.as_posix().casefold() in used_relative_paths or (destination_dir / relative).exists():
+                                index += 1
+                                relative = relative.with_name(f"{base_stem} ({index}){suffix}")
+                            destination = destination_dir / relative
+                        else:
+                            # Keep the established _2 naming for collisions
+                            # among session imports while reserving (2) for a
+                            # collision with an existing catalogue image.
+                            destination = unique_session_import_destination(destination_dir / relative)
+                            relative = destination.relative_to(destination_dir)
+                        used_relative_paths.add(relative.as_posix().casefold())
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(temporary, destination)
                         final_paths.append(destination)
                         stat = destination.stat()
-                        image_id = uuid.uuid4().hex
                         added.append(ImageRecord(
-                            image_id=image_id,
+                            image_id=uuid.uuid4().hex,
                             path=destination,
                             relative_path=destination.relative_to(destination_dir).as_posix(),
                             width=width,
@@ -431,12 +579,19 @@ class CatalogMixin:
                             size_bytes=stat.st_size,
                             source_kind="session",
                         ))
-                        imported.append({"clientKey": client_key, "imageId": image_id})
+                        imported.append({"clientKey": client_key, "imageId": added[-1].image_id})
                 except Exception:
                     for destination in final_paths:
                         destination.unlink(missing_ok=True)
                     raise
-                for record in added:
+                for index, record in enumerate(added):
+                    if self.catalog_id:
+                        stored = self.workspace_store.reconcile_images(self.catalog_id, [record], {record.relative_path: source_hash})[record.relative_path]
+                        record.image_id = str(stored["image_id"]); record.hidden = bool(stored["hidden"]); record.reviewed = bool(stored["reviewed"])
+                        if source_hash: self.browser_import_hashes[record.relative_path] = source_hash
+                        _revision, restored = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
+                        if restored: self.candidates[record.image_id] = restored; self.candidate_revisions[record.image_id] = _revision
+                    imported[index]["imageId"] = record.image_id
                     self.images[record.image_id] = record
                     self.order.append(record.image_id)
                 self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
@@ -458,6 +613,7 @@ class CatalogMixin:
         client_key: str,
         include_images: bool = True,
         transfer_active: bool = False,
+        source_hash: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(client_key, str) or not client_key:
             raise ClientError("追加画像のclientKeyが不正です。")
@@ -466,7 +622,7 @@ class CatalogMixin:
             "name": name,
             "relativePath": relative_path,
             "stagedPath": staged_path,
-        }], include_images=include_images, transfer_active=transfer_active)
+        }], include_images=include_images, transfer_active=transfer_active, source_hash=source_hash)
 
     def _clear_cache(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -643,6 +799,53 @@ class CatalogMixin:
     def list_images(self) -> list[dict[str, Any]]:
         return self.catalog_snapshot()["images"]
 
+    def set_image_flags(self, image_id: str, payload: dict[str, Any]) -> dict[str, bool]:
+        if not isinstance(payload, dict):
+            raise ClientError("画像の状態が正しくありません。")
+        hidden = payload.get("hidden")
+        reviewed = payload.get("reviewed")
+        if hidden is not None and not isinstance(hidden, bool) or reviewed is not None and not isinstance(reviewed, bool):
+            raise ClientError("画像の状態が正しくありません。")
+        with self.lock:
+            record = self.images.get(image_id)
+            if record is None:
+                raise ClientError("画像が見つかりません。")
+            if hidden is not None: record.hidden = hidden
+            if reviewed is not None: record.reviewed = reviewed
+            if self.workspace_store.has_image(image_id):
+                self.workspace_store.set_image_flags(image_id, hidden=hidden, reviewed=reviewed)
+            return {"hidden": record.hidden, "reviewed": record.reviewed}
+
+    @staticmethod
+    def _decode_workspace_mask(value: Any) -> bytes | None:
+        if value is None or value == "": return None
+        if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
+            raise ClientError("手描きマスクが正しくありません。")
+        try:
+            raw = base64.b64decode(value.split(",", 1)[1], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ClientError("手描きマスクが正しくありません。") from exc
+        if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
+            raise ClientError("手描きマスクが正しくありません。")
+        return raw
+
+    @staticmethod
+    def _encode_workspace_mask(value: bytes | None) -> str:
+        return "" if not value else f"data:image/png;base64,{base64.b64encode(value).decode('ascii')}"
+
+    def save_manual_workspace(self, image_id: str, payload: dict[str, Any]) -> None:
+        record = self.image_for_id(image_id)
+        if not self.workspace_store.has_image(image_id): return
+        try:
+            self.workspace_store.save_manual(image_id, payload, self._decode_workspace_mask)
+        except ValueError as exc:
+            raise ClientError("手描き状態を保存できません。") from exc
+
+    def manual_workspace(self, image_id: str) -> dict[str, Any] | None:
+        record = self.image_for_id(image_id)
+        if not self.workspace_store.has_image(image_id): return None
+        return self.workspace_store.manual(image_id, self._encode_workspace_mask)
+
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
@@ -665,12 +868,16 @@ class CatalogMixin:
                             for candidate in self.candidates.get(image_id, [])
                         ),
                         "candidateRevision": self._candidate_revision(image_id),
+                        "hidden": record.hidden,
+                        "reviewed": record.reviewed,
                     }
                 )
             return {
                 "root": str(self.root) if self.root else "",
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
+                "workspace": self.catalog_id is not None,
+                "workspaceVersion": 1,
             }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
@@ -688,15 +895,16 @@ class CatalogMixin:
                     revision = self._candidate_revision(image_id)
                     snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
                 self._assert_record_stat_matches(record)
-                available = {candidate.candidate_id for candidate in snapshot if candidate.mask_path.is_file()}
                 with self.lock:
                     if self._candidate_revision(image_id) != revision:
                         continue
                     stored_candidates = self.candidates.get(image_id, [])
-                    candidates = [candidate for candidate in stored_candidates if candidate.candidate_id in available]
+                    durable_ids = self.workspace_store.valid_candidate_ids(image_id)
+                    candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file() or candidate.candidate_id in durable_ids]
                     if len(candidates) != len(stored_candidates):
                         self.candidates[image_id] = candidates
                         self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
                     return {
                         "candidates": [
                             candidate.as_api_dict(
@@ -743,11 +951,19 @@ class CatalogMixin:
             try:
                 raw_mask = candidate.mask_path.read_bytes()
             except FileNotFoundError as exc:
-                with self.lock:
-                    if self._candidate_revision(image_id) == revision:
-                        self._remove_candidate_unchecked(image_id, candidate_id)
-                        self._touch_candidates(image_id)
-                raise StaleMaskError("検出候補は既に更新されています。") from exc
+                raw_mask = self.workspace_store.candidate_png(image_id, candidate_id)
+                if raw_mask is not None:
+                    # Do not keep every restored PNG in the process cache. The
+                    # requested candidate alone becomes a short-lived cache file.
+                    candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
+                    candidate.mask_path.write_bytes(raw_mask)
+                else:
+                    with self.lock:
+                        if self._candidate_revision(image_id) == revision:
+                            self._remove_candidate_unchecked(image_id, candidate_id)
+                            self._touch_candidates(image_id)
+                            self._persist_candidates(image_id)
+                    raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
             alpha = mask_image.convert("L")
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
@@ -768,6 +984,13 @@ class CatalogMixin:
                 ):
                     raise StaleMaskError("検出候補は既に更新されています。")
             return output.getvalue()
+
+    def materialize_candidate_mask(self, candidate: Candidate, image_id: str) -> None:
+        if candidate.mask_path.is_file(): return
+        raw = self.workspace_store.candidate_png(image_id, candidate.candidate_id)
+        if raw is None: return
+        candidate.mask_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate.mask_path.write_bytes(raw)
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)
@@ -794,6 +1017,7 @@ class CatalogMixin:
             if "forced" in payload:
                 candidate.forced = payload["forced"]
             self._touch_candidates(image_id)
+            self._persist_candidates(image_id)
             return self._candidate_revision(image_id)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
@@ -816,6 +1040,7 @@ class CatalogMixin:
                     for item in selected:
                         item.enabled = operation == "enable"
                 revision = self._touch_candidates(image_id)
+                self._persist_candidates(image_id)
             for path in paths:
                 path.unlink(missing_ok=True)
             return revision
@@ -832,5 +1057,6 @@ class CatalogMixin:
                     return False
                 self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
                 self._touch_candidates(image_id)
+                self._persist_candidates(image_id)
             candidate.mask_path.unlink(missing_ok=True)
             return True

@@ -196,6 +196,14 @@ function startFixtureServer() {
       response.end(JSON.stringify({ ok: true }));
       return;
     }
+    if (requestPath.startsWith("/api/workspace/manual/")) {
+      for await (const _chunk of request) { /* consume POST body */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      // Deliberately lacks history: selected in-session drafts must win over
+      // this compact server record when returning to an image.
+      response.end(JSON.stringify({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 0 } }));
+      return;
+    }
     if (requestPath.startsWith("/api/candidates/")) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ candidates: [], candidateRevision: 0 }));
@@ -1548,6 +1556,31 @@ async function main() {
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
     assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: true }, `soft deletion keeps undo/redo and trimmed history while display state clears on navigation: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    const workspaceDraftRetention = await page.evaluate(async () => {
+      const previousPersistence = state.workspacePersistence;
+      const draft = (label) => ({
+        add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",
+        exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true,
+        manualExclusionEraseEnabled: true, manualExclusionForced: true, manualMaskPresent: true,
+        candidateRevision: 0, removedCandidateIds: [], history: [{ kind: "clearManual", role: "apply", label }], historyIndex: 1,
+        historyBase: { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [] },
+      });
+      state.workspacePersistence = true;
+      state.drafts.set("sample", draft("A")); state.drafts.set("sample-two", draft("B"));
+      await selectImage("sample", true, { saveCurrentDraft: false });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await selectImage("sample-two", true, { saveCurrentDraft: false });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await selectImage("sample", true, { saveCurrentDraft: false });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const restoredHistory = state.history.length === 1 && state.historyIndex === 1;
+      restoreSnapshot(0); const undo = state.historyIndex === 0;
+      restoreSnapshot(1); const redo = state.historyIndex === 1;
+      const bulk = draftPayload(["sample", "sample-two"]);
+      state.workspacePersistence = previousPersistence;
+      return { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
+    });
+    assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);

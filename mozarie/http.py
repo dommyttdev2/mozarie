@@ -1,3 +1,5 @@
+import hashlib
+
 from .core import *
 from .state import STATE, StudioState
 from .image_io import *
@@ -6,6 +8,14 @@ from typing import BinaryIO
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(IO_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run_native_picker(script: str, environment: dict[str, str], *, failed_message: str, busy_message: str, state: StudioState) -> str | None:
@@ -178,7 +188,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "device": inference_device_name(),
                 })
             elif path == "/api/settings":
-                payload = {"settings": STATE.settings, "version": _local_version()}
+                payload = {"settings": STATE.settings, "version": _local_version(), "workspaceVersion": 1}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     payload["status"] = STATE.settings_status()
                 self._json(payload)
@@ -199,6 +209,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/candidates/"):
                 image_id = path.removeprefix("/api/candidates/")
                 self._json(STATE.candidate_snapshot(image_id))
+            elif path.startswith("/api/workspace/manual/"):
+                self._json({"draft": STATE.manual_workspace(path.removeprefix("/api/workspace/manual/"))})
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._send_candidate_mask(image_id, candidate_id, _request_version(parsed.query))
@@ -234,18 +246,32 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 try:
                     with STATE.import_staging_gate:
                         staged_path = self._read_binary_body_to_file()
+                        requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                        # Browser uploads have no trustworthy native path.
+                        # Streamed content fingerprints let the fallback match
+                        # a complete folder manifest after all files arrive.
+                        source_hash = _file_sha256(staged_path)
                         try:
-                            _images, imported = STATE.import_image_file_for_api(
-                                staged_path,
-                                name=name,
-                                relative_path=relative_path,
-                                client_key=client_key,
-                                include_images=False,
-                                transfer_active=True,
-                            )
+                            # Keep implicit API callers from splitting a
+                            # parallel empty-catalog upload across IDs. This
+                            # lock covers identity selection only; decoding
+                            # and file copy below retain their parallelism.
+                            with STATE.import_lock:
+                                if requested_catalog and STATE.catalog_id != requested_catalog:
+                                    if STATE.catalog_id is not None:
+                                        raise ClientError("画像追加中にフォルダを切り替えることはできません。")
+                                    STATE.activate_browser_catalog(requested_catalog)
+                                elif not STATE.catalog_id:
+                                    # Never bind a fallback import based on its
+                                    # first file. Finalisation scores the full manifest.
+                                    STATE.catalog_id = STATE.workspace_store.ensure_provisional_catalog()
+                                    STATE.browser_catalog_provisional = True
+                            import_args = {"name": name, "relative_path": relative_path, "client_key": client_key, "include_images": False, "transfer_active": True}
+                            if source_hash: import_args["source_hash"] = source_hash
+                            _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
                         finally:
                             staged_path.unlink(missing_ok=True)
-                    self._json({"imported": imported})
+                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional, "workspaceVersion": 1})
                 finally:
                     STATE.end_import_transfer()
                 return
@@ -253,10 +279,29 @@ class MosaicHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
-                self._json({"images": images})
+                self._json({"images": images, "workspace": True, "workspaceVersion": 1})
+            elif path == "/api/workspace/catalog":
+                if payload.get("provisional") is True:
+                    if payload.get("catalogId"):
+                        raise ClientError("仮カタログにIDは指定できません。")
+                    STATE.clear_catalog()
+                    catalog_id = STATE.workspace_store.ensure_provisional_catalog()
+                    STATE.catalog_id = catalog_id
+                    STATE.browser_catalog_provisional = True
+                    self._json({"catalogId": catalog_id, "provisional": True})
+                else:
+                    self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId")), "provisional": False})
+            elif path == "/api/workspace/catalog/finalize":
+                catalog_id, image_ids = STATE.finalize_browser_catalog()
+                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id), "workspaceVersion": 1})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
+            elif path.startswith("/api/workspace/image/"):
+                self._json(STATE.set_image_flags(path.removeprefix("/api/workspace/image/"), payload))
+            elif path.startswith("/api/workspace/manual/"):
+                STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload)
+                self._json({"ok": True})
             elif path == "/api/catalog/remove":
                 self._json(STATE.remove_images_from_catalog(payload.get("imageIds", [])))
             elif path == "/api/masks/clear":
