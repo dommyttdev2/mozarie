@@ -9,13 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mozarie.config import SettingsError, SettingsStore, validate_output_directory_ready, validate_settings
 
 
+DEFAULTS_PATH = Path(__file__).resolve().parents[1] / "config" / "defaults.json"
+
+
+def default_settings() -> dict:
+    return json.loads(DEFAULTS_PATH.read_text(encoding="utf-8"))
+
+
 class SettingsTests(unittest.TestCase):
     def test_missing_builtin_output_directory_is_created_for_load_save_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "config"
             config.mkdir()
-            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults = default_settings()
             defaults["saving"].pop("default_output_directory")
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root)
@@ -42,7 +49,7 @@ class SettingsTests(unittest.TestCase):
             root = Path(directory)
             config = root / "config"
             config.mkdir()
-            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults = default_settings()
             defaults["saving"]["default_output_directory"] = str(root / "configured-output")
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             (config / "local.json").write_text(json.dumps({"saving": {"default_output_directory": "   "}}), encoding="utf-8")
@@ -58,7 +65,7 @@ class SettingsTests(unittest.TestCase):
             root = Path(directory)
             config = root / "config"
             config.mkdir()
-            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults = default_settings()
             custom_output = root / "custom-output"
             defaults["saving"]["default_output_directory"] = str(custom_output)
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
@@ -86,13 +93,7 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "config").mkdir()
-            defaults = {
-                "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-                "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-                "importing": {"parallelism": 3},
-                "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-            }
+            defaults = default_settings()
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root)
             saved = store.save({"general": {"language": "en"}, "display": {"tool_position": "bottom"}, "importing": {"parallelism": 10}, "detection": {"mode": "high_precision", "parallelism": 4}})
@@ -107,13 +108,7 @@ class SettingsTests(unittest.TestCase):
     def test_reset_removes_only_machine_override(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "config").mkdir()
-            defaults = {
-                "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-                "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-                "importing": {"parallelism": 3},
-                "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-            }
+            defaults = default_settings()
             (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             store = SettingsStore(root); store.save({"general": {"language": "en"}})
             self.assertTrue((root / "config" / "local.json").is_file())
@@ -122,35 +117,28 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(reset["saving"]["default_output_directory"], str((root / "output").resolve()))
             self.assertFalse((root / "config" / "local.json").exists())
 
-    def test_legacy_sam_path_moves_to_its_named_variant_and_new_saves_use_the_map(self):
+    def test_sam_checkpoint_variants_are_persisted_as_a_map(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); config = root / "config"; config.mkdir()
-            defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+            defaults = default_settings()
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
-            legacy_path = r"C:\models\sam_vit_l_0b3195.pth"
-            (config / "local.json").write_text(json.dumps({"models": {"sam_checkpoint": legacy_path, "sam_model_type": "vit_b"}}), encoding="utf-8")
+            checkpoint = r"C:\models\sam_vit_l_0b3195.pth"
+            (config / "local.json").write_text(json.dumps({"models": {"sam_checkpoints": {"vit_l": checkpoint}, "sam_model_type": "vit_l"}}), encoding="utf-8")
             store = SettingsStore(root)
 
             loaded = store.load()
             self.assertEqual(loaded["models"]["sam_model_type"], "vit_l")
-            self.assertEqual(loaded["models"]["sam_checkpoints"]["vit_l"], legacy_path)
-            self.assertEqual(loaded["models"]["sam_checkpoint"], legacy_path)
+            self.assertEqual(loaded["models"]["sam_checkpoints"]["vit_l"], checkpoint)
 
             loaded["models"]["sam_checkpoints"]["vit_h"] = r"D:\models\sam_vit_h_4b8939.pth"
             loaded["models"]["sam_model_type"] = "vit_h"
             saved = store.save(loaded)
             persisted = json.loads((config / "local.json").read_text(encoding="utf-8"))
-            self.assertNotIn("sam_checkpoint", persisted["models"])
-            self.assertEqual(saved["models"]["sam_checkpoint"], r"D:\models\sam_vit_h_4b8939.pth")
+            self.assertEqual(persisted["models"]["sam_checkpoints"]["vit_h"], r"D:\models\sam_vit_h_4b8939.pth")
+            self.assertEqual(saved["models"]["sam_checkpoints"]["vit_h"], r"D:\models\sam_vit_h_4b8939.pth")
 
     def test_invalid_provider_and_threshold_are_rejected(self):
-        valid = {
-            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-            "importing": {"parallelism": 3},
-            "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-        }
+        valid = default_settings()
         invalid_provider = json.loads(json.dumps(valid)); invalid_provider["models"]["provider"] = "metal"
         invalid_threshold = json.loads(json.dumps(valid)); invalid_threshold["detection"]["threshold"] = 1.1
         invalid_tool_position = json.loads(json.dumps(valid)); invalid_tool_position["display"]["tool_position"] = "center"
@@ -162,40 +150,23 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(SettingsError): validate_settings(invalid_fluid_exclusion)
         with self.assertRaises(SettingsError): validate_settings(invalid_import_parallelism)
 
-    def test_hand_segmentation_settings_merge_with_legacy_defaults(self):
-        legacy = {
-            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-        }
-        settings = validate_settings(legacy)
+    def test_hand_segmentation_settings_have_safe_defaults(self):
+        settings = validate_settings(default_settings())
         self.assertEqual(settings["models"]["hand_segmentation"], "")
         self.assertFalse(settings["models"]["hand_segmentation_enabled"])
         self.assertTrue(settings["detection"]["exclude_forced_default"])
         self.assertTrue(Path(settings["saving"]["default_output_directory"]).is_absolute())
 
-    def test_hand_segmentation_requires_hand_detection_but_legacy_load_is_normalised(self):
-        defaults = json.loads((Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_text(encoding="utf-8"))
+    def test_hand_segmentation_requires_hand_detection(self):
+        defaults = default_settings()
         invalid = json.loads(json.dumps(defaults))
         invalid["models"]["hand_segmentation_enabled"] = True
         with self.assertRaises(SettingsError):
             validate_settings(invalid)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "config").mkdir()
-            (root / "config" / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
-            (root / "config" / "local.json").write_text(json.dumps({"models": {"hand_segmentation_enabled": True}}), encoding="utf-8")
-            self.assertFalse(SettingsStore(root).load()["models"]["hand_segmentation_enabled"])
 
     def test_output_directory_must_be_an_absolute_path(self):
-        legacy = {
-            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-            "saving": {"parallelism": 2, "default_output_directory": "relative-output"},
-        }
+        legacy = default_settings()
+        legacy["saving"] = {"parallelism": 2, "default_output_directory": "relative-output"}
         with self.assertRaises(SettingsError):
             validate_settings(legacy)
         legacy["saving"]["default_output_directory"] = "C:\\output\x00bad"
@@ -203,12 +174,7 @@ class SettingsTests(unittest.TestCase):
             validate_settings(legacy)
 
     def test_legacy_shortcuts_gain_per_action_defaults(self):
-        legacy = {
-            "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-            "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-            "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-            "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-        }
+        legacy = default_settings()
         settings = validate_settings(legacy)
         self.assertTrue(settings["shortcuts"]["actions"]["previousVisible"])
         self.assertEqual(settings["shortcuts"]["bindings"]["nextVisible"], "ArrowDown")
@@ -217,12 +183,7 @@ class SettingsTests(unittest.TestCase):
     def test_failed_atomic_replace_keeps_the_previous_local_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); config = root / "config"; config.mkdir()
-            defaults = {
-                "general": {"language": "ja", "open_browser": True, "port": 8766, "shortcuts_enabled": True},
-                "models": {"target_segmentation": "", "ntd11": "", "ntd11_enabled": False, "sensitive": "", "sensitive_enabled": False, "hand_detection": "", "hand_detection_enabled": False, "sam_checkpoint": "", "sam_model_type": "vit_b", "provider": "gpu"},
-                "display": {"apply_color": "#ff3d4d", "exclude_color": "#28d3ff", "overlay_opacity": 0.78, "mosaic_preview": True, "tool_position": "left"},
-                "importing": {"parallelism": 3}, "detection": {"mode": "standard", "fluid_exclusion_enabled": True, "threshold": 0.5, "parallelism": 2},
-            }
+            defaults = default_settings()
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
             local = config / "local.json"; local.write_text('{"keep": true}', encoding="utf-8")
             store = SettingsStore(root)

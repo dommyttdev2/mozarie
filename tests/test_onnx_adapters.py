@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 import sys
 
 import numpy as np
@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter, _class_names
-from mozarie.inference.onnx import Letterbox, class_aware_nms_indices, create_session, nms_indices
+from mozarie.inference.onnx import BaseOnnxModel, Letterbox, class_aware_nms_indices, create_session, nms_indices
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -46,6 +46,19 @@ class OnnxAdapterTests(unittest.TestCase):
                 },
             ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
+
+    def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
+        cpu = BaseOnnxModel.__new__(BaseOnnxModel)
+        cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()
+        cpu.session.run.return_value = [np.asarray([1])]
+        self.assertEqual(cpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [1])
+        cpu.session.run.assert_called_once_with(None, {"image": ANY})
+
+        gpu = BaseOnnxModel.__new__(BaseOnnxModel)
+        gpu.input_name = "image"; gpu.run_options = Mock(); gpu.session = Mock()
+        gpu.session.run.return_value = [np.asarray([2])]
+        self.assertEqual(gpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [2])
+        gpu.session.run.assert_called_once_with(None, {"image": ANY}, gpu.run_options)
 
     def test_target_decoder_identifies_reversed_outputs_and_channel_first_rows(self) -> None:
         prediction = np.zeros((1, 43, 2), dtype=np.float32)

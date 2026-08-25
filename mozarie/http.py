@@ -1,10 +1,30 @@
 import hashlib
+import base64
+import io
+import json
+import mimetypes
+import os
+import subprocess
+import tempfile
+import threading
+import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, BinaryIO
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .core import *
+from PIL import Image, ImageOps
+
+from .core import (
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE, STATIC_DIR,
+    ClientError, ForbiddenClientError, ImageRecord, StaleMaskError,
+    read_detection_confidence, _read_detection_parallelism, _read_mosaic_divisor,
+    _read_save_suffix, _read_target_classes,
+)
 from .state import STATE, StudioState
-from .image_io import *
+from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
 from .model_downloads import ModelDownloadError
-from typing import BinaryIO
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
@@ -658,16 +678,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
         LOGGER.warning("HTTP %s %s -> %d", self.command, path, status)
 
 
-def _read_mosaic_divisor(value: Any) -> int:
-    try:
-        divisor = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ClientError("モザイク粗さが正しくありません。") from exc
-    if not 1 <= divisor <= 10000:
-        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
-    return divisor
-
-
 def _request_version(query: str) -> str | None:
     values = parse_qs(query, keep_blank_values=True).get("v")
     if values is None:
@@ -684,27 +694,6 @@ def _read_candidate_revision(value: Any) -> int:
     if revision < 0:
         raise ClientError("候補の版番号が不正です。")
     return revision
-
-
-def _read_detection_parallelism(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ClientError("並列数は1から4で指定してください。")
-    return value
-
-
-def _read_save_suffix(value: Any) -> str:
-    if not isinstance(value, str) or not value or Path(value).name != value:
-        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
-    return value
-
-
-def _read_target_classes(value: Any) -> set[str]:
-    if not isinstance(value, (list, tuple, set)):
-        raise ClientError("検出対象の形式が正しくありません。")
-    targets = {str(item) for item in value}
-    if not targets or not targets <= TARGET_CLASSES:
-        raise ClientError("検出対象は penis または pussy を選択してください。")
-    return targets
 
 
 def _read_bool(value: Any, field_name: str) -> bool:
