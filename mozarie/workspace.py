@@ -435,16 +435,16 @@ class WorkspaceStore:
     def hydrate_candidates(self, image_id: str, directory: Path, candidate_factory: Any) -> tuple[int, list[Any]]:
         with self._connect() as db:
             image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
-            rows = db.execute("""SELECT candidate_id,class_name,confidence,enabled,color,source,origin,refinement,role,forced,
-                length(mask_png) AS mask_size,substr(mask_png,1,8) AS mask_signature
+            rows = db.execute("""SELECT candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
                 FROM candidates WHERE image_id=? AND deleted=0""", (image_id,)).fetchall()
         if not image: return 0, []
         if not rows: return int(image["candidate_revision"]), []
-        candidates = []
         for row in rows:
-            if int(row["mask_size"] or 0) < 8 or row["mask_signature"] != b"\x89PNG\r\n\x1a\n": continue
-            path = directory / f"{row['candidate_id']}.png"
-            candidates.append(candidate_factory(row, path))
+            mask = row["mask_png"]
+            if not isinstance(mask, bytes):
+                raise ValueError("workspace candidate mask is not a PNG")
+            self._require_png_mask(mask)
+        candidates = [candidate_factory(row, directory / f"{row['candidate_id']}.png") for row in rows]
         return int(image["candidate_revision"]), candidates
 
     def valid_candidate_ids(self, image_id: str) -> set[str]:
@@ -498,6 +498,10 @@ class WorkspaceStore:
     def manual(self, image_id: str, encoder: Any) -> dict[str, Any] | None:
         with self._connect() as db: row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
         if not row: return None
-        try:
-            return {"add": encoder(row["add_png"]), "exclusion": encoder(row["exclusion_png"]), "exclusionErase": encoder(row["exclusion_erase_png"]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": __import__('json').loads(row["removed_candidate_ids"]), "candidateRevision": int(row["candidate_revision"]), "hasEffectiveMask": bool(row["has_effective_mask"])}
-        except Exception: return None
+        masks = (row["add_png"], row["exclusion_png"], row["exclusion_erase_png"])
+        for mask in masks:
+            self._require_png_mask(mask)
+        removed = json.loads(row["removed_candidate_ids"])
+        if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+            raise ValueError("workspace removed candidates are invalid")
+        return {"add": encoder(masks[0]), "exclusion": encoder(masks[1]), "exclusionErase": encoder(masks[2]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": removed, "candidateRevision": int(row["candidate_revision"]), "hasEffectiveMask": bool(row["has_effective_mask"])}

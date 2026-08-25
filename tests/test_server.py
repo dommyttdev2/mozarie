@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -186,6 +187,53 @@ class MozarieTests(unittest.TestCase):
             # must materialise the selected PNG before it consumes it.
             output, _record, _revision, _token = replacement.render_browser_save(image_id, 1, 100, None)
             self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
+
+    def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("a-valid.png", "b-corrupt.png"):
+                Image.new("RGB", (16, 16), "white").save(root / name)
+            state = self.new_state()
+            image_ids = {item["relativePath"]: item["id"] for item in state.set_root(str(root))}
+            for name, candidate_id in (("a-valid.png", "valid"), ("b-corrupt.png", "corrupt")):
+                image_id = image_ids[name]
+                mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (16, 16), 255).save(mask_path)
+                state.candidates[image_id] = [Candidate(candidate_id, "penis", 0.9, mask_path)]
+                state._touch_candidates(image_id)
+                state._persist_candidates(image_id)
+            connection = sqlite3.connect(state.workspace_store.path)
+            with connection as db:
+                db.execute("UPDATE candidates SET mask_png=? WHERE image_id=? AND candidate_id=?", (b"not a PNG", image_ids["b-corrupt.png"], "corrupt"))
+            connection.close()
+
+            replacement = self.new_state()
+            with self.assertRaisesRegex(ValueError, "PNG"):
+                replacement.set_root(str(root))
+            self.assertEqual(replacement.candidates, {})
+
+    def test_workspace_restore_rejects_invalid_candidate_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state._persist_candidates(image_id)
+            connection = sqlite3.connect(state.workspace_store.path)
+            with connection as db:
+                db.execute("UPDATE candidates SET role=? WHERE image_id=?", ("not-a-role", image_id))
+            connection.close()
+
+            replacement = self.new_state()
+            with self.assertRaisesRegex(ValueError, "not-a-role"):
+                replacement.set_root(str(root))
+            self.assertEqual(replacement.candidates, {})
 
     def test_lazy_workspace_candidates_survive_toggle_and_delete_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:

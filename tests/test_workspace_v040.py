@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from mozarie.catalog import CatalogMixin
 from mozarie.workspace import WorkspaceStore
 
 
@@ -43,6 +44,88 @@ class WorkspaceV040Tests(unittest.TestCase):
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             with self.assertRaisesRegex(ValueError, "effective mask"):
                 store.save_manual(image_id, {"add": "x"}, lambda value: b"png" if value else None)
+
+    def test_hydrate_candidates_rejects_corrupt_masks_without_partial_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                for candidate_id, mask in (("valid", self._png()), ("broken", b"not a PNG")):
+                    db.execute("""INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                        image_id, candidate_id, "penis", 0.9, mask, 1, "#123456", "detector",
+                        "automatic", None, "apply", 0, 0,
+                    ))
+            connection.close()
+            constructed: list[str] = []
+            with self.assertRaisesRegex(ValueError, "PNG"):
+                store.hydrate_candidates(image_id, root / "cache", lambda row, _path: constructed.append(str(row["candidate_id"])))
+            self.assertEqual(constructed, [])
+
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                db.execute("UPDATE candidates SET mask_png=0 WHERE image_id=? AND candidate_id=?", (image_id, "broken"))
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "PNG"):
+                store.hydrate_candidates(image_id, root / "cache", lambda _row, _path: None)
+
+    def test_hydrate_candidates_propagates_invalid_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                db.execute("""INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    image_id, "candidate", "penis", 0.9, self._png(), 1, "#123456", "detector",
+                    "automatic", None, "invalid-role", 0, 0,
+                ))
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "invalid-role"):
+                store.hydrate_candidates(image_id, root / "cache", CatalogMixin._candidate_from_workspace)
+
+    def test_manual_rejects_corrupt_persisted_values_and_propagates_encoder_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            store.save_manual(image_id, {
+                "add": "add", "exclusion": "exclusion", "exclusionErase": "erase",
+                "removedCandidateIds": [], "candidateRevision": 0, "hasEffectiveMask": False,
+            }, lambda _value: self._png())
+            for column in ("add_png", "exclusion_png", "exclusion_erase_png"):
+                connection = sqlite3.connect(store.path)
+                with connection as db:
+                    db.execute(f"UPDATE manual_edits SET {column}=? WHERE image_id=?", (b"not a PNG", image_id))
+                connection.close()
+                with self.assertRaisesRegex(ValueError, "PNG"):
+                    store.manual(image_id, lambda value: value)
+                connection = sqlite3.connect(store.path)
+                with connection as db:
+                    db.execute(f"UPDATE manual_edits SET {column}=? WHERE image_id=?", (self._png(), image_id))
+                connection.close()
+            for removed in ("not JSON", '["candidate", 1]'):
+                connection = sqlite3.connect(store.path)
+                with connection as db:
+                    db.execute("UPDATE manual_edits SET removed_candidate_ids=? WHERE image_id=?", (removed, image_id))
+                connection.close()
+                with self.assertRaises(ValueError):
+                    store.manual(image_id, lambda value: value)
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                db.execute("UPDATE manual_edits SET removed_candidate_ids='[]' WHERE image_id=?", (image_id,))
+            connection.close()
+            with self.assertRaisesRegex(RuntimeError, "encoder failed"):
+                store.manual(image_id, lambda _value: (_ for _ in ()).throw(RuntimeError("encoder failed")))
+
+    def test_manual_returns_none_only_when_no_row_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkspaceStore(Path(directory))
+            self.assertIsNone(store.manual("missing", lambda value: value))
 
     def test_future_database_is_not_touched(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

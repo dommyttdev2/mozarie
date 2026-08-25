@@ -39,15 +39,16 @@ class CatalogMixin:
 
     def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
         """Materialise only small PNGs for the active catalogue into the disposable cache."""
+        restored: list[tuple[str, int, list[Candidate]]] = []
         for record in records:
-            try:
-                revision, candidates = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
-            except Exception:
-                LOGGER.warning("Could not restore workspace state for %s", record.relative_path, exc_info=True)
-                continue
+            revision, candidates = self.workspace_store.hydrate_candidates(
+                record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace,
+            )
             if candidates or revision:
-                self.candidates[record.image_id] = candidates
-                self.candidate_revisions[record.image_id] = revision
+                restored.append((record.image_id, revision, candidates))
+        for image_id, revision, candidates in restored:
+            self.candidates[image_id] = candidates
+            self.candidate_revisions[image_id] = revision
 
     def _persist_candidates(self, image_id: str) -> None:
         """Commit a complete candidate revision before exposing a successful mutation."""
