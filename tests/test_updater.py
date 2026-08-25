@@ -117,8 +117,8 @@ class LegacyOpener:
 def legacy_v040_updater() -> types.ModuleType:
     module = types.ModuleType("legacy_updater")
     module.__file__ = str(Path(__file__).resolve().parents[1] / "legacy_updater.py")
-    root = Path(__file__).resolve().parents[1]
-    source = subprocess.check_output(["git", "show", "4e621c5:updater.py"], cwd=root, text=True, encoding="utf-8")
+    # v0.4.0 (4e621c5) updater snapshot; keep this fixture byte-identical to the tag.
+    source = (Path(__file__).resolve().parent / "fixtures" / "v0.4.0" / "updater.py").read_text(encoding="utf-8")
     exec(compile(source, module.__file__, "exec"), module.__dict__)
     return module
 
