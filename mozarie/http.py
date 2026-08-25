@@ -199,6 +199,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/candidates/"):
                 image_id = path.removeprefix("/api/candidates/")
                 self._json(STATE.candidate_snapshot(image_id))
+            elif path.startswith("/api/workspace/manual/"):
+                self._json({"draft": STATE.manual_workspace(path.removeprefix("/api/workspace/manual/"))})
             elif path.startswith("/api/mask/"):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 self._send_candidate_mask(image_id, candidate_id, _request_version(parsed.query))
@@ -257,6 +259,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
+            elif path.startswith("/api/workspace/image/"):
+                self._json(STATE.set_image_flags(path.removeprefix("/api/workspace/image/"), payload))
+            elif path.startswith("/api/workspace/manual/"):
+                STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload)
+                self._json({"ok": True})
             elif path == "/api/catalog/remove":
                 self._json(STATE.remove_images_from_catalog(payload.get("imageIds", [])))
             elif path == "/api/masks/clear":

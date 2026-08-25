@@ -316,6 +316,7 @@ class SavingMixin:
                         candidate_dirs = [self.cache_dir / image_id]
                         self.candidates[image_id] = []
                         self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
                     rendered_path = token_details.rendered_path
                     if deleted:
@@ -399,6 +400,7 @@ class SavingMixin:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)
+                        self._persist_candidates(record.image_id)
                         self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
                     self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
                     self.invalidate_sam_image(record.image_id)

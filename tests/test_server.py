@@ -174,6 +174,32 @@ class MozarieTests(unittest.TestCase):
         self._states.append(state)
         return state
 
+    def test_workspace_restores_flags_masks_and_manual_edits_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state._persist_candidates(image_id)
+            state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
+            buffer = io.BytesIO(); Image.new("L", (16, 16), 255).save(buffer, format="PNG")
+            manual = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            state.save_manual_workspace(image_id, {"add": manual, "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["candidate"], "candidateRevision": 1})
+            replacement = self.new_state()
+            restored = replacement.set_root(str(root))[0]
+            self.assertEqual(restored["id"], image_id)
+            self.assertTrue(restored["hidden"])
+            self.assertTrue(restored["reviewed"])
+            self.assertEqual(replacement.candidate_snapshot(image_id)["candidates"][0]["id"], "candidate")
+            self.assertEqual(replacement.manual_workspace(image_id)["removedCandidateIds"], ["candidate"])
+
     def test_builtin_output_directory_is_created_for_default_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

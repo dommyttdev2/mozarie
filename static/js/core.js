@@ -2,7 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
-  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
+  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "", workspacePersistence: false,
   selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
@@ -288,6 +288,25 @@ function hiddenStorageKey(image) { const prefix = reviewStoragePrefix(); const p
 function isReviewed(image) { return state.reviewedPaths.has(reviewPath(image)); }
 function isHidden(image) { return state.hiddenPaths.has(reviewPath(image)); }
 function loadReviewedPaths() {
+  if (state.workspacePersistence) {
+    state.reviewedPaths = new Set(state.images.filter((image) => image.reviewed).map(reviewPath));
+    state.hiddenPaths = new Set(state.images.filter((image) => image.hidden).map(reviewPath));
+    // Migrate legacy keys exactly once when this catalogue is first reopened.
+    try {
+      for (const image of state.images) {
+        const reviewed = localStorage.getItem(reviewStorageKey(image)) === "true";
+        const hidden = localStorage.getItem(hiddenStorageKey(image)) === "true";
+        if (reviewed || hidden) {
+          image.reviewed ||= reviewed; image.hidden ||= hidden;
+          if (image.reviewed) state.reviewedPaths.add(reviewPath(image));
+          if (image.hidden) state.hiddenPaths.add(reviewPath(image));
+          void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed: image.reviewed, hidden: image.hidden }) }).catch(() => {});
+        }
+        localStorage.removeItem(reviewStorageKey(image)); localStorage.removeItem(hiddenStorageKey(image));
+      }
+    } catch { /* localStorage is only a migration source. */ }
+    return;
+  }
   if (!reviewStoragePrefix()) { state.reviewedPaths = new Set(); state.hiddenPaths = new Set(); return; }
   try {
     state.reviewedPaths = new Set(state.images.filter((image) => localStorage.getItem(reviewStorageKey(image)) === "true").map(reviewPath));
@@ -298,6 +317,8 @@ function setHidden(image, hidden) {
   if (!image) return;
   const path = reviewPath(image); const key = hiddenStorageKey(image);
   if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
+  image.hidden = hidden;
+  if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ hidden }) }).catch((error) => setStatus(error.message, "error"));
   if (key) try { if (hidden) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Session state remains usable. */ }
   renderCatalogViews(); updateSelectionActionBar();
 }
@@ -338,6 +359,8 @@ function setReviewed(image, reviewed) {
   const changed = reviewed ? !state.reviewedPaths.has(path) : state.reviewedPaths.has(path);
   if (!changed) return;
   if (reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
+  image.reviewed = reviewed;
+  if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed }) }).catch((error) => setStatus(error.message, "error"));
   const key = reviewStorageKey(image);
   if (key) try { if (reviewed) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
   refreshReviewViews();
@@ -376,6 +399,8 @@ function markImagesUnreviewed(imageIds, renderAfter = true) {
     if (!image) continue;
     const path = reviewPath(image);
     if (!state.reviewedPaths.delete(path)) continue;
+    image.reviewed = false;
+    if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed: false }) }).catch(() => {});
     changed = true;
     const key = reviewStorageKey(image);
     if (key) try { localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
@@ -591,6 +616,7 @@ async function loadFolder() {
   try {
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
+    state.workspacePersistence = data.workspace === true;
     resetCatalog(data.images, path);
     setStatusKey("status.imagesLoaded", { count: state.images.length });
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }

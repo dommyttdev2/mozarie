@@ -153,6 +153,7 @@ class DetectionMixin:
                                 return
                             self.candidates[record.image_id] = [*boundary_candidates, *candidates]
                             self._touch_candidates(record.image_id)
+                            self._persist_candidates(record.image_id)
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)
@@ -568,6 +569,7 @@ class DetectionMixin:
                             raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
                         self.candidates.setdefault(image_id, []).extend(created)
                         revision = self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)

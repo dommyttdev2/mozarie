@@ -167,6 +167,8 @@ class ImageRecord:
     size_bytes: int = 0
     source_kind: str = "filesystem"
     asset_revision: int = 0
+    hidden: bool = False
+    reviewed: bool = False
 
 
 @dataclass(frozen=True)

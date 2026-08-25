@@ -9,6 +9,35 @@ from . import image_io as _image_io
 globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
 
 class CatalogMixin:
+    @staticmethod
+    def _candidate_from_workspace(row: Any, path: Path) -> Candidate:
+        return Candidate(
+            candidate_id=str(row["candidate_id"]), class_name=str(row["class_name"]), confidence=row["confidence"], mask_path=path,
+            enabled=bool(row["enabled"]), color=str(row["color"]), source=str(row["source"]), origin=str(row["origin"]),
+            refinement=row["refinement"], role=CandidateRole(str(row["role"])), forced=bool(row["forced"]),
+        )
+
+    def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
+        """Materialise only small PNGs for the active catalogue into the disposable cache."""
+        for record in records:
+            try:
+                revision, candidates = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
+            except Exception:
+                LOGGER.warning("Could not restore workspace state for %s", record.relative_path, exc_info=True)
+                continue
+            if candidates or revision:
+                self.candidates[record.image_id] = candidates
+                self.candidate_revisions[record.image_id] = revision
+
+    def _persist_candidates(self, image_id: str) -> None:
+        """Commit a complete candidate revision before exposing a successful mutation."""
+        record = self.images.get(image_id)
+        if record is None or record.source_kind != "filesystem":
+            return
+        if not self.workspace_store.has_image(image_id):
+            return
+        self.workspace_store.replace_candidates(image_id, self._candidate_revision(image_id), self.candidates.get(image_id, []))
+
     def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
         with self.lock:
             previous_ids = tuple(self.images)
@@ -30,6 +59,8 @@ class CatalogMixin:
                 session = self._detach_session_unchecked()
                 self._image_io_locks.clear()
             self._clear_cache()
+            # Cache cleanup intentionally happens before masks are materialised.
+            self._restore_workspace_candidates(records)
             self._release_detached_session(session)
         self.cleanup_expired_browser_save_tokens()
         return self.list_images()
@@ -106,6 +137,14 @@ class CatalogMixin:
                 for worker in workers:
                     worker.result()
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
+        catalog_id = self.workspace_store.catalog_for_root(root)
+        stored = self.workspace_store.reconcile_images(catalog_id, records)
+        for record in records:
+            saved = stored[record.relative_path]
+            record.image_id = str(saved["image_id"])
+            record.hidden = bool(saved["hidden"])
+            record.reviewed = bool(saved["reviewed"])
+        self.catalog_id = catalog_id
         return self._replace_catalog(root, records)
 
     def clear_catalog(self) -> None:
@@ -338,6 +377,7 @@ class CatalogMixin:
                 for record in records:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
+                    self._persist_candidates(record.image_id)
             self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
 
@@ -643,6 +683,53 @@ class CatalogMixin:
     def list_images(self) -> list[dict[str, Any]]:
         return self.catalog_snapshot()["images"]
 
+    def set_image_flags(self, image_id: str, payload: dict[str, Any]) -> dict[str, bool]:
+        if not isinstance(payload, dict):
+            raise ClientError("画像の状態が正しくありません。")
+        hidden = payload.get("hidden")
+        reviewed = payload.get("reviewed")
+        if hidden is not None and not isinstance(hidden, bool) or reviewed is not None and not isinstance(reviewed, bool):
+            raise ClientError("画像の状態が正しくありません。")
+        with self.lock:
+            record = self.images.get(image_id)
+            if record is None:
+                raise ClientError("画像が見つかりません。")
+            if hidden is not None: record.hidden = hidden
+            if reviewed is not None: record.reviewed = reviewed
+            if record.source_kind == "filesystem":
+                self.workspace_store.set_image_flags(image_id, hidden=hidden, reviewed=reviewed)
+            return {"hidden": record.hidden, "reviewed": record.reviewed}
+
+    @staticmethod
+    def _decode_workspace_mask(value: Any) -> bytes | None:
+        if value is None or value == "": return None
+        if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
+            raise ClientError("手描きマスクが正しくありません。")
+        try:
+            raw = base64.b64decode(value.split(",", 1)[1], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ClientError("手描きマスクが正しくありません。") from exc
+        if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
+            raise ClientError("手描きマスクが正しくありません。")
+        return raw
+
+    @staticmethod
+    def _encode_workspace_mask(value: bytes | None) -> str:
+        return "" if not value else f"data:image/png;base64,{base64.b64encode(value).decode('ascii')}"
+
+    def save_manual_workspace(self, image_id: str, payload: dict[str, Any]) -> None:
+        record = self.image_for_id(image_id)
+        if record.source_kind != "filesystem": return
+        try:
+            self.workspace_store.save_manual(image_id, payload, self._decode_workspace_mask)
+        except ValueError as exc:
+            raise ClientError("手描き状態を保存できません。") from exc
+
+    def manual_workspace(self, image_id: str) -> dict[str, Any] | None:
+        record = self.image_for_id(image_id)
+        if record.source_kind != "filesystem": return None
+        return self.workspace_store.manual(image_id, self._encode_workspace_mask)
+
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
@@ -665,12 +752,15 @@ class CatalogMixin:
                             for candidate in self.candidates.get(image_id, [])
                         ),
                         "candidateRevision": self._candidate_revision(image_id),
+                        "hidden": record.hidden,
+                        "reviewed": record.reviewed,
                     }
                 )
             return {
                 "root": str(self.root) if self.root else "",
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
+                "workspace": True,
             }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
@@ -697,6 +787,7 @@ class CatalogMixin:
                     if len(candidates) != len(stored_candidates):
                         self.candidates[image_id] = candidates
                         self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
                     return {
                         "candidates": [
                             candidate.as_api_dict(
@@ -747,6 +838,7 @@ class CatalogMixin:
                     if self._candidate_revision(image_id) == revision:
                         self._remove_candidate_unchecked(image_id, candidate_id)
                         self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
                 raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
             alpha = mask_image.convert("L")
@@ -794,6 +886,7 @@ class CatalogMixin:
             if "forced" in payload:
                 candidate.forced = payload["forced"]
             self._touch_candidates(image_id)
+            self._persist_candidates(image_id)
             return self._candidate_revision(image_id)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
@@ -816,6 +909,7 @@ class CatalogMixin:
                     for item in selected:
                         item.enabled = operation == "enable"
                 revision = self._touch_candidates(image_id)
+                self._persist_candidates(image_id)
             for path in paths:
                 path.unlink(missing_ok=True)
             return revision
@@ -832,5 +926,6 @@ class CatalogMixin:
                     return False
                 self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
                 self._touch_candidates(image_id)
+                self._persist_candidates(image_id)
             candidate.mask_path.unlink(missing_ok=True)
             return True

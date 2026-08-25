@@ -4,6 +4,7 @@ window.MOZARIE_SCRIPT_ORDER = [
   "core.js",
   "resources.js",
   "gallery.js",
+  "workspace.js",
   "editor-canvas.js",
   "editor-masks.js",
   "detection.js",

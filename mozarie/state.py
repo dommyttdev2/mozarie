@@ -12,6 +12,7 @@ from .saving import SavingMixin
 from .detection import DetectionMixin
 from .jobs import JobsMixin
 from .model_downloads import ModelDownloadManager
+from .workspace import WorkspaceStore
 
 
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
@@ -58,6 +59,8 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
 class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.settings_store = SettingsStore(APP_DIR)
+        self.workspace_store = WorkspaceStore(APP_DIR / "data")
+        self.catalog_id: str | None = None
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.Lock()

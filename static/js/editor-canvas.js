@@ -27,7 +27,7 @@ function clearEditor() {
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
-  if (saveCurrentDraft) saveDraft();
+  if (saveCurrentDraft) { saveDraft(); if (state.workspacePersistence) await flushWorkspaceDraft(state.currentId); }
   if (state.currentId !== imageId) clearCandidateBlink();
   cancelFillWork();
   abortCatalogLoads();
@@ -67,6 +67,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     state.candidates = candidateBundle.candidates;
     state.candidateImages = candidateBundle.candidateImages;
     state.imageCache.trim(); state.candidateBundleCache.trim();
+    if (state.workspacePersistence) { await loadWorkspaceDraft(imageId); if (!isCurrentGeneration(generation)) return; }
     canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;
@@ -323,6 +324,7 @@ function saveDraft() {
   const defaultManualExclusionForced = state.settings?.detection?.exclude_forced_default !== false;
   if (!hasAdd && !hasExclusion && !hasExclusionErase && state.history.length === 0 && state.removedCandidateIds.size === 0 && state.manualExclusionForced === defaultManualExclusionForced) {
     state.drafts.delete(state.currentId);
+    if (state.workspacePersistence) void queueWorkspaceDraft(state.currentId);
     return;
   }
   const visibility = captureCurrentMaskVisibility();
@@ -345,6 +347,7 @@ function saveDraft() {
       candidateIds: [...(state.historyCandidateIds || [])],
     },
   });
+  if (state.workspacePersistence) void queueWorkspaceDraft(state.currentId);
 }
 
 function restoreDraft(imageId, generation) {
