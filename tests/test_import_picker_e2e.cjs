@@ -49,7 +49,9 @@ function startFixtureServer() {
   let holdDetection = false;
   let cancelShouldFail = false;
   const pendingFullSettings = [];
+  const pendingUpdateStatus = [];
   let deferFullSettings = false;
+  let deferUpdateStatus = false;
   let currentJob = { kind: "idle", state: "idle" };
   const settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
@@ -137,8 +139,15 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/update/status") {
       updateRequests.push(requestUrl.search);
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      const reply = () => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      };
+      if (deferUpdateStatus) {
+        await new Promise((resolve) => { pendingUpdateStatus.push(() => { reply(); resolve(); }); });
+        return;
+      }
+      reply();
       return;
     }
     if (requestPath === "/api/model-file/pick" && request.method === "POST") {
@@ -256,7 +265,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -689,8 +698,9 @@ async function main() {
   let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseNextFullSettings, releaseFullSettings;
+  let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     const settingsFailurePage = await browser.newPage();
     await settingsFailurePage.addInitScript(() => {
@@ -980,9 +990,14 @@ async function main() {
     assert.equal(await page.locator("#checkUpdateButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the version update button owns its hit target");
     await page.waitForFunction(() => document.querySelector("#checkUpdateButton").dataset.available === "false");
     const updatesBeforeClick = updateRequests.length;
-    await page.locator("#checkUpdateButton").click();
-    assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
-    assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
+    deferUpdateStatus();
+    try {
+      await page.locator("#checkUpdateButton").click();
+      assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
+      assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
+    } finally {
+      releaseUpdateStatus();
+    }
     await page.waitForFunction(() => document.querySelector("#updateStatus").textContent.includes("最新"));
     await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");

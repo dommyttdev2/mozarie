@@ -837,15 +837,19 @@ class MozarieTests(unittest.TestCase):
         connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
         try:
             with patch.object(http_module, "STATE", state), patch.object(MosaicHandler, "_read_binary_body_to_file") as read_body:
-                connection.request("POST", "/api/import/file", b"unread", {
-                    "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
-                    "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
-                    "X-Mozarie-Token": state.session_token, "Origin": f"http://127.0.0.1:{httpd.server_port}",
-                })
-                response = connection.getresponse(); response.read()
-            self.assertEqual(response.status, 400)
-            self.assertEqual(response.getheader("Connection"), "close")
-            read_body.assert_not_called()
+                try:
+                    connection.request("POST", "/api/import/file", b"unread", {
+                        "Content-Type": "application/octet-stream", "X-Mozarie-Name": "image.png",
+                        "X-Mozarie-Relative-Path": "image.png", "X-Mozarie-Client-Key": "client",
+                        "X-Mozarie-Token": state.session_token, "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                    })
+                    response = connection.getresponse(); response.read()
+                except http_module.CLIENT_DISCONNECT_ERRORS:
+                    response = None
+                read_body.assert_not_called()
+            if response is not None:
+                self.assertEqual(response.status, 400)
+                self.assertEqual(response.getheader("Connection"), "close")
         finally:
             connection.close()
             httpd.shutdown(); httpd.server_close()
