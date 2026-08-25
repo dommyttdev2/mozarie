@@ -446,7 +446,7 @@ const MODEL_DOWNLOAD_INFO = {
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", target: "models\\sam_vit_b_01ec64.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" },
   sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", target: "models\\sam_vit_l_0b3195.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth" },
   sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", target: "models\\sam_vit_h_4b8939.pth", source: "Meta", url: "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", target: "ntd11_anime_nsfw_segm_v5-variant1.onnx", source: "CivitAI", url: "https://civitai.com/models/1313556?modelVersionId=2350456" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", target: "animeNSFWDetection_v50Variant1.zip → ntd11_anime_nsfw_segm_v5-variant1.pt → ntd11_anime_nsfw_segm_v5-variant1.onnx", source: "Civitai.red", url: "https://civitai.red/models/1313556?modelVersionId=2350456" },
   sensitive: { name: "sugarknight/sensitive-detect / sensitive_detect_v07", target: "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40" },
 };
 
@@ -473,16 +473,26 @@ async function refreshModelDownload() {
   }
 }
 
+function modelPreparationCommand(key) {
+  const english = $("#settingsLanguage")?.value === "en";
+  const path = key === "ntd11"
+    ? (english ? "path\\to\\downloaded\\ntd11_anime_nsfw_segm_v5-variant1.pt" : "ダウンロードしたntd11_anime_nsfw_segm_v5-variant1.ptのパス")
+    : (english ? "path\\to\\downloaded\\sensitive_detect_v07.pt" : "ダウンロードしたsensitive_detect_v07.ptのパス");
+  return `python -m pip install "ultralytics==8.4.75"\nyolo export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
+}
+
 function showUnsupportedModelDownload(key) {
-  const sensitive = key === "sensitive";
+  pendingModelDownloadKey = null;
   $("#modelDownloadMessage").textContent = t(`modelDownload.${key}`);
   renderModelDownloadItems([key]);
-  $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadStatus").textContent = "";
-  setModelDownloadGuide(sensitive ? 'python -m pip install ultralytics\nyolo export model="C:\\...\\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu' : "");
+  $("#modelDownloadTitle").textContent = t("modelDownload.prepareTitle");
+  setModelDownloadGuide(modelPreparationCommand(key));
   $("#modelDownloadSecurity").hidden = true;
+  $("#modelDownloadProgress").hidden = true;
+  $("#modelDownloadStatus").hidden = true;
+  $("#modelDownloadActions").hidden = true;
   $("#modelDownloadStart").hidden = true;
-  $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
+  $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
   const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
 }
 
@@ -491,12 +501,14 @@ function modelDownloadConfirmation(key) {
   const samKey = `sam_${samType}`;
   const keys = key === "all" ? [samKey, "hand_detection", "hand_segmentation"] : [key === "sam" ? samKey : key];
   pendingModelDownloadKey = key;
+  $("#modelDownloadTitle").textContent = t("modelDownload.title");
   $("#modelDownloadMessage").textContent = t(key === "all" ? "modelDownload.confirmAll" : "modelDownload.confirmOne");
   renderModelDownloadItems(keys);
   $("#modelDownloadSecurity").textContent = t("modelDownload.security"); $("#modelDownloadSecurity").hidden = false;
   setModelDownloadGuide();
-  $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
-  $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
+  $("#modelDownloadProgress").hidden = false; $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
+  $("#modelDownloadStatus").hidden = false; $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
+  $("#modelDownloadActions").hidden = false;
   $("#modelDownloadStart").hidden = false; $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
   const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
 }

@@ -49,15 +49,24 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | Use | What to prepare | Source and selection |
 | --- | --- | --- |
 | Primary genital detection | A compatible `.onnx` file | Select it with **Browse**. Mozarie supports a 1280 input, a 43-channel detection output, and a 32-channel prototype output. |
-| NTD11 supplemental detection | `ntd11_anime_nsfw_segm_v5-variant1.onnx` | Download it from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.com/models/1313556?modelVersionId=2350456), then select it with **Browse**. |
+| NTD11 supplemental detection | ONNX converted from `ntd11_anime_nsfw_segm_v5-variant1.pt` inside `animeNSFWDetection_v50Variant1.zip` | Download and extract the v5.0-variant1 ZIP from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.red/models/1313556?modelVersionId=2350456), convert that `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from `sensitive_detect_v07.pt` | Download [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40), convert it, then select the ONNX file with **Browse**. |
+
+Convert NTD11:
+
+```powershell
+python -m pip install "ultralytics==8.4.75"
+yolo export model="path\to\downloaded\ntd11_anime_nsfw_segm_v5-variant1.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+```
 
 Convert Sensitive:
 
 ```powershell
-python -m pip install ultralytics
-yolo export model="C:\...\sensitive_detect_v07.pt" format=onnx imgsz=1024 simplify=False opset=17 end2end=False device=cpu
+python -m pip install "ultralytics==8.4.75"
+yolo export model="path\to\downloaded\sensitive_detect_v07.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
+
+The conversion creates a same-stem `.onnx` file in the same folder. Select that ONNX file in Settings, confirm its model status is valid, then run detection.
 
 Review the source terms and licenses for each model and the [third-party notices and model sources](THIRD_PARTY_NOTICES.md).
 
