@@ -205,6 +205,71 @@ class MozarieTests(unittest.TestCase):
             output, _record, _revision, _token = replacement.render_browser_save(image_id, 1, 100, None)
             self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
 
+    def test_lazy_workspace_candidates_survive_toggle_and_delete_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            candidates = []
+            for candidate_id, value in (("first", 255), ("second", 128)):
+                mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (16, 16), value).save(mask_path)
+                candidates.append(Candidate(candidate_id, candidate_id, 0.9, mask_path))
+            state.candidates[image_id] = candidates
+            state._touch_candidates(image_id)
+            state._persist_candidates(image_id)
+
+            reopened = self.new_state()
+            reopened.set_root(str(root))
+            self.assertFalse(any(candidate.mask_path.is_file() for candidate in reopened.candidates[image_id]))
+            reopened.set_candidate_state(image_id, "first", {"enabled": False})
+
+            after_toggle = self.new_state()
+            after_toggle.set_root(str(root))
+            restored = {candidate["id"]: candidate for candidate in after_toggle.candidate_snapshot(image_id)["candidates"]}
+            self.assertEqual(set(restored), {"first", "second"})
+            self.assertFalse(restored["first"]["enabled"])
+            self.assertIsNotNone(after_toggle.workspace_store.candidate_png(image_id, "first"))
+            self.assertIsNotNone(after_toggle.workspace_store.candidate_png(image_id, "second"))
+
+            self.assertTrue(after_toggle.delete_candidate(image_id, "first"))
+            after_delete = self.new_state()
+            after_delete.set_root(str(root))
+            self.assertEqual([candidate["id"] for candidate in after_delete.candidate_snapshot(image_id)["candidates"]], ["second"])
+
+    def test_session_import_path_collision_keeps_native_image_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native_path = root / "001.png"
+            Image.new("RGB", (16, 16), "red").save(native_path)
+            state = self.new_state()
+            native_id = state.set_root(str(root))[0]["id"]
+            state.set_image_flags(native_id, {"hidden": True, "reviewed": True})
+            mask_path = state.cache_dir / native_id / "native.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[native_id] = [Candidate("native", "penis", 0.9, mask_path)]
+            state._touch_candidates(native_id)
+            state._persist_candidates(native_id)
+
+            upload = io.BytesIO(); Image.new("RGB", (16, 16), "blue").save(upload, format="PNG")
+            with tempfile.TemporaryDirectory() as staging_directory:
+                staged = Path(staging_directory) / "001.upload"
+                staged.write_bytes(upload.getvalue())
+                _images, imported = state.import_image_file_for_api(
+                    staged, name="001.png", relative_path="001.png", client_key="collision", include_images=False,
+                )
+            added_id = imported[0]["imageId"]
+            self.assertNotEqual(added_id, native_id)
+            listed = {item["id"]: item for item in state.list_images()}
+            self.assertEqual(listed[native_id]["relativePath"], "001.png")
+            self.assertEqual(listed[added_id]["relativePath"], "001 (2).png")
+            self.assertTrue(listed[native_id]["hidden"])
+            self.assertTrue(listed[native_id]["reviewed"])
+            self.assertEqual(state.candidate_snapshot(native_id)["candidates"][0]["id"], "native")
+
     def _import_browser_manifest(self, state, files, catalog_id=None):
         state.activate_browser_catalog(catalog_id)
         state.browser_catalog_provisional = catalog_id is None
@@ -282,6 +347,31 @@ class MozarieTests(unittest.TestCase):
         restored = {item["id"]: item for item in reopened.list_images()}
         self.assertTrue(restored[reopened_ids["same/001.png"]]["hidden"])
         self.assertTrue(restored[reopened_ids["same/001.png"]]["reviewed"])
+
+    def test_browser_manifest_never_reuses_native_catalog(self):
+        def png(color):
+            buffer = io.BytesIO(); Image.new("RGB", (10, 10), color).save(buffer, format="PNG"); return buffer.getvalue()
+
+        files = [("same/a.png", png("red")), ("same/b.png", png("blue"))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative_path, raw in files:
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            native = self.new_state()
+            native_ids = native.set_root(str(root))
+            native_records = [native.image_for_id(item["id"]) for item in native_ids]
+            native.workspace_store.reconcile_images(
+                native.catalog_id, native_records,
+                {relative_path: hashlib.sha256(raw).hexdigest() for relative_path, raw in files},
+            )
+            native_catalog = native.catalog_id
+
+            browser = self.new_state()
+            self._import_browser_manifest(browser, files)
+            browser_catalog, _ = browser.finalize_browser_catalog()
+            self.assertNotEqual(browser_catalog, native_catalog)
 
     def test_builtin_output_directory_is_created_for_default_copy(self):
         with tempfile.TemporaryDirectory() as directory:

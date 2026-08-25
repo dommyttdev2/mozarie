@@ -538,8 +538,16 @@ class CatalogMixin:
                 final_paths: list[Path] = []
                 try:
                     imported: list[dict[str, str]] = []
+                    used_relative_paths = {record.relative_path.casefold() for record in self.images.values()}
                     for temporary, name, width, height, client_key in pending:
-                        destination = unique_session_import_destination(destination_dir / name)
+                        relative = Path(name)
+                        base_stem, suffix = relative.stem, relative.suffix
+                        index = 1
+                        while relative.as_posix().casefold() in used_relative_paths or (destination_dir / relative).exists():
+                            index += 1
+                            relative = relative.with_name(f"{base_stem} ({index}){suffix}")
+                        used_relative_paths.add(relative.as_posix().casefold())
+                        destination = destination_dir / relative
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(temporary, destination)
                         final_paths.append(destination)

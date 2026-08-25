@@ -134,7 +134,10 @@ class WorkspaceStore:
         scores: dict[str, int] = {}
         with self._connect() as db:
             for relative_path, source_hash in entries:
-                for row in db.execute("SELECT catalog_id FROM images WHERE relative_path=? AND source_hash=? AND catalog_id<>?", (relative_path, source_hash, exclude_catalog)):
+                for row in db.execute("""SELECT images.catalog_id
+                    FROM images JOIN catalogs ON catalogs.catalog_id=images.catalog_id
+                    WHERE images.relative_path=? AND images.source_hash=? AND images.catalog_id<>?
+                      AND catalogs.identity_hash LIKE 'browser:%'""", (relative_path, source_hash, exclude_catalog)):
                     scores[str(row["catalog_id"])] = scores.get(str(row["catalog_id"]), 0) + 1
         if not scores: return None
         best = max(scores.values())
@@ -198,7 +201,17 @@ class WorkspaceStore:
                     try:
                         with candidate.mask_path.open("rb") as handle:
                             mask = handle.read()
-                    except OSError: continue
+                    except OSError:
+                        # Restored candidates intentionally do not materialise
+                        # every PNG.  Keep their existing durable mask while
+                        # updating just the requested metadata.
+                        row = db.execute(
+                            "SELECT mask_png FROM candidates WHERE image_id=? AND candidate_id=?",
+                            (image_id, candidate.candidate_id),
+                        ).fetchone()
+                        mask = row["mask_png"] if row else None
+                        if not isinstance(mask, bytes) or not mask.startswith(b"\x89PNG\r\n\x1a\n"):
+                            continue
                     db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
                         ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
