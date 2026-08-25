@@ -49,11 +49,13 @@ function startFixtureServer() {
   let holdDetection = false;
   let cancelShouldFail = false;
   const pendingFullSettings = [];
+  const pendingUpdateStatus = [];
   let deferFullSettings = false;
+  let deferUpdateStatus = false;
   let currentJob = { kind: "idle", state: "idle" };
   const settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
-    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_checkpoint: "", sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, saving: { parallelism: 2 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
@@ -114,6 +116,22 @@ function startFixtureServer() {
       }));
       return;
     }
+    if (requestPath === "/api/workspace/catalog" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ catalogId: "fixture-catalog", provisional: true, workspace: true }));
+      return;
+    }
+    if (requestPath === "/api/workspace/catalog/finalize" && request.method === "POST") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ catalogId: "fixture-catalog", imageIds: {}, images: [], workspace: true }));
+      return;
+    }
+    if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (requestPath === "/api/job") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(currentJob));
@@ -121,8 +139,15 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/update/status") {
       updateRequests.push(requestUrl.search);
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      const reply = () => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+      };
+      if (deferUpdateStatus) {
+        await new Promise((resolve) => { pendingUpdateStatus.push(() => { reply(); resolve(); }); });
+        return;
+      }
+      reply();
       return;
     }
     if (requestPath === "/api/model-file/pick" && request.method === "POST") {
@@ -240,7 +265,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -673,9 +698,25 @@ async function main() {
   let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseNextFullSettings, releaseFullSettings;
+  let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
+    const settingsFailurePage = await browser.newPage();
+    await settingsFailurePage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/settings?status=0")
+        ? Promise.reject(new Error("settings unavailable"))
+        : fetchOriginal(...args);
+    });
+    await settingsFailurePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await settingsFailurePage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
+    assert.match(await settingsFailurePage.locator("#connectionStatus").textContent(), /settings unavailable/, "initial settings failure is shown in the header");
+    await settingsFailurePage.locator("#settingsButton").click();
+    assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
+    await settingsFailurePage.close();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
       const fetchOriginal = window.fetch;
@@ -756,8 +797,8 @@ async function main() {
     await page.evaluate(() => showProcessing({ kind: "detect", state: "paused", total: 3, completed: 2, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "three"] }));
     assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "paused detection keeps the earliest unfinished filename");
     await page.evaluate(() => closeProcessing());
-    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "legacy.png", completedImageIds: ["one"] }));
-    assert.equal(await page.locator("#processingCurrent").textContent(), "002.png", "legacy detection jobs fall back to the remembered target ids");
+    await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 3, completed: 1, current: "server.png", imageIds: [], completedImageIds: ["one"] }));
+    assert.equal(await page.locator("#processingCurrent").textContent(), "server.png", "current jobs use the server filename when no current image id is supplied");
     await page.evaluate(() => showProcessing({ kind: "detect", state: "running", total: 1, completed: 0, current: "optimistic.png", imageIds: ["not-in-catalog"], completedImageIds: [] }));
     assert.equal(await page.locator("#processingCurrent").textContent(), "optimistic.png", "unmapped active detection targets retain the server filename");
     await page.evaluate(() => showProcessing({ kind: "detect", state: "complete", total: 3, completed: 3, current: "003.png", imageIds: ["one", "two", "three"], completedImageIds: ["one", "two", "three"] }));
@@ -776,9 +817,9 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
     await page.locator("#settingsTabModels").click();
-    await page.locator("#settingsProvider").selectOption("cpu");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
-    await page.locator("#settingsProvider").selectOption("gpu");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), false, "GPU re-enables the GPU selector");
     assert.equal(await page.locator("#settingsHandSegmentationCard .model-card-note").count(), 0, "HandSeg matches the other model cards without an inline explanation");
     assert.equal(await page.locator("#settingsHandSegmentationCard a").count(), 0, "HandSeg keeps download information out of Settings");
@@ -949,9 +990,14 @@ async function main() {
     assert.equal(await page.locator("#checkUpdateButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the version update button owns its hit target");
     await page.waitForFunction(() => document.querySelector("#checkUpdateButton").dataset.available === "false");
     const updatesBeforeClick = updateRequests.length;
-    await page.locator("#checkUpdateButton").click();
-    assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
-    assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
+    deferUpdateStatus();
+    try {
+      await page.locator("#checkUpdateButton").click();
+      assert.equal(updateRequests.length, updatesBeforeClick + 1, "explicit update checking sends exactly one request");
+      assert.equal(await page.locator("#updateStatus").textContent(), "確認中…");
+    } finally {
+      releaseUpdateStatus();
+    }
     await page.waitForFunction(() => document.querySelector("#updateStatus").textContent.includes("最新"));
     await page.locator("#settingsDialog").evaluate((dialog) => dialog.close());
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance is hidden until the fill tool is selected");
@@ -963,6 +1009,52 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
+    const atomicDraftFailure = await page.evaluate(async () => {
+      const before = {
+        id: state.currentId,
+        image: state.currentImage,
+        candidates: state.candidates,
+        fileName: $("#currentFileName").textContent,
+        empty: $("#emptyState").hidden,
+        addPixels: canvasHasPixels(addCtx, addCanvas),
+      };
+      state.drafts.delete("sample-two");
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/workspace/manual/sample-two")
+        ? Promise.reject(new Error("manual draft rejected"))
+        : fetchOriginal(...args);
+      await selectImage("sample-two", true, { saveCurrentDraft: false });
+      window.fetch = fetchOriginal;
+      return {
+        id: state.currentId === before.id,
+        image: state.currentImage === before.image,
+        candidates: state.candidates === before.candidates,
+        fileName: $("#currentFileName").textContent === before.fileName,
+        empty: $("#emptyState").hidden === before.empty,
+        addPixels: canvasHasPixels(addCtx, addCanvas) === before.addPixels,
+      };
+    });
+    assert.deepEqual(atomicDraftFailure, { id: true, image: true, candidates: true, fileName: true, empty: true, addPixels: true }, "a rejected manual workspace GET preserves the previous editor atomically");
+    const delayedDraftSave = await page.evaluate(async () => {
+      const originalEncoder = canvasToDataUrl;
+      const originalDraft = state.drafts.get(state.currentId);
+      const gates = [];
+      canvasToDataUrl = () => new Promise((resolve) => gates.push(resolve));
+      state.drafts.delete(state.currentId);
+      addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 2, 2);
+      markDraftDirty("add");
+      const first = saveDraft();
+      state.manualExclusionForced = !state.manualExclusionForced;
+      markDraftDirty("add");
+      const second = saveDraft();
+      gates[1]("newer"); gates[0]("older");
+      await Promise.all([first, second]);
+      const result = { latestLayer: state.drafts.get(state.currentId)?.add === "newer", dirty: state.draftDirty };
+      state.drafts.set(state.currentId, originalDraft);
+      canvasToDataUrl = originalEncoder;
+      return result;
+    });
+    assert.deepEqual(delayedDraftSave, { latestLayer: true, dirty: false }, "per-image draft saves commit delayed canvas encodes in capture order");
     const manualExclusionVisibility = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages;
       const manualEnabled = state.manualEnabled; const manualExclusionEnabled = state.manualExclusionEnabled;
@@ -975,11 +1067,11 @@ async function main() {
       state.candidateImages = new Map([["temporary-exclude", exclusion]]);
       state.candidates = [{ id: "temporary-exclude", role: "exclude", enabled: true, forced: false }];
       state.manualEnabled = true; state.manualExclusionEnabled = false; state.manualExclusionForced = true; state.manualMaskPresent = true;
-      const nonForced = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const nonForced = hasEffectiveMask();
       state.candidates[0].forced = true;
-      const forced = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const forced = hasEffectiveMask();
       exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
-      const forcedErased = captureCurrentMaskVisibility().manual;
+      markMaskDirty(); const forcedErased = hasEffectiveMask();
       state.candidates = candidates; state.candidateImages = candidateImages;
       state.manualEnabled = manualEnabled; state.manualExclusionEnabled = manualExclusionEnabled;
       state.manualExclusionEraseEnabled = manualExclusionEraseEnabled;
@@ -991,7 +1083,7 @@ async function main() {
     assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false, forcedErased: true }, "manual exclusion erase restores forced exclusions without creating a new mosaic");
     const restoredHistory = await page.evaluate(async () => {
       resetCurrentDraft(); state.drafts.delete("sample");
-      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); saveDraft();
+      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); await saveDraft();
       const saved = state.drafts.get("sample");
       addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); state.history = []; state.historyIndex = 0;
       restoreDraft("sample", state.imageGeneration);
@@ -1065,15 +1157,6 @@ async function main() {
     });
     assert.equal(eta.polled, eta.first, "ETA is retained between image completions");
     assert.notEqual(eta.completed, eta.first, "ETA is recalculated after an image completes");
-    const legacyDraftManualExclusion = await page.evaluate(() => {
-      state.settings.detection.exclude_forced_default = false;
-      state.drafts.set("sample", { add: "", exclusion: "" });
-      const forced = draftPayload(["sample"]).sample.manualExclusionForced;
-      state.drafts.delete("sample");
-      state.settings.detection.exclude_forced_default = true;
-      return forced;
-    });
-    assert.equal(legacyDraftManualExclusion, false, "a legacy draft inherits the configured manual-exclusion default");
     await assertDesktopLayout(page, 1024, 768);
     await assertSettingsDialogLayout(page, 1024, 768, "ja", modelDownloadRequests);
     await page.evaluate(() => loadTranslations("en"));
@@ -1196,7 +1279,13 @@ async function main() {
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
+    assert.equal(await page.locator("#detectParallelism").isDisabled(), true, "GPU detection keeps the visible worker count fixed at one");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     await page.locator("#detectParallelism").fill("3");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "1", "GPU hides the stored CPU worker count behind one effective worker");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "3", "switching back to CPU restores its stored worker count");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
@@ -1551,13 +1640,12 @@ async function main() {
       state.removedCandidateIds.delete(candidate.id);
       renderCandidates();
       document.querySelector('[data-candidate-effective-toggle="apply"]').click();
-      const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
+      const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; state.drafts.set("sample-two", { candidateRevision: 0, removedCandidateIds: [] }); await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
       state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
-    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: true }, `soft deletion keeps undo/redo and trimmed history while display state clears on navigation: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
-      const previousPersistence = state.workspacePersistence;
       const draft = (label) => ({
         add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",
         exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true,
@@ -1565,7 +1653,6 @@ async function main() {
         candidateRevision: 0, removedCandidateIds: [], history: [{ kind: "clearManual", role: "apply", label }], historyIndex: 1,
         historyBase: { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [] },
       });
-      state.workspacePersistence = true;
       state.drafts.set("sample", draft("A")); state.drafts.set("sample-two", draft("B"));
       await selectImage("sample", true, { saveCurrentDraft: false });
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1577,7 +1664,6 @@ async function main() {
       restoreSnapshot(0); const undo = state.historyIndex === 0;
       restoreSnapshot(1); const redo = state.historyIndex === 1;
       const bulk = draftPayload(["sample", "sample-two"]);
-      state.workspacePersistence = previousPersistence;
       return { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");

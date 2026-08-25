@@ -2,10 +2,12 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
-  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "", workspacePersistence: false, workspaceApiAvailable: false,
+  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
   selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
+  draftSaveChains: new Map(),
+  cpuDetectionParallelism: 2,
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
@@ -29,7 +31,7 @@ const state = {
   prefetchQueue: [], prefetchActive: 0, prefetchTimer: null,
   fillWorker: null, fillPending: false,
   renderFrame: 0,
-  maskDirty: false,
+  maskDirty: false, draftDirty: false, draftLayerDirty: new Set(), historyBaseDirty: false, draftSaveChains: new Map(),
 };
 
 const canvas = $("#editorCanvas");
@@ -42,7 +44,6 @@ const exclusionEraseCanvas = document.createElement("canvas");
 const effectiveExclusionCanvas = document.createElement("canvas");
 const combinedCanvas = document.createElement("canvas");
 const mosaicCanvas = document.createElement("canvas");
-const mosaicSourceCanvas = document.createElement("canvas");
 const originalCanvas = document.createElement("canvas");
 const historyAddCanvas = document.createElement("canvas");
 const historyExclusionCanvas = document.createElement("canvas");
@@ -56,7 +57,6 @@ const exclusionEraseCtx = exclusionEraseCanvas.getContext("2d");
 const effectiveExclusionCtx = effectiveExclusionCanvas.getContext("2d");
 const combinedCtx = combinedCanvas.getContext("2d");
 const mosaicCtx = mosaicCanvas.getContext("2d");
-const mosaicSourceCtx = mosaicSourceCanvas.getContext("2d");
 const originalCtx = originalCanvas.getContext("2d", { willReadFrequently: true });
 const layerCtx = layerCanvas.getContext("2d");
 const boundaryOverlayCtx = boundaryOverlayCanvas.getContext("2d");
@@ -178,9 +178,10 @@ function progressText(job) {
 function processingCurrentPath(job) {
   if (job?.kind !== "detect") return job?.current || "";
   if (job.phase === "preparing_models") return "";
-  const imageIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
-  const completedIds = new Set(Array.isArray(job.completedImageIds) ? job.completedImageIds : []);
+  const imageIds = job.imageIds || [];
+  const completedIds = new Set(job.completedImageIds || []);
   const targetIds = new Set(imageIds);
+  if (!targetIds.size) return job.current || "";
   if (![...targetIds].some((imageId) => !completedIds.has(imageId))) return "";
   const nextImage = state.images.find((image) => targetIds.has(image.id) && !completedIds.has(image.id));
   return nextImage ? (nextImage.relativePath || "") : (job.current || "");
@@ -281,57 +282,22 @@ function saveTargets(mode = "masked") {
   return state.images.filter((image) => !isHidden(image) && imageHasMask(image) && (mode !== "reviewed" || isReviewed(image))).map((image) => image.id);
 }
 function normaliseReviewRoot(value) { return String(value || "").trim().replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase(); }
-function reviewStoragePrefix() { return state.reviewRoot ? `mozarie.reviewed.v1:${state.reviewRoot}:` : ""; }
 function reviewPath(image) { return String(image?.relativePath || "").replaceAll("\\", "/").toLowerCase(); }
-function reviewStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}${path}` : ""; }
-function hiddenStorageKey(image) { const prefix = reviewStoragePrefix(); const path = reviewPath(image); return prefix && path ? `${prefix}hidden:${path}` : ""; }
 function isReviewed(image) { return state.reviewedPaths.has(reviewPath(image)); }
 function isHidden(image) { return state.hiddenPaths.has(reviewPath(image)); }
 function loadReviewedPaths() {
-  if (state.workspacePersistence) {
-    state.reviewedPaths = new Set(state.images.filter((image) => image.reviewed).map(reviewPath));
-    state.hiddenPaths = new Set(state.images.filter((image) => image.hidden).map(reviewPath));
-    // Migrate legacy keys exactly once when this catalogue is first reopened.
-    try {
-      for (const image of state.images) {
-        const reviewed = localStorage.getItem(reviewStorageKey(image)) === "true";
-        const hidden = localStorage.getItem(hiddenStorageKey(image)) === "true";
-        if (reviewed || hidden) {
-          image.reviewed ||= reviewed; image.hidden ||= hidden;
-          if (image.reviewed) state.reviewedPaths.add(reviewPath(image));
-          if (image.hidden) state.hiddenPaths.add(reviewPath(image));
-          void queueWorkspaceFlags(image.id, { reviewed: image.reviewed, hidden: image.hidden });
-        }
-        localStorage.removeItem(reviewStorageKey(image)); localStorage.removeItem(hiddenStorageKey(image));
-      }
-    } catch { /* localStorage is only a migration source. */ }
-    return;
-  }
-  if (!reviewStoragePrefix()) { state.reviewedPaths = new Set(); state.hiddenPaths = new Set(); return; }
-  try {
-    state.reviewedPaths = new Set(state.images.filter((image) => localStorage.getItem(reviewStorageKey(image)) === "true").map(reviewPath));
-    state.hiddenPaths = new Set(state.images.filter((image) => localStorage.getItem(hiddenStorageKey(image)) === "true").map(reviewPath));
-  } catch { /* Keep the in-session review state when storage is unavailable. */ }
+  state.reviewedPaths = new Set(state.images.filter((image) => image.reviewed).map(reviewPath));
+  state.hiddenPaths = new Set(state.images.filter((image) => image.hidden).map(reviewPath));
 }
 function setHidden(image, hidden) {
   if (!image) return;
-  const path = reviewPath(image); const key = hiddenStorageKey(image);
+  const path = reviewPath(image);
   if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
   image.hidden = hidden;
-  if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { hidden });
-  if (key) try { if (hidden) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Session state remains usable. */ }
+  void queueWorkspaceFlags(image.id, { hidden });
   renderCatalogViews(); updateSelectionActionBar();
 }
-function clearStoredCatalogState(root = state.reviewRoot) {
-  const prefix = root ? `mozarie.reviewed.v1:${root}:` : "";
-  if (!prefix) return;
-  try {
-    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-      const key = localStorage.key(index); if (key?.startsWith(prefix)) localStorage.removeItem(key);
-    }
-  } catch { /* Storage is an optional convenience. */ }
-  state.reviewedPaths.clear(); state.hiddenPaths.clear();
-}
+function clearStoredCatalogState() { state.reviewedPaths.clear(); state.hiddenPaths.clear(); }
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
 function clearBatchSelection() { state.selectedImageIds.clear(); state.selectionAnchorId = null; }
 function updateSelectionActionBar() {
@@ -360,9 +326,7 @@ function setReviewed(image, reviewed) {
   if (!changed) return;
   if (reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
   image.reviewed = reviewed;
-  if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { reviewed });
-  const key = reviewStorageKey(image);
-  if (key) try { if (reviewed) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
+  void queueWorkspaceFlags(image.id, { reviewed });
   refreshReviewViews();
 }
 function moveReviewedPathAfterApply(previousImage, reloadedImage) {
@@ -370,27 +334,12 @@ function moveReviewedPathAfterApply(previousImage, reloadedImage) {
   const reloadedPath = reviewPath(reloadedImage);
   if (!previousPath || !reloadedPath || previousPath === reloadedPath) return;
 
-  const previousKey = reviewStorageKey(previousImage);
-  const reloadedKey = reviewStorageKey(reloadedImage);
-  let wasReviewed;
-  try {
-    const previousValue = previousKey ? localStorage.getItem(previousKey) : null;
-    const reloadedValue = reloadedKey ? localStorage.getItem(reloadedKey) : null;
-    wasReviewed = previousValue === "true" || reloadedValue === "true";
-  } catch {
-    wasReviewed = state.reviewedPaths.has(previousPath) || state.reviewedPaths.has(reloadedPath);
-  }
+  const wasReviewed = state.reviewedPaths.has(previousPath) || state.reviewedPaths.has(reloadedPath);
   state.reviewedPaths.delete(previousPath);
   if (!wasReviewed) state.reviewedPaths.delete(reloadedPath);
   else state.reviewedPaths.add(reloadedPath);
 
-  try {
-    if (previousKey) localStorage.removeItem(previousKey);
-    if (reloadedKey) {
-      if (wasReviewed) localStorage.setItem(reloadedKey, "true");
-      else localStorage.removeItem(reloadedKey);
-    }
-  } catch { /* Keep the reviewed paths migrated for this session. */ }
+  void queueWorkspaceFlags(reloadedImage.id, { reviewed: wasReviewed });
 }
 function markImagesUnreviewed(imageIds, renderAfter = true) {
   let changed = false;
@@ -400,10 +349,8 @@ function markImagesUnreviewed(imageIds, renderAfter = true) {
     const path = reviewPath(image);
     if (!state.reviewedPaths.delete(path)) continue;
     image.reviewed = false;
-    if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { reviewed: false });
+    void queueWorkspaceFlags(image.id, { reviewed: false });
     changed = true;
-    const key = reviewStorageKey(image);
-    if (key) try { localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
   }
   if (!changed) return false;
   if (renderAfter) refreshReviewViews();
@@ -445,20 +392,6 @@ async function persistNavigationShortcuts(enabled) {
     setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
   } catch (error) { setStatus(error.message, "error"); }
 }
-function handleReviewStorageEvent(event) {
-  const prefix = reviewStoragePrefix();
-  if (!prefix) return;
-  if (event.key === null) { loadReviewedPaths(); refreshReviewViews(); return; }
-  if (!event.key.startsWith(prefix)) return;
-  const rawPath = event.key.slice(prefix.length);
-  const hidden = rawPath.startsWith("hidden:");
-  const path = hidden ? rawPath.slice("hidden:".length) : rawPath;
-  if (!path) return;
-  const paths = hidden ? state.hiddenPaths : state.reviewedPaths;
-  if (event.newValue === "true") paths.add(path); else paths.delete(path);
-  refreshReviewViews();
-}
-
 function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;
@@ -522,7 +455,6 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
       if (role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas)) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
       if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
       const active = enabled.length > 0 && enabled.every(Boolean);
-      button.textContent = t(active ? "settings.on" : "settings.off");
       button.setAttribute("aria-pressed", String(active));
     }
   }
@@ -568,6 +500,7 @@ function setMosaicPreviewEnabled(enabled) {
   const button = $("#mosaicPreviewButton");
   button.classList.toggle("active", enabled);
   button.setAttribute("aria-pressed", String(enabled));
+  if (enabled) requestMosaicPreview(); else releaseMosaicPreview();
   render();
 }
 
@@ -614,10 +547,9 @@ async function loadFolder() {
   ++state.imageGeneration;
   setStatusKey("status.loadingImages", {}, "running");
   try {
-    if (state.workspacePersistence) await flushAllWorkspaceMutations();
+    await flushAllWorkspaceMutations();
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
-    state.workspacePersistence = data.workspaceVersion === 1;
     resetCatalog(data.images, path);
     setStatusKey("status.imagesLoaded", { count: state.images.length });
   } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }

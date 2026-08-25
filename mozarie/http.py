@@ -1,13 +1,42 @@
 import hashlib
+import base64
+import io
+import json
+import mimetypes
+import os
+import subprocess
+import tempfile
+import threading
+import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, BinaryIO
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .core import *
+from PIL import Image, ImageOps
+
+from .core import (
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE, STATIC_DIR,
+    ClientError, ForbiddenClientError, ImageRecord, StaleMaskError,
+    read_detection_confidence, _read_detection_parallelism, _read_mosaic_divisor,
+    _read_save_suffix, _read_target_classes,
+)
 from .state import STATE, StudioState
-from .image_io import *
+from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
 from .model_downloads import ModelDownloadError
-from typing import BinaryIO
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
+    """Format health device data without probing CUDA for a CPU selection."""
+    if provider != "gpu":
+        return {"provider": "cpu", "gpuDevice": None, "device": "CPU"}
+    selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
+    name = str(selected["name"]) if selected else "unavailable"
+    return {"provider": "gpu", "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
 
 
 def _file_sha256(path: Path) -> str:
@@ -173,7 +202,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
-                configured = all(str(models.get(key, "")).strip() for key in ("target_segmentation", "sam_checkpoint"))
+                provider = str(models.get("provider", "cpu"))
+                configured = bool(str(models.get("target_segmentation", "")).strip()) and bool(
+                    str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
+                )
                 configured = configured and all(
                     not bool(models.get(enabled_key)) or bool(str(models.get(path_key, "")).strip())
                     for enabled_key, path_key in (
@@ -182,13 +214,17 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         ("hand_detection_enabled", "hand_detection"),
                     )
                 )
-                self._json({
+                payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
-                    "device": inference_device_name(),
-                })
+                }
+                if provider == "gpu":
+                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), STATE.settings_status()["gpus"]))
+                else:
+                    payload.update(health_device(provider, 0, []))
+                self._json(payload)
             elif path == "/api/settings":
-                payload = {"settings": STATE.settings, "version": _local_version(), "workspaceVersion": 1}
+                payload = {"settings": STATE.settings, "version": _local_version()}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     payload["status"] = STATE.settings_status()
                 self._json(payload)
@@ -236,6 +272,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/import/file":
                 self._require_binary_import_request()
+                self._upload_sha256 = None
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
@@ -250,7 +287,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         # Browser uploads have no trustworthy native path.
                         # Streamed content fingerprints let the fallback match
                         # a complete folder manifest after all files arrive.
-                        source_hash = _file_sha256(staged_path)
+                        source_hash = getattr(self, "_upload_sha256", None) or _file_sha256(staged_path)
                         try:
                             # Keep implicit API callers from splitting a
                             # parallel empty-catalog upload across IDs. This
@@ -271,20 +308,21 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
                         finally:
                             staged_path.unlink(missing_ok=True)
-                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional, "workspaceVersion": 1})
+                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional})
                 finally:
                     STATE.end_import_transfer()
+                    self._upload_sha256 = None
                 return
             self._require_json_request()
             payload = self._read_json_body()
             if path == "/api/folder":
                 images = STATE.set_root(str(payload.get("path", "")))
-                self._json({"images": images, "workspace": True, "workspaceVersion": 1})
+                self._json({"images": images, "workspace": True})
             elif path == "/api/workspace/catalog":
                 if payload.get("provisional") is True:
                     if payload.get("catalogId"):
                         raise ClientError("仮カタログにIDは指定できません。")
-                    STATE.clear_catalog()
+                    STATE.detach_catalog()
                     catalog_id = STATE.workspace_store.ensure_provisional_catalog()
                     STATE.catalog_id = catalog_id
                     STATE.browser_catalog_provisional = True
@@ -293,7 +331,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId")), "provisional": False})
             elif path == "/api/workspace/catalog/finalize":
                 catalog_id, image_ids = STATE.finalize_browser_catalog()
-                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id), "workspaceVersion": 1})
+                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id)})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})
@@ -435,6 +473,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 deleted = STATE.delete_candidate(image_id, candidate_id)
                 self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
+            elif path.startswith("/api/workspace/manual/"):
+                STATE.delete_manual_workspace(path.removeprefix("/api/workspace/manual/"))
+                self._json({"ok": True})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
@@ -475,6 +516,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         staging_dir.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         remaining = content_length
+        digest = hashlib.sha256()
         try:
             with tempfile.NamedTemporaryFile(dir=staging_dir, suffix=".upload.tmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
@@ -483,8 +525,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     if not chunk:
                         raise ClientError("画像データを最後まで読み込めません。")
                     handle.write(chunk)
+                    digest.update(chunk)
                     remaining -= len(chunk)
                 handle.flush()
+            self._upload_sha256 = digest.hexdigest()
             result = temporary_path
             temporary_path = None
             return result
@@ -651,16 +695,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
         LOGGER.warning("HTTP %s %s -> %d", self.command, path, status)
 
 
-def _read_mosaic_divisor(value: Any) -> int:
-    try:
-        divisor = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ClientError("モザイク粗さが正しくありません。") from exc
-    if not 1 <= divisor <= 10000:
-        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
-    return divisor
-
-
 def _request_version(query: str) -> str | None:
     values = parse_qs(query, keep_blank_values=True).get("v")
     if values is None:
@@ -677,27 +711,6 @@ def _read_candidate_revision(value: Any) -> int:
     if revision < 0:
         raise ClientError("候補の版番号が不正です。")
     return revision
-
-
-def _read_detection_parallelism(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ClientError("並列数は1から4で指定してください。")
-    return value
-
-
-def _read_save_suffix(value: Any) -> str:
-    if not isinstance(value, str) or not value or Path(value).name != value:
-        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
-    return value
-
-
-def _read_target_classes(value: Any) -> set[str]:
-    if not isinstance(value, (list, tuple, set)):
-        raise ClientError("検出対象の形式が正しくありません。")
-    targets = {str(item) for item in value}
-    if not targets or not targets <= TARGET_CLASSES:
-        raise ClientError("検出対象は penis または pussy を選択してください。")
-    return targets
 
 
 def _read_bool(value: Any, field_name: str) -> bool:

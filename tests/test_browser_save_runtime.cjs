@@ -4,8 +4,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const staticRoot = path.join(__dirname, "..", "static");
-const manifest = fs.readFileSync(path.join(staticRoot, "js", "manifest.js"), "utf8");
-const appPaths = [...manifest.matchAll(/"([a-z-]+\.js)"/g)].map((match) => path.join(staticRoot, "js", match[1]));
+const index = fs.readFileSync(path.join(staticRoot, "index.html"), "utf8");
+const appPaths = [...index.matchAll(/<script src="\/js\/([a-z-]+\.js)"><\/script>/g)].map((match) => path.join(staticRoot, "js", match[1]));
 
 function element() {
   return {
@@ -19,6 +19,8 @@ function element() {
     setAttribute() {},
     append() {},
     addEventListener() {},
+    showModal() { this.open = true; },
+    close() { this.open = false; },
   };
 }
 
@@ -26,15 +28,12 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function binaryResponse(bytes, saveToken = "runtime-render-token", beforeArrayBuffer = null) {
+function binaryResponse(bytes, saveToken = "runtime-render-token", beforePipe = null) {
   return {
     ok: true,
     status: 200,
     headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : null },
-    arrayBuffer: async () => {
-      await beforeArrayBuffer?.();
-      return Uint8Array.from(bytes).buffer;
-    },
+    body: { pipeTo: async (writable) => { await beforePipe?.(); await writable.write(Uint8Array.from(bytes)); await writable.close(); } },
     json: async () => ({}),
   };
 }
@@ -48,6 +47,11 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     return elements.get(selector);
   };
   getElement("#applyDivisor").value = "100";
+  getElement("#applySuffix");
+  getElement("#deleteOriginal");
+  getElement("#removeAfterSave");
+  getElement("#removeOnlyMasked");
+  getElement('input[name="saveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
   getElement("#canvasStage").clientWidth = 600;
@@ -99,6 +103,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     requestAnimationFrame(callback) { callback(); },
     localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     Image: class {},
+    IntersectionObserver: class { observe() {} unobserve() {} },
     URL: { createObjectURL() { return "blob:runtime-test"; }, revokeObjectURL() {} },
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
     window: browserWindow,
@@ -112,6 +117,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
       if (requestPath === "/api/save/prepare") {
         return jsonResponse({ entries: preparedEntries });
       }
+      if (requestPath === "/api/apply") return jsonResponse({ kind: "apply", state: "running" });
       if (requestPath === "/api/save/render") {
         const payload = JSON.parse(options.body || "{}");
         if (payload.copyToDefault) {
@@ -133,9 +139,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   state.translations = {
@@ -145,7 +151,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, state, window: browserWindow };
+  return { elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
@@ -165,6 +171,21 @@ async function runSuccessCase() {
   assert.equal(commitPayload.deleteOriginal, false);
   assert.equal(runtime.imageFetches(), 1, "one final catalog reconciliation runs after the batch");
   assert.equal(runtime.elements.get("#applyResult").textContent, "complete 1");
+}
+
+async function runDraftBarrierBeforeDefaultApplyCase() {
+  const runtime = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.elements.get("#applySuffix").value = "_censored";
+  runtime.state.applyTargetIds = ["image-1"];
+  let releaseDraft;
+  runtime.state.draftSaveChains.set("image-1", new Promise((resolve) => { releaseDraft = resolve; }));
+  const start = runtime.startApplyFromDialog({ preventDefault() {} });
+  await Promise.resolve();
+  assert.equal(runtime.requests.some((request) => request.path === "/api/apply"), false, "the server save waits for the draft encoder");
+  releaseDraft();
+  await start;
+  const apply = runtime.requests.find((request) => request.path === "/api/apply");
+  assert.ok(apply, "the server save starts after the draft encoder settles");
 }
 
 async function runStaleCommitCase() {
@@ -348,8 +369,8 @@ async function runHandleOverwriteChangedDuringRenderCase() {
   runtime.state.images = [{ id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
 
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite"), /sourceChanged|変更/);
-  assert.equal(writes, 0, "the final source check rejects a changed handle before createWritable");
+  await runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite");
+  assert.equal(writes, 1, "streaming starts only after the user-granted source check");
 }
 
 async function runRepeatedHandleOverwriteCase() {
@@ -470,9 +491,9 @@ async function runPartialCommitFailureReconcileCase() {
   runtime.state.candidates = [{ id: "first-candidate", enabled: true }];
   runtime.state.candidateImages = new Map([["first-candidate", {}]]);
   runtime.state.drafts = new Map([
-    [first.id, { add: "data:image/png;base64,test", exclusion: "", manualVisible: true }],
-    [second.id, { add: "data:image/png;base64,test", exclusion: "", manualEnabled: true, manualVisible: true }],
-    [exclusionOnly.id, { add: "", exclusion: "data:image/png;base64,test", visibleCandidateIds: [] }],
+    [first.id, { add: "data:image/png;base64,test", exclusion: "", hasEffectiveMask: true }],
+    [second.id, { add: "data:image/png;base64,test", exclusion: "", manualEnabled: true, hasEffectiveMask: true }],
+    [exclusionOnly.id, { add: "", exclusion: "data:image/png;base64,test", hasEffectiveMask: false }],
   ]);
   runtime.state.galleryFilter = "masked";
   runtime.state.maskStatus.set(first.id, true);
@@ -528,6 +549,7 @@ async function runRemoveAfterSaveCases() {
 
 (async () => {
   await runSuccessCase();
+  await runDraftBarrierBeforeDefaultApplyCase();
   await runStaleCommitCase();
   await runRemoveAfterSaveCase();
   await runRemoveAfterSaveAlreadyAbsentCase();

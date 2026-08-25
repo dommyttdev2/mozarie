@@ -1,6 +1,22 @@
-from .core import *
-from .core import _read_save_suffix
 import warnings
+import base64
+import binascii
+import io
+import math
+import os
+import tempfile
+import zlib
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+from .core import (
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE,
+    ClientError, ImageRecord, oriented_image_size,
+    safe_import_relative_path, torch_module, _read_save_suffix,
+)
 
 
 def _valid_color(value: str) -> bool:
@@ -375,7 +391,7 @@ def draft_manual_exclusion_forced(raw_draft: Any, default: bool = True) -> bool:
     """Use the configured default for drafts created before per-exclusion state existed."""
     if not isinstance(raw_draft, dict):
         return default
-    return raw_draft.get("manualExclusionForced", raw_draft.get("forceExclusion", default)) is not False
+    return raw_draft.get("manualExclusionForced", default) is not False
 
 
 def unique_session_import_destination(path: Path, reserved: set[Path] | None = None) -> Path:

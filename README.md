@@ -16,12 +16,12 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 ### 動作環境
 
 - Windows
-- Python 3.11以降
+- 64-bit Python 3.11〜3.14（Python Launcher `py`）
 
 ### セットアップ
 
 ```powershell
-python -m pip install -r requirements.txt
+.\setup.bat
 ```
 
 ### 起動
@@ -52,6 +52,8 @@ python -m pip install -r requirements.txt
 | NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
 
+> **`.pt` ファイルの注意:** NTD を含むPyTorchの`.pt`は、読み込み時にpickle経由のコードを実行し得るため、ここに記載した配布元以外から入手した`.pt`は実行しないでください。
+
 NTD11の変換:
 
 ```powershell
@@ -72,12 +74,14 @@ yolo export model="ダウンロードしたSensitiveの.ptファイルのパス"
 
 ## 使い方
 
+自動検出の同時処理数は、GPU使用時はVRAMを安定させるため常に1です。CPU使用時のみ1〜4を設定できます。
+
 1. 画像またはフォルダーを読み込みます。
 2. 現在の画像または全画像に自動検出を実行します。
 3. 右側の候補を確認し、必要に応じてブラシ、消しゴム、境界ツールで修正します。
 4. 保存対象を選び、コピー保存または元画像への上書きを行います。
 
-GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメモリが不足した場合は、同時処理数を下げるかCPUへ切り替えてください。
+GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメモリが不足した場合は、ほかのGPUアプリを閉じるかCPUへ切り替えてください。
 
 ## 更新
 
@@ -86,13 +90,13 @@ GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメ�
 ## 困ったとき
 
 - **モデルを読み込めない:** ファイル形式と、SAMの種類・ファイルの組み合わせを確認してください。
-- **GPUまたはCUDAのエラー:** 同時処理数を下げる、別のGPUを選ぶ、またはCPUへ切り替えてください。
+- **GPUまたはCUDAのエラー:** ほかのGPUアプリを閉じる、別のGPUを選ぶ、またはCPUへ切り替えてください。
 - **解決しない:** エラー文を添えて[Issues](https://github.com/norqis/mozarie/issues)へ報告してください。
 
 ## 開発
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
 npm test
 ```

@@ -6,6 +6,7 @@
 models/
 config/local.json
 data/
+output/
 
 # Python build artifacts and virtual environments
 __pycache__/

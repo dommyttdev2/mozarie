@@ -89,6 +89,7 @@ function renderCandidates() {
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
       candidate.enabled = !candidate.enabled;
+      markMaskDirty();
       setReviewed(currentRecord(), false);
       syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
     }, deleting || state.candidateBatchPending.has(state.currentId));
@@ -109,6 +110,7 @@ function renderCandidates() {
         const previousForced = candidate.forced !== false;
         const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
         candidate.forced = !previousForced; setReviewed(currentRecord(), false);
+        markMaskDirty();
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
@@ -302,7 +304,7 @@ function deleteManualMask() {
   state.manualMaskPresent = false; state.manualEnabled = true;
   setCandidateDisplayMode(["manual:apply"], "off");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); saveDraft(); requestMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); markDraftDirty("add"); saveDraft(); requestMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusion() {
@@ -311,7 +313,7 @@ function deleteManualExclusion() {
   state.manualExclusionEnabled = true;
   setCandidateDisplayMode(["manual:exclude"], "off");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); markDraftDirty("exclusion"); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function deleteManualExclusionErase() {
@@ -320,7 +322,7 @@ function deleteManualExclusionErase() {
   state.manualExclusionEraseEnabled = true;
   setCandidateDisplayMode(["manual:excludeErase"], "off");
   setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
+  recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); markDraftDirty("exclusionErase"); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
 function shouldBlinkNewManual(role) {
@@ -366,6 +368,7 @@ async function batchCandidateOperation(spec) {
         if (manual) role === "apply" ? deleteManualMask() : deleteManualExclusion();
       } else {
         changed.forEach((item) => { item.enabled = operation === "enable"; });
+        markMaskDirty();
         if (manual) {
           if (role === "apply") state.manualEnabled = operation === "enable";
           else state.manualExclusionEnabled = operation === "enable";
@@ -494,6 +497,7 @@ function resetHistoryToCurrentManualMask() {
   copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
   state.historyRemovedCandidateIds = new Set(state.removedCandidateIds || []);
   state.historyCandidateIds = new Set(state.candidates.map((candidate) => candidate.id));
+  state.historyBaseDirty = true;
   state.history = []; state.historyIndex = 0; state.activeStroke = null; updateHistoryButtons();
 }
 
@@ -517,6 +521,9 @@ function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseConte
 function paintStroke(from, to, tool, size) {
   paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, from, to, tool, size);
   markMaskDirty();
+  if (tool === "brush" || tool === "mosaic_eraser") markDraftDirty("add");
+  if (tool === "eraser") markDraftDirty("exclusion", "exclusionErase");
+  if (tool === "exclude_eraser") markDraftDirty("exclusionErase");
 }
 
 function fillAt(point, tool = state.tool) {
@@ -529,7 +536,7 @@ function fillAt(point, tool = state.tool) {
   const apply = (spans) => {
     if (!catalogRecordMatches(record, epoch, { version, revision }) || !isCurrentGeneration(generation) || state.currentId !== imageId) { state.fillPending = false; return; }
     applyFillSpans(spans, tool); state.history.splice(state.historyIndex); state.history.push({ tool, spans }); trimHistory();
-    state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; if (state.workspacePersistence) scheduleManualWorkspaceSave(); setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+    state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; scheduleManualWorkspaceSave(); setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
   };
   if (typeof Worker !== "function") { setStatus(t("error.requestFailed"), "error"); return; }
   state.fillWorker?.terminate?.(); state.fillPending = true;
@@ -556,6 +563,9 @@ function paintFillSpans(addContext, exclusionContext, exclusionEraseContext, spa
   target.restore();
   if (tool === "eraser" || tool === "exclude_bucket") exclusionEraseContext.restore();
   else if (!state.manualExclusionForced && tool === "bucket") exclusionContext.restore();
+  if (tool === "bucket") markDraftDirty("add", ...(state.manualExclusionForced ? [] : ["exclusion"]));
+  if (tool === "eraser" || tool === "exclude_bucket") markDraftDirty("exclusion", "exclusionErase");
+  if (tool === "exclude_eraser") markDraftDirty("exclusionErase");
 }
 
 function applyFillSpans(spans, tool = "bucket") {
@@ -602,6 +612,7 @@ function trimHistory() {
     if (operation.kind === "removeCandidates") operation.ids.forEach((id) => state.historyRemovedCandidateIds.add(id));
     if (operation.kind === "restoreCandidates") operation.ids.forEach((id) => state.historyRemovedCandidateIds.delete(id));
     if (operation.kind === "addCandidates") operation.ids.forEach((id) => { state.historyCandidateIds.add(id); state.historyRemovedCandidateIds.delete(id); });
+    state.historyBaseDirty = true;
   }
 }
 
@@ -620,7 +631,7 @@ function rebuildManualMaskFromHistory() {
   for (const candidate of state.candidates) if (!(state.historyCandidateIds || new Set()).has(candidate.id)) state.removedCandidateIds.add(candidate.id);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
-  markMaskDirty();
+  markMaskDirty(); markDraftDirty("add", "exclusion", "exclusionErase");
   flushMaskComposition();
 }
 
@@ -633,7 +644,7 @@ function completeManualStroke() {
   trimHistory();
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
-  if (state.workspacePersistence) scheduleManualWorkspaceSave();
+  scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates();
 }
@@ -642,7 +653,7 @@ function restoreSnapshot(index) {
   if (isBusy() || state.importing || index < 0 || index > state.history.length) return;
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
-  if (state.workspacePersistence) scheduleManualWorkspaceSave();
+  scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
 }

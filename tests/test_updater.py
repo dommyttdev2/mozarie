@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
 import string
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -16,7 +20,10 @@ import updater
 
 
 def make_release(tag: str = "v1.2.0", url: str = "https://example.test/release.zip") -> dict:
-    return {"tag_name": tag, "assets": [], "zipball_url": url}
+    return {"tag_name": tag, "immutable": True, "assets": [{
+        "name": "mozarie.zip", "state": "uploaded", "browser_download_url": url,
+        "digest": "sha256:" + "0" * 64, "size": 1,
+    }]}
 
 
 def make_source(root: Path, version: str = "1.2.0") -> Path:
@@ -33,6 +40,17 @@ def make_source(root: Path, version: str = "1.2.0") -> Path:
     (root / "static" / "app.js").write_text("new app", encoding="utf-8")
     (root / "config").mkdir()
     (root / "config" / "defaults.json").write_text("{}", encoding="utf-8")
+    (root / "update.bat").write_text("new updater entry", encoding="utf-8")
+    (root / "setup.bat").write_text("new setup", encoding="utf-8")
+    (root / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    (root / ".gitignore").write_text("output/\n", encoding="utf-8")
+    (root / "LICENSE").write_text("MIT", encoding="utf-8")
+    (root / "THIRD_PARTY_NOTICES.md").write_text("notices", encoding="utf-8")
+    for relative in updater.MANAGED_FILES:
+        path = root / relative
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"new {relative}", encoding="utf-8")
     return root
 
 
@@ -62,6 +80,7 @@ def make_install(root: Path, version: str = "1.1.0") -> Path:
 
 
 UPDATE_ARCHIVE_CONTENTS = {
+    **{f"wrapper/{relative}": "file" for relative in updater.MANAGED_FILES},
     "wrapper/server.py": "server",
     "wrapper/run.bat": "run",
     "wrapper/VERSION": "1.2.0",
@@ -84,6 +103,26 @@ class Response(io.BytesIO):
         self.close()
 
 
+class LegacyOpener:
+    def __init__(self, release: dict, archive: bytes):
+        self.release = release
+        self.archive = archive
+
+    def __call__(self, request, **_kwargs):
+        if request.full_url == "https://api.github.com/repos/norqis/mozarie/releases/latest":
+            return Response(json.dumps(self.release).encode())
+        return Response(self.archive)
+
+
+def legacy_v040_updater() -> types.ModuleType:
+    module = types.ModuleType("legacy_updater")
+    module.__file__ = str(Path(__file__).resolve().parents[1] / "legacy_updater.py")
+    # v0.4.0 (4e621c5) updater snapshot; keep this fixture byte-identical to the tag.
+    source = (Path(__file__).resolve().parent / "fixtures" / "v0.4.0" / "updater.py").read_text(encoding="utf-8")
+    exec(compile(source, module.__file__, "exec"), module.__dict__)
+    return module
+
+
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
         updater._language = "ja"
@@ -94,10 +133,68 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.parse_version("1.2")
 
-    def test_release_asset_is_preferred_over_zipball(self):
+    def test_release_asset_must_be_the_immutable_mozarie_asset(self):
         release = make_release()
-        release["assets"] = [{"name": "mozarie-windows.zip", "browser_download_url": "https://example.test/asset.zip"}]
-        self.assertEqual(updater.release_download_url(release), "https://example.test/asset.zip")
+        release["assets"][0]["browser_download_url"] = "https://example.test/asset.zip"
+        self.assertEqual(updater.release_archive(release)[0], "https://example.test/asset.zip")
+        release["assets"][0]["name"] = "other.zip"
+        with self.assertRaises(updater.UpdateError):
+            updater.release_archive(release)
+
+    def test_download_rejects_a_digest_or_size_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "release.zip"
+            body = b"archive"
+            digest = __import__("hashlib").sha256(body).hexdigest()
+            updater.download_archive("https://example.test/release.zip", destination, digest, len(body), lambda *_args, **_kwargs: Response(body))
+            with self.assertRaises(updater.UpdateError):
+                updater.download_archive("https://example.test/release.zip", destination, "0" * 64, len(body), lambda *_args, **_kwargs: Response(body))
+            with self.assertRaises(updater.UpdateError):
+                updater.download_archive("https://example.test/release.zip", destination, digest, len(body) + 1, lambda *_args, **_kwargs: Response(body))
+
+    def test_requirements_install_uses_the_app_venv_not_the_updater_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 0
+                updater.install_requirements(source, app)
+            self.assertEqual(run.call_args.args[0][:3], [str(python), "-m", "pip"])
+
+    def test_v040_update_leaves_shared_python_untouched_and_new_run_bootstraps(self):
+        legacy = legacy_v040_updater()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = make_install(root / "install", version="0.4.0")
+            source = make_source(root / "source", version="0.4.1")
+            requirements = (Path(__file__).resolve().parents[1] / "requirements.txt").read_bytes()
+            (install / "requirements.txt").write_bytes(requirements)
+            (source / "run.bat").write_bytes((Path(__file__).resolve().parents[1] / "run.bat").read_bytes())
+            (source / "requirements.txt").write_bytes(requirements)
+            archive = root / "mozarie.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                for path in source.rglob("*"):
+                    if path.is_file():
+                        bundle.write(path, f"mozarie-0.4.1/{path.relative_to(source).as_posix()}")
+            body = archive.read_bytes()
+            release = {"tag_name": "v0.4.1", "assets": [{"name": "mozarie.zip", "browser_download_url": "https://example.test/mozarie.zip"}]}
+            with patch.object(legacy.subprocess, "run") as pip_run:
+                result = legacy.perform_update(install, opener=LegacyOpener(release, body), input_fn=lambda _prompt: "y")
+            self.assertEqual(result, legacy.EXIT_UPDATED)
+            pip_run.assert_not_called()
+            self.assertFalse((install / ".venv").exists())
+            self.assertFalse((install / "setup.bat").exists())
+            self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
+            run = (install / "run.bat").read_text(encoding="utf-8")
+            self.assertIn('if not exist "%PYTHON%" (', run)
+            self.assertIn('call :create_venv', run)
+            self.assertIn('"%PYTHON%" -m pip install -r "%APP_DIR%requirements.txt"', run)
+            self.assertIn('if defined MOZARIE_PYTHON (', run)
 
     def test_fetch_latest_release_validates_payload(self):
         payload = json.dumps(make_release()).encode()
@@ -110,13 +207,8 @@ class UpdaterTests(unittest.TestCase):
             root = Path(directory)
             archive = root / "release.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
-                for name, data in {
-                    "norqis-mozarie/server.py": "server",
-                    "norqis-mozarie/run.bat": "run",
-                    "norqis-mozarie/VERSION": "1.2.0",
-                    "norqis-mozarie/mozarie/core.py": "core",
-                    "norqis-mozarie/static/app.js": "app",
-                }.items():
+                for name, data in UPDATE_ARCHIVE_CONTENTS.items():
+                    name = name.replace("wrapper/", "norqis-mozarie/", 1)
                     bundle.writestr(name, data)
             source = updater.extract_archive(archive, root / "out")
             self.assertEqual(source.name, "norqis-mozarie")
@@ -199,6 +291,12 @@ class UpdaterTests(unittest.TestCase):
                 with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
                     updater._safe_member_path(zipfile.ZipInfo(f"root/{name}"))
 
+    def test_safe_member_path_rejects_windows_forbidden_characters_and_controls(self):
+        for name in ("less<than", "greater>than", 'quote"name', "pipe|name", "question?name", "star*name", "tab\tname", "control\x1fname"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                    updater._safe_member_path(zipfile.ZipInfo(f"root/{name}"))
+
     def test_safe_member_path_accepts_non_reserved_windows_names(self):
         for name in ("COM0", "COM10", "LPT0", "LPT10", "COM4work", ".config"):
             with self.subTest(name=name):
@@ -250,7 +348,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "models/model.onnx").read_bytes(), b"model")
             self.assertEqual((install / ".mozarie-cache/draft.bin").read_bytes(), b"draft")
             self.assertEqual((install / ".git/HEAD").read_text(encoding="utf-8"), "main")
-            self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
+            self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "new updater entry")
             self.assertFalse(backup.exists())
 
     def test_apply_backup_failure_leaves_install_unchanged(self):
@@ -531,9 +629,9 @@ class UpdaterTests(unittest.TestCase):
         batch_path = Path(__file__).parents[1] / "update.bat"
         raw = batch_path.read_bytes()
         batch = raw.decode("utf-8")
-        self.assertEqual(batch.count('"%PYTHON%" %PYTHON_ARGS% -X utf8 "%APP_DIR%updater.py"'), 1)
+        self.assertEqual(batch.count('"%PYTHON%" -X utf8 "%APP_DIR%updater.py"'), 1)
         self.assertIn(
-            '"%PYTHON%" %PYTHON_ARGS% -X utf8 "%APP_DIR%updater.py"\r\n'
+            '"%PYTHON%" -X utf8 "%APP_DIR%updater.py"\r\n'
             'set "EXIT_CODE=%ERRORLEVEL%"\r\n'
             "goto :finish",
             batch,
@@ -545,15 +643,54 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("pause >nul", batch)
         self.assertIn("MOZARIE_PYTHON is invalid. / MOZARIE_PYTHON が正しくありません。", batch)
         self.assertIn(
-            "Python 3.11 or newer was not found. Set MOZARIE_PYTHON or create .venv. / "
-            "Python 3.11 以上が見つかりません。MOZARIE_PYTHONを設定するか.venvを作成してください。",
+            "Python 3.11 or newer was not found. Run setup.bat, or set MOZARIE_PYTHON. / "
+            "Python 3.11 以上が見つかりません。setup.batを実行するかMOZARIE_PYTHONを設定してください。",
             batch,
         )
         self.assertEqual(len(re.findall(r"(?mi)^echo (?!off$)", batch)), 2)
         self.assertNotIn("run.bat", batch.lower())
-        self.assertNotIn("update.bat", updater.MANAGED_FILES)
+        self.assertIn("update.bat", updater.MANAGED_FILES)
         self.assertIn(b"\r\n", raw)
         self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+
+    def test_setup_checks_the_created_venv_python_version_before_pip(self):
+        batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
+        version_check = '"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize(\'P\') == 8 else 1)"'
+        self.assertIn(version_check, batch)
+        install_index = batch.index('"%PYTHON%" -m pip install --upgrade pip')
+        self.assertLess(batch.index("call :validate_python"), install_index)
+
+    def test_setup_and_run_select_only_supported_64_bit_launchers(self):
+        expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
+        for name in ("setup.bat", "run.bat"):
+            with self.subTest(name=name):
+                batch = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
+                self.assertIn(expected_loop, batch)
+                self.assertEqual(batch.count("py -%%V -m venv"), 1)
+                self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
+                self.assertNotIn("python -m venv", batch)
+                if name == "setup.bat":
+                    self.assertNotIn("MOZARIE_PYTHON", batch)
+                else:
+                    self.assertIn('if defined MOZARIE_PYTHON (', batch)
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
+    def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):
+        root_batch = Path(__file__).parents[1] / "run.bat"
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"
+            app.mkdir()
+            shutil.copy2(root_batch, app / "run.bat")
+            marker = app / "server-ran.txt"
+            (app / "server.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ok', encoding='utf-8')",
+                encoding="utf-8",
+            )
+            environment = os.environ | {"MOZARIE_PYTHON": sys.executable}
+            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
+            self.assertFalse((app / ".venv").exists())
 
 
 if __name__ == "__main__":

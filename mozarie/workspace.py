@@ -7,6 +7,8 @@ cannot be reconstructed from the source images is written here.
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import sqlite3
 import threading
 import time
@@ -14,21 +16,64 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageChops, UnidentifiedImageError
+
 
 class _ClosingConnection(sqlite3.Connection):
     """sqlite's context manager commits but does not close on Windows."""
     def __exit__(self, *args: Any) -> None:
-        super().__exit__(*args)
-        self.close()
+        try:
+            super().__exit__(*args)
+        finally:
+            self.close()
 
 
 class WorkspaceStore:
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "workspaces.sqlite3"
         self._lock = threading.RLock()
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Inspect an existing database before issuing any write-capable pragma,
+        # DDL, or cleanup statement.
+        existing = self.path.exists()
+        if existing:
+            with sqlite3.connect(self.path, factory=_ClosingConnection) as db:
+                db.row_factory = sqlite3.Row
+                tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "meta" not in tables:
+                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
+                version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if version_row is None:
+                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
+                try:
+                    version = int(version_row["value"])
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4") from exc
+                if version > self.VERSION:
+                    raise RuntimeError("workspace database is newer than this Mozarie version")
+                if version == self.VERSION - 1:
+                    self._validate_schema(db, tables, version)
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                        if version_row is None or version_row["value"] != str(version):
+                            raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+                        self._validate_schema(db, tables, version)
+                        db.execute("ALTER TABLE manual_edits ADD COLUMN has_effective_mask INTEGER NOT NULL DEFAULT 0")
+                        self._migrate_v2_effective_masks(db)
+                        db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(self.VERSION),))
+                        self._validate_schema(db, tables, self.VERSION)
+                        db.execute("COMMIT")
+                    except Exception:
+                        db.execute("ROLLBACK")
+                        raise
+                elif version != self.VERSION:
+                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+                else:
+                    self._validate_schema(db, tables, version)
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
@@ -63,19 +108,31 @@ class WorkspaceStore:
                     exclusion_erase_enabled INTEGER NOT NULL DEFAULT 1,
                     exclusion_forced INTEGER NOT NULL DEFAULT 1,
                     removed_candidate_ids TEXT NOT NULL DEFAULT '[]', candidate_revision INTEGER NOT NULL DEFAULT 0,
+                    has_effective_mask INTEGER NOT NULL DEFAULT 0,
                     updated_at INTEGER NOT NULL
                 );
             """)
-            # A process cannot own an upload that survived a restart. These
-            # partial browser manifests are never safe restoration targets.
-            db.execute("DELETE FROM catalogs WHERE identity_hash LIKE 'browser-provisional:%'")
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(images)")}
-            if "source_hash" not in columns:
-                db.execute("ALTER TABLE images ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
-            version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if version_row and int(version_row["value"]) > self.VERSION:
-                raise RuntimeError("workspace database is newer than this Mozarie version")
-            db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
+            if not existing:
+                db.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
+
+    @staticmethod
+    def _validate_schema(db: sqlite3.Connection, tables: set[str], version: int) -> None:
+        required = {
+            "catalogs": {"catalog_id", "identity_hash", "created_at", "updated_at"},
+            "images": {"catalog_id", "relative_path", "image_id", "size_bytes", "mtime_ns", "source_hash", "hidden", "reviewed", "candidate_revision", "updated_at"},
+            "candidates": {"image_id", "candidate_id", "class_name", "confidence", "mask_png", "enabled", "color", "source", "origin", "refinement", "role", "forced", "deleted"},
+            "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "updated_at"},
+        }
+        if version == WorkspaceStore.VERSION:
+            required["manual_edits"].add("has_effective_mask")
+        if not set(required) <= tables:
+            raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+        for table, columns in required.items():
+            present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            if not columns <= present:
+                raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+            if version == WorkspaceStore.VERSION - 1 and table == "manual_edits" and "has_effective_mask" in present:
+                raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
@@ -83,6 +140,88 @@ class WorkspaceStore:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=5000")
         return db
+
+    @staticmethod
+    def _decode_png_mask(raw: bytes | None) -> Image.Image | None:
+        """Read the same alpha/grayscale mask representation used at render time."""
+        if raw is None:
+            return None
+        if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("workspace mask is not a PNG")
+        try:
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.format != "PNG":
+                    raise ValueError("workspace mask is not a PNG")
+                image.load()
+                if image.mode in {"RGBA", "LA"}:
+                    return image.getchannel("A").point(lambda value: 255 if value else 0)
+                if image.mode in {"L", "1"}:
+                    return image.convert("L").point(lambda value: 255 if value else 0)
+        except (OSError, UnidentifiedImageError) as exc:
+            raise ValueError("workspace mask is not a PNG") from exc
+        raise ValueError("workspace mask has no alpha or grayscale channel")
+
+    @classmethod
+    def _require_png_mask(cls, raw: bytes | None) -> None:
+        if raw is not None:
+            cls._decode_png_mask(raw)
+
+    @classmethod
+    def _migrate_v2_effective_masks(cls, db: sqlite3.Connection) -> None:
+        """Derive v3's scalar from v2's actual layer composition before commit."""
+        candidates_by_image: dict[str, list[sqlite3.Row]] = {}
+        for row in db.execute("SELECT * FROM candidates WHERE deleted=0"):
+            cls._require_png_mask(row["mask_png"])
+            candidates_by_image.setdefault(str(row["image_id"]), []).append(row)
+        for manual in db.execute("SELECT * FROM manual_edits"):
+            for key in ("add_png", "exclusion_png", "exclusion_erase_png"):
+                cls._require_png_mask(manual[key])
+            image_id = str(manual["image_id"])
+            candidates = candidates_by_image.get(image_id, [])
+            masks = [cls._decode_png_mask(row["mask_png"]) for row in candidates]
+            masks.extend(cls._decode_png_mask(manual[key]) for key in ("add_png", "exclusion_png", "exclusion_erase_png"))
+            first = next((mask for mask in masks if mask is not None), None)
+            if first is None:
+                effective = False
+            else:
+                if any(mask is not None and mask.size != first.size for mask in masks):
+                    raise ValueError("workspace masks have mismatched dimensions")
+                removed = json.loads(manual["removed_candidate_ids"])
+                if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+                    raise ValueError("workspace removed candidates are invalid")
+                image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
+                if image is None:
+                    raise ValueError("workspace manual image is missing")
+                removed_ids = set(removed) if int(manual["candidate_revision"]) == int(image["candidate_revision"]) else set()
+                empty = Image.new("L", first.size)
+                apply = empty.copy()
+                exclusion = empty.copy()
+                forced_exclusion = empty.copy()
+                for row in candidates:
+                    mask = cls._decode_png_mask(row["mask_png"])
+                    if str(row["candidate_id"]) in removed_ids or not bool(row["enabled"]):
+                        continue
+                    if row["role"] == "apply":
+                        apply = ImageChops.lighter(apply, mask)
+                    elif row["role"] == "exclude":
+                        exclusion = ImageChops.lighter(exclusion, mask)
+                        if bool(row["forced"]):
+                            forced_exclusion = ImageChops.lighter(forced_exclusion, mask)
+                add = cls._decode_png_mask(manual["add_png"])
+                manual_exclusion = cls._decode_png_mask(manual["exclusion_png"])
+                erase = cls._decode_png_mask(manual["exclusion_erase_png"])
+                if bool(manual["exclusion_enabled"]) and manual_exclusion is not None:
+                    exclusion = ImageChops.lighter(exclusion, manual_exclusion)
+                    if bool(manual["exclusion_forced"]):
+                        forced_exclusion = ImageChops.lighter(forced_exclusion, manual_exclusion)
+                if bool(manual["exclusion_erase_enabled"]) and erase is not None:
+                    exclusion = ImageChops.subtract(exclusion, erase)
+                    forced_exclusion = ImageChops.subtract(forced_exclusion, erase)
+                apply = ImageChops.subtract(apply, exclusion)
+                if bool(manual["manual_enabled"]) and add is not None:
+                    apply = ImageChops.lighter(apply, add)
+                effective = ImageChops.subtract(apply, forced_exclusion).getbbox() is not None
+            db.execute("UPDATE manual_edits SET has_effective_mask=? WHERE image_id=?", (int(effective), image_id))
 
     @staticmethod
     def identity_for_root(root: Path) -> str:
@@ -136,12 +275,6 @@ class WorkspaceStore:
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-
-    def unique_catalog_for_file(self, relative_path: str, source_hash: str) -> str | None:
-        if not source_hash: return None
-        with self._connect() as db:
-            rows = db.execute("SELECT DISTINCT catalog_id FROM images WHERE relative_path=? AND source_hash=?", (relative_path, source_hash)).fetchall()
-        return str(rows[0]["catalog_id"]) if len(rows) == 1 else None
 
     def best_catalog_for_manifest(self, entries: list[tuple[str, str]], exclude_catalog: str) -> str | None:
         """Return a browser catalogue only for a unique strict-majority match."""
@@ -201,6 +334,26 @@ class WorkspaceStore:
                 raise
         return result
 
+    def delete_images(self, image_ids: list[str]) -> None:
+        """Permanently remove explicitly discarded image workspaces."""
+        if not image_ids:
+            return
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._lock, self._connect() as db:
+            db.execute(f"DELETE FROM images WHERE image_id IN ({placeholders})", image_ids)
+
+    def prune_catalog_images(self, catalog_id: str, relative_paths: set[str]) -> None:
+        """Drop rows for files absent from a complete folder scan only."""
+        with self._lock, self._connect() as db:
+            if relative_paths:
+                placeholders = ",".join("?" for _ in relative_paths)
+                db.execute(
+                    f"DELETE FROM images WHERE catalog_id=? AND relative_path NOT IN ({placeholders})",
+                    [catalog_id, *relative_paths],
+                )
+            else:
+                db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
+
     def image_state(self, image_id: str) -> tuple[bool, bool]:
         with self._connect() as db:
             row = db.execute("SELECT hidden,reviewed FROM images WHERE image_id=?", (image_id,)).fetchone()
@@ -218,6 +371,35 @@ class WorkspaceStore:
         values.extend([time.time_ns(), image_id])
         with self._lock, self._connect() as db:
             db.execute(f"UPDATE images SET {','.join(updates)},updated_at=? WHERE image_id=?", values)
+
+    def commit_saved_image(self, image_id: str, *, mtime_ns: int, size_bytes: int, source_hash: str | None, clear_manual: bool) -> None:
+        """Persist the source fingerprint and cleared manual state as one save commit."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if source_hash is None:
+                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
+                else:
+                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,source_hash=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, source_hash, time.time_ns(), image_id))
+                if clear_manual:
+                    db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def update_candidate_metadata(self, image_id: str, revision: int, candidates: list[Any]) -> None:
+        """Update lightweight candidate controls without reading or rewriting PNG blobs."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("UPDATE images SET candidate_revision=?, reviewed=0, updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
+                for candidate in candidates:
+                    db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def replace_candidates(self, image_id: str, revision: int, candidates: list[Any]) -> None:
         with self._lock, self._connect() as db:
@@ -238,8 +420,9 @@ class WorkspaceStore:
                             (image_id, candidate.candidate_id),
                         ).fetchone()
                         mask = row["mask_png"] if row else None
-                        if not isinstance(mask, bytes) or not mask.startswith(b"\x89PNG\r\n\x1a\n"):
+                        if not isinstance(mask, bytes):
                             continue
+                    self._require_png_mask(mask)
                     db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
                         ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
@@ -252,16 +435,16 @@ class WorkspaceStore:
     def hydrate_candidates(self, image_id: str, directory: Path, candidate_factory: Any) -> tuple[int, list[Any]]:
         with self._connect() as db:
             image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
-            rows = db.execute("""SELECT candidate_id,class_name,confidence,enabled,color,source,origin,refinement,role,forced,
-                length(mask_png) AS mask_size,substr(mask_png,1,8) AS mask_signature
+            rows = db.execute("""SELECT candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
                 FROM candidates WHERE image_id=? AND deleted=0""", (image_id,)).fetchall()
         if not image: return 0, []
         if not rows: return int(image["candidate_revision"]), []
-        candidates = []
         for row in rows:
-            if int(row["mask_size"] or 0) < 8 or row["mask_signature"] != b"\x89PNG\r\n\x1a\n": continue
-            path = directory / f"{row['candidate_id']}.png"
-            candidates.append(candidate_factory(row, path))
+            mask = row["mask_png"]
+            if not isinstance(mask, bytes):
+                raise ValueError("workspace candidate mask is not a PNG")
+            self._require_png_mask(mask)
+        candidates = [candidate_factory(row, directory / f"{row['candidate_id']}.png") for row in rows]
         return int(image["candidate_revision"]), candidates
 
     def valid_candidate_ids(self, image_id: str) -> set[str]:
@@ -278,15 +461,32 @@ class WorkspaceStore:
         return raw if isinstance(raw, bytes) and raw.startswith(b"\x89PNG\r\n\x1a\n") else None
 
     def save_manual(self, image_id: str, payload: dict[str, Any], decoder: Any) -> None:
-        add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
         removed = payload.get("removedCandidateIds", [])
         if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed): raise ValueError("invalid removed candidates")
+        has_effective_mask = payload.get("hasEffectiveMask")
+        if not isinstance(has_effective_mask, bool): raise ValueError("invalid effective mask")
+        add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
+        for mask in (add, exclusion, erase):
+            self._require_png_mask(mask)
         with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO manual_edits VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
+            db.execute("""INSERT INTO manual_edits(
+                image_id,add_png,exclusion_png,exclusion_erase_png,manual_enabled,exclusion_enabled,
+                exclusion_erase_enabled,exclusion_forced,removed_candidate_ids,candidate_revision,
+                has_effective_mask,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 add_png=excluded.add_png,exclusion_png=excluded.exclusion_png,exclusion_erase_png=excluded.exclusion_erase_png,
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
-                exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,updated_at=excluded.updated_at""",
-                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),time.time_ns()))
+                exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
+                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),int(has_effective_mask),time.time_ns()))
+
+    def manual_effective_masks(self, image_ids: list[str]) -> dict[str, bool]:
+        """Return the persisted manual-mask state; omitted IDs have no manual row."""
+        if not image_ids:
+            return {}
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._connect() as db:
+            rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({placeholders})", image_ids).fetchall()
+        return {str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows}
 
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:
@@ -298,6 +498,10 @@ class WorkspaceStore:
     def manual(self, image_id: str, encoder: Any) -> dict[str, Any] | None:
         with self._connect() as db: row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
         if not row: return None
-        try:
-            return {"add": encoder(row["add_png"]), "exclusion": encoder(row["exclusion_png"]), "exclusionErase": encoder(row["exclusion_erase_png"]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": __import__('json').loads(row["removed_candidate_ids"]), "candidateRevision": int(row["candidate_revision"])}
-        except Exception: return None
+        masks = (row["add_png"], row["exclusion_png"], row["exclusion_erase_png"])
+        for mask in masks:
+            self._require_png_mask(mask)
+        removed = json.loads(row["removed_candidate_ids"])
+        if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+            raise ValueError("workspace removed candidates are invalid")
+        return {"add": encoder(masks[0]), "exclusion": encoder(masks[1]), "exclusionErase": encoder(masks[2]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": removed, "candidateRevision": int(row["candidate_revision"]), "hasEffectiveMask": bool(row["has_effective_mask"])}

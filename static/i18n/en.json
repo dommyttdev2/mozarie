@@ -46,6 +46,7 @@
   "candidates.manual": "Manual mosaic",
   "candidates.manualOnly": "Manual edits only",
   "candidates.manualToggle": "Enable manual mosaic",
+  "candidates.toggleAll": "Toggle",
   "candidates.none": "No ranges",
   "candidates.title": "Mosaic ranges",
   "candidates.toggle": "Enable {label}",

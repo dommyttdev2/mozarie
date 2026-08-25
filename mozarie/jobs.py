@@ -1,26 +1,35 @@
 from __future__ import annotations
 
 import gc
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from typing import Any
 
-from .core import *
-from .image_io import *
-from . import image_io as _image_io
+import numpy as np
+from PIL import Image
 
-globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
+from .core import JOB_LABELS, LOGGER, CandidateRole, ClientError, ImageRecord, Job, JobControl
+from .image_io import calculate_block_size
+from .masks import compose_masks
 
 class JobsMixin:
     @staticmethod
     def _is_gpu_out_of_memory(exc: BaseException) -> bool:
         """Recognise the OOM forms emitted by PyTorch and ONNX Runtime."""
+        if isinstance(exc, MemoryError):
+            return False
         if exc.__class__.__name__ == "OutOfMemoryError" and "torch" in exc.__class__.__module__:
             return True
         message = str(exc).casefold()
         return any(marker in message for marker in (
             "cuda out of memory",
-            "out of memory",
-            "could not allocate tensor with",
+            "cuda error out of memory",
+            "cuda out of memory",
+            "could not allocate cuda",
             "not enough gpu video memory",
-            "failed to allocate memory",
             "bfcarena",
         ))
 
@@ -28,13 +37,8 @@ class JobsMixin:
         """Return a localised-by-code error without exposing runtime exception text."""
         if isinstance(exc, ClientError) or self.settings["models"].get("provider") != "gpu" or not self._is_gpu_out_of_memory(exc):
             return None
-        with self.lock:
-            parallelism = max(1, int(self.job.parallelism or 1))
-        if parallelism > 1:
-            message = "GPUメモリが不足しました。同時実行数を1に下げるか、他のGPUアプリを閉じてもう一度実行してください。"
-        else:
-            message = "GPUメモリが不足しました。他のGPUアプリを閉じるか、CPUまたは小さいSAMモデル（vit_b）を選択してください。"
-        return ClientError(message, "gpu_out_of_memory", {"parallelism": parallelism})
+        message = "GPUメモリが不足しました。他のGPUアプリを閉じるか、CPUまたは小さいSAMモデル（vit_b）を選択してください。"
+        return ClientError(message, "gpu_out_of_memory", {"parallelism": 1})
 
     @staticmethod
     def _empty_selected_gpu_cache(torch: Any, gpu_device: int) -> None:
@@ -76,6 +80,7 @@ class JobsMixin:
                 self.hand_segmentation_image_id = None
             with self.lock:
                 self.models = None
+                self.hand_model = None
         self._release_gpu_cache(provider=provider, gpu_device=gpu_device)
 
     def recover_gpu_oom_for_request(self, exc: BaseException) -> ClientError | None:
@@ -106,7 +111,8 @@ class JobsMixin:
 
     def request_pause(self) -> Job:
         with self.lock:
-            if self.job.kind not in {"apply", "detect"} or self.job.state != "running":
+            if (self.job.kind not in {"apply", "detect"} or self.job.state != "running"
+                    or self.job.completed >= self.job.total):
                 raise ClientError("一時停止できる処理はありません。")
             assert self.job_control is not None
             control = self.job_control
@@ -410,6 +416,9 @@ class JobsMixin:
             self.job.active_count -= 1
             if (control.pause_requested.is_set() and not control.cancel_requested.is_set()
                     and not control.failed.is_set() and self.job.active_count == 0):
+                if self.job.completed >= self.job.total:
+                    control.pause_requested.clear()
+                    return self.job.active_count
                 self.job.state = "paused"
                 self.job.current = ""
                 self._pause_job_clock()

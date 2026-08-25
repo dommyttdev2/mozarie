@@ -16,12 +16,12 @@ Mozarie is a local Windows app for detecting, reviewing, editing, and saving mos
 ### Requirements
 
 - Windows
-- Python 3.11 or later
+- 64-bit Python 3.11–3.14 (Python Launcher `py`)
 
 ### Setup
 
 ```powershell
-python -m pip install -r requirements.txt
+.\setup.bat
 ```
 
 ### Run
@@ -52,6 +52,8 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from a Sensitive `.pt` file | Get it from the [source](https://huggingface.co/sugarknight/sensitive-detect), convert it, then select the ONNX file with **Browse**. |
 
+> **About `.pt` files:** PyTorch `.pt` files, including NTD files, can execute code through pickle while loading, so do not run a `.pt` obtained from any source other than those listed here.
+
 Convert NTD11:
 
 ```powershell
@@ -72,12 +74,14 @@ Review the source terms and licenses for each model and the [third-party notices
 
 ## Use
 
+Automatic detection always uses one worker on GPU to keep VRAM use stable. On CPU, you can choose one to four workers.
+
 1. Import images or a folder.
 2. Run automatic detection for the current image or all images.
 3. Review the candidates at right and correct them with brushes, erasers, or the boundary tool when needed.
 4. Choose a save target, then save a copy or overwrite the source.
 
-To use GPU processing, select a GPU in **Settings > Detection**. If GPU memory runs out, lower parallel processing or switch to CPU.
+To use GPU processing, select a GPU in **Settings > Detection**. If GPU memory runs out, close other GPU apps or switch to CPU.
 
 ## Updates
 
@@ -86,13 +90,13 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 ## Troubleshooting
 
 - **A model cannot load:** Check the file format and the selected SAM type/file combination.
-- **GPU or CUDA error:** Lower parallel processing, select another GPU, or switch to CPU.
+- **GPU or CUDA error:** Close other GPU apps, select another GPU, or switch to CPU.
 - **Still stuck:** Include the error text in a [GitHub issue](https://github.com/norqis/mozarie/issues).
 
 ## Development
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
 npm test
 ```

@@ -1,4 +1,4 @@
-"""Mozarie's small executable entry point and backwards-compatible API surface."""
+"""Mozarie's small executable entry point."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from mozarie.core import *  # noqa: F403
-from mozarie.image_io import *  # noqa: F403
-from mozarie.image_io import _apply_mosaic_to_image, _assert_image_suffix_matches_format, _decode_mask, _default_output_destination
-from mozarie.state import DetectionModels, STATE, StudioState
-from mozarie.http import MosaicHandler, _read_candidate_revision, _read_detection_parallelism, _read_mosaic_divisor, _read_save_suffix, _read_target_classes, _start_update_after_response
+from mozarie.core import LOGGER, LOG_DATE_FORMAT, LOG_FORMAT
+import mozarie.state as state_module
+from mozarie.http import MosaicHandler
 
 
 def _open_browser(url: str) -> None:
@@ -43,17 +41,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Mozarie locally.")
     parser.add_argument("--port", type=int, default=None, help="Override the saved local port for this start only.")
     args = parser.parse_args()
-    port = args.port if args.port is not None else int(STATE.settings["general"]["port"])
-    STATE.cache_dir.mkdir(parents=True, exist_ok=True)
+    port = args.port if args.port is not None else int(state_module.STATE.settings["general"]["port"])
+    state_module.STATE.cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         http_server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
     except OSError:
         LOGGER.exception("サーバーを起動できません")
-        STATE.shutdown()
+        state_module.STATE.shutdown()
         raise SystemExit(1) from None
     url = f"http://127.0.0.1:{port}"
     LOGGER.info("Mozarie を起動しました: %s", url)
-    if STATE.settings["general"]["open_browser"]:
+    if state_module.STATE.settings["general"]["open_browser"]:
         _schedule_browser_open(url)
     try:
         http_server.serve_forever()
@@ -61,7 +59,7 @@ def main() -> None:
         LOGGER.info("Mozarie を停止します")
     finally:
         http_server.server_close()
-        STATE.shutdown()
+        state_module.STATE.shutdown()
         LOGGER.info("Mozarie を停止しました")
 
 

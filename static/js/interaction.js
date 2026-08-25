@@ -116,7 +116,7 @@ async function clearCatalog() {
   ++state.imageGeneration;
   updateActionButtons();
   try {
-    if (state.workspacePersistence) await flushAllWorkspaceMutations();
+    await flushAllWorkspaceMutations();
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     clearStoredCatalogState();
@@ -165,8 +165,6 @@ function openCatalogContextMenu(event, imageId) {
 function clearReviewForRemovedImage(image) {
   const path = reviewPath(image);
   state.reviewedPaths.delete(path);
-  const key = reviewStorageKey(image);
-  if (key) try { localStorage.removeItem(key); } catch { /* Session state is already cleared. */ }
 }
 
 async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
@@ -229,43 +227,17 @@ function droppedFile(file, relativePath = file.name, fileHandle = null, parentHa
 }
 
 async function directFilesFromDrop(dataTransfer) {
-  const handles = [...dataTransfer.items]
-    .map((item) => item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null)
-    .filter(Boolean);
-  if (handles.length) {
-    const entries = [];
-    async function collectHandle(handle, parent = "", parentHandle = null) {
-      if (!handle) return;
-      const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
-      if (handle.kind === "file") entries.push({ handle, relativePath, parentHandle });
-      else for await (const entry of handle.values()) await collectHandle(entry, relativePath, handle);
-    }
-    for (const handlePromise of handles) {
-      const handle = await handlePromise;
-      if (handle) await collectHandle(handle);
-    }
-    return { handleEntries: entries };
+  const handles = await Promise.all([...dataTransfer.items]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFileSystemHandle()));
+  const entries = [];
+  async function collectHandle(handle, parent = "", parentHandle = null) {
+    const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
+    if (handle.kind === "file") entries.push({ handle, relativePath, parentHandle });
+    else for await (const entry of handle.values()) await collectHandle(entry, relativePath, handle);
   }
-  const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
-  if (entries.length) {
-    const files = [];
-    async function collectEntry(entry, parent = "") {
-      const relativePath = parent ? `${parent}/${entry.name}` : entry.name;
-      if (entry.isFile) files.push({ name: entry.name, relativePath, getFile: () => new Promise((resolve, reject) => entry.file(resolve, reject)), fileHandle: null, parentHandle: null });
-      else if (entry.isDirectory) {
-        const reader = entry.createReader(); const children = [];
-        while (true) {
-          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
-          if (!batch.length) break;
-          children.push(...batch);
-        }
-        for (const child of children) await collectEntry(child, relativePath);
-      }
-    }
-    for (const entry of entries) await collectEntry(entry);
-    return files;
-  }
-  return [...dataTransfer.files].map((file) => droppedFile(file));
+  for (const handle of handles) if (handle) await collectHandle(handle);
+  return { handleEntries: entries };
 }
 
 function isSupportedImageFile(file) {
@@ -273,7 +245,7 @@ function isSupportedImageFile(file) {
 }
 
 function newClientKey() {
-  return globalThis.crypto?.randomUUID?.() || `import-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return crypto.randomUUID();
 }
 
 function pruneSourceAccess() {
@@ -295,16 +267,12 @@ async function importFiles(files) {
   const session = arguments.length > 1 ? arguments[1] : beginImportSession();
   if (!session || state.importSession !== session) return;
   const supportedFiles = [...files]
-    .map((entry) => entry.file || entry.getFile ? entry : { file: entry, relativePath: entry.webkitRelativePath || entry.name, fileHandle: null, parentHandle: null })
+    .map((entry) => entry.file || entry.getFile ? entry : { file: entry, relativePath: entry.name, fileHandle: null, parentHandle: null })
     .filter((entry) => isSupportedImageFile(entry.file || { name: entry.name || entry.relativePath }));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
-    // webkitdirectory/drop fallbacks have no durable directory handle. Start
-    // a fresh provisional catalogue for this complete manifest. Standalone
-    // files deliberately inherit the active catalogue instead.
-    const isFolderFallback = supportedFiles.some((entry) => String(entry.relativePath || entry.file?.webkitRelativePath || "").includes("/"));
-    if (!session.catalogId && !session.provisional && (isFolderFallback || !state.images.length) && state.workspaceApiAvailable) {
-      if (state.workspacePersistence) await flushAllWorkspaceMutations();
+    if (!session.catalogId && !session.provisional && !state.images.length) {
+      await flushAllWorkspaceMutations();
       const prepared = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ provisional: true }) });
       session.catalogId = prepared.catalogId || null;
       session.provisional = prepared.provisional === true;
@@ -322,7 +290,7 @@ async function importFiles(files) {
         const file = descriptor.file || await descriptor.getFile();
         if (session.cancelled || state.importSession !== session) return;
         if (!isSupportedImageFile(file)) continue;
-        const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.webkitRelativePath || file.name };
+        const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
         const data = await importSingleFile(entry, clientKey, session.catalogId);
         if (!session.catalogId && data.catalogId) session.catalogId = data.catalogId;
@@ -347,27 +315,22 @@ async function importFiles(files) {
       throw error;
     }
     if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
+    if (session.cancelled) { setStatusKey("status.importCancelled", { completed: session.completed }); return; }
     if (session.provisional) {
       const finalized = await api("/api/workspace/catalog/finalize", { method: "POST", body: JSON.stringify({}) });
       session.catalogId = finalized.catalogId || session.catalogId;
       remapImportedImageIds(finalized.imageIds || {});
-      state.workspacePersistence = finalized.workspaceVersion === 1;
       state.images = finalized.images || [];
       session.provisional = false;
     }
     const latest = await api("/api/images");
-    state.workspacePersistence = latest.workspaceVersion === 1 && latest.workspace === true; state.images = latest.images;
+    state.images = latest.images;
     loadReviewedPaths();
-    if (session.cancelled) {
-      pruneSourceAccess(); renderCatalogViews();
-      setStatusKey("status.importCancelled", { completed: session.completed });
-      return;
-    }
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
     try {
       const latest = await api("/api/images");
-      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspaceVersion === 1 && latest.workspace === true; state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
+      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
     if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
   }
@@ -442,7 +405,7 @@ async function importFileHandles(handles, session = beginImportSession()) {
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
-  if (state.workspacePersistence) await flushAllWorkspaceMutations();
+  await flushAllWorkspaceMutations();
   session.catalogId = await catalogForDirectoryHandle(directoryHandle);
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
@@ -459,7 +422,6 @@ async function importDirectoryHandle(directoryHandle, session = beginImportSessi
 
 async function pickImageFiles() {
   $("#pickerMenu").hidePopover();
-  if (typeof window.showOpenFilePicker !== "function") return $("#importImagesInput").click();
   const session = beginImportSession(); if (!session) return;
   try { await importFileHandles(await window.showOpenFilePicker({ multiple: true, types: [{ description: "Images", accept: { "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"] } }] }), session); }
   catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); finishImportSession(session); }
@@ -467,7 +429,6 @@ async function pickImageFiles() {
 
 async function pickImageDirectory() {
   $("#pickerMenu").hidePopover();
-  if (typeof window.showDirectoryPicker !== "function") return $("#importFolderInput").click();
   const session = beginImportSession(); if (!session) return;
   try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-source" }), session); }
   catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); finishImportSession(session); }

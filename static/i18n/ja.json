@@ -123,6 +123,7 @@
   "candidates.manualOnly": "手書きあり",
   "candidates.manual": "手書き",
   "candidates.manualToggle": "手書きモザイクを使用",
+  "candidates.toggleAll": "切替",
   "candidates.toggle": "{label}を使用",
   "candidates.delete": "{label}を削除",
   "candidates.deleteManual": "手書きを削除",

@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import warnings
+import base64
+import binascii
+import io
+import os
+import secrets
+import shutil
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
-from .core import *
-from .image_io import *
-from . import image_io as _image_io
+import numpy as np
+from PIL import Image, UnidentifiedImageError
 
-globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
+from .core import (
+    IMAGE_SUFFIXES, IO_CHUNK_BYTES, MAX_BODY_BYTES, PNG_SIGNATURE,
+    REFINEMENT_LABELS, SAVE_TOKEN_TTL_SECONDS, SOURCE_LABELS,
+    BrowserSaveToken, ClientError, ImageRecord, Job, LOGGER, StaleMaskError,
+    safe_import_relative_path, torch_module,
+)
+from .domain import Candidate, CandidateRole
+from .image_io import _valid_color, inspect_import_image, oriented_image_size, unique_session_import_destination
 
 class CatalogMixin:
     @staticmethod
@@ -19,15 +39,16 @@ class CatalogMixin:
 
     def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
         """Materialise only small PNGs for the active catalogue into the disposable cache."""
+        restored: list[tuple[str, int, list[Candidate]]] = []
         for record in records:
-            try:
-                revision, candidates = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
-            except Exception:
-                LOGGER.warning("Could not restore workspace state for %s", record.relative_path, exc_info=True)
-                continue
+            revision, candidates = self.workspace_store.hydrate_candidates(
+                record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace,
+            )
             if candidates or revision:
-                self.candidates[record.image_id] = candidates
-                self.candidate_revisions[record.image_id] = revision
+                restored.append((record.image_id, revision, candidates))
+        for image_id, revision, candidates in restored:
+            self.candidates[image_id] = candidates
+            self.candidate_revisions[image_id] = revision
 
     def _persist_candidates(self, image_id: str) -> None:
         """Commit a complete candidate revision before exposing a successful mutation."""
@@ -89,7 +110,7 @@ class CatalogMixin:
             # A directory selection is a full reimport. Even when its handle
             # maps to the active ID, discard current session files first so
             # each uploaded relative path reconciles its durable record.
-            self.clear_catalog()
+            self.detach_catalog()
             try:
                 self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
                 self.browser_catalog_provisional = False
@@ -218,6 +239,10 @@ class CatalogMixin:
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         catalog_id = self.workspace_store.catalog_for_root(root)
         stored = self.workspace_store.reconcile_images(catalog_id, records)
+        # This is the only missing-file prune path: the complete directory
+        # scan above is authoritative. Browser imports and partial operations
+        # must never discard durable rows merely because a file was absent.
+        self.workspace_store.prune_catalog_images(catalog_id, {record.relative_path for record in records})
         for record in records:
             saved = stored[record.relative_path]
             record.image_id = str(saved["image_id"])
@@ -228,7 +253,8 @@ class CatalogMixin:
         self.browser_import_hashes = {}
         return self._replace_catalog(root, records)
 
-    def clear_catalog(self) -> None:
+    def detach_catalog(self) -> str | None:
+        """Clear only the live screen state while retaining durable work."""
         with self.import_lock:
             with self.lock:
                 image_ids = tuple(self.images)
@@ -244,7 +270,8 @@ class CatalogMixin:
                     self.candidate_revisions = {}
                     self._clear_browser_save_tokens_unchecked()
                     self._invalidate_sam_cache()
-                    provisional_catalog = self.catalog_id if self.browser_catalog_provisional else None
+                    catalog_id = self.catalog_id
+                    provisional_catalog = catalog_id if self.browser_catalog_provisional else None
                     self.catalog_id = None
                     self.browser_import_hashes = {}
                     self.browser_catalog_provisional = False
@@ -256,6 +283,13 @@ class CatalogMixin:
                 if provisional_catalog:
                     self.workspace_store.delete_catalog(provisional_catalog)
         self.cleanup_expired_browser_save_tokens()
+        return None if provisional_catalog else catalog_id
+
+    def clear_catalog(self) -> None:
+        """Explicit user clear: remove durable rows after detaching the view."""
+        catalog_id = self.detach_catalog()
+        if catalog_id:
+            self.workspace_store.prune_catalog_images(catalog_id, set())
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
         """Remove one image's working state without deleting its source file."""
@@ -283,6 +317,10 @@ class CatalogMixin:
                     mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
                     session_paths = [record.path for record in records if record.source_kind == "session"]
                     session_imports_dir = self.session_imports_dir
+                    # The durable delete is the transaction boundary. Do it
+                    # before publishing the in-memory removal so a database
+                    # failure leaves both views intact.
+                    self.workspace_store.delete_images(removed_ids)
                     for record in records:
                         self.images.pop(record.image_id, None)
                         self.candidates.pop(record.image_id, None)
@@ -590,7 +628,9 @@ class CatalogMixin:
                         record.image_id = str(stored["image_id"]); record.hidden = bool(stored["hidden"]); record.reviewed = bool(stored["reviewed"])
                         if source_hash: self.browser_import_hashes[record.relative_path] = source_hash
                         _revision, restored = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
-                        if restored: self.candidates[record.image_id] = restored; self.candidate_revisions[record.image_id] = _revision
+                        if restored or _revision:
+                            self.candidates[record.image_id] = restored
+                            self.candidate_revisions[record.image_id] = _revision
                     imported[index]["imageId"] = record.image_id
                     self.images[record.image_id] = record
                     self.order.append(record.image_id)
@@ -827,6 +867,15 @@ class CatalogMixin:
             raise ClientError("手描きマスクが正しくありません。") from exc
         if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
             raise ClientError("手描きマスクが正しくありません。")
+        try:
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.format != "PNG":
+                    raise ClientError("手描きマスクが正しくありません。")
+                image.load()
+                if image.mode not in {"RGBA", "LA", "L", "1"}:
+                    raise ClientError("手描きマスクが正しくありません。")
+        except (OSError, UnidentifiedImageError) as exc:
+            raise ClientError("手描きマスクが正しくありません。") from exc
         return raw
 
     @staticmethod
@@ -846,9 +895,15 @@ class CatalogMixin:
         if not self.workspace_store.has_image(image_id): return None
         return self.workspace_store.manual(image_id, self._encode_workspace_mask)
 
+    def delete_manual_workspace(self, image_id: str) -> None:
+        self.image_for_id(image_id)
+        if self.workspace_store.has_image(image_id):
+            self.workspace_store.delete_manual([image_id])
+
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
+            manual_effective_masks = self.workspace_store.manual_effective_masks(list(self.order))
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
@@ -867,17 +922,20 @@ class CatalogMixin:
                             candidate.enabled and candidate.role == CandidateRole.APPLY
                             for candidate in self.candidates.get(image_id, [])
                         ),
+                        "hasEffectiveMask": manual_effective_masks.get(image_id, any(
+                            candidate.enabled and candidate.role == CandidateRole.APPLY
+                            for candidate in self.candidates.get(image_id, [])
+                        )),
                         "candidateRevision": self._candidate_revision(image_id),
                         "hidden": record.hidden,
                         "reviewed": record.reviewed,
                     }
                 )
             return {
-                "root": str(self.root) if self.root else "",
+                "root": str(self.root) if self.root else None,
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
                 "workspace": self.catalog_id is not None,
-                "workspaceVersion": 1,
             }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
@@ -1016,8 +1074,8 @@ class CatalogMixin:
                 candidate.color = color
             if "forced" in payload:
                 candidate.forced = payload["forced"]
-            self._touch_candidates(image_id)
-            self._persist_candidates(image_id)
+            revision = self._touch_candidates(image_id)
+            self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
             return self._candidate_revision(image_id)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
@@ -1040,7 +1098,10 @@ class CatalogMixin:
                     for item in selected:
                         item.enabled = operation == "enable"
                 revision = self._touch_candidates(image_id)
-                self._persist_candidates(image_id)
+                if operation == "delete":
+                    self._persist_candidates(image_id)
+                else:
+                    self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
             for path in paths:
                 path.unlink(missing_ok=True)
             return revision
