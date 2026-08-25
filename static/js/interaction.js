@@ -335,7 +335,7 @@ async function importFiles(files) {
     }
     if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
     const latest = await api("/api/images");
-    state.workspacePersistence = latest.workspace === true; state.images = latest.images;
+    state.workspacePersistence = latest.workspaceVersion === 1; state.images = latest.images;
     if (session.cancelled) {
       pruneSourceAccess(); renderCatalogViews();
       setStatusKey("status.importCancelled", { completed: session.completed });
@@ -345,7 +345,7 @@ async function importFiles(files) {
   } catch (error) {
     try {
       const latest = await api("/api/images");
-      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspace === true; state.images = latest.images; renderCatalogViews(); }
+      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspaceVersion === 1; state.images = latest.images; renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
     if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
   }
@@ -409,7 +409,6 @@ async function importFileHandles(handles, session = beginImportSession()) {
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
   session.catalogId = await catalogForDirectoryHandle(directoryHandle);
-  if (!session.catalogId) throw new Error(t("error.requestFailed"));
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
   async function collect(handle, relativePath = "", parentHandle = null) {

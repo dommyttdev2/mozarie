@@ -14,6 +14,7 @@ async function directoryCatalogStore() {
   });
 }
 async function catalogForDirectoryHandle(handle) {
+  if (!state.workspaceApiAvailable) return null;
   const db = await directoryCatalogStore();
   if (db) {
     const rows = await new Promise((resolve) => { const request = db.transaction("directories").objectStore("directories").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });

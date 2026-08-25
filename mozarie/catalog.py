@@ -481,17 +481,18 @@ class CatalogMixin:
                             size_bytes=stat.st_size,
                             source_kind="session",
                         ))
-                        imported.append({"clientKey": client_key, "imageId": image_id})
+                        imported.append({"clientKey": client_key, "imageId": added[-1].image_id})
                 except Exception:
                     for destination in final_paths:
                         destination.unlink(missing_ok=True)
                     raise
-                for record in added:
+                for index, record in enumerate(added):
                     if self.catalog_id:
                         stored = self.workspace_store.reconcile_images(self.catalog_id, [record], {record.relative_path: source_hash})[record.relative_path]
                         record.image_id = str(stored["image_id"]); record.hidden = bool(stored["hidden"]); record.reviewed = bool(stored["reviewed"])
                         _revision, restored = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
                         if restored: self.candidates[record.image_id] = restored; self.candidate_revisions[record.image_id] = _revision
+                    imported[index]["imageId"] = record.image_id
                     self.images[record.image_id] = record
                     self.order.append(record.image_id)
                 self.order.sort(key=lambda image_id: self.images[image_id].relative_path.lower())
@@ -777,6 +778,7 @@ class CatalogMixin:
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
                 "workspace": self.catalog_id is not None,
+                "workspaceVersion": 1,
             }
 
     def list_candidates(self, image_id: str) -> list[dict[str, Any]]:
@@ -798,7 +800,11 @@ class CatalogMixin:
                     if self._candidate_revision(image_id) != revision:
                         continue
                     stored_candidates = self.candidates.get(image_id, [])
-                    candidates = stored_candidates
+                    candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file() or self.workspace_store.candidate_png(image_id, candidate.candidate_id) is not None]
+                    if len(candidates) != len(stored_candidates):
+                        self.candidates[image_id] = candidates
+                        self._touch_candidates(image_id)
+                        self._persist_candidates(image_id)
                     return {
                         "candidates": [
                             candidate.as_api_dict(
