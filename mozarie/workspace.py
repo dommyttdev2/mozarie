@@ -224,6 +224,26 @@ class WorkspaceStore:
                 raise
         return result
 
+    def delete_images(self, image_ids: list[str]) -> None:
+        """Permanently remove explicitly discarded image workspaces."""
+        if not image_ids:
+            return
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._lock, self._connect() as db:
+            db.execute(f"DELETE FROM images WHERE image_id IN ({placeholders})", image_ids)
+
+    def prune_catalog_images(self, catalog_id: str, relative_paths: set[str]) -> None:
+        """Drop rows for files absent from a complete folder scan only."""
+        with self._lock, self._connect() as db:
+            if relative_paths:
+                placeholders = ",".join("?" for _ in relative_paths)
+                db.execute(
+                    f"DELETE FROM images WHERE catalog_id=? AND relative_path NOT IN ({placeholders})",
+                    [catalog_id, *relative_paths],
+                )
+            else:
+                db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
+
     def image_state(self, image_id: str) -> tuple[bool, bool]:
         with self._connect() as db:
             row = db.execute("SELECT hidden,reviewed FROM images WHERE image_id=?", (image_id,)).fetchone()

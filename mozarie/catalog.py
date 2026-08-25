@@ -109,7 +109,7 @@ class CatalogMixin:
             # A directory selection is a full reimport. Even when its handle
             # maps to the active ID, discard current session files first so
             # each uploaded relative path reconciles its durable record.
-            self.clear_catalog()
+            self.detach_catalog()
             try:
                 self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
                 self.browser_catalog_provisional = False
@@ -238,6 +238,10 @@ class CatalogMixin:
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         catalog_id = self.workspace_store.catalog_for_root(root)
         stored = self.workspace_store.reconcile_images(catalog_id, records)
+        # This is the only missing-file prune path: the complete directory
+        # scan above is authoritative. Browser imports and partial operations
+        # must never discard durable rows merely because a file was absent.
+        self.workspace_store.prune_catalog_images(catalog_id, {record.relative_path for record in records})
         for record in records:
             saved = stored[record.relative_path]
             record.image_id = str(saved["image_id"])
@@ -248,7 +252,8 @@ class CatalogMixin:
         self.browser_import_hashes = {}
         return self._replace_catalog(root, records)
 
-    def clear_catalog(self) -> None:
+    def detach_catalog(self) -> str | None:
+        """Clear only the live screen state while retaining durable work."""
         with self.import_lock:
             with self.lock:
                 image_ids = tuple(self.images)
@@ -264,7 +269,8 @@ class CatalogMixin:
                     self.candidate_revisions = {}
                     self._clear_browser_save_tokens_unchecked()
                     self._invalidate_sam_cache()
-                    provisional_catalog = self.catalog_id if self.browser_catalog_provisional else None
+                    catalog_id = self.catalog_id
+                    provisional_catalog = catalog_id if self.browser_catalog_provisional else None
                     self.catalog_id = None
                     self.browser_import_hashes = {}
                     self.browser_catalog_provisional = False
@@ -276,6 +282,13 @@ class CatalogMixin:
                 if provisional_catalog:
                     self.workspace_store.delete_catalog(provisional_catalog)
         self.cleanup_expired_browser_save_tokens()
+        return None if provisional_catalog else catalog_id
+
+    def clear_catalog(self) -> None:
+        """Explicit user clear: remove durable rows after detaching the view."""
+        catalog_id = self.detach_catalog()
+        if catalog_id:
+            self.workspace_store.prune_catalog_images(catalog_id, set())
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
         """Remove one image's working state without deleting its source file."""
@@ -303,6 +316,10 @@ class CatalogMixin:
                     mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
                     session_paths = [record.path for record in records if record.source_kind == "session"]
                     session_imports_dir = self.session_imports_dir
+                    # The durable delete is the transaction boundary. Do it
+                    # before publishing the in-memory removal so a database
+                    # failure leaves both views intact.
+                    self.workspace_store.delete_images(removed_ids)
                     for record in records:
                         self.images.pop(record.image_id, None)
                         self.candidates.pop(record.image_id, None)

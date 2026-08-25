@@ -21,7 +21,7 @@ Mozarie is a local Windows app for detecting, reviewing, editing, and saving mos
 ### Setup
 
 ```powershell
-python -m pip install -r requirements.txt
+.\setup.bat
 ```
 
 ### Run
@@ -51,6 +51,8 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | Primary genital detection | ONNX from the source | Get it from the [source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26), then select it with **Browse**. No conversion is required. |
 | NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from a Sensitive `.pt` file | Get it from the [source](https://huggingface.co/sugarknight/sensitive-detect), convert it, then select the ONNX file with **Browse**. |
+
+> **About `.pt` files:** PyTorch `.pt` files, including NTD files, can execute code through pickle while loading. Do not run a `.pt` obtained from any source other than those listed here. Preferably convert it in an isolated environment separate from Mozarie.
 
 Convert NTD11:
 
@@ -92,7 +94,7 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 ## Development
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
 npm test
 ```

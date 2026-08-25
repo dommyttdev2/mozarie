@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import msvcrt
 import re
 import shutil
@@ -28,7 +30,7 @@ _WINDOWS_RESERVED_NAMES = frozenset({
     "LPT¹", "LPT²", "LPT³",
 })
 
-MANAGED_DIRECTORIES = ("mozarie", "static", "tests")
+MANAGED_DIRECTORIES = ("mozarie", "static")
 MANAGED_FILES = (
     ".gitattributes",
     ".gitignore",
@@ -37,10 +39,12 @@ MANAGED_FILES = (
     "README.md",
     "requirements.txt",
     "run.bat",
+    "setup.bat",
     "server.py",
     "THIRD_PARTY_NOTICES.md",
     "VERSION",
     "updater.py",
+    "update.bat",
     "config/defaults.json",
 )
 
@@ -56,6 +60,8 @@ MESSAGES = {
         "release_fetch": "GitHubから更新情報を取得できませんでした。",
         "release_invalid": "GitHubの更新情報が正しくありません。",
         "download_url": "ダウンロード先が見つかりません。",
+        "download_digest": "GitHub Releaseの更新ファイル検証情報が正しくありません。",
+        "archive_digest": "ダウンロードした更新ファイルのSHA-256が一致しません。",
         "archive_too_large": "更新ファイルが大きすぎます。",
         "downloading_progress": "ダウンロード中: {megabytes} MB",
         "archive_download": "更新ファイルをダウンロードできませんでした。",
@@ -91,6 +97,8 @@ MESSAGES = {
         "release_fetch": "Could not retrieve update information from GitHub.",
         "release_invalid": "GitHub returned invalid update information.",
         "download_url": "No download URL was found.",
+        "download_digest": "The GitHub Release update verification information is invalid.",
+        "archive_digest": "The downloaded update archive SHA-256 does not match.",
         "archive_too_large": "The update archive is too large.",
         "downloading_progress": "Downloading: {megabytes} MB",
         "archive_download": "Could not download the update archive.",
@@ -185,33 +193,36 @@ def fetch_latest_release(opener: Callable[..., Any] = urllib.request.urlopen) ->
     return payload
 
 
-def release_download_url(release: dict[str, Any]) -> str:
+def release_archive(release: dict[str, Any]) -> tuple[str, str, int]:
     assets = release.get("assets")
-    if isinstance(assets, list):
-        zip_assets = [
-            asset for asset in assets
-            if isinstance(asset, dict)
-            and isinstance(asset.get("name"), str)
-            and asset["name"].lower().endswith(".zip")
-            and isinstance(asset.get("browser_download_url"), str)
-        ]
-        preferred = next(
-            (asset for asset in zip_assets if asset["name"].lower() in {"mozarie.zip", "mozarie-windows.zip"}),
-            None,
-        )
-        if preferred is not None:
-            return preferred["browser_download_url"]
-    url = release.get("zipball_url")
-    if not isinstance(url, str) or not url.startswith("https://"):
+    if not isinstance(assets, list):
         raise UpdateError(tr("download_url"))
-    return url
+    matches = [asset for asset in assets if isinstance(asset, dict) and asset.get("name") == "mozarie.zip"]
+    if len(matches) != 1:
+        raise UpdateError(tr("download_url"))
+    asset = matches[0]
+    url, digest, size = asset.get("browser_download_url"), asset.get("digest"), asset.get("size")
+    if release.get("immutable") is not True or asset.get("state") != "uploaded" or not isinstance(url, str) or not url.startswith("https://"):
+        raise UpdateError(tr("download_url"))
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise UpdateError(tr("download_digest"))
+    if not isinstance(size, int) or size < 1 or size > MAX_ARCHIVE_BYTES:
+        raise UpdateError(tr("archive_too_large"))
+    return url, digest.removeprefix("sha256:"), size
 
 
-def download_archive(url: str, destination: Path, opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+def release_download_url(release: dict[str, Any]) -> str:
+    """Compatibility wrapper for callers that only need the validated URL."""
+    return release_archive(release)[0]
+
+
+def download_archive(url: str, destination: Path, expected_digest: str, expected_size: int,
+                     opener: Callable[..., Any] = urllib.request.urlopen) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozarie-Updater"})
     try:
         with opener(request, timeout=60) as response, destination.open("wb") as output:
             total = 0
+            digest = hashlib.sha256()
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -220,11 +231,16 @@ def download_archive(url: str, destination: Path, opener: Callable[..., Any] = u
                 if total > MAX_ARCHIVE_BYTES:
                     raise UpdateError(tr("archive_too_large"))
                 output.write(chunk)
+                digest.update(chunk)
                 print(f"\r{tr('downloading_progress', megabytes=total // 1024 // 1024)}", end="", flush=True)
     except UpdateError:
         raise
     except (OSError, urllib.error.URLError) as exc:
         raise UpdateError(tr("archive_download")) from exc
+    if total != expected_size:
+        raise UpdateError(tr("archive_download"))
+    if not hmac.compare_digest(digest.hexdigest(), expected_digest):
+        raise UpdateError(tr("archive_digest"))
     print()
 
 
@@ -236,7 +252,9 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
     for part in path.parts:
-        basename = part.split(".", maxsplit=1)[0].rstrip(" ")
+        if any(ord(char) < 32 or char in '<>:"|?*' for char in part):
+            raise UpdateError(tr("archive_invalid_path"))
+        basename = part.split(".", maxsplit=1)[0].rstrip(" .")
         if part.endswith((" ", ".")) or basename.upper() in _WINDOWS_RESERVED_NAMES:
             raise UpdateError(tr("archive_invalid_path"))
     mode = info.external_attr >> 16
@@ -271,9 +289,11 @@ def extract_archive(archive: Path, destination: Path) -> Path:
         raise UpdateError(tr("archive_extract")) from exc
 
     children = list(destination_root.iterdir())
-    source_root = children[0] if len(children) == 1 and children[0].is_dir() else destination_root
-    required_files = (source_root / "server.py", source_root / "run.bat", source_root / "VERSION")
-    required_directories = (source_root / "mozarie", source_root / "static")
+    if len(children) != 1 or not children[0].is_dir():
+        raise UpdateError(tr("archive_missing_app"))
+    source_root = children[0]
+    required_files = tuple(source_root / relative for relative in MANAGED_FILES)
+    required_directories = tuple(source_root / relative for relative in MANAGED_DIRECTORIES)
     if not all(path.is_file() for path in required_files) or not all(path.is_dir() for path in required_directories):
         raise UpdateError(tr("archive_missing_app"))
     return source_root
@@ -310,8 +330,11 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> None:
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
         return
     print(tr("requirements_updating"))
+    python = app_dir / ".venv" / "Scripts" / "python.exe"
+    if not python.is_file():
+        raise UpdateError(tr("requirements_failed"))
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", str(incoming)],
+        [str(python), "-m", "pip", "install", "-r", str(incoming)],
         cwd=str(app_dir),
         check=False,
     )
@@ -336,9 +359,9 @@ def _copy_path(source: Path, destination: Path) -> None:
 
 def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
     managed = [*MANAGED_DIRECTORIES, *MANAGED_FILES]
-    incoming = [relative for relative in managed if (source_root / relative).exists()]
-    if "VERSION" not in incoming:
-        raise UpdateError(tr("update_missing_version"))
+    if any(not (source_root / relative).exists() for relative in managed):
+        raise UpdateError(tr("archive_missing_app"))
+    incoming = managed
 
     backup_root: Path | None = None
     backed_up: set[str] = set()
@@ -433,7 +456,8 @@ def perform_update(
         extracted = workspace / "extracted"
         extracted.mkdir()
         print(tr("downloading"))
-        download_archive(release_download_url(release), archive, opener)
+        url, digest, size = release_archive(release)
+        download_archive(url, archive, digest, size, opener)
         print(tr("verifying"))
         source_root = extract_archive(archive, extracted)
         archive_version = read_local_version(source_root)

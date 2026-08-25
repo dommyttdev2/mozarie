@@ -30,6 +30,15 @@ from .model_downloads import ModelDownloadError
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
+def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
+    """Format health device data without probing CUDA for a CPU selection."""
+    if provider != "gpu":
+        return {"provider": "cpu", "gpuDevice": None, "device": "CPU"}
+    selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
+    name = str(selected["name"]) if selected else "unavailable"
+    return {"provider": "gpu", "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -193,6 +202,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
+                provider = str(models.get("provider", "cpu"))
                 configured = bool(str(models.get("target_segmentation", "")).strip()) and bool(
                     str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
                 )
@@ -204,11 +214,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         ("hand_detection_enabled", "hand_detection"),
                     )
                 )
-                self._json({
+                payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
-                    "device": inference_device_name(),
-                })
+                }
+                if provider == "gpu":
+                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), STATE.settings_status()["gpus"]))
+                else:
+                    payload.update(health_device(provider, 0, []))
+                self._json(payload)
             elif path == "/api/settings":
                 payload = {"settings": STATE.settings, "version": _local_version()}
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":

@@ -21,7 +21,7 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 ### セットアップ
 
 ```powershell
-python -m pip install -r requirements.txt
+.\setup.bat
 ```
 
 ### 起動
@@ -51,6 +51,8 @@ python -m pip install -r requirements.txt
 | 基本の性器検出 | 配布元のONNX | [配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26)から取得し、**参照**から指定します。変換は不要です。 |
 | NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
 | Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
+
+> **`.pt` ファイルの注意:** NTD を含むPyTorchの`.pt`は、読み込み時にpickle経由のコードを実行し得ます。ここに記載した配布元以外から入手した`.pt`は実行しないでください。変換はMozarie本体とは別の隔離環境で行うことを推奨します。
 
 NTD11の変換:
 
@@ -92,7 +94,7 @@ GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメ�
 ## 開発
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
 npm test
 ```

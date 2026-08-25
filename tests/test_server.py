@@ -1362,6 +1362,18 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.list_images(), [])
             self.assertEqual({path: path.read_bytes() for path in originals}, originals)
 
+    def test_remove_image_keeps_live_and_durable_state_when_database_delete_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            with patch.object(state.workspace_store, "delete_images", side_effect=OSError("locked")):
+                with self.assertRaises(OSError):
+                    state.remove_image_from_catalog(image_id)
+            self.assertIn(image_id, state.images)
+            self.assertTrue(state.workspace_store.has_image(image_id))
+
     def test_remove_image_from_catalog_rejects_active_work(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
