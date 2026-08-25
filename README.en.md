@@ -16,7 +16,7 @@ Mozarie is a local Windows app for detecting, reviewing, editing, and saving mos
 ### Requirements
 
 - Windows
-- Python 3.11 or later
+- 64-bit Python 3.11–3.14 (Python Launcher `py`)
 
 ### Setup
 

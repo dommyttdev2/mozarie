@@ -16,7 +16,7 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 ### 動作環境
 
 - Windows
-- Python 3.11以降
+- 64-bit Python 3.11〜3.14（Python Launcher `py`）
 
 ### セットアップ
 

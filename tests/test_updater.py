@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import string
 import tempfile
@@ -189,8 +191,10 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse((install / "setup.bat").exists())
             self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
             run = (install / "run.bat").read_text(encoding="utf-8")
-            self.assertIn('if not defined MOZARIE_PYTHON if not exist "%PYTHON%" call :bootstrap', run)
+            self.assertIn('if not exist "%PYTHON%" (', run)
+            self.assertIn('call :create_venv', run)
             self.assertIn('"%PYTHON%" -m pip install -r "%APP_DIR%requirements.txt"', run)
+            self.assertIn('if defined MOZARIE_PYTHON (', run)
 
     def test_fetch_latest_release_validates_payload(self):
         payload = json.dumps(make_release()).encode()
@@ -651,9 +655,42 @@ class UpdaterTests(unittest.TestCase):
 
     def test_setup_checks_the_created_venv_python_version_before_pip(self):
         batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
-        version_check = '"%APP_DIR%.venv\\Scripts\\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"'
+        version_check = '"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize(\'P\') == 8 else 1)"'
         self.assertIn(version_check, batch)
-        self.assertLess(batch.index(version_check), batch.index('"%APP_DIR%.venv\\Scripts\\python.exe" -m pip install --upgrade pip'))
+        install_index = batch.index('"%PYTHON%" -m pip install --upgrade pip')
+        self.assertLess(batch.index("call :validate_python"), install_index)
+
+    def test_setup_and_run_select_only_supported_64_bit_launchers(self):
+        expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
+        for name in ("setup.bat", "run.bat"):
+            with self.subTest(name=name):
+                batch = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
+                self.assertIn(expected_loop, batch)
+                self.assertEqual(batch.count("py -%%V -m venv"), 1)
+                self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
+                self.assertNotIn("python -m venv", batch)
+                if name == "setup.bat":
+                    self.assertNotIn("MOZARIE_PYTHON", batch)
+                else:
+                    self.assertIn('if defined MOZARIE_PYTHON (', batch)
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
+    def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):
+        root_batch = Path(__file__).parents[1] / "run.bat"
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"
+            app.mkdir()
+            shutil.copy2(root_batch, app / "run.bat")
+            marker = app / "server-ran.txt"
+            (app / "server.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ok', encoding='utf-8')",
+                encoding="utf-8",
+            )
+            environment = os.environ | {"MOZARIE_PYTHON": sys.executable}
+            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
+            self.assertFalse((app / ".venv").exists())
 
 
 if __name__ == "__main__":
