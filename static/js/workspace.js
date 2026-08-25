@@ -2,11 +2,16 @@
 // quick image switch never lets an earlier canvas snapshot overwrite a later one.
 state.workspaceDraftChains = new Map();
 state.workspaceDraftTimers = new Map();
+state.workspaceMutationErrors = new Map();
 
 function queueWorkspaceMutation(imageId, send) {
   const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();
   const next = previous.catch(() => {}).then(send);
   state.workspaceDraftChains.set(imageId, next);
+  next.then(
+    () => { if (state.workspaceDraftChains.get(imageId) === next) state.workspaceMutationErrors.delete(imageId); },
+    (error) => { state.workspaceMutationErrors.set(imageId, error); },
+  );
   return next;
 }
 function queueWorkspaceFlags(imageId, payload) {
@@ -93,6 +98,8 @@ async function flushAllWorkspaceMutations() {
   const results = await Promise.allSettled([...state.workspaceDraftChains.values()]);
   const failed = results.find((result) => result.status === "rejected");
   if (failed) throw failed.reason;
+  const storedFailure = [...pendingIds].map((imageId) => state.workspaceMutationErrors.get(imageId)).find(Boolean);
+  if (storedFailure) throw storedFailure;
 }
 
 async function loadWorkspaceDraft(imageId) {
