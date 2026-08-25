@@ -7,6 +7,8 @@ cannot be reconstructed from the source images is written here.
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import sqlite3
 import threading
 import time
@@ -14,12 +16,16 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageChops, UnidentifiedImageError
+
 
 class _ClosingConnection(sqlite3.Connection):
     """sqlite's context manager commits but does not close on Windows."""
     def __exit__(self, *args: Any) -> None:
-        super().__exit__(*args)
-        self.close()
+        try:
+            super().__exit__(*args)
+        finally:
+            self.close()
 
 
 class WorkspaceStore:
@@ -57,6 +63,7 @@ class WorkspaceStore:
                             raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
                         self._validate_schema(db, tables, version)
                         db.execute("ALTER TABLE manual_edits ADD COLUMN has_effective_mask INTEGER NOT NULL DEFAULT 0")
+                        self._migrate_v2_effective_masks(db)
                         db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(self.VERSION),))
                         self._validate_schema(db, tables, self.VERSION)
                         db.execute("COMMIT")
@@ -133,6 +140,88 @@ class WorkspaceStore:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=5000")
         return db
+
+    @staticmethod
+    def _decode_png_mask(raw: bytes | None) -> Image.Image | None:
+        """Read the same alpha/grayscale mask representation used at render time."""
+        if raw is None:
+            return None
+        if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("workspace mask is not a PNG")
+        try:
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.format != "PNG":
+                    raise ValueError("workspace mask is not a PNG")
+                image.load()
+                if image.mode in {"RGBA", "LA"}:
+                    return image.getchannel("A").point(lambda value: 255 if value else 0)
+                if image.mode in {"L", "1"}:
+                    return image.convert("L").point(lambda value: 255 if value else 0)
+        except (OSError, UnidentifiedImageError) as exc:
+            raise ValueError("workspace mask is not a PNG") from exc
+        raise ValueError("workspace mask has no alpha or grayscale channel")
+
+    @classmethod
+    def _require_png_mask(cls, raw: bytes | None) -> None:
+        if raw is not None:
+            cls._decode_png_mask(raw)
+
+    @classmethod
+    def _migrate_v2_effective_masks(cls, db: sqlite3.Connection) -> None:
+        """Derive v3's scalar from v2's actual layer composition before commit."""
+        candidates_by_image: dict[str, list[sqlite3.Row]] = {}
+        for row in db.execute("SELECT * FROM candidates WHERE deleted=0"):
+            cls._require_png_mask(row["mask_png"])
+            candidates_by_image.setdefault(str(row["image_id"]), []).append(row)
+        for manual in db.execute("SELECT * FROM manual_edits"):
+            for key in ("add_png", "exclusion_png", "exclusion_erase_png"):
+                cls._require_png_mask(manual[key])
+            image_id = str(manual["image_id"])
+            candidates = candidates_by_image.get(image_id, [])
+            masks = [cls._decode_png_mask(row["mask_png"]) for row in candidates]
+            masks.extend(cls._decode_png_mask(manual[key]) for key in ("add_png", "exclusion_png", "exclusion_erase_png"))
+            first = next((mask for mask in masks if mask is not None), None)
+            if first is None:
+                effective = False
+            else:
+                if any(mask is not None and mask.size != first.size for mask in masks):
+                    raise ValueError("workspace masks have mismatched dimensions")
+                removed = json.loads(manual["removed_candidate_ids"])
+                if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+                    raise ValueError("workspace removed candidates are invalid")
+                image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
+                if image is None:
+                    raise ValueError("workspace manual image is missing")
+                removed_ids = set(removed) if int(manual["candidate_revision"]) == int(image["candidate_revision"]) else set()
+                empty = Image.new("L", first.size)
+                apply = empty.copy()
+                exclusion = empty.copy()
+                forced_exclusion = empty.copy()
+                for row in candidates:
+                    mask = cls._decode_png_mask(row["mask_png"])
+                    if str(row["candidate_id"]) in removed_ids or not bool(row["enabled"]):
+                        continue
+                    if row["role"] == "apply":
+                        apply = ImageChops.lighter(apply, mask)
+                    elif row["role"] == "exclude":
+                        exclusion = ImageChops.lighter(exclusion, mask)
+                        if bool(row["forced"]):
+                            forced_exclusion = ImageChops.lighter(forced_exclusion, mask)
+                add = cls._decode_png_mask(manual["add_png"])
+                manual_exclusion = cls._decode_png_mask(manual["exclusion_png"])
+                erase = cls._decode_png_mask(manual["exclusion_erase_png"])
+                if bool(manual["exclusion_enabled"]) and manual_exclusion is not None:
+                    exclusion = ImageChops.lighter(exclusion, manual_exclusion)
+                    if bool(manual["exclusion_forced"]):
+                        forced_exclusion = ImageChops.lighter(forced_exclusion, manual_exclusion)
+                if bool(manual["exclusion_erase_enabled"]) and erase is not None:
+                    exclusion = ImageChops.subtract(exclusion, erase)
+                    forced_exclusion = ImageChops.subtract(forced_exclusion, erase)
+                apply = ImageChops.subtract(apply, exclusion)
+                if bool(manual["manual_enabled"]) and add is not None:
+                    apply = ImageChops.lighter(apply, add)
+                effective = ImageChops.subtract(apply, forced_exclusion).getbbox() is not None
+            db.execute("UPDATE manual_edits SET has_effective_mask=? WHERE image_id=?", (int(effective), image_id))
 
     @staticmethod
     def identity_for_root(root: Path) -> str:
@@ -331,8 +420,9 @@ class WorkspaceStore:
                             (image_id, candidate.candidate_id),
                         ).fetchone()
                         mask = row["mask_png"] if row else None
-                        if not isinstance(mask, bytes) or not mask.startswith(b"\x89PNG\r\n\x1a\n"):
+                        if not isinstance(mask, bytes):
                             continue
+                    self._require_png_mask(mask)
                     db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
                         ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
@@ -371,11 +461,13 @@ class WorkspaceStore:
         return raw if isinstance(raw, bytes) and raw.startswith(b"\x89PNG\r\n\x1a\n") else None
 
     def save_manual(self, image_id: str, payload: dict[str, Any], decoder: Any) -> None:
-        add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
         removed = payload.get("removedCandidateIds", [])
         if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed): raise ValueError("invalid removed candidates")
         has_effective_mask = payload.get("hasEffectiveMask")
         if not isinstance(has_effective_mask, bool): raise ValueError("invalid effective mask")
+        add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
+        for mask in (add, exclusion, erase):
+            self._require_png_mask(mask)
         with self._lock, self._connect() as db:
             db.execute("""INSERT INTO manual_edits(
                 image_id,add_png,exclusion_png,exclusion_erase_png,manual_enabled,exclusion_enabled,

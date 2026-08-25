@@ -866,6 +866,15 @@ class CatalogMixin:
             raise ClientError("手描きマスクが正しくありません。") from exc
         if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
             raise ClientError("手描きマスクが正しくありません。")
+        try:
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.format != "PNG":
+                    raise ClientError("手描きマスクが正しくありません。")
+                image.load()
+                if image.mode not in {"RGBA", "LA", "L", "1"}:
+                    raise ClientError("手描きマスクが正しくありません。")
+        except (OSError, UnidentifiedImageError) as exc:
+            raise ClientError("手描きマスクが正しくありません。") from exc
         return raw
 
     @staticmethod
@@ -884,6 +893,11 @@ class CatalogMixin:
         record = self.image_for_id(image_id)
         if not self.workspace_store.has_image(image_id): return None
         return self.workspace_store.manual(image_id, self._encode_workspace_mask)
+
+    def delete_manual_workspace(self, image_id: str) -> None:
+        self.image_for_id(image_id)
+        if self.workspace_store.has_image(image_id):
+            self.workspace_store.delete_manual([image_id])
 
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""

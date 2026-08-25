@@ -2839,6 +2839,28 @@ class MozarieTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(detector.call_count, 1)
 
+    def test_boundary_then_auto_reuses_one_hand_detector(self):
+        state = self.new_state(); state.settings["models"]["hand_detection_enabled"] = True
+        hand = Mock(); hand.detect_boxes.return_value = []
+        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(detection_module, "HandDetector", return_value=hand) as detector:
+            state._boundary_hand_boxes(np.zeros((8, 8, 3), dtype=np.uint8))
+            state._ensure_hand_model(DetectionModels(Mock()))
+        self.assertEqual(detector.call_count, 1)
+
+    def test_auto_then_boundary_reuses_one_hand_detector(self):
+        state = self.new_state(); state.settings["models"]["hand_detection_enabled"] = True
+        hand = Mock(); hand.detect_boxes.return_value = []
+        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), patch.object(detection_module, "HandDetector", return_value=hand) as detector:
+            state._ensure_hand_model(DetectionModels(Mock()))
+            state._boundary_hand_boxes(np.zeros((8, 8, 3), dtype=np.uint8))
+        self.assertEqual(detector.call_count, 1)
+
+    def test_hand_detector_is_dropped_with_gpu_model_cache(self):
+        state = self.new_state(); state.hand_model = Mock()
+        with patch.object(state, "_release_gpu_cache"):
+            state._discard_gpu_models_after_oom()
+        self.assertIsNone(state.hand_model)
+
     def test_precise_segments_receive_hand_refinement(self):
         state = self.new_state()
         state.settings["models"]["hand_segmentation_enabled"] = False

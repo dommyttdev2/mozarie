@@ -80,7 +80,7 @@ class JobsMixin:
                 self.hand_segmentation_image_id = None
             with self.lock:
                 self.models = None
-                self.boundary_hand_model = None
+                self.hand_model = None
         self._release_gpu_cache(provider=provider, gpu_device=gpu_device)
 
     def recover_gpu_oom_for_request(self, exc: BaseException) -> ClientError | None:

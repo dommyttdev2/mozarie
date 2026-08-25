@@ -169,11 +169,20 @@ function renderSettingsStatus(status) {
 }
 
 function syncProviderSelection() {
-  $("#settingsGpuDevice").disabled = $("#settingsProvider").value === "cpu";
+  const gpu = $("#settingsProvider").value === "gpu";
+  $("#settingsGpuDevice").disabled = !gpu;
+  const parallelism = $("#detectParallelism");
+  if (gpu && !parallelism.disabled) {
+    const value = Number(parallelism.value);
+    state.cpuDetectionParallelism = Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
+  }
+  parallelism.disabled = gpu;
+  parallelism.value = String(gpu ? 1 : state.cpuDetectionParallelism);
 }
 
 function setSettingsForm(settings, status = null) {
   state.settings = settings;
+  state.cpuDetectionParallelism = Number(settings.detection?.parallelism) || 2;
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
@@ -210,7 +219,7 @@ function setSettingsForm(settings, status = null) {
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
-  $("#detectParallelism").value = String(settings.detection.parallelism);
+  $("#detectParallelism").value = String(settings.models.provider === "gpu" ? 1 : state.cpuDetectionParallelism);
   setDetectionTargets(settings.detection.targets);
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
@@ -260,7 +269,7 @@ function settingsPayload() {
     importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
-      parallelism: detectionParallelism(),
+      parallelism: $("#settingsProvider").value === "gpu" ? state.cpuDetectionParallelism : detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
       exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),

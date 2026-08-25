@@ -121,7 +121,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.worker_thread: threading.Thread | None = None
         self.job_control: JobControl | None = None
         self.models: DetectionModels | None = None
-        self.boundary_hand_model: Any | None = None
+        self.hand_model: Any | None = None
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
@@ -157,7 +157,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             sam_keys = {"sam_checkpoints", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
                 self.models = None
-                self.boundary_hand_model = None
+                self.hand_model = None
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
                 self.sam_predictor = None
                 self.sam_image_id = None
@@ -182,7 +182,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = self.settings_store.reset()
             self.models = None
-            self.boundary_hand_model = None
+            self.hand_model = None
             self.sam_predictor = None
             self.sam_image_id = None
             self.hand_segmentation_predictor = None

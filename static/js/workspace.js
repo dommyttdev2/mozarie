@@ -9,7 +9,7 @@ function queueWorkspaceMutation(imageId, send) {
   const next = previous.catch(() => {}).then(send);
   state.workspaceDraftChains.set(imageId, next);
   next.then(
-    () => { if (state.workspaceDraftChains.get(imageId) === next) state.workspaceMutationErrors.delete(imageId); },
+    () => {},
     (error) => { state.workspaceMutationErrors.set(imageId, error); },
   );
   return next;
@@ -38,11 +38,22 @@ async function catalogForDirectoryHandle(handle) {
     for (const row of rows) {
       try {
         if (await row.handle?.isSameEntry?.(handle)) {
-          db.close();
           // Validate the opaque ID on the server before uploads. A database
           // reset leaves the handle usable and simply falls back to a new ID.
-          const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: row.catalogId }) });
-          return activated.catalogId || null;
+          try {
+            const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: row.catalogId }) });
+            db.close();
+            return activated.catalogId || null;
+          } catch {
+            try {
+              await new Promise((resolve) => {
+                const transaction = db.transaction("directories", "readwrite");
+                transaction.objectStore("directories").delete(row.catalogId);
+                transaction.oncomplete = transaction.onerror = transaction.onabort = resolve;
+              });
+            } catch { /* a fresh ID remains safe */ }
+            break;
+          }
         }
       } catch {
         db.transaction("directories", "readwrite").objectStore("directories").delete(row.catalogId);
@@ -74,34 +85,52 @@ function queueWorkspaceDraft(imageId, immediate = false) {
   if (previousTimer) clearTimeout(previousTimer);
   const write = () => {
     state.workspaceDraftTimers.delete(imageId);
-    const payload = workspaceDraftPayload(state.drafts.get(imageId));
-    return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) }))
-      .catch((error) => { setStatus(error.message, "error"); });
+    const draft = state.drafts.get(imageId);
+    const payload = workspaceDraftPayload(draft);
+    const request = draft
+      ? { method: "POST", body: JSON.stringify(payload) }
+      : { method: "DELETE" };
+    return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
   };
   if (immediate) return write();
-  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write()), 250)));
+  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { setStatus(error.message, "error"); })), 250)));
   return promise;
 }
 
 async function flushWorkspaceDraft(imageId) {
+  await (state.draftSaveChains.get(imageId) || Promise.resolve());
   const timer = state.workspaceDraftTimers.get(imageId);
   if (timer) { clearTimeout(timer); state.workspaceDraftTimers.delete(imageId); await queueWorkspaceDraft(imageId, true); }
   await (state.workspaceDraftChains.get(imageId) || Promise.resolve());
+  const failure = state.workspaceMutationErrors.get(imageId);
+  if (failure) { state.workspaceMutationErrors.delete(imageId); throw failure; }
 }
 
 async function flushAllWorkspaceMutations() {
-  const pendingIds = new Set([...state.workspaceDraftTimers.keys(), ...state.workspaceDraftChains.keys()]);
-  for (const imageId of pendingIds) {
-    if (!state.workspaceDraftTimers.has(imageId)) continue;
-    clearTimeout(state.workspaceDraftTimers.get(imageId));
-    state.workspaceDraftTimers.delete(imageId);
-    await queueWorkspaceDraft(imageId, true);
+  while (true) {
+    if (state.currentId && state.maskDirty) await saveDraft();
+    const draftSaves = [...state.draftSaveChains.values()];
+    const draftResults = await Promise.allSettled(draftSaves);
+    const draftFailure = draftResults.find((result) => result.status === "rejected");
+    if (draftFailure) throw draftFailure.reason;
+    const dirtyIds = [...state.workspaceDraftTimers.keys()];
+    for (const imageId of dirtyIds) {
+      clearTimeout(state.workspaceDraftTimers.get(imageId));
+      state.workspaceDraftTimers.delete(imageId);
+      await queueWorkspaceDraft(imageId, true);
+    }
+    const chains = [...state.workspaceDraftChains.entries()];
+    const results = await Promise.allSettled(chains.map(([, chain]) => chain));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+    const failedImageId = chains.map(([imageId]) => imageId).find((imageId) => state.workspaceMutationErrors.has(imageId));
+    if (failedImageId) {
+      const storedFailure = state.workspaceMutationErrors.get(failedImageId);
+      state.workspaceMutationErrors.delete(failedImageId);
+      throw storedFailure;
+    }
+    if (!state.workspaceDraftTimers.size && [...state.workspaceDraftChains.entries()].every(([imageId, chain]) => chains.some(([knownId, known]) => knownId === imageId && known === chain))) return;
   }
-  const results = await Promise.allSettled([...state.workspaceDraftChains.values()]);
-  const failed = results.find((result) => result.status === "rejected");
-  if (failed) throw failed.reason;
-  const storedFailure = [...pendingIds].map((imageId) => state.workspaceMutationErrors.get(imageId)).find(Boolean);
-  if (storedFailure) throw storedFailure;
 }
 
 async function loadWorkspaceDraft(imageId) {
@@ -109,4 +138,14 @@ async function loadWorkspaceDraft(imageId) {
   return data.draft || null;
 }
 
-function scheduleManualWorkspaceSave() { setTimeout(() => saveDraft(), 0); }
+function scheduleManualWorkspaceSave() {
+  const imageId = state.currentId;
+  if (!imageId) return Promise.resolve();
+  const previous = state.draftSaveChains.get(imageId) || Promise.resolve();
+  const next = previous.then(() => new Promise((resolve, reject) => setTimeout(() => {
+    try { saveDraft(); resolve(); } catch (error) { reject(error); }
+  }, 0)));
+  state.draftSaveChains.set(imageId, next);
+  next.finally(() => { if (state.draftSaveChains.get(imageId) === next) state.draftSaveChains.delete(imageId); }).catch(() => {});
+  return next;
+}

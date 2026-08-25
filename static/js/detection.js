@@ -1,4 +1,5 @@
 function detectionParallelism() {
+  if ($("#settingsProvider")?.value === "gpu") return 1;
   const value = Number($("#detectParallelism").value);
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
@@ -38,6 +39,7 @@ function openDetectionDialog(imageIds) {
   state.pendingDetectionTargetIds = [...imageIds];
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
+  $("#detectParallelism").disabled = $("#settingsProvider")?.value === "gpu";
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
@@ -72,7 +74,8 @@ async function startDetectionFromDialog(event) {
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
+    const storedParallelism = $("#settingsProvider")?.value === "gpu" ? state.cpuDetectionParallelism : parallelism;
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism: storedParallelism, targets: targetClasses };
     try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }

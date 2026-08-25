@@ -473,6 +473,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 _, _, _, image_id, candidate_id = path.split("/", 4)
                 deleted = STATE.delete_candidate(image_id, candidate_id)
                 self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
+            elif path.startswith("/api/workspace/manual/"):
+                STATE.delete_manual_workspace(path.removeprefix("/api/workspace/manual/"))
+                self._json({"ok": True})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:

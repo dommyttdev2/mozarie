@@ -807,9 +807,9 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
     await page.locator("#settingsTabModels").click();
-    await page.locator("#settingsProvider").selectOption("cpu");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
-    await page.locator("#settingsProvider").selectOption("gpu");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), false, "GPU re-enables the GPU selector");
     assert.equal(await page.locator("#settingsHandSegmentationCard .model-card-note").count(), 0, "HandSeg matches the other model cards without an inline explanation");
     assert.equal(await page.locator("#settingsHandSegmentationCard a").count(), 0, "HandSeg keeps download information out of Settings");
@@ -1264,7 +1264,13 @@ async function main() {
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
+    assert.equal(await page.locator("#detectParallelism").isDisabled(), true, "GPU detection keeps the visible worker count fixed at one");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     await page.locator("#detectParallelism").fill("3");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "1", "GPU hides the stored CPU worker count behind one effective worker");
+    await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "3", "switching back to CPU restores its stored worker count");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);

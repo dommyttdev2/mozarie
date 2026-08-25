@@ -91,37 +91,29 @@ class DetectionMixin:
             self.models = models
         return models
 
-    def _ensure_hand_model(self, models: DetectionModels) -> HandDetector:
+    def _ensure_hand_model(self, models: DetectionModels | None = None) -> HandDetector:
         with self.inference_lock:
-            if models.hand is None:
+            with self.lock:
+                hand = self.hand_model
+            if hand is None:
                 self._set_detection_model_preparation(True)
                 try:
                     model_path = self._configured_model_path("hand_detection", "手の検出")
                     provider = str(self.settings["models"].get("provider", "gpu"))
-                    models.hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
+                    hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
                 finally:
                     self._set_detection_model_preparation(False)
-            return models.hand
+                with self.lock:
+                    self.hand_model = hand
+            if models is not None:
+                models.hand = hand
+            return hand
 
     def _boundary_hand_boxes(self, rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Load only the hand detector for an interactive boundary request."""
         if not self.settings["models"]["hand_detection_enabled"]:
             return []
-        with self.lock:
-            hand = self.boundary_hand_model
-        if hand is None:
-            self._set_detection_model_preparation(True)
-            try:
-                hand = HandDetector(
-                    self._configured_model_path("hand_detection", "手の検出"),
-                    device=str(self.settings["models"].get("provider", "gpu")),
-                    gpu_device=int(self.settings["models"].get("gpu_device", 0)),
-                )
-            finally:
-                self._set_detection_model_preparation(False)
-            with self.lock:
-                self.boundary_hand_model = hand
-        return hand.detect_boxes(rgb, HAND_CONFIDENCE)
+        return self._ensure_hand_model().detect_boxes(rgb, HAND_CONFIDENCE)
 
     def _detect_worker(
         self,
