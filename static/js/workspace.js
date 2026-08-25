@@ -3,6 +3,19 @@
 state.workspaceDraftChains = new Map();
 state.workspaceDraftTimers = new Map();
 
+function queueWorkspaceMutation(imageId, send) {
+  const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(send);
+  state.workspaceDraftChains.set(imageId, next);
+  return next;
+}
+function queueWorkspaceFlags(imageId, payload) {
+  if (!imageId || !state.workspacePersistence) return Promise.resolve();
+  return queueWorkspaceMutation(imageId, () => api(`/api/workspace/image/${encodeURIComponent(imageId)}`, {
+    method: "POST", body: JSON.stringify(payload),
+  })).catch((error) => { setStatus(error.message, "error"); });
+}
+
 const DIRECTORY_DB = "mozarie-directory-catalogs";
 async function directoryCatalogStore() {
   if (!window.indexedDB) return null;
@@ -19,7 +32,15 @@ async function catalogForDirectoryHandle(handle) {
   if (db) {
     const rows = await new Promise((resolve) => { const request = db.transaction("directories").objectStore("directories").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
     for (const row of rows) {
-      try { if (await row.handle?.isSameEntry?.(handle)) { db.close(); return row.catalogId; } } catch { /* revoked handles are ignored */ }
+      try {
+        if (await row.handle?.isSameEntry?.(handle)) {
+          db.close();
+          // Validate the opaque ID on the server before uploads. A database
+          // reset leaves the handle usable and simply falls back to a new ID.
+          const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: row.catalogId }) });
+          return activated.catalogId || null;
+        }
+      } catch { /* revoked handles and stale server IDs fall back below */ }
     }
     db.close();
   }
@@ -47,10 +68,13 @@ function queueWorkspaceDraft(imageId, immediate = false) {
   const write = () => {
     state.workspaceDraftTimers.delete(imageId);
     const payload = workspaceDraftPayload(state.drafts.get(imageId));
-    const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) }));
-    state.workspaceDraftChains.set(imageId, next);
-    return next.catch((error) => { setStatus(error.message, "error"); });
+    return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) }))
+      .then(() => {
+        // SQLite is now authoritative. Do not retain base64 canvases for
+        // every previously selected image in the browser heap.
+        if (state.currentId !== imageId) state.drafts.delete(imageId);
+      })
+      .catch((error) => { setStatus(error.message, "error"); });
   };
   if (immediate) return write();
   const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write()), 250)));

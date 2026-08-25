@@ -138,6 +138,7 @@ class SavingMixin:
                     raise ClientError("保存するモザイク範囲がありません。")
                 for candidate in candidates:
                     try:
+                        self.materialize_candidate_mask(candidate, image_id)
                         with Image.open(candidate.mask_path) as mask_image:
                             candidate_mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
                     except FileNotFoundError as exc:

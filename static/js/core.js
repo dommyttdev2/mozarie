@@ -300,7 +300,7 @@ function loadReviewedPaths() {
           image.reviewed ||= reviewed; image.hidden ||= hidden;
           if (image.reviewed) state.reviewedPaths.add(reviewPath(image));
           if (image.hidden) state.hiddenPaths.add(reviewPath(image));
-          void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed: image.reviewed, hidden: image.hidden }) }).catch(() => {});
+          void queueWorkspaceFlags(image.id, { reviewed: image.reviewed, hidden: image.hidden });
         }
         localStorage.removeItem(reviewStorageKey(image)); localStorage.removeItem(hiddenStorageKey(image));
       }
@@ -318,7 +318,7 @@ function setHidden(image, hidden) {
   const path = reviewPath(image); const key = hiddenStorageKey(image);
   if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
   image.hidden = hidden;
-  if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ hidden }) }).catch((error) => setStatus(error.message, "error"));
+  if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { hidden });
   if (key) try { if (hidden) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Session state remains usable. */ }
   renderCatalogViews(); updateSelectionActionBar();
 }
@@ -360,7 +360,7 @@ function setReviewed(image, reviewed) {
   if (!changed) return;
   if (reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
   image.reviewed = reviewed;
-  if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed }) }).catch((error) => setStatus(error.message, "error"));
+  if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { reviewed });
   const key = reviewStorageKey(image);
   if (key) try { if (reviewed) localStorage.setItem(key, "true"); else localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }
   refreshReviewViews();
@@ -400,7 +400,7 @@ function markImagesUnreviewed(imageIds, renderAfter = true) {
     const path = reviewPath(image);
     if (!state.reviewedPaths.delete(path)) continue;
     image.reviewed = false;
-    if (state.workspacePersistence) void api(`/api/workspace/image/${encodeURIComponent(image.id)}`, { method: "POST", body: JSON.stringify({ reviewed: false }) }).catch(() => {});
+    if (state.workspacePersistence) void queueWorkspaceFlags(image.id, { reviewed: false });
     changed = true;
     const key = reviewStorageKey(image);
     if (key) try { localStorage.removeItem(key); } catch { /* Keep review state usable for this session. */ }

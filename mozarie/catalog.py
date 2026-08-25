@@ -85,11 +85,80 @@ class CatalogMixin:
     def activate_browser_catalog(self, catalog_id: str | None = None) -> str:
         with self.import_lock:
             if catalog_id and self.catalog_id == catalog_id:
+                self.browser_catalog_provisional = False
                 return catalog_id
+            if catalog_id and not self.workspace_store.catalog_exists(catalog_id):
+                raise ClientError("保存済みのフォルダ状態が見つかりません。")
             self.clear_catalog()
-            try: self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
+            try:
+                self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
+                self.browser_catalog_provisional = False
             except ValueError as exc: raise ClientError("カタログIDが正しくありません。") from exc
             return self.catalog_id
+
+    def finalize_browser_catalog(self) -> tuple[str | None, dict[str, str]]:
+        """Bind a fallback import after its complete content manifest is known.
+
+        A single filename/hash pair is deliberately insufficient: folders can
+        contain common names such as ``001.png``.  We first import into a fresh
+        browser catalogue, then reuse an existing one only after the complete
+        manifest identifies it unambiguously.
+        """
+        with self.import_lock:
+            with self.lock:
+                if not self.catalog_id or not self.browser_catalog_provisional or not self.browser_import_hashes:
+                    return self.catalog_id, {}
+                self._assert_catalog_mutable()
+                source_catalog = self.catalog_id
+                entries = list(self.browser_import_hashes.items())
+                records = list(self.images.values())
+                hashes = dict(self.browser_import_hashes)
+            target = self.workspace_store.best_catalog_for_manifest(entries, source_catalog)
+            if not target:
+                with self.lock:
+                    self.browser_catalog_provisional = False
+                    self.browser_import_hashes = {}
+                return source_catalog, {}
+            stored = self.workspace_store.reconcile_images(target, records, hashes)
+            image_id_map = {
+                record.image_id: str(value["image_id"])
+                for record in records if (value := stored.get(record.relative_path)) is not None
+            }
+            with self.lock:
+                # No processing can be active here, so cache files can be
+                # discarded before candidate metadata is lazily rehydrated.
+                self.images = {}
+                self.order = []
+                self.candidates = {}
+                self.candidate_revisions = {}
+                self._image_io_locks.clear()
+                self._clear_browser_save_tokens_unchecked()
+            self._clear_cache()
+            with self.lock:
+                for record in records:
+                    value = stored.get(record.relative_path)
+                    if value is None:
+                        continue
+                    record.image_id = str(value["image_id"])
+                    record.hidden = bool(value["hidden"])
+                    record.reviewed = bool(value["reviewed"])
+                    self.images[record.image_id] = record
+                    self.order.append(record.image_id)
+                    revision, candidates = self.workspace_store.hydrate_candidates(
+                        record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace
+                    )
+                    if candidates or revision:
+                        self.candidates[record.image_id] = candidates
+                        self.candidate_revisions[record.image_id] = revision
+                self.order.sort(key=lambda image_id: self.images[image_id].relative_path.casefold())
+                self.catalog_id = target
+                self.catalog_generation += 1
+                self.browser_catalog_provisional = False
+                self.browser_import_hashes = {}
+            # The target is fully committed before dropping the provisional
+            # rows, so a crash can only retain harmless temporary state.
+            self.workspace_store.delete_catalog(source_catalog)
+            return target, image_id_map
 
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
@@ -154,6 +223,8 @@ class CatalogMixin:
             record.hidden = bool(saved["hidden"])
             record.reviewed = bool(saved["reviewed"])
         self.catalog_id = catalog_id
+        self.browser_catalog_provisional = False
+        self.browser_import_hashes = {}
         return self._replace_catalog(root, records)
 
     def clear_catalog(self) -> None:
@@ -173,6 +244,8 @@ class CatalogMixin:
                     self._clear_browser_save_tokens_unchecked()
                     self._invalidate_sam_cache()
                     self.catalog_id = None
+                    self.browser_import_hashes = {}
+                    self.browser_catalog_provisional = False
                     self.catalog_generation += 1
                     session = self._detach_session_unchecked()
                     self._image_io_locks.clear()
@@ -490,6 +563,7 @@ class CatalogMixin:
                     if self.catalog_id:
                         stored = self.workspace_store.reconcile_images(self.catalog_id, [record], {record.relative_path: source_hash})[record.relative_path]
                         record.image_id = str(stored["image_id"]); record.hidden = bool(stored["hidden"]); record.reviewed = bool(stored["reviewed"])
+                        if source_hash: self.browser_import_hashes[record.relative_path] = source_hash
                         _revision, restored = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
                         if restored: self.candidates[record.image_id] = restored; self.candidate_revisions[record.image_id] = _revision
                     imported[index]["imageId"] = record.image_id

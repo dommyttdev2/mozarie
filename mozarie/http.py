@@ -247,19 +247,25 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     with STATE.import_staging_gate:
                         staged_path = self._read_binary_body_to_file()
                         requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
-                        source_hash = _file_sha256(staged_path) if requested_catalog or not STATE.catalog_id else ""
+                        # Browser uploads have no trustworthy native path.
+                        # Streamed content fingerprints let the fallback match
+                        # a complete folder manifest after all files arrive.
+                        source_hash = _file_sha256(staged_path)
                         try:
                             if requested_catalog and STATE.catalog_id != requested_catalog:
                                 STATE.activate_browser_catalog(requested_catalog)
                             elif not STATE.catalog_id:
-                                candidate = STATE.workspace_store.unique_catalog_for_file(relative_path.replace("\\", "/"), source_hash)
-                                STATE.catalog_id = STATE.workspace_store.ensure_catalog(candidate)
+                                # Never bind a fallback import based on its
+                                # first file.  Finalisation scores the complete
+                                # manifest and only reuses an unambiguous match.
+                                STATE.catalog_id = STATE.workspace_store.ensure_catalog()
+                                STATE.browser_catalog_provisional = True
                             import_args = {"name": name, "relative_path": relative_path, "client_key": client_key, "include_images": False, "transfer_active": True}
                             if source_hash: import_args["source_hash"] = source_hash
                             _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
                         finally:
                             staged_path.unlink(missing_ok=True)
-                    self._json({"imported": imported})
+                    self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional, "workspaceVersion": 1})
                 finally:
                     STATE.end_import_transfer()
                 return
@@ -269,7 +275,17 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 images = STATE.set_root(str(payload.get("path", "")))
                 self._json({"images": images, "workspace": True, "workspaceVersion": 1})
             elif path == "/api/workspace/catalog":
-                self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId"))})
+                if payload.get("provisional") is True:
+                    if payload.get("catalogId"):
+                        raise ClientError("仮カタログにIDは指定できません。")
+                    catalog_id = STATE.activate_browser_catalog()
+                    STATE.browser_catalog_provisional = True
+                    self._json({"catalogId": catalog_id, "provisional": True})
+                else:
+                    self._json({"catalogId": STATE.activate_browser_catalog(payload.get("catalogId")), "provisional": False})
+            elif path == "/api/workspace/catalog/finalize":
+                catalog_id, image_ids = STATE.finalize_browser_catalog()
+                self._json({"catalogId": catalog_id, "imageIds": image_ids, "images": STATE.list_images(), "workspace": bool(catalog_id), "workspaceVersion": 1})
             elif path == "/api/catalog/clear":
                 STATE.clear_catalog()
                 self._json({"images": []})

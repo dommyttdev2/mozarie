@@ -298,6 +298,15 @@ async function importFiles(files) {
     .filter((entry) => isSupportedImageFile(entry.file || { name: entry.name || entry.relativePath }));
   if (!supportedFiles.length) { finishImportSession(session); return; }
   try {
+    // webkitdirectory/drop fallbacks have no durable directory handle. Start
+    // a fresh provisional catalogue for this complete manifest. Standalone
+    // files deliberately inherit the active catalogue instead.
+    const isFolderFallback = supportedFiles.some((entry) => String(entry.relativePath || entry.file?.webkitRelativePath || "").includes("/"));
+    if (!session.catalogId && !session.provisional && isFolderFallback && state.workspaceApiAvailable) {
+      const prepared = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ provisional: true }) });
+      session.catalogId = prepared.catalogId || null;
+      session.provisional = prepared.provisional === true;
+    }
     session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
     showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
     let nextIndex = 0;
@@ -314,6 +323,8 @@ async function importFiles(files) {
         const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.webkitRelativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
         const data = await importSingleFile(entry, clientKey, session.catalogId);
+        if (!session.catalogId && data.catalogId) session.catalogId = data.catalogId;
+        session.provisional ||= data.provisional === true;
         const result = { entry, clientKey, data };
         // Keep source access for each committed upload, including a later
         // cancellation or an unrelated upload failure.
@@ -334,8 +345,17 @@ async function importFiles(files) {
       throw error;
     }
     if (!isCurrentCatalogEpoch(session.epoch) || state.importSession !== session) return;
+    if (session.provisional) {
+      const finalized = await api("/api/workspace/catalog/finalize", { method: "POST", body: JSON.stringify({}) });
+      session.catalogId = finalized.catalogId || session.catalogId;
+      remapImportedImageIds(finalized.imageIds || {});
+      state.workspacePersistence = finalized.workspaceVersion === 1;
+      state.images = finalized.images || [];
+      session.provisional = false;
+    }
     const latest = await api("/api/images");
-    state.workspacePersistence = latest.workspaceVersion === 1; state.images = latest.images;
+    state.workspacePersistence = latest.workspaceVersion === 1 && latest.workspace === true; state.images = latest.images;
+    loadReviewedPaths();
     if (session.cancelled) {
       pruneSourceAccess(); renderCatalogViews();
       setStatusKey("status.importCancelled", { completed: session.completed });
@@ -345,7 +365,7 @@ async function importFiles(files) {
   } catch (error) {
     try {
       const latest = await api("/api/images");
-      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspaceVersion === 1; state.images = latest.images; renderCatalogViews(); }
+      if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.workspacePersistence = latest.workspaceVersion === 1 && latest.workspace === true; state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
     if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
   }
@@ -377,10 +397,22 @@ async function importSingleFile(entry, clientKey, catalogId = null) {
 
 function beginImportSession() {
   if (isBusy() || state.importing) return null;
-  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0, catalogId: null };
+  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0, catalogId: null, provisional: false };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
+}
+
+function remapImportedImageIds(imageIds) {
+  const map = new Map(Object.entries(imageIds).filter(([from, to]) => from && to && from !== to));
+  if (!map.size) return;
+  const remapMap = (source) => new Map([...source].map(([id, value]) => [map.get(id) || id, value]));
+  state.sourceAccess = remapMap(state.sourceAccess);
+  state.drafts = remapMap(state.drafts);
+  state.maskStatus = remapMap(state.maskStatus);
+  state.selectedImageIds = new Set([...state.selectedImageIds].map((id) => map.get(id) || id));
+  if (state.currentId) state.currentId = map.get(state.currentId) || state.currentId;
+  if (state.pendingImageId) state.pendingImageId = map.get(state.pendingImageId) || state.pendingImageId;
 }
 
 function finishImportSession(session) {

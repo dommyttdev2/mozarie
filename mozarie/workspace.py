@@ -108,11 +108,38 @@ class WorkspaceStore:
             db.execute("INSERT OR IGNORE INTO catalogs(catalog_id,identity_hash,created_at,updated_at) VALUES(?,?,?,?)", (catalog_id, identity, now, now))
             return catalog_id
 
+    def catalog_exists(self, catalog_id: str) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM catalogs WHERE catalog_id=?", (catalog_id,)).fetchone() is not None
+
+    def delete_catalog(self, catalog_id: str) -> None:
+        """Remove an unused provisional browser catalogue and its cascaded rows."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("DELETE FROM catalogs WHERE catalog_id=?", (catalog_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
     def unique_catalog_for_file(self, relative_path: str, source_hash: str) -> str | None:
         if not source_hash: return None
         with self._connect() as db:
             rows = db.execute("SELECT DISTINCT catalog_id FROM images WHERE relative_path=? AND source_hash=?", (relative_path, source_hash)).fetchall()
         return str(rows[0]["catalog_id"]) if len(rows) == 1 else None
+
+    def best_catalog_for_manifest(self, entries: list[tuple[str, str]], exclude_catalog: str) -> str | None:
+        """Return one safe reuse target. A single matching file is ambiguous."""
+        scores: dict[str, int] = {}
+        with self._connect() as db:
+            for relative_path, source_hash in entries:
+                for row in db.execute("SELECT catalog_id FROM images WHERE relative_path=? AND source_hash=? AND catalog_id<>?", (relative_path, source_hash, exclude_catalog)):
+                    scores[str(row["catalog_id"])] = scores.get(str(row["catalog_id"]), 0) + 1
+        if not scores: return None
+        best = max(scores.values())
+        winners = [catalog_id for catalog_id, score in scores.items() if score == best]
+        return winners[0] if best >= 2 and len(winners) == 1 else None
 
     def reconcile_images(self, catalog_id: str, records: list[Any], source_hashes: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
         """Return durable state by relative path, clearing pixels on source change."""

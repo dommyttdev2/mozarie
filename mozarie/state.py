@@ -61,6 +61,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.settings_store = SettingsStore(APP_DIR)
         self.workspace_store = WorkspaceStore(APP_DIR / "data")
         self.catalog_id: str | None = None
+        self.browser_import_hashes: dict[str, str] = {}
+        self.browser_catalog_provisional = False
         self.settings = self.settings_store.load()
         self.lock = threading.RLock()
         self.import_lock = threading.RLock()

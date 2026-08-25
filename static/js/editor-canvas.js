@@ -27,7 +27,8 @@ function clearEditor() {
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
-  if (saveCurrentDraft) { saveDraft(); if (state.workspacePersistence) await flushWorkspaceDraft(state.currentId); }
+  const previousImageId = state.currentId;
+  if (saveCurrentDraft) { saveDraft(); if (state.workspacePersistence) await flushWorkspaceDraft(previousImageId); }
   if (state.currentId !== imageId) clearCandidateBlink();
   cancelFillWork();
   abortCatalogLoads();
@@ -62,6 +63,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     if (!isCurrentGeneration(generation)) return;
     releaseStaleImageVersions(imageId, imageCacheKey(record), candidateCacheKey(imageId, candidateBundle.candidateRevision));
     state.currentId = imageId;
+    if (previousImageId && previousImageId !== imageId) state.drafts.delete(previousImageId);
     state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
     state.currentImage = image;
     state.candidates = candidateBundle.candidates;
