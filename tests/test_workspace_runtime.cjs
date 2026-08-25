@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, "..", "static", "js", "works
 const calls = [];
 let rejectFirst = false;
 const state = {
-  images: [{ id: "one" }], drafts: new Map(), workspacePersistence: true, workspaceApiAvailable: true,
+  images: [{ id: "one" }], drafts: new Map(),
   workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), draftSaveChains: new Map(),
   currentId: null, maskDirty: false,
 };

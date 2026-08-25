@@ -26,7 +26,7 @@ function database() {
 }
 const indexedDB = { open() { opens += 1; return eventRequest(database()); } };
 const context = {
-  state: { workspaceApiAvailable: true, workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), draftSaveChains: new Map() },
+  state: { workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), draftSaveChains: new Map() },
   window: { indexedDB }, indexedDB, Promise, Map, Set, Object, Number, encodeURIComponent, setTimeout, clearTimeout, queueMicrotask,
   api: async (_url, options = {}) => options.body.includes("stale") ? Promise.reject(new Error("missing")) : { catalogId: "fresh" }, setStatus() {}, saveDraft() {},
 };
