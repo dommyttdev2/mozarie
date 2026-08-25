@@ -360,7 +360,7 @@ function restoreDraft(imageId, generation) {
   state.manualEnabled = draft?.manualEnabled !== false;
   state.manualExclusionEnabled = draft?.manualExclusionEnabled !== false;
   state.manualExclusionEraseEnabled = draft?.manualExclusionEraseEnabled !== false;
-  state.manualExclusionForced = draft?.manualExclusionForced ?? draft?.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false);
+  state.manualExclusionForced = draft?.manualExclusionForced ?? (state.settings?.detection?.exclude_forced_default !== false);
   state.manualMaskPresent = false;
   const candidateRevisionMatches = !draft || Number(draft.candidateRevision) === Number(currentRecord()?.candidateRevision || 0);
   state.removedCandidateIds = new Set(candidateRevisionMatches ? (draft?.removedCandidateIds || []) : []);

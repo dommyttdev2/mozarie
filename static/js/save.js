@@ -92,7 +92,7 @@ function draftPayload(imageIds) {
       add: draft.manualEnabled === false ? "" : draft.add,
       exclusion: draft.manualExclusionEnabled === false ? "" : draft.exclusion,
       exclusionErase: draft.manualExclusionEraseEnabled === false ? "" : draft.exclusionErase,
-      manualExclusionForced: draft.manualExclusionForced ?? draft.forceExclusion ?? (state.settings?.detection?.exclude_forced_default !== false),
+      manualExclusionForced: draft.manualExclusionForced ?? (state.settings?.detection?.exclude_forced_default !== false),
       removedCandidateIds: draft.removedCandidateIds || [],
     };
   }
