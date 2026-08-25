@@ -422,7 +422,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
   const helpExpectations = {
-    target: [language === "ja" ? "基本モデル" : "Primary model", ".onnx", ""],
+    target: ["01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One v5.0-variant1", "animeNSFWDetection_v50Variant1.zip → ntd11_anime_nsfw_segm_v5-variant1.pt → ntd11_anime_nsfw_segm_v5-variant1.onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
     sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
@@ -436,8 +436,8 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
     if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
-      ? "1280入力、rank-3の43チャンネル予測出力とrank-4の32チャンネルプロトタイプ出力を持つONNXを指定します。"
-      : "Use a 1280-input ONNX with rank-3 43-channel predictions and rank-4 32-channel prototypes.", `${key} help states the neutral file contract at ${width}x${height} (${language})`);
+      ? "固定配布元のnsfw-anime-xl-x1280.onnxを指定します。変換は不要です。"
+      : "Use nsfw-anime-xl-x1280.onnx from the fixed source. No conversion is required.", `${key} help states the fixed model contract at ${width}x${height} (${language})`);
     if (href) {
       assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
       assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
@@ -493,8 +493,21 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   })), true, `download source links own their hit targets at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
   assert.equal(await allDownload.evaluate((button) => document.activeElement === button), true, `closing download confirmation restores focus at ${width}x${height} (${language})`);
-  const ntd11Download = page.locator('[data-model-download="ntd11"]');
+  const targetDownload = page.locator('[data-model-download="target"]');
   const requestsBeforePreparation = modelDownloadRequests.length;
+  await targetDownload.scrollIntoViewIfNeeded(); await targetDownload.click();
+  assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
+    ? "基本モデルは固定配布元からnsfw-anime-xl-x1280.onnxをそのまま取得し、「参照」から指定してください。変換は不要です。"
+    : "Download nsfw-anime-xl-x1280.onnx directly from the fixed source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `primary model opens the preparation dialog at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx", `primary model keeps its pinned source link at ${width}x${height} (${language})`);
+  assert.match(await page.locator("#modelDownloadItems").textContent(), /126,350,117 bytes \(120\.5 MiB\)/, `primary model shows its exact size at ${width}x${height} (${language})`);
+  assert.match(await page.locator("#modelDownloadItems").textContent(), /92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a/, `primary model shows its exact SHA-256 at ${width}x${height} (${language})`);
+  assert.match(await page.locator("#modelDownloadItems").textContent(), /MIT.*AGPL-3\.0/, `primary model shows its license notation at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
+  for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
+  await page.locator("#modelDownloadClose").click();
+  const ntd11Download = page.locator('[data-model-download="ntd11"]');
   await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
   const ntdCommand = language === "ja"
     ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたntd11_anime_nsfw_segm_v5-variant1.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
@@ -794,7 +807,7 @@ async function main() {
     await cancelResponse;
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
     assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
-    assert.equal(await page.locator("[data-model-download]").count(), 6, "only downloadable models and the section expose download actions");
+    assert.equal(await page.locator("[data-model-download]").count(), 7, "model preparation and downloadable models expose their actions");
     const requestsBeforeModelPreparation = modelDownloadRequests.length;
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");

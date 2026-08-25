@@ -48,7 +48,7 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 
 | Use | What to prepare | Source and selection |
 | --- | --- | --- |
-| Primary genital detection | A compatible `.onnx` file | Select it with **Browse**. Mozarie supports a 1280 input, a 43-channel detection output, and a 32-channel prototype output. |
+| Primary genital detection | `nsfw-anime-xl-x1280.onnx` | Download it directly from the [fixed source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx) ([direct download](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)), then select it with **Browse**. No conversion is required. 126,350,117 bytes (120.5 MiB); SHA-256: `92046f77852b3e3d3a3ddf74575dd9d11f79f832af8d2d3e7eac186ba379194a`. |
 | NTD11 supplemental detection | ONNX converted from `ntd11_anime_nsfw_segm_v5-variant1.pt` inside `animeNSFWDetection_v50Variant1.zip` | Download and extract the v5.0-variant1 ZIP from [Anime NSFW Detection / ADetailer All-in-One v5.0-variant1](https://civitai.red/models/1313556?modelVersionId=2350456), convert that `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from `sensitive_detect_v07.pt` | Download [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40), convert it, then select the ONNX file with **Browse**. |
 
