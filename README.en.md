@@ -52,7 +52,7 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 | NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
 | Sensitive supplemental detection | ONNX converted from a Sensitive `.pt` file | Get it from the [source](https://huggingface.co/sugarknight/sensitive-detect), convert it, then select the ONNX file with **Browse**. |
 
-> **About `.pt` files:** PyTorch `.pt` files, including NTD files, can execute code through pickle while loading. Do not run a `.pt` obtained from any source other than those listed here. Preferably convert it in an isolated environment separate from Mozarie.
+> **About `.pt` files:** PyTorch `.pt` files, including NTD files, can execute code through pickle while loading, so do not run a `.pt` obtained from any source other than those listed here.
 
 Convert NTD11:
 

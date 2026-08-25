@@ -112,10 +112,10 @@ class UpdaterTests(unittest.TestCase):
     def test_release_asset_must_be_the_immutable_mozarie_asset(self):
         release = make_release()
         release["assets"][0]["browser_download_url"] = "https://example.test/asset.zip"
-        self.assertEqual(updater.release_download_url(release), "https://example.test/asset.zip")
+        self.assertEqual(updater.release_archive(release)[0], "https://example.test/asset.zip")
         release["assets"][0]["name"] = "other.zip"
         with self.assertRaises(updater.UpdateError):
-            updater.release_download_url(release)
+            updater.release_archive(release)
 
     def test_download_rejects_a_digest_or_size_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:

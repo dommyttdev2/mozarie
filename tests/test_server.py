@@ -3551,6 +3551,37 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_provisional_browser_catalog_detaches_without_durable_clear(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+        original_catalog_id = http_module.STATE.catalog_id
+        original_provisional = http_module.STATE.browser_catalog_provisional
+        try:
+            with patch.object(http_module.STATE, "detach_catalog") as detach_catalog, \
+                    patch.object(http_module.STATE, "clear_catalog") as clear_catalog, \
+                    patch.object(http_module.STATE.workspace_store, "ensure_provisional_catalog", return_value="a" * 32):
+                connection.request("POST", "/api/workspace/catalog", json.dumps({"provisional": True}).encode("utf-8"), {
+                    "Content-Type": "application/json",
+                    "X-Mozarie-Token": http_module.STATE.session_token,
+                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                })
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"catalogId": "a" * 32, "provisional": True})
+            detach_catalog.assert_called_once_with()
+            clear_catalog.assert_not_called()
+        finally:
+            http_module.STATE.catalog_id = original_catalog_id
+            http_module.STATE.browser_catalog_provisional = original_provisional
+            connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_mutation_api_rejects_invalid_request_context(self):
         from http.server import ThreadingHTTPServer
 

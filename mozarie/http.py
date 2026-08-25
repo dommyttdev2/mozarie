@@ -322,7 +322,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if payload.get("provisional") is True:
                     if payload.get("catalogId"):
                         raise ClientError("仮カタログにIDは指定できません。")
-                    STATE.clear_catalog()
+                    STATE.detach_catalog()
                     catalog_id = STATE.workspace_store.ensure_provisional_catalog()
                     STATE.catalog_id = catalog_id
                     STATE.browser_catalog_provisional = True

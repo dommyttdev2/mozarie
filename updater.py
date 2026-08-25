@@ -211,11 +211,6 @@ def release_archive(release: dict[str, Any]) -> tuple[str, str, int]:
     return url, digest.removeprefix("sha256:"), size
 
 
-def release_download_url(release: dict[str, Any]) -> str:
-    """Compatibility wrapper for callers that only need the validated URL."""
-    return release_archive(release)[0]
-
-
 def download_archive(url: str, destination: Path, expected_digest: str, expected_size: int,
                      opener: Callable[..., Any] = urllib.request.urlopen) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozarie-Updater"})
