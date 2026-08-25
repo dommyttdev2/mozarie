@@ -424,9 +424,9 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
   const helpExpectations = {
-    target: ["01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", "nsfw-anime-xl-x1280.onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx"],
+    target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556?modelVersionId=2350456"],
-    sensitive: ["sugarknight/sensitive-detect / sensitive_detect_v07", "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"],
+    sensitive: ["sugarknight/sensitive-detect", ".pt → .onnx", "https://huggingface.co/sugarknight/sensitive-detect"],
     precision: ["Meta Segment Anything (SAM)", "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection / hand_detect_v1.0_s", "hand_detect_v1.0_s/model.onnx", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s"],
     handSegmentation: ["HandSegNet anime SDXL", "handsegnet_vit_b_best.safetensors", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a"],
@@ -437,8 +437,8 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     assert.equal(await page.locator("#modelHelpModel").textContent(), model, `${key} help names its model at ${width}x${height} (${language})`);
     assert.match(await page.locator("#modelHelpFile").textContent(), new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} help names its file at ${width}x${height} (${language})`);
     if (key === "target") assert.equal(await page.locator("#modelHelpText").textContent(), language === "ja"
-      ? "固定配布元のnsfw-anime-xl-x1280.onnxを指定します。変換は不要です。"
-      : "Use nsfw-anime-xl-x1280.onnx from the fixed source. No conversion is required.", `${key} help states the fixed model contract at ${width}x${height} (${language})`);
+      ? "性器候補を検出する基本モデルです。配布元のONNXを「参照」から指定します。変換は不要です。"
+      : "This primary model detects genital candidates. Select an ONNX from the source with Browse. No conversion is required.", `${key} help states the model contract at ${width}x${height} (${language})`);
     if (href) {
       assert.equal(await page.locator("#modelHelpSource").getAttribute("href"), href, `${key} help links to its source at ${width}x${height} (${language})`);
       assert.equal(await page.locator("#modelHelpSource").evaluate((link) => { const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link; }), true, `${key} source link owns its hit target at ${width}x${height} (${language})`);
@@ -498,10 +498,10 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   const requestsBeforePreparation = modelDownloadRequests.length;
   await targetDownload.scrollIntoViewIfNeeded(); await targetDownload.click();
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "基本モデルは固定配布元からnsfw-anime-xl-x1280.onnxをそのまま取得し、「参照」から指定してください。変換は不要です。"
-    : "Download nsfw-anime-xl-x1280.onnx directly from the fixed source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
+    ? "配布元から基本モデルのONNXを取得し、「参照」から指定してください。変換は不要です。"
+    : "Get the primary model ONNX from the source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `primary model opens the preparation dialog at ${width}x${height} (${language})`);
-  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx", `primary model keeps its pinned source link at ${width}x${height} (${language})`);
+  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26", `primary model links to its source at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
@@ -525,11 +525,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   const sensitiveDownload = page.locator('[data-model-download="sensitive"]');
   await sensitiveDownload.scrollIntoViewIfNeeded(); await sensitiveDownload.click();
   const sensitiveCommand = language === "ja"
-    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
-    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\sensitive_detect_v07.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
+    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からsensitive_detect_v07.ptを取得し、ONNXへ変換して、生成した.onnxを「参照」から指定してください。"
-    : "Sensitive is an optional model that supplements areas missed by the primary model. Get sensitive_detect_v07.pt from the source, convert it to ONNX, then select the generated .onnx file with Browse.", `Sensitive download explains preparation at ${width}x${height} (${language})`);
+    ? "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。"
+    : "Sensitive is an optional model that supplements areas missed by the primary model. Get a Sensitive .pt file from the source, convert it to ONNX, then select it with Browse.", `Sensitive download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), sensitiveCommand, `Sensitive download shows its conversion command at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `Sensitive hides ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadCopy").click();
@@ -816,9 +816,9 @@ async function main() {
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からsensitive_detect_v07.ptを取得し、ONNXへ変換して、生成した.onnxを「参照」から指定してください。", "Sensitive download explains how to prepare its model");
-    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40", "Sensitive download links to its pinned source");
-    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "Sensitive download shows its conversion commands");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。", "Sensitive download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect", "Sensitive download links to its source");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "Sensitive download shows its conversion commands");
     await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
     await page.locator("#modelDownloadCopy").click();
     assert.match(await page.locator("#modelDownloadCopyResult").textContent(), /コピーしました|Copied/, "conversion command copy reports success locally");

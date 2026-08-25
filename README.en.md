@@ -48,9 +48,9 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 
 | Use | What to prepare | Source and selection |
 | --- | --- | --- |
-| Primary genital detection | `nsfw-anime-xl-x1280.onnx` | Get it from the [fixed source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx), then select it with **Browse**. No conversion is required. |
+| Primary genital detection | ONNX from the source | Get it from the [source](https://huggingface.co/01miku/anime-nsfw-segm-yolo26), then select it with **Browse**. No conversion is required. |
 | NTD11 supplemental detection | ONNX converted from the `.pt` file included in the NTD11 ZIP | Download and extract [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456), convert the included `.pt` file, then select the generated ONNX file with **Browse**. |
-| Sensitive supplemental detection | ONNX converted from `sensitive_detect_v07.pt` | Download [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40), convert it, then select the ONNX file with **Browse**. |
+| Sensitive supplemental detection | ONNX converted from a Sensitive `.pt` file | Get it from the [source](https://huggingface.co/sugarknight/sensitive-detect), convert it, then select the ONNX file with **Browse**. |
 
 Convert NTD11:
 
@@ -63,7 +63,7 @@ Convert Sensitive:
 
 ```powershell
 python -m pip install "ultralytics==8.4.75"
-yolo export model="path\to\downloaded\sensitive_detect_v07.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+yolo export model="path\to\downloaded\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 The conversion creates a same-stem `.onnx` file in the same folder. Select that ONNX file in Settings, confirm its model status is valid, then run detection.

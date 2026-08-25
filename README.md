@@ -48,9 +48,9 @@ python -m pip install -r requirements.txt
 
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
-| 基本の性器検出 | `nsfw-anime-xl-x1280.onnx` | [固定配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx)から取得し、**参照**から指定します。変換は不要です。 |
+| 基本の性器検出 | 配布元のONNX | [配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26)から取得し、**参照**から指定します。変換は不要です。 |
 | NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556?modelVersionId=2350456)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
-| Sensitive補助検出 | `sensitive_detect_v07.pt`を変換したONNX | [Sensitive v07](https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40)から取得し、変換後のONNXを**参照**から指定します。 |
+| Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
 
 NTD11の変換:
 
@@ -63,7 +63,7 @@ Sensitiveの変換:
 
 ```powershell
 python -m pip install "ultralytics==8.4.75"
-yolo export model="ダウンロードしたsensitive_detect_v07.ptのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+yolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 変換すると同じフォルダーに同名の`.onnx`が生成されます。設定でそのONNXを指定し、モデルの状態が有効であることを確認してから検出を実行してください。

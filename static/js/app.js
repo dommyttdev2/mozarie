@@ -4,13 +4,13 @@ function modelHelpInfo(key) {
   const conversionCommand = (model) => {
     const path = model === "ntd11"
       ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
-      : (english ? "path\\to\\downloaded\\sensitive_detect_v07.pt" : "ダウンロードしたsensitive_detect_v07.ptのパス");
+      : (english ? "path\\to\\downloaded\\Sensitive.pt" : "ダウンロードしたSensitiveの.ptファイルのパス");
     return `python -m pip install "ultralytics==8.4.75"\nyolo export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
   };
   const models = {
-    target: { model: "01miku/anime-nsfw-segm-yolo26 / nsfw-anime-xl-x1280", file: "nsfw-anime-xl-x1280.onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/blob/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx") },
+    target: { model: "01miku/anime-nsfw-segm-yolo26", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26") },
     ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.red", "https://civitai.red/models/1313556?modelVersionId=2350456"), command: conversionCommand("ntd11") },
-    sensitive: { model: "sugarknight/sensitive-detect / sensitive_detect_v07", file: "sensitive_detect_v07.pt → sensitive_detect_v07.onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect/tree/b7ec7a528841aac3d52411fb4d031d51a8225e40"), command: conversionCommand("sensitive") },
+    sensitive: { model: "sugarknight/sensitive-detect", file: ".pt → .onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect"), command: conversionCommand("sensitive") },
     precision: { model: "Meta Segment Anything (SAM)", file: "sam_vit_b_01ec64.pth / sam_vit_l_0b3195.pth / sam_vit_h_4b8939.pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
     hand: { model: "deepghs/anime_hand_detection / hand_detect_v1.0_s", file: "hand_detect_v1.0_s/model.onnx（保存名 anime-hand-v1.0-s.onnx）", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection/tree/dba2c5bec15fcee9ac4909b244a84e8783cf46a2/hand_detect_v1.0_s") },
     handSegmentation: { model: "HandSegNet anime SDXL", file: "handsegnet_vit_b_best.safetensors", ...source("Hugging Face", "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a") },
