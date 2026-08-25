@@ -538,16 +538,28 @@ class CatalogMixin:
                 final_paths: list[Path] = []
                 try:
                     imported: list[dict[str, str]] = []
-                    used_relative_paths = {record.relative_path.casefold() for record in self.images.values()}
+                    catalog_relative_paths = {
+                        record.relative_path.casefold()
+                        for record in self.images.values()
+                        if record.source_kind != "session"
+                    }
+                    used_relative_paths = set(catalog_relative_paths)
                     for temporary, name, width, height, client_key in pending:
                         relative = Path(name)
                         base_stem, suffix = relative.stem, relative.suffix
-                        index = 1
-                        while relative.as_posix().casefold() in used_relative_paths or (destination_dir / relative).exists():
-                            index += 1
-                            relative = relative.with_name(f"{base_stem} ({index}){suffix}")
+                        if relative.as_posix().casefold() in catalog_relative_paths:
+                            index = 1
+                            while relative.as_posix().casefold() in used_relative_paths or (destination_dir / relative).exists():
+                                index += 1
+                                relative = relative.with_name(f"{base_stem} ({index}){suffix}")
+                            destination = destination_dir / relative
+                        else:
+                            # Keep the established _2 naming for collisions
+                            # among session imports while reserving (2) for a
+                            # collision with an existing catalogue image.
+                            destination = unique_session_import_destination(destination_dir / relative)
+                            relative = destination.relative_to(destination_dir)
                         used_relative_paths.add(relative.as_posix().casefold())
-                        destination = destination_dir / relative
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(temporary, destination)
                         final_paths.append(destination)
