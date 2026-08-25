@@ -36,5 +36,20 @@ vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flu
   await assert.rejects(failed, /write failed/);
   await assert.rejects(context.workspaceTest.flushAllWorkspaceMutations(), /write failed/, "a recovered later DELETE does not hide the earlier write failure");
   assert.deepEqual(calls.map(([, method]) => method), ["POST", "DELETE"], "a later DELETE still runs after a rejected POST");
+
+  let releaseDraft;
+  state.currentId = "one"; state.maskDirty = true; state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear();
+  context.saveDraft = () => new Promise((resolve) => { releaseDraft = () => { state.maskDirty = false; resolve(); }; });
+  const transition = context.workspaceTest.flushAllWorkspaceMutations().then(() => context.api("/api/catalog/clear", { method: "POST" }));
+  await Promise.resolve();
+  assert.equal(calls.some(([url]) => url === "/api/catalog/clear"), false, "a dirty draft blocks its catalog transition until encoded");
+  releaseDraft(); await transition;
+  assert.equal(calls.some(([url]) => url === "/api/catalog/clear"), true, "the transition starts after the dirty draft resolves");
+
+  state.currentId = "one"; state.maskDirty = true;
+  context.saveDraft = () => Promise.reject(new Error("encode failed"));
+  let switched = false;
+  await assert.rejects(context.workspaceTest.flushAllWorkspaceMutations().then(() => { switched = true; }), /encode failed/);
+  assert.equal(switched, false, "a rejected draft encoder prevents the transition");
   console.log("test_workspace_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
