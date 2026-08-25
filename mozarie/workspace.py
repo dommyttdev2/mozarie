@@ -30,7 +30,7 @@ class WorkspaceStore:
         self._lock = threading.RLock()
         data_dir.mkdir(parents=True, exist_ok=True)
         # Inspect an existing database before issuing any write-capable pragma,
-        # DDL, or cleanup statement. v0.4 intentionally has no migrations.
+        # DDL, or cleanup statement.
         existing = self.path.exists()
         if existing:
             with sqlite3.connect(self.path, factory=_ClosingConnection) as db:
@@ -47,9 +47,26 @@ class WorkspaceStore:
                     raise RuntimeError("workspace database must be recreated for Mozarie v0.4") from exc
                 if version > self.VERSION:
                     raise RuntimeError("workspace database is newer than this Mozarie version")
-                if version != self.VERSION:
+                if version == self.VERSION - 1:
+                    self._validate_schema(db, tables, version)
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                        if version_row is None or version_row["value"] != str(version):
+                            raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+                        self._validate_schema(db, tables, version)
+                        db.execute("ALTER TABLE manual_edits ADD COLUMN has_effective_mask INTEGER NOT NULL DEFAULT 0")
+                        db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(self.VERSION),))
+                        self._validate_schema(db, tables, self.VERSION)
+                        db.execute("COMMIT")
+                    except Exception:
+                        db.execute("ROLLBACK")
+                        raise
+                elif version != self.VERSION:
                     raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
-                self._validate_schema(db, tables)
+                else:
+                    self._validate_schema(db, tables, version)
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
@@ -92,18 +109,22 @@ class WorkspaceStore:
                 db.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
 
     @staticmethod
-    def _validate_schema(db: sqlite3.Connection, tables: set[str]) -> None:
+    def _validate_schema(db: sqlite3.Connection, tables: set[str], version: int) -> None:
         required = {
             "catalogs": {"catalog_id", "identity_hash", "created_at", "updated_at"},
             "images": {"catalog_id", "relative_path", "image_id", "size_bytes", "mtime_ns", "source_hash", "hidden", "reviewed", "candidate_revision", "updated_at"},
             "candidates": {"image_id", "candidate_id", "class_name", "confidence", "mask_png", "enabled", "color", "source", "origin", "refinement", "role", "forced", "deleted"},
-            "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "has_effective_mask", "updated_at"},
+            "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "updated_at"},
         }
+        if version == WorkspaceStore.VERSION:
+            required["manual_edits"].add("has_effective_mask")
         if not set(required) <= tables:
             raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
         for table, columns in required.items():
             present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
             if not columns <= present:
+                raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+            if version == WorkspaceStore.VERSION - 1 and table == "manual_edits" and "has_effective_mask" in present:
                 raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
 
     def _connect(self) -> sqlite3.Connection:
@@ -356,7 +377,11 @@ class WorkspaceStore:
         has_effective_mask = payload.get("hasEffectiveMask")
         if not isinstance(has_effective_mask, bool): raise ValueError("invalid effective mask")
         with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO manual_edits VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
+            db.execute("""INSERT INTO manual_edits(
+                image_id,add_png,exclusion_png,exclusion_erase_png,manual_enabled,exclusion_enabled,
+                exclusion_erase_enabled,exclusion_forced,removed_candidate_ids,candidate_revision,
+                has_effective_mask,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 add_png=excluded.add_png,exclusion_png=excluded.exclusion_png,exclusion_erase_png=excluded.exclusion_erase_png,
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
                 exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",

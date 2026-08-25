@@ -31,8 +31,10 @@ class WorkspaceV040Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            with sqlite3.connect(store.path) as db:
+            connection = sqlite3.connect(store.path)
+            with connection as db:
                 db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(WorkspaceStore.VERSION + 1),))
+            connection.close()
             before = store.path.read_bytes()
             with self.assertRaisesRegex(RuntimeError, "newer"):
                 WorkspaceStore(root)
@@ -42,12 +44,83 @@ class WorkspaceV040Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            with sqlite3.connect(store.path) as db:
+            connection = sqlite3.connect(store.path)
+            with connection as db:
                 db.execute("UPDATE meta SET value=? WHERE key='schema_version'", ("not-a-version",))
+            connection.close()
             before = store.path.read_bytes()
             with self.assertRaisesRegex(RuntimeError, "recreated"):
                 WorkspaceStore(root)
             self.assertEqual(store.path.read_bytes(), before)
+
+    def test_v1_and_missing_schema_versions_are_rejected_without_mutation(self):
+        for version in ("1", None):
+            with self.subTest(version=version), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+                root = Path(directory)
+                store = WorkspaceStore(root)
+                connection = sqlite3.connect(store.path)
+                with connection as db:
+                    if version is None:
+                        db.execute("DELETE FROM meta WHERE key='schema_version'")
+                    else:
+                        db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
+                connection.close()
+                before = store.path.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "recreated|not a Mozarie"):
+                    WorkspaceStore(root)
+                self.assertEqual(store.path.read_bytes(), before)
+
+    def test_v2_database_migrates_without_losing_workspace_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog("a" * 32)
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                db.execute("UPDATE images SET hidden=1,reviewed=1,candidate_revision=42 WHERE image_id=?", (image_id,))
+                db.execute("""INSERT INTO candidates(
+                    image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,
+                    refinement,role,forced,deleted
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    image_id, "candidate", "person", 0.9, b"candidate-mask", 1, "#123456", "detector",
+                    "automatic", "refined", "apply", 0, 0,
+                ))
+                db.execute("""INSERT INTO manual_edits(
+                    image_id,add_png,exclusion_png,exclusion_erase_png,manual_enabled,exclusion_enabled,
+                    exclusion_erase_enabled,exclusion_forced,removed_candidate_ids,candidate_revision,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
+                    image_id, b"add-mask", b"exclude-mask", b"erase-mask", 0, 1, 0, 1,
+                    '["candidate"]', 42, 123456789,
+                ))
+                db.execute("ALTER TABLE manual_edits DROP COLUMN has_effective_mask")
+                db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
+            connection.close()
+
+            migrated = WorkspaceStore(root)
+            connection = sqlite3.connect(migrated.path)
+            with connection as db:
+                self.assertEqual(db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "3")
+                self.assertIn("has_effective_mask", {row[1] for row in db.execute("PRAGMA table_info(manual_edits)")})
+                self.assertEqual(db.execute("SELECT hidden,reviewed,candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone(), (1, 1, 42))
+                self.assertEqual(db.execute("SELECT mask_png FROM candidates WHERE image_id=?", (image_id,)).fetchone()[0], b"candidate-mask")
+                self.assertEqual(db.execute("""SELECT add_png,exclusion_png,exclusion_erase_png,manual_enabled,
+                    exclusion_enabled,exclusion_erase_enabled,exclusion_forced,removed_candidate_ids,
+                    candidate_revision,has_effective_mask,updated_at FROM manual_edits WHERE image_id=?""", (image_id,)).fetchone(), (
+                    b"add-mask", b"exclude-mask", b"erase-mask", 0, 1, 0, 1, '["candidate"]', 42, 0, 123456789,
+                ))
+            connection.close()
+
+            migrated.save_manual(image_id, {
+                "add": "add", "exclusion": "exclude", "exclusionErase": "erase",
+                "manualEnabled": True, "manualExclusionEnabled": False,
+                "manualExclusionEraseEnabled": True, "manualExclusionForced": False,
+                "removedCandidateIds": [], "candidateRevision": 7, "hasEffectiveMask": True,
+            }, lambda value: value.encode() if value else None)
+            connection = sqlite3.connect(migrated.path)
+            with connection as db:
+                self.assertEqual(db.execute("SELECT add_png,exclusion_png,exclusion_erase_png,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone(), (b"add", b"exclude", b"erase", 1))
+            connection.close()
 
     def test_empty_candidate_set_keeps_nonzero_revision_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
