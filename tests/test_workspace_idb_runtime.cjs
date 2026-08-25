@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "..", "static", "js", "workspace.js"), "utf8");
-const deleted = []; const writes = []; let opens = 0;
+const deleted = []; const writes = []; const events = []; let opens = 0;
 function eventRequest(result) {
   return {
     result,
@@ -13,12 +13,12 @@ function eventRequest(result) {
 }
 function database() {
   return {
-    close() {},
+    close() { events.push("close"); },
     transaction(_name, mode) {
       const transaction = { set oncomplete(handler) { queueMicrotask(handler); }, set onerror(_handler) {}, set onabort(_handler) {} };
       transaction.objectStore = () => ({
         getAll: () => eventRequest([{ catalogId: "stale", handle: { isSameEntry: async () => true } }]),
-        delete: (id) => deleted.push(id), put: (row) => writes.push(row),
+        delete: (id) => { deleted.push(id); events.push("delete"); }, put: (row) => writes.push(row),
       });
       return transaction;
     },
@@ -34,6 +34,7 @@ vm.runInNewContext(`${source}\nglobalThis.idbTest={catalogForDirectoryHandle};`,
 (async () => {
   assert.equal(await context.idbTest.catalogForDirectoryHandle({}), "fresh");
   assert.deepEqual(deleted, ["stale"], "same-entry activation failure removes the stale IDB row before replacement");
+  assert.ok(events.indexOf("delete") < events.indexOf("close"), "the stale row is deleted before the matching database closes");
   assert.deepEqual(writes.map((row) => row.catalogId), ["fresh"], "the replacement catalog is persisted");
   assert.ok(opens >= 2, "the stale read is closed before a fresh catalog write");
   console.log("test_workspace_idb_runtime: passed");
