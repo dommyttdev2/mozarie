@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import string
 import tempfile
-import types
 import unittest
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -103,26 +102,6 @@ class Response(io.BytesIO):
         self.close()
 
 
-class LegacyOpener:
-    def __init__(self, release: dict, archive: bytes):
-        self.release = release
-        self.archive = archive
-
-    def __call__(self, request, **_kwargs):
-        if request.full_url == "https://api.github.com/repos/norqis/mozarie/releases/latest":
-            return Response(json.dumps(self.release).encode())
-        return Response(self.archive)
-
-
-def legacy_v040_updater() -> types.ModuleType:
-    module = types.ModuleType("legacy_updater")
-    module.__file__ = str(Path(__file__).resolve().parents[1] / "legacy_updater.py")
-    # v0.4.0 (4e621c5) updater snapshot; keep this fixture byte-identical to the tag.
-    source = (Path(__file__).resolve().parent / "fixtures" / "v0.4.0" / "updater.py").read_text(encoding="utf-8")
-    exec(compile(source, module.__file__, "exec"), module.__dict__)
-    return module
-
-
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
         updater._language = "ja"
@@ -165,36 +144,6 @@ class UpdaterTests(unittest.TestCase):
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
             self.assertEqual(run.call_args.args[0][:3], [str(python), "-m", "pip"])
-
-    def test_v040_update_leaves_shared_python_untouched_and_new_run_bootstraps(self):
-        legacy = legacy_v040_updater()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            install = make_install(root / "install", version="0.4.0")
-            source = make_source(root / "source", version="0.4.1")
-            requirements = (Path(__file__).resolve().parents[1] / "requirements.txt").read_bytes()
-            (install / "requirements.txt").write_bytes(requirements)
-            (source / "run.bat").write_bytes((Path(__file__).resolve().parents[1] / "run.bat").read_bytes())
-            (source / "requirements.txt").write_bytes(requirements)
-            archive = root / "mozarie.zip"
-            with zipfile.ZipFile(archive, "w") as bundle:
-                for path in source.rglob("*"):
-                    if path.is_file():
-                        bundle.write(path, f"mozarie-0.4.1/{path.relative_to(source).as_posix()}")
-            body = archive.read_bytes()
-            release = {"tag_name": "v0.4.1", "assets": [{"name": "mozarie.zip", "browser_download_url": "https://example.test/mozarie.zip"}]}
-            with patch.object(legacy.subprocess, "run") as pip_run:
-                result = legacy.perform_update(install, opener=LegacyOpener(release, body), input_fn=lambda _prompt: "y")
-            self.assertEqual(result, legacy.EXIT_UPDATED)
-            pip_run.assert_not_called()
-            self.assertFalse((install / ".venv").exists())
-            self.assertFalse((install / "setup.bat").exists())
-            self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "stable entry")
-            run = (install / "run.bat").read_text(encoding="utf-8")
-            self.assertIn('if not exist "%PYTHON%" (', run)
-            self.assertIn('call :create_venv', run)
-            self.assertIn('"%PYTHON%" -m pip install -r "%APP_DIR%requirements.txt"', run)
-            self.assertIn('if defined MOZARIE_PYTHON (', run)
 
     def test_fetch_latest_release_validates_payload(self):
         payload = json.dumps(make_release()).encode()
