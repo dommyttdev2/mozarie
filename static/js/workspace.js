@@ -97,22 +97,40 @@ function queueWorkspaceDraft(imageId, immediate = false) {
   return promise;
 }
 
+function draftSaveEntries(imageIds = null) {
+  const wanted = imageIds == null ? null : new Set(imageIds);
+  return [...state.draftSaveChains.entries()].filter(([imageId]) => !wanted || wanted.has(imageId));
+}
+
+async function flushDraftSaves(imageIds = null) {
+  const wanted = imageIds == null ? null : new Set(imageIds);
+  if (state.currentId && state.draftDirty && (!wanted || wanted.has(state.currentId))) await saveDraft();
+  while (true) {
+    const chains = draftSaveEntries(imageIds);
+    const results = await Promise.allSettled(chains.map(([, chain]) => chain));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+    const current = draftSaveEntries(imageIds);
+    if (current.length === chains.length && current.every(([imageId, chain]) => chains.some(([knownId, known]) => knownId === imageId && known === chain))) return;
+  }
+}
+
 async function flushWorkspaceDraft(imageId) {
-  await (state.draftSaveChains.get(imageId) || Promise.resolve());
-  const timer = state.workspaceDraftTimers.get(imageId);
-  if (timer) { clearTimeout(timer); state.workspaceDraftTimers.delete(imageId); await queueWorkspaceDraft(imageId, true); }
-  await (state.workspaceDraftChains.get(imageId) || Promise.resolve());
-  const failure = state.workspaceMutationErrors.get(imageId);
-  if (failure) { state.workspaceMutationErrors.delete(imageId); throw failure; }
+  await flushDraftSaves([imageId]);
+  while (true) {
+    const timer = state.workspaceDraftTimers.get(imageId);
+    if (timer) { clearTimeout(timer); state.workspaceDraftTimers.delete(imageId); await queueWorkspaceDraft(imageId, true); }
+    const chain = state.workspaceDraftChains.get(imageId);
+    await (chain || Promise.resolve());
+    const failure = state.workspaceMutationErrors.get(imageId);
+    if (failure) { state.workspaceMutationErrors.delete(imageId); throw failure; }
+    if (!state.workspaceDraftTimers.has(imageId) && state.workspaceDraftChains.get(imageId) === chain) return;
+  }
 }
 
 async function flushAllWorkspaceMutations() {
   while (true) {
-    if (state.currentId && state.maskDirty) await saveDraft();
-    const draftSaves = [...state.draftSaveChains.values()];
-    const draftResults = await Promise.allSettled(draftSaves);
-    const draftFailure = draftResults.find((result) => result.status === "rejected");
-    if (draftFailure) throw draftFailure.reason;
+    await flushDraftSaves();
     const dirtyIds = [...state.workspaceDraftTimers.keys()];
     for (const imageId of dirtyIds) {
       clearTimeout(state.workspaceDraftTimers.get(imageId));
@@ -129,7 +147,8 @@ async function flushAllWorkspaceMutations() {
       state.workspaceMutationErrors.delete(failedImageId);
       throw storedFailure;
     }
-    if (!state.workspaceDraftTimers.size && [...state.workspaceDraftChains.entries()].every(([imageId, chain]) => chains.some(([knownId, known]) => knownId === imageId && known === chain))) return;
+    const stable = [...state.workspaceDraftChains.entries()];
+    if (!state.workspaceDraftTimers.size && stable.length === chains.length && stable.every(([imageId, chain]) => chains.some(([knownId, known]) => knownId === imageId && known === chain))) return;
   }
 }
 

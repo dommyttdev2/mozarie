@@ -9,7 +9,7 @@ let rejectFirst = false;
 const state = {
   images: [{ id: "one" }], drafts: new Map(),
   workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), draftSaveChains: new Map(),
-  currentId: null, maskDirty: false,
+  currentId: null, draftDirty: false,
 };
 const context = {
   state, Map, Set, Promise, Object, Number, encodeURIComponent, window: {}, indexedDB: undefined,
@@ -21,7 +21,7 @@ const context = {
     return Promise.resolve({});
   },
 };
-vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,workspaceDraftPayload};`, context);
+vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushAllWorkspaceMutations,queueWorkspaceMutation,workspaceDraftPayload};`, context);
 
 (async () => {
   await context.workspaceTest.queueWorkspaceDraft("one", true);
@@ -38,18 +38,35 @@ vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flu
   assert.deepEqual(calls.map(([, method]) => method), ["POST", "DELETE"], "a later DELETE still runs after a rejected POST");
 
   let releaseDraft;
-  state.currentId = "one"; state.maskDirty = true; state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear();
-  context.saveDraft = () => new Promise((resolve) => { releaseDraft = () => { state.maskDirty = false; resolve(); }; });
+  state.currentId = "one"; state.draftDirty = true; state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear();
+  context.saveDraft = () => new Promise((resolve) => { releaseDraft = () => { state.draftDirty = false; resolve(); }; });
   const transition = context.workspaceTest.flushAllWorkspaceMutations().then(() => context.api("/api/catalog/clear", { method: "POST" }));
   await Promise.resolve();
   assert.equal(calls.some(([url]) => url === "/api/catalog/clear"), false, "a dirty draft blocks its catalog transition until encoded");
   releaseDraft(); await transition;
   assert.equal(calls.some(([url]) => url === "/api/catalog/clear"), true, "the transition starts after the dirty draft resolves");
 
-  state.currentId = "one"; state.maskDirty = true;
+  state.currentId = "one"; state.draftDirty = true;
   context.saveDraft = () => Promise.reject(new Error("encode failed"));
   let switched = false;
   await assert.rejects(context.workspaceTest.flushAllWorkspaceMutations().then(() => { switched = true; }), /encode failed/);
   assert.equal(switched, false, "a rejected draft encoder prevents the transition");
+
+  state.currentId = null; state.draftDirty = false; state.draftSaveChains.clear();
+  let resolveFirst;
+  const first = new Promise((resolve) => { resolveFirst = resolve; });
+  state.draftSaveChains.set("one", first);
+  const flush = context.workspaceTest.flushDraftSaves(["one"]);
+  let resolved = false;
+  flush.then(() => { resolved = true; });
+  let resolveSecond;
+  const second = new Promise((resolve) => { resolveSecond = resolve; });
+  state.draftSaveChains.set("one", second);
+  resolveFirst();
+  await Promise.resolve();
+  assert.equal(resolved, false, "a replacement encoder chain keeps the flush pending");
+  resolveSecond();
+  await flush;
+  assert.equal(resolved, true, "the flush completes after the stable replacement chain");
   console.log("test_workspace_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

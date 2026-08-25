@@ -67,7 +67,8 @@ async function openApplyDialog(options = {}) {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const initialMode = Array.isArray(options) ? "current" : (options.initialMode || "masked");
   if (isBusy() || state.importing) return;
-  await saveDraft();
+  try { await flushDraftSaves(); }
+  catch (error) { setStatus(error.message, "error"); return; }
   $("#applyTargetMode").value = initialMode;
   refreshApplyTargets();
   if (!state.applyTargetIds.length) return;
@@ -457,6 +458,7 @@ async function startApplyFromDialog(event) {
   updateActionButtons();
   if (copy && !$("#deleteOriginal").checked) {
     try {
+      await flushDraftSaves(imageIds);
       await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, removeOnlyMasked: $("#removeOnlyMasked").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
     } catch (error) { setApplyResult(error.message, true); return finishSaveStart(); }
@@ -471,6 +473,7 @@ async function startApplyFromDialog(event) {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   if (state.importing) return finishSaveStart();
   try {
+    await flushDraftSaves(imageIds);
     state.saveStarting = false;
     await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked, $("#removeOnlyMasked").checked);
   } catch (error) {

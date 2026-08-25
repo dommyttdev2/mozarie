@@ -19,6 +19,8 @@ function element() {
     setAttribute() {},
     append() {},
     addEventListener() {},
+    showModal() { this.open = true; },
+    close() { this.open = false; },
   };
 }
 
@@ -45,6 +47,11 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     return elements.get(selector);
   };
   getElement("#applyDivisor").value = "100";
+  getElement("#applySuffix");
+  getElement("#deleteOriginal");
+  getElement("#removeAfterSave");
+  getElement("#removeOnlyMasked");
+  getElement('input[name="saveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
   getElement("#canvasStage").clientWidth = 600;
@@ -110,6 +117,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
       if (requestPath === "/api/save/prepare") {
         return jsonResponse({ entries: preparedEntries });
       }
+      if (requestPath === "/api/apply") return jsonResponse({ kind: "apply", state: "running" });
       if (requestPath === "/api/save/render") {
         const payload = JSON.parse(options.body || "{}");
         if (payload.copyToDefault) {
@@ -131,9 +139,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   state.translations = {
@@ -143,7 +151,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, state, window: browserWindow };
+  return { elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, state, window: browserWindow };
 }
 
 async function runSuccessCase() {
@@ -163,6 +171,21 @@ async function runSuccessCase() {
   assert.equal(commitPayload.deleteOriginal, false);
   assert.equal(runtime.imageFetches(), 1, "one final catalog reconciliation runs after the batch");
   assert.equal(runtime.elements.get("#applyResult").textContent, "complete 1");
+}
+
+async function runDraftBarrierBeforeDefaultApplyCase() {
+  const runtime = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.elements.get("#applySuffix").value = "_censored";
+  runtime.state.applyTargetIds = ["image-1"];
+  let releaseDraft;
+  runtime.state.draftSaveChains.set("image-1", new Promise((resolve) => { releaseDraft = resolve; }));
+  const start = runtime.startApplyFromDialog({ preventDefault() {} });
+  await Promise.resolve();
+  assert.equal(runtime.requests.some((request) => request.path === "/api/apply"), false, "the server save waits for the draft encoder");
+  releaseDraft();
+  await start;
+  const apply = runtime.requests.find((request) => request.path === "/api/apply");
+  assert.ok(apply, "the server save starts after the draft encoder settles");
 }
 
 async function runStaleCommitCase() {
@@ -526,6 +549,7 @@ async function runRemoveAfterSaveCases() {
 
 (async () => {
   await runSuccessCase();
+  await runDraftBarrierBeforeDefaultApplyCase();
   await runStaleCommitCase();
   await runRemoveAfterSaveCase();
   await runRemoveAfterSaveAlreadyAbsentCase();
