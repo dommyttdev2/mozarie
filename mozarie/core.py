@@ -227,6 +227,7 @@ class Job:
     image_ids: tuple[str, ...] = ()
     completed_image_ids: tuple[str, ...] = ()
     active_count: int = 0
+    parallelism: int = 0
     preparing_models: int = 0
     remove_after_save: bool = False
 
@@ -249,6 +250,7 @@ class Job:
             "imageIds": list(self.image_ids),
             "completedImageIds": list(self.completed_image_ids),
             "activeCount": self.active_count,
+            "parallelism": self.parallelism,
             "phase": "preparing_models" if self.preparing_models else "",
             "removeAfterSave": self.remove_after_save,
         }
@@ -311,6 +313,70 @@ def restore_tile_mask(mask: np.ndarray, full_width: int, full_height: int, x_off
     return restored
 
 
+def tile_mask_area(mask: np.ndarray) -> int:
+    """Count a tile-local binary mask once for sparse duplicate arbitration."""
+    return int(np.count_nonzero(mask))
+
+
+def tile_mask_bbox(mask: np.ndarray, x_offset: int, y_offset: int) -> tuple[int, int, int, int]:
+    """Return the original-image bounding box without materialising that image."""
+    occupied_rows = np.flatnonzero(np.any(mask > 0, axis=1))
+    occupied_columns = np.flatnonzero(np.any(mask > 0, axis=0))
+    if not len(occupied_rows) or not len(occupied_columns):
+        return (x_offset, y_offset, x_offset, y_offset)
+    return (
+        x_offset + int(occupied_columns[0]),
+        y_offset + int(occupied_rows[0]),
+        x_offset + int(occupied_columns[-1]) + 1,
+        y_offset + int(occupied_rows[-1]) + 1,
+    )
+
+
+def tile_mask_overlap(left: dict[str, Any], right: dict[str, Any]) -> int:
+    """Count overlap between two masks kept in their own tile coordinates."""
+    left_x, left_y = left["tile_offset"]
+    right_x, right_y = right["tile_offset"]
+    left_mask = np.asarray(left["mask"]) > 0
+    right_mask = np.asarray(right["mask"]) > 0
+    left_box = left["tile_bbox"]
+    right_box = right["tile_bbox"]
+    x0 = max(left_box[0], right_box[0])
+    y0 = max(left_box[1], right_box[1])
+    x1 = min(left_box[2], right_box[2])
+    y1 = min(left_box[3], right_box[3])
+    if x0 >= x1 or y0 >= y1:
+        return 0
+    left_region = left_mask[y0 - left_y:y1 - left_y, x0 - left_x:x1 - left_x]
+    right_region = right_mask[y0 - right_y:y1 - right_y, x0 - right_x:x1 - right_x]
+    return int(np.count_nonzero(left_region & right_region))
+
+
+def tile_segments_overlap(left: dict[str, Any], right: dict[str, Any], iou_threshold: float, containment_threshold: float) -> bool:
+    """Match ``segment_overlaps`` without allocating original-image masks."""
+    if left["class_name"] != right["class_name"]:
+        return False
+    overlap = tile_mask_overlap(left, right)
+    if overlap == 0:
+        return False
+    left_area = int(left["tile_area"])
+    right_area = int(right["tile_area"])
+    union = left_area + right_area - overlap
+    return (
+        overlap / union >= iou_threshold
+        or overlap / min(left_area, right_area) >= containment_threshold
+    )
+
+
+def materialize_tile_mask(segment: dict[str, Any], full_width: int, full_height: int) -> dict[str, Any]:
+    """Convert a surviving sparse tile candidate to the established full mask."""
+    output = dict(segment)
+    x_offset, y_offset = output.pop("tile_offset")
+    output.pop("tile_area", None)
+    output.pop("tile_bbox", None)
+    output["mask"] = restore_tile_mask(output["mask"], full_width, full_height, x_offset, y_offset)
+    return output
+
+
 def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
     left_bool = left > 0
     right_bool = right > 0
@@ -367,6 +433,45 @@ def merge_segment(
         segments.append({"class_name": class_name, "confidence": confidence, "mask": mask, "source": source})
         return
     candidate = {"class_name": class_name, "confidence": confidence, "mask": mask, "source": source}
+    winner = max([*matching, candidate], key=_segment_rank)
+    for duplicate in matching:
+        segments.remove(duplicate)
+    segments.append(winner)
+
+
+def merge_tile_segment(
+    segments: list[dict[str, Any]],
+    class_name: str,
+    confidence: float,
+    mask: np.ndarray,
+    x_offset: int,
+    y_offset: int,
+    source: str = "target",
+    iou_threshold: float = 0.75,
+    containment_threshold: float = 0.95,
+) -> None:
+    """Keep tile masks sparse until duplicate removal has finished.
+
+    This mirrors ``merge_segment`` including its ordering/tie behaviour, but
+    does not allocate a full-resolution zero-filled array for every candidate.
+    """
+    candidate = {
+        "class_name": class_name,
+        "confidence": confidence,
+        "mask": mask,
+        "source": source,
+        "tile_offset": (x_offset, y_offset),
+        "tile_area": tile_mask_area(mask),
+        "tile_bbox": tile_mask_bbox(mask, x_offset, y_offset),
+    }
+    matching = [
+        segment
+        for segment in segments
+        if tile_segments_overlap(segment, candidate, iou_threshold, containment_threshold)
+    ]
+    if not matching:
+        segments.append(candidate)
+        return
     winner = max([*matching, candidate], key=_segment_rank)
     for duplicate in matching:
         segments.remove(duplicate)

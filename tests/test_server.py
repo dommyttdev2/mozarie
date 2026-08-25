@@ -52,6 +52,8 @@ from server import (  # noqa: E402
     detection_tiles,
     mask_iou,
     merge_segment,
+    merge_tile_segment,
+    materialize_tile_mask,
     restore_tile_mask,
     read_boundary_request,
     read_detection_confidence,
@@ -84,6 +86,44 @@ def fake_catalog_torch(load_result=None):
         load=Mock(return_value={} if load_result is None else load_result),
         cuda=types.SimpleNamespace(is_available=lambda: True),
     )
+
+
+def reference_apply_mosaic(image, mask, block_size):
+    """The pre block-row implementation, retained only for exactness tests."""
+    image_array = np.asarray(image)
+    width, height = image.size
+    selected = mask > 0
+    blocks_x = math.ceil(width / block_size)
+    block_ids = ((np.arange(height)[:, None] // block_size) * blocks_x + (np.arange(width)[None, :] // block_size)).ravel()
+    block_count = math.ceil(height / block_size) * blocks_x
+    selected_flat = selected.ravel()
+    counts = np.bincount(block_ids, weights=selected_flat.astype(np.int64), minlength=block_count).astype(np.int64)
+    valid = counts > 0
+    if image.mode == "RGBA":
+        output = image_array.copy()
+        alpha = image_array[..., 3].astype(np.int64).ravel()
+        weights = alpha * selected_flat.astype(np.int64)
+        alpha_sums = np.bincount(block_ids, weights=weights, minlength=block_count).astype(np.int64)
+        rgb = image_array[..., :3].reshape(-1, 3).astype(np.int64)
+        colors = np.zeros((block_count, 3), dtype=np.uint8)
+        alpha_valid = alpha_sums > 0
+        for channel in range(3):
+            sums = np.bincount(block_ids, weights=rgb[:, channel] * weights, minlength=block_count).astype(np.int64)
+            colors[alpha_valid, channel] = ((sums[alpha_valid] + alpha_sums[alpha_valid] // 2) // alpha_sums[alpha_valid]).astype(np.uint8)
+        target = colors[block_ids].reshape(height, width, 3)
+        output[..., :3] = np.where((selected & alpha_valid[block_ids].reshape(height, width))[..., None], target, output[..., :3])
+        return output
+    channels = 1 if image.mode == "L" else 3
+    values = image_array.reshape(-1, channels).astype(np.int64) if channels > 1 else image_array.reshape(-1, 1).astype(np.int64)
+    colors = np.zeros((block_count, channels), dtype=np.uint8)
+    for channel in range(channels):
+        sums = np.bincount(block_ids, weights=values[:, channel] * selected_flat, minlength=block_count).astype(np.int64)
+        colors[valid, channel] = ((sums[valid] + counts[valid] // 2) // counts[valid]).astype(np.uint8)
+    target = colors[block_ids].reshape(height, width, channels)
+    if image.mode == "L":
+        output = image_array.copy(); output[selected] = target[..., 0][selected]
+        return output
+    return np.where(selected[..., None], target, image_array)
 
 def import_images_for_test(state, files):
     """Exercise the binary staging path without retaining the removed JSON API."""
@@ -620,6 +660,18 @@ class MozarieTests(unittest.TestCase):
         mask = np.zeros((3, 5), dtype=np.uint8); mask[:2, :2] = 255
         output = np.asarray(server_module._apply_mosaic_to_image(image, mask, 2))
         self.assertTrue(np.array_equal(output[:, 4], np.asarray(image)[:, 4]))
+
+    def test_mosaic_block_rows_are_bit_exact_for_rgb_rgba_and_l(self):
+        random = np.random.default_rng(20260825)
+        for mode, channels in (("RGB", 3), ("RGBA", 4), ("L", 1)):
+            for width, height, block_size in ((1, 1, 1), (19, 17, 4), (101, 73, 13)):
+                shape = (height, width, channels) if channels > 1 else (height, width)
+                pixels = random.integers(0, 256, size=shape, dtype=np.uint8)
+                mask = random.integers(0, 2, size=(height, width), dtype=np.uint8) * 255
+                image = Image.fromarray(pixels, mode=mode)
+                expected = reference_apply_mosaic(image, mask, block_size)
+                actual = np.asarray(server_module._apply_mosaic_to_image(image, mask, block_size))
+                self.assertTrue(np.array_equal(actual, expected), (mode, width, height, block_size))
 
     def test_standard_log_format_has_timestamp_level_and_message(self):
         record = logging.LogRecord("test", logging.INFO, __file__, 1, "起動: %s", ("OK",), None)
@@ -1825,6 +1877,32 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(segments[0]["source"], "ntd11")
         self.assertTrue(np.array_equal(segments[0]["mask"], first))
 
+    def test_sparse_tile_merge_matches_full_mask_order_scores_and_pixels(self):
+        width, height = 100, 80
+        entries = []
+        for source, confidence, x_offset, y_offset, tile_width, tile_height, box in (
+            ("ntd11", 0.61, 0, 0, 65, 52, (20, 18, 48, 42)),
+            ("ntd11", 0.87, 35, 0, 65, 80, (0, 18, 13, 42)),
+            ("sensitive", 0.99, 35, 28, 65, 52, (0, 0, 13, 14)),
+            ("ntd11", 0.71, 0, 28, 100, 52, (60, 15, 80, 35)),
+        ):
+            mask = np.zeros((tile_height, tile_width), dtype=np.uint8)
+            left, top, right, bottom = box
+            mask[top:bottom, left:right] = 255
+            entries.append((source, confidence, mask, x_offset, y_offset))
+        full = []
+        sparse = []
+        for source, confidence, mask, x_offset, y_offset in entries:
+            merge_segment(full, "penis", confidence, restore_tile_mask(mask, width, height, x_offset, y_offset), source)
+            merge_tile_segment(sparse, "penis", confidence, mask, x_offset, y_offset, source)
+        materialized = [materialize_tile_mask(segment, width, height) for segment in sparse]
+        self.assertEqual(
+            [(segment["source"], segment["confidence"]) for segment in materialized],
+            [(segment["source"], segment["confidence"]) for segment in full],
+        )
+        for actual, expected in zip(materialized, full):
+            self.assertTrue(np.array_equal(actual["mask"], expected["mask"]))
+
     def test_detection_confidence_validation_and_auxiliary_floor(self):
         self.assertEqual(DEFAULT_DETECTION_CONFIDENCE, 0.50)
         self.assertEqual(read_detection_confidence("0.10"), 0.10)
@@ -2098,7 +2176,10 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.as_dict()["activeElapsed"], 30.0)
 
     def test_detection_maps_worker_gpu_memory_errors(self):
-        for message in ("out of memory", "failed to allocate memory", "bfcarena exhausted"):
+        for message in (
+            "out of memory", "failed to allocate memory", "bfcarena exhausted",
+            "Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!",
+        ):
             with self.subTest(message=message):
                 with tempfile.TemporaryDirectory() as directory:
                     source = Path(directory) / "source.png"
@@ -2112,6 +2193,46 @@ class MozarieTests(unittest.TestCase):
                         state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 1)
                     self.assertEqual(state.job.state, "error")
                     self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+
+    def test_torch_oom_uses_effective_parallelism_and_never_exposes_runtime_text(self):
+        torch_oom = type("OutOfMemoryError", (RuntimeError,), {"__module__": "torch.cuda"})
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running", parallelism=1)
+        with patch.object(state, "_discard_gpu_models_after_oom") as recover:
+            state._fail_job(torch_oom("Could not allocate tensor with 1073741824 bytes"))
+        self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+        self.assertEqual(state.job.params, {"parallelism": 1})
+        self.assertNotIn("1073741824", state.job.error)
+        self.assertIn("vit_b", state.job.error)
+        recover.assert_called_once_with()
+
+    def test_detection_records_effective_parallelism_for_oom_guidance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]; record = state.image_for_id(image_id)
+            state.job = server_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+            with patch.object(state, "_ensure_models", return_value=object()), \
+                 patch.object(state, "_detect_image", side_effect=RuntimeError("cuda out of memory")), \
+                 patch.object(state, "_discard_gpu_models_after_oom"):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 4)
+            self.assertEqual(state.job.parallelism, 1)
+            self.assertEqual(state.job.params, {"parallelism": 1})
+            self.assertNotIn("同時実行数を1に下げる", state.job.error)
+
+    def test_gpu_oom_discards_all_cached_models_once(self):
+        state = self.new_state()
+        state.job = server_module.Job(kind="detect", state="running")
+        state.models = object(); state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
+        with patch.object(state, "_release_gpu_cache") as cache:
+            state._fail_job(RuntimeError("cuda out of memory"))
+        self.assertIsNone(state.models)
+        self.assertIsNone(state.sam_predictor)
+        self.assertIsNone(state.hand_segmentation_predictor)
+        cache.assert_called_once_with(provider="gpu", gpu_device=0)
+
+    def test_sam_and_handseg_share_the_default_gpu_lock(self):
+        state = self.new_state()
+        self.assertIs(state.sam_lock, state.hand_segmentation_lock)
 
     def test_detection_reports_an_unsupported_gpu_architecture(self):
         state = self.new_state()
@@ -2150,6 +2271,16 @@ class MozarieTests(unittest.TestCase):
         state.invalidate_sam_image("current")
         state.sam_predictor.reset_image.assert_called_once_with()
         state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+
+    def test_sam_resets_handseg_embedding_before_setting_its_image(self):
+        state = self.new_state()
+        state.hand_segmentation_predictor = Mock(); state.hand_segmentation_image_id = "old"
+        record = Mock(image_id="new")
+        predictor = Mock(); predictor.set_image.return_value = None
+        state.sam_predictor = predictor
+        state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
+        state.hand_segmentation_predictor.reset_image.assert_called_once_with()
+        self.assertIsNone(state.hand_segmentation_image_id)
 
     def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
         state = self.new_state()
@@ -2234,6 +2365,20 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state.settings_store, "save", return_value=next_settings):
             state.update_settings(next_settings)
         self.assertIs(state.models, models)
+
+    def test_model_path_change_releases_old_gpu_resources(self):
+        state = self.new_state()
+        state.models = object(); sam = object(); handseg = object()
+        state.sam_predictor = sam; state.hand_segmentation_predictor = handseg
+        next_settings = copy.deepcopy(state.settings)
+        next_settings["models"]["target_segmentation"] = "another.onnx"
+        with patch.object(state.settings_store, "save", return_value=next_settings), \
+             patch.object(state, "_release_gpu_cache") as release:
+            state.update_settings(next_settings)
+        self.assertIsNone(state.models)
+        self.assertIs(state.sam_predictor, sam)
+        self.assertIs(state.hand_segmentation_predictor, handseg)
+        release.assert_called_once_with(provider="gpu", gpu_device=0)
 
     def test_sam_setting_change_keeps_detection_model_cache(self):
         state = self.new_state()
@@ -2322,6 +2467,20 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaises(ClientError) as raised:
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
             self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
+
+    def test_hand_segmentation_gpu_oom_is_not_misclassified_as_a_bad_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "handsegnet.safetensors"; checkpoint.write_bytes(b"checkpoint")
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
+            state = self.new_state(); state.settings["models"].update({"hand_segmentation": str(checkpoint), "provider": "gpu"})
+            model = Mock(); model.load_state_dict.side_effect = RuntimeError("Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!")
+            fake_safetensors = types.ModuleType("safetensors"); fake_safetensors.__path__ = []
+            fake_torch = types.ModuleType("safetensors.torch"); fake_torch.load_file = Mock(return_value={})
+            fake_sam = types.SimpleNamespace(SamPredictor=Mock(), sam_model_registry={"vit_b": Mock(return_value=model)})
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch, "segment_anything": fake_sam}), \
+                 patch.object(catalog_module, "torch_module", return_value=fake_catalog_torch()):
+                with self.assertRaisesRegex(RuntimeError, "not enough GPU video memory"):
+                    state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
 
     def test_hand_segmentation_device_runtime_error_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2452,6 +2611,17 @@ class MozarieTests(unittest.TestCase):
             )
         generic.predict.assert_called_once()
         self.assertTrue(np.any(result[0]["_confirmed_hand"]))
+
+    def test_handseg_checkpoint_failure_falls_back_only_once_per_job(self):
+        state = self.new_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        record = Mock(image_id="image")
+        genital = np.zeros((16, 16), dtype=np.uint8); genital[4:12, 4:12] = 255
+        with patch.object(state, "_hand_boxes", return_value=[(4, 4, 8, 8)]), \
+             patch.object(state, "_hand_segmentation_predictor_for", side_effect=ClientError("bad checkpoint", "hand_segmentation_invalid")) as specialist:
+            state._hand_refinement_context(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}])
+            state._hand_refinement_context(Mock(), record, np.zeros((16, 16, 3), dtype=np.uint8), [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}])
+        specialist.assert_called_once()
 
     def test_hand_segmentation_load_mismatch_falls_back_to_generic_hand_sam(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5312,9 +5482,28 @@ class MozarieTests(unittest.TestCase):
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()
             self.assertIn(token, state.browser_save_receipts)
-            self.assertEqual(state.commit_browser_save(image_id, rendered_revision, token, "keep")["images"], [])
+            self.assertNotIn("images", state.commit_browser_save(image_id, rendered_revision, token, "keep"))
             with self.assertRaises(ClientError):
                 state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+
+    def test_browser_save_skips_disabled_candidate_mask_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            cache = state.cache_dir / image_id; cache.mkdir(parents=True, exist_ok=True)
+            enabled_path = cache / "enabled.png"
+            Image.fromarray(self._mask(16, 16)).save(enabled_path)
+            state.candidates[image_id] = [
+                Candidate("enabled", "penis", 0.9, enabled_path),
+                Candidate("disabled", "penis", 0.8, cache / "missing-disabled.png", enabled=False),
+            ]
+            revision = state._touch_candidates(image_id)
+            output, _record, rendered_revision, _token = state.render_browser_save(image_id, revision, 100, None)
+            self.assertEqual(rendered_revision, revision)
+            self.assertTrue(output)
 
     def test_update_stops_server_and_state_before_launching_batch(self):
         events = []

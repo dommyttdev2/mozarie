@@ -211,6 +211,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ClientError as exc:
             self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # Keep tracebacks in the terminal, not in browser.
+            if (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
+                LOGGER.error("GET リクエストでGPUメモリが不足: %s", self.path)
+                self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
+                return
             LOGGER.exception("GET リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
@@ -368,6 +372,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ClientError as exc:
             self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
+            if (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
+                LOGGER.error("POST リクエストでGPUメモリが不足: %s", self.path)
+                self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
+                return
             LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
@@ -389,6 +397,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ClientError as exc:
             self._client_error(exc, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
+            if (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
+                LOGGER.error("DELETE リクエストでGPUメモリが不足: %s", self.path)
+                self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
+                return
             LOGGER.exception("DELETE リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 

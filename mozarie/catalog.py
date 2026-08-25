@@ -506,6 +506,11 @@ class CatalogMixin:
 
     def _sam_predictor_for(self, record: ImageRecord, rgb: np.ndarray) -> Any:
         with self.sam_lock:
+            # HandSegNet runs first during detection. Drop its image embedding
+            # before SAM allocates a new one, while retaining its weights.
+            if self.hand_segmentation_predictor is not None:
+                self.hand_segmentation_predictor.reset_image()
+            self.hand_segmentation_image_id = None
             if self.sam_predictor is None:
                 sam_path = self._configured_sam_path()
                 self._set_detection_model_preparation(True)
@@ -574,6 +579,8 @@ class CatalogMixin:
                     except ImportError as exc:
                         raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
                     except Exception as exc:
+                        if self._is_gpu_out_of_memory(exc):
+                            raise
                         raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
                     provider = self.settings["models"]["provider"]
                     if provider == "gpu" and not torch.cuda.is_available():

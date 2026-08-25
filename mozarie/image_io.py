@@ -271,41 +271,64 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
     # Calculate each block from pixels that will actually receive mosaic.  This
     # intentionally excludes nearby excluded/unselected pixels from the colour
     # average, so the editor preview and saved image do not bleed across masks.
-    selected = mask > 0
-    blocks_x = math.ceil(width / block_size)
-    block_ids = ((np.arange(height)[:, None] // block_size) * blocks_x + (np.arange(width)[None, :] // block_size)).ravel()
-    block_count = math.ceil(height / block_size) * blocks_x
-    selected_flat = selected.ravel()
-    counts = np.bincount(block_ids, weights=selected_flat.astype(np.int64), minlength=block_count).astype(np.int64)
-    valid = counts > 0
+    #
+    # Work one block-row at a time.  The former whole-image block-id grid and
+    # int64 RGB copy were both several times larger than a 4K source image.
+    # Keeping only a block-row is bit-for-bit equivalent: a mosaic block never
+    # crosses either its horizontal or vertical block boundary.
+    x_starts = np.arange(0, width, block_size)
+    x_widths = np.diff(np.append(x_starts, width))
+    output = image_array.copy()
 
-    if original_mode == "RGBA":
-        output = image_array.copy()
-        alpha = image_array[..., 3].astype(np.int64).ravel()
-        weights = alpha * selected_flat.astype(np.int64)
-        alpha_sums = np.bincount(block_ids, weights=weights, minlength=block_count).astype(np.int64)
-        rgb = image_array[..., :3].reshape(-1, 3).astype(np.int64)
-        colors = np.zeros((block_count, 3), dtype=np.uint8)
-        alpha_valid = alpha_sums > 0
+    for top in range(0, height, block_size):
+        bottom = min(height, top + block_size)
+        source_rows = image_array[top:bottom]
+        selected = mask[top:bottom] > 0
+        # First collapse the block-row vertically, then horizontally.  The
+        # calculations stay in int64 just like the former bincount path.
+        selected_columns = selected.sum(axis=0, dtype=np.int64)
+        counts = np.add.reduceat(selected_columns, x_starts)
+
+        if original_mode == "RGBA":
+            alpha = source_rows[..., 3].astype(np.int64, copy=False)
+            weights = alpha * selected
+            alpha_columns = weights.sum(axis=0, dtype=np.int64)
+            alpha_sums = np.add.reduceat(alpha_columns, x_starts)
+            alpha_valid = alpha_sums > 0
+            colors = np.zeros((len(x_starts), 3), dtype=np.uint8)
+            rgb = source_rows[..., :3].astype(np.int64, copy=False)
+            for channel in range(3):
+                channel_columns = (rgb[..., channel] * weights).sum(axis=0, dtype=np.int64)
+                sums = np.add.reduceat(channel_columns, x_starts)
+                colors[alpha_valid, channel] = (
+                    (sums[alpha_valid] + alpha_sums[alpha_valid] // 2) // alpha_sums[alpha_valid]
+                ).astype(np.uint8)
+            per_column = np.repeat(colors, x_widths, axis=0)
+            apply = selected & np.repeat(alpha_valid, x_widths)[None, :]
+            output_rows = output[top:bottom, :, :3]
+            output_rows[apply] = np.broadcast_to(per_column, output_rows.shape)[apply]
+            continue
+
+        valid = counts > 0
+        if original_mode == "L":
+            values = source_rows.astype(np.int64, copy=False)
+            column_sums = (values * selected).sum(axis=0, dtype=np.int64)
+            sums = np.add.reduceat(column_sums, x_starts)
+            colors = np.zeros(len(x_starts), dtype=np.uint8)
+            colors[valid] = ((sums[valid] + counts[valid] // 2) // counts[valid]).astype(np.uint8)
+            output_rows = output[top:bottom]
+            output_rows[selected] = np.broadcast_to(np.repeat(colors, x_widths), output_rows.shape)[selected]
+            continue
+
+        values = source_rows.astype(np.int64, copy=False)
+        colors = np.zeros((len(x_starts), 3), dtype=np.uint8)
         for channel in range(3):
-            sums = np.bincount(block_ids, weights=rgb[:, channel] * weights, minlength=block_count).astype(np.int64)
-            colors[alpha_valid, channel] = ((sums[alpha_valid] + alpha_sums[alpha_valid] // 2) // alpha_sums[alpha_valid]).astype(np.uint8)
-        target = colors[block_ids].reshape(height, width, 3)
-        output[..., :3] = np.where((selected & alpha_valid[block_ids].reshape(height, width))[..., None], target, output[..., :3])
-        return Image.fromarray(output)
+            column_sums = (values[..., channel] * selected).sum(axis=0, dtype=np.int64)
+            sums = np.add.reduceat(column_sums, x_starts)
+            colors[valid, channel] = ((sums[valid] + counts[valid] // 2) // counts[valid]).astype(np.uint8)
+        output_rows = output[top:bottom]
+        output_rows[selected] = np.broadcast_to(np.repeat(colors, x_widths, axis=0), output_rows.shape)[selected]
 
-    channels = 1 if original_mode == "L" else 3
-    values = image_array.reshape(-1, channels).astype(np.int64) if channels > 1 else image_array.reshape(-1, 1).astype(np.int64)
-    colors = np.zeros((block_count, channels), dtype=np.uint8)
-    for channel in range(channels):
-        sums = np.bincount(block_ids, weights=values[:, channel] * selected_flat, minlength=block_count).astype(np.int64)
-        colors[valid, channel] = ((sums[valid] + counts[valid] // 2) // counts[valid]).astype(np.uint8)
-    target = colors[block_ids].reshape(height, width, channels)
-    if original_mode == "L":
-        output = image_array.copy()
-        output[selected] = target[..., 0][selected]
-    else:
-        output = np.where(selected[..., None], target, image_array)
     return Image.fromarray(output)
 
 
