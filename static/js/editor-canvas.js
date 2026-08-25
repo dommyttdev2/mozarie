@@ -336,6 +336,7 @@ function saveDraft() {
     exclusion: hasExclusion ? exclusionCanvas.toDataURL("image/png") : "",
     exclusionErase: hasExclusionErase ? exclusionEraseCanvas.toDataURL("image/png") : "",
     manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled, manualMaskPresent: state.manualMaskPresent,
+    hasEffectiveMask: canvasHasPixels(combinedCtx, combinedCanvas),
     manualExclusionForced: state.manualExclusionForced,
     candidateRevision: Number(currentRecord()?.candidateRevision || 0),
     visibleCandidateIds: visibility.candidateIds, manualVisible: visibility.manual,

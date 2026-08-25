@@ -330,7 +330,7 @@ class SavingMixin:
                         record.size_bytes = record_snapshot.size_bytes
                         record.asset_revision = record_snapshot.asset_revision + 1
                     if source_action == "overwrite":
-                        source_hash = self._sha256_file(token_details.rendered_path) if record.source_kind == "session" and token_details.rendered_path else None
+                        source_hash = self._sha256_file(record_snapshot.path) if record.source_kind == "session" else None
                         self.workspace_store.commit_saved_image(
                             image_id, mtime_ns=record_snapshot.mtime_ns, size_bytes=record_snapshot.size_bytes,
                             source_hash=source_hash, clear_manual=deleted or cleared,

@@ -57,11 +57,12 @@ async function catalogForDirectoryHandle(handle) {
 }
 
 function workspaceDraftPayload(draft) {
-  if (!draft) return { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateRevision: 0 };
+  if (!draft) return { add: "", exclusion: "", exclusionErase: "", hasEffectiveMask: false, removedCandidateIds: [], candidateRevision: 0 };
   return {
     add: draft.add || "", exclusion: draft.exclusion || "", exclusionErase: draft.exclusionErase || "",
     manualEnabled: draft.manualEnabled !== false, manualExclusionEnabled: draft.manualExclusionEnabled !== false,
     manualExclusionEraseEnabled: draft.manualExclusionEraseEnabled !== false, manualExclusionForced: draft.manualExclusionForced !== false,
+    hasEffectiveMask: draft.hasEffectiveMask === true,
     removedCandidateIds: draft.removedCandidateIds || [], candidateRevision: Number(draft.candidateRevision || 0),
   };
 }

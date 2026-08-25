@@ -41,7 +41,10 @@ class WorkspaceStore:
                 version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
                 if version_row is None:
                     raise RuntimeError("workspace database is not a Mozarie v0.4 database")
-                version = int(version_row["value"])
+                try:
+                    version = int(version_row["value"])
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4") from exc
                 if version > self.VERSION:
                     raise RuntimeError("workspace database is newer than this Mozarie version")
                 if version != self.VERSION:
@@ -330,22 +333,23 @@ class WorkspaceStore:
         add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
         removed = payload.get("removedCandidateIds", [])
         if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed): raise ValueError("invalid removed candidates")
+        has_effective_mask = payload.get("hasEffectiveMask")
+        if not isinstance(has_effective_mask, bool): raise ValueError("invalid effective mask")
         with self._lock, self._connect() as db:
-            has_effective_mask = int(bool(add) and bool(payload.get("manualEnabled", True)))
             db.execute("""INSERT INTO manual_edits VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 add_png=excluded.add_png,exclusion_png=excluded.exclusion_png,exclusion_erase_png=excluded.exclusion_erase_png,
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
                 exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
-                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),has_effective_mask,time.time_ns()))
+                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),int(has_effective_mask),time.time_ns()))
 
-    def manual_effective_mask_ids(self, image_ids: list[str]) -> set[str]:
-        """Return manual-mask presence from indexed scalar metadata only."""
+    def manual_effective_masks(self, image_ids: list[str]) -> dict[str, bool]:
+        """Return the persisted manual-mask state; omitted IDs have no manual row."""
         if not image_ids:
-            return set()
+            return {}
         placeholders = ",".join("?" for _ in image_ids)
         with self._connect() as db:
-            rows = db.execute(f"SELECT image_id FROM manual_edits WHERE has_effective_mask=1 AND image_id IN ({placeholders})", image_ids).fetchall()
-        return {str(row["image_id"]) for row in rows}
+            rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({placeholders})", image_ids).fetchall()
+        return {str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows}
 
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:
@@ -358,5 +362,5 @@ class WorkspaceStore:
         with self._connect() as db: row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
         if not row: return None
         try:
-            return {"add": encoder(row["add_png"]), "exclusion": encoder(row["exclusion_png"]), "exclusionErase": encoder(row["exclusion_erase_png"]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": __import__('json').loads(row["removed_candidate_ids"]), "candidateRevision": int(row["candidate_revision"])}
+            return {"add": encoder(row["add_png"]), "exclusion": encoder(row["exclusion_png"]), "exclusionErase": encoder(row["exclusion_erase_png"]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": __import__('json').loads(row["removed_candidate_ids"]), "candidateRevision": int(row["candidate_revision"]), "hasEffectiveMask": bool(row["has_effective_mask"])}
         except Exception: return None

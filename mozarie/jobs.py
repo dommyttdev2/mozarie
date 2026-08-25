@@ -416,6 +416,9 @@ class JobsMixin:
             self.job.active_count -= 1
             if (control.pause_requested.is_set() and not control.cancel_requested.is_set()
                     and not control.failed.is_set() and self.job.active_count == 0):
+                if self.job.completed >= self.job.total:
+                    control.pause_requested.clear()
+                    return self.job.active_count
                 self.job.state = "paused"
                 self.job.current = ""
                 self._pause_job_clock()

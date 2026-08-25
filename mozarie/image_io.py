@@ -5,6 +5,7 @@ import io
 import math
 import os
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Any
 

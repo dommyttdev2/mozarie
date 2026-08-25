@@ -871,7 +871,7 @@ class CatalogMixin:
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
-            manual_effective_ids = self.workspace_store.manual_effective_mask_ids(list(self.order))
+            manual_effective_masks = self.workspace_store.manual_effective_masks(list(self.order))
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
@@ -890,10 +890,10 @@ class CatalogMixin:
                             candidate.enabled and candidate.role == CandidateRole.APPLY
                             for candidate in self.candidates.get(image_id, [])
                         ),
-                        "hasEffectiveMask": image_id in manual_effective_ids or any(
+                        "hasEffectiveMask": manual_effective_masks.get(image_id, any(
                             candidate.enabled and candidate.role == CandidateRole.APPLY
                             for candidate in self.candidates.get(image_id, [])
-                        ),
+                        )),
                         "candidateRevision": self._candidate_revision(image_id),
                         "hidden": record.hidden,
                         "reviewed": record.reviewed,
