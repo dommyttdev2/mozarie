@@ -68,7 +68,9 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     state.candidates = candidateBundle.candidates;
     state.candidateImages = candidateBundle.candidateImages;
     state.imageCache.trim(); state.candidateBundleCache.trim();
-    if (state.workspacePersistence) { await loadWorkspaceDraft(imageId); if (!isCurrentGeneration(generation)) return; }
+    // The server intentionally stores compact masks, not the in-session undo
+    // log.  A local draft therefore remains authoritative until reload.
+    if (state.workspacePersistence && !state.drafts.has(imageId)) { await loadWorkspaceDraft(imageId); if (!isCurrentGeneration(generation)) return; }
     canvasSizeForImage(record); restoreDraft(imageId, generation); rebuildMosaicPreview(); fitImage();
     updateBlockSizeDisplay(); refreshMaskStatus();
     $("#emptyState").hidden = true;

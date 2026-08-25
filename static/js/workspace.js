@@ -82,6 +82,19 @@ async function flushWorkspaceDraft(imageId) {
   await (state.workspaceDraftChains.get(imageId) || Promise.resolve());
 }
 
+async function flushAllWorkspaceMutations() {
+  const pendingIds = new Set([...state.workspaceDraftTimers.keys(), ...state.workspaceDraftChains.keys()]);
+  for (const imageId of pendingIds) {
+    if (!state.workspaceDraftTimers.has(imageId)) continue;
+    clearTimeout(state.workspaceDraftTimers.get(imageId));
+    state.workspaceDraftTimers.delete(imageId);
+    await queueWorkspaceDraft(imageId, true);
+  }
+  const results = await Promise.allSettled([...state.workspaceDraftChains.values()]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
 async function loadWorkspaceDraft(imageId) {
   const data = await api(`/api/workspace/manual/${encodeURIComponent(imageId)}`);
   // Older test fixtures and a mismatched running server do not implement this

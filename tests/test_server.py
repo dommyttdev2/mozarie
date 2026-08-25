@@ -228,7 +228,9 @@ class MozarieTests(unittest.TestCase):
 
             after_toggle = self.new_state()
             after_toggle.set_root(str(root))
-            restored = {candidate["id"]: candidate for candidate in after_toggle.candidate_snapshot(image_id)["candidates"]}
+            # Listing metadata must not fetch the lazy PNG BLOBs.
+            with patch.object(after_toggle.workspace_store, "candidate_png", side_effect=AssertionError("BLOB read")):
+                restored = {candidate["id"]: candidate for candidate in after_toggle.candidate_snapshot(image_id)["candidates"]}
             self.assertEqual(set(restored), {"first", "second"})
             self.assertFalse(restored["first"]["enabled"])
             self.assertIsNotNone(after_toggle.workspace_store.candidate_png(image_id, "first"))
@@ -270,9 +272,27 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(listed[native_id]["reviewed"])
             self.assertEqual(state.candidate_snapshot(native_id)["candidates"][0]["id"], "native")
 
+    def test_clear_masks_removes_workspace_manual_edits_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (12, 12), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            raw = io.BytesIO(); Image.new("L", (12, 12), 255).save(raw, format="PNG")
+            draft = "data:image/png;base64," + base64.b64encode(raw.getvalue()).decode("ascii")
+            state.save_manual_workspace(image_id, {"add": draft, "exclusion": draft, "exclusionErase": draft, "removedCandidateIds": ["old"], "candidateRevision": 0})
+            state.clear_masks([image_id])
+            reopened = self.new_state()
+            reopened.set_root(str(root))
+            self.assertIsNone(reopened.manual_workspace(image_id))
+
     def _import_browser_manifest(self, state, files, catalog_id=None):
-        state.activate_browser_catalog(catalog_id)
-        state.browser_catalog_provisional = catalog_id is None
+        if catalog_id is None:
+            state.clear_catalog()
+            state.catalog_id = state.workspace_store.ensure_provisional_catalog()
+            state.browser_catalog_provisional = True
+        else:
+            state.activate_browser_catalog(catalog_id)
         imported = {}
         with tempfile.TemporaryDirectory() as directory:
             staging = Path(directory)
@@ -339,6 +359,13 @@ class MozarieTests(unittest.TestCase):
         catalog_id = first.catalog_id
         first.set_image_flags(ids["same/001.png"], {"hidden": True, "reviewed": True})
 
+        # Selecting the same File System Access handle is a full reimport,
+        # not an append to the previous session directory.
+        repeated_ids = self._import_browser_manifest(first, files, catalog_id)
+        self.assertEqual({item["relativePath"] for item in first.list_images()}, {"same/001.png", "same/002.png"})
+        self.assertTrue(first.list_images()[0]["hidden"])
+        self.assertEqual(repeated_ids["same/001.png"], ids["same/001.png"])
+
         reopened = self.new_state()
         reopened_ids = self._import_browser_manifest(reopened, files, catalog_id)
         finalized, remapped = reopened.finalize_browser_catalog()
@@ -372,6 +399,29 @@ class MozarieTests(unittest.TestCase):
             self._import_browser_manifest(browser, files)
             browser_catalog, _ = browser.finalize_browser_catalog()
             self.assertNotEqual(browser_catalog, native_catalog)
+
+    def test_browser_manifest_requires_strict_majority_and_handles_single_or_ambiguous(self):
+        buffer = io.BytesIO(); Image.new("RGB", (8, 8), "teal").save(buffer, format="PNG")
+        raw = buffer.getvalue()
+        many = [(f"root/{index:03}.png", raw) for index in range(100)]
+        target = self.new_state()
+        self._import_browser_manifest(target, many)
+        target_catalog, _ = target.finalize_browser_catalog()
+        hashes = [(relative_path, hashlib.sha256(content).hexdigest()) for relative_path, content in many]
+        self.assertIsNone(target.workspace_store.best_catalog_for_manifest(hashes[:2], "f" * 32))
+
+        one = [("only.png", raw)]
+        single = self.new_state(); self._import_browser_manifest(single, one)
+        single_catalog, _ = single.finalize_browser_catalog()
+        one_hash = [("only.png", hashlib.sha256(raw).hexdigest())]
+        self.assertEqual(single.workspace_store.best_catalog_for_manifest(one_hash, "e" * 32), single_catalog)
+
+        clone = self.new_state()
+        clone_id = clone.workspace_store.ensure_catalog()
+        self._import_browser_manifest(clone, one, clone_id)  # A separate finalized but equal folder.
+        third = self.new_state(); self._import_browser_manifest(third, one)
+        third_catalog, _ = third.finalize_browser_catalog()
+        self.assertNotIn(third_catalog, {single_catalog, clone.catalog_id, target_catalog})
 
     def test_builtin_output_directory_is_created_for_default_copy(self):
         with tempfile.TemporaryDirectory() as directory:

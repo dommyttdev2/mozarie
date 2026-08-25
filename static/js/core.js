@@ -614,6 +614,7 @@ async function loadFolder() {
   ++state.imageGeneration;
   setStatusKey("status.loadingImages", {}, "running");
   try {
+    if (state.workspacePersistence) await flushAllWorkspaceMutations();
     const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     state.workspacePersistence = data.workspaceVersion === 1;

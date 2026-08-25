@@ -66,6 +66,9 @@ class WorkspaceStore:
                     updated_at INTEGER NOT NULL
                 );
             """)
+            # A process cannot own an upload that survived a restart. These
+            # partial browser manifests are never safe restoration targets.
+            db.execute("DELETE FROM catalogs WHERE identity_hash LIKE 'browser-provisional:%'")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(images)")}
             if "source_hash" not in columns:
                 db.execute("ALTER TABLE images ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
@@ -108,6 +111,17 @@ class WorkspaceStore:
             db.execute("INSERT OR IGNORE INTO catalogs(catalog_id,identity_hash,created_at,updated_at) VALUES(?,?,?,?)", (catalog_id, identity, now, now))
             return catalog_id
 
+    def ensure_provisional_catalog(self) -> str:
+        catalog_id = uuid.uuid4().hex
+        now = time.time_ns()
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO catalogs(catalog_id,identity_hash,created_at,updated_at) VALUES(?,?,?,?)", (catalog_id, f"browser-provisional:{catalog_id}", now, now))
+        return catalog_id
+
+    def finalize_catalog(self, catalog_id: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE catalogs SET identity_hash=?,updated_at=? WHERE catalog_id=? AND identity_hash LIKE 'browser-provisional:%'", (f"browser:{catalog_id}", time.time_ns(), catalog_id))
+
     def catalog_exists(self, catalog_id: str) -> bool:
         with self._connect() as db:
             return db.execute("SELECT 1 FROM catalogs WHERE catalog_id=?", (catalog_id,)).fetchone() is not None
@@ -130,8 +144,9 @@ class WorkspaceStore:
         return str(rows[0]["catalog_id"]) if len(rows) == 1 else None
 
     def best_catalog_for_manifest(self, entries: list[tuple[str, str]], exclude_catalog: str) -> str | None:
-        """Return one safe reuse target. A single matching file is ambiguous."""
+        """Return a browser catalogue only for a unique strict-majority match."""
         scores: dict[str, int] = {}
+        counts: dict[str, int] = {}
         with self._connect() as db:
             for relative_path, source_hash in entries:
                 for row in db.execute("""SELECT images.catalog_id
@@ -139,10 +154,23 @@ class WorkspaceStore:
                     WHERE images.relative_path=? AND images.source_hash=? AND images.catalog_id<>?
                       AND catalogs.identity_hash LIKE 'browser:%'""", (relative_path, source_hash, exclude_catalog)):
                     scores[str(row["catalog_id"])] = scores.get(str(row["catalog_id"]), 0) + 1
+            for row in db.execute("""SELECT catalogs.catalog_id, COUNT(images.image_id) AS image_count
+                FROM catalogs JOIN images ON images.catalog_id=catalogs.catalog_id
+                WHERE catalogs.identity_hash LIKE 'browser:%' AND catalogs.catalog_id<>?
+                GROUP BY catalogs.catalog_id""", (exclude_catalog,)):
+                counts[str(row["catalog_id"])] = int(row["image_count"])
         if not scores: return None
         best = max(scores.values())
         winners = [catalog_id for catalog_id, score in scores.items() if score == best]
-        return winners[0] if best >= 2 and len(winners) == 1 else None
+        if len(winners) != 1:
+            return None
+        target = winners[0]
+        # A one-image folder is safe only when both complete manifests are
+        # exactly that one image. Larger folders require strict majority on
+        # both sides, preventing two common files from joining a 100-image set.
+        if best == len(entries) == counts.get(target, 0) == 1:
+            return target
+        return target if best * 2 > max(len(entries), counts.get(target, 0)) else None
 
     def reconcile_images(self, catalog_id: str, records: list[Any], source_hashes: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
         """Return durable state by relative path, clearing pixels on source change."""
@@ -216,6 +244,7 @@ class WorkspaceStore:
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
                         ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
                         (image_id,candidate.candidate_id,candidate.class_name,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
+                db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK"); raise
@@ -223,16 +252,24 @@ class WorkspaceStore:
     def hydrate_candidates(self, image_id: str, directory: Path, candidate_factory: Any) -> tuple[int, list[Any]]:
         with self._connect() as db:
             image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
-            rows = db.execute("SELECT * FROM candidates WHERE image_id=? AND deleted=0", (image_id,)).fetchall()
+            rows = db.execute("""SELECT candidate_id,class_name,confidence,enabled,color,source,origin,refinement,role,forced,
+                length(mask_png) AS mask_size,substr(mask_png,1,8) AS mask_signature
+                FROM candidates WHERE image_id=? AND deleted=0""", (image_id,)).fetchall()
         if not image: return 0, []
         if not rows: return int(image["candidate_revision"]), []
         candidates = []
         for row in rows:
-            raw = row["mask_png"]
-            if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n"): continue
+            if int(row["mask_size"] or 0) < 8 or row["mask_signature"] != b"\x89PNG\r\n\x1a\n": continue
             path = directory / f"{row['candidate_id']}.png"
             candidates.append(candidate_factory(row, path))
         return int(image["candidate_revision"]), candidates
+
+    def valid_candidate_ids(self, image_id: str) -> set[str]:
+        with self._connect() as db:
+            rows = db.execute("""SELECT candidate_id FROM candidates
+                WHERE image_id=? AND deleted=0 AND length(mask_png)>=8
+                  AND substr(mask_png,1,8)=?""", (image_id, b"\x89PNG\r\n\x1a\n")).fetchall()
+        return {str(row["candidate_id"]) for row in rows}
 
     def candidate_png(self, image_id: str, candidate_id: str) -> bytes | None:
         with self._connect() as db:
@@ -250,6 +287,13 @@ class WorkspaceStore:
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
                 exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,updated_at=excluded.updated_at""",
                 (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),time.time_ns()))
+
+    def delete_manual(self, image_ids: list[str]) -> None:
+        if not image_ids:
+            return
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._lock, self._connect() as db:
+            db.execute(f"DELETE FROM manual_edits WHERE image_id IN ({placeholders})", image_ids)
 
     def manual(self, image_id: str, encoder: Any) -> dict[str, Any] | None:
         with self._connect() as db: row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()

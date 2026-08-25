@@ -197,11 +197,11 @@ function startFixtureServer() {
       return;
     }
     if (requestPath.startsWith("/api/workspace/manual/")) {
-      // The persistence endpoint is intentionally opaque to this UI fixture:
-      // an absent draft response must not replace the in-session undo draft.
       for await (const _chunk of request) { /* consume POST body */ }
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({}));
+      // Deliberately lacks history: selected in-session drafts must win over
+      // this compact server record when returning to an image.
+      response.end(JSON.stringify({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 0 } }));
       return;
     }
     if (requestPath.startsWith("/api/candidates/")) {

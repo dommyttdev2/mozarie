@@ -116,6 +116,7 @@ async function clearCatalog() {
   ++state.imageGeneration;
   updateActionButtons();
   try {
+    if (state.workspacePersistence) await flushAllWorkspaceMutations();
     await api("/api/catalog/clear", { method: "POST", body: JSON.stringify({}) });
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     clearStoredCatalogState();
@@ -302,7 +303,8 @@ async function importFiles(files) {
     // a fresh provisional catalogue for this complete manifest. Standalone
     // files deliberately inherit the active catalogue instead.
     const isFolderFallback = supportedFiles.some((entry) => String(entry.relativePath || entry.file?.webkitRelativePath || "").includes("/"));
-    if (!session.catalogId && !session.provisional && isFolderFallback && state.workspaceApiAvailable) {
+    if (!session.catalogId && !session.provisional && (isFolderFallback || !state.images.length) && state.workspaceApiAvailable) {
+      if (state.workspacePersistence) await flushAllWorkspaceMutations();
       const prepared = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ provisional: true }) });
       session.catalogId = prepared.catalogId || null;
       session.provisional = prepared.provisional === true;
@@ -440,6 +442,7 @@ async function importFileHandles(handles, session = beginImportSession()) {
 
 async function importDirectoryHandle(directoryHandle, session = beginImportSession()) {
   if (!session) return;
+  if (state.workspacePersistence) await flushAllWorkspaceMutations();
   session.catalogId = await catalogForDirectoryHandle(directoryHandle);
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });

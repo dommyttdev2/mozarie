@@ -84,11 +84,11 @@ class CatalogMixin:
 
     def activate_browser_catalog(self, catalog_id: str | None = None) -> str:
         with self.import_lock:
-            if catalog_id and self.catalog_id == catalog_id:
-                self.browser_catalog_provisional = False
-                return catalog_id
             if catalog_id and not self.workspace_store.catalog_exists(catalog_id):
                 raise ClientError("保存済みのフォルダ状態が見つかりません。")
+            # A directory selection is a full reimport. Even when its handle
+            # maps to the active ID, discard current session files first so
+            # each uploaded relative path reconciles its durable record.
             self.clear_catalog()
             try:
                 self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
@@ -115,6 +115,7 @@ class CatalogMixin:
                 hashes = dict(self.browser_import_hashes)
             target = self.workspace_store.best_catalog_for_manifest(entries, source_catalog)
             if not target:
+                self.workspace_store.finalize_catalog(source_catalog)
                 with self.lock:
                     self.browser_catalog_provisional = False
                     self.browser_import_hashes = {}
@@ -243,6 +244,7 @@ class CatalogMixin:
                     self.candidate_revisions = {}
                     self._clear_browser_save_tokens_unchecked()
                     self._invalidate_sam_cache()
+                    provisional_catalog = self.catalog_id if self.browser_catalog_provisional else None
                     self.catalog_id = None
                     self.browser_import_hashes = {}
                     self.browser_catalog_provisional = False
@@ -251,6 +253,8 @@ class CatalogMixin:
                     self._image_io_locks.clear()
                 self._clear_cache()
                 self._release_detached_session(session)
+                if provisional_catalog:
+                    self.workspace_store.delete_catalog(provisional_catalog)
         self.cleanup_expired_browser_save_tokens()
 
     def remove_image_from_catalog(self, image_id: str) -> list[dict[str, Any]]:
@@ -461,6 +465,7 @@ class CatalogMixin:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
                     self._persist_candidates(record.image_id)
+                self.workspace_store.delete_manual([record.image_id for record in records])
             self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
 
@@ -894,7 +899,8 @@ class CatalogMixin:
                     if self._candidate_revision(image_id) != revision:
                         continue
                     stored_candidates = self.candidates.get(image_id, [])
-                    candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file() or self.workspace_store.candidate_png(image_id, candidate.candidate_id) is not None]
+                    durable_ids = self.workspace_store.valid_candidate_ids(image_id)
+                    candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file() or candidate.candidate_id in durable_ids]
                     if len(candidates) != len(stored_candidates):
                         self.candidates[image_id] = candidates
                         self._touch_candidates(image_id)
