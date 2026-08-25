@@ -69,11 +69,6 @@ function queueWorkspaceDraft(imageId, immediate = false) {
     state.workspaceDraftTimers.delete(imageId);
     const payload = workspaceDraftPayload(state.drafts.get(imageId));
     return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) }))
-      .then(() => {
-        // SQLite is now authoritative. Do not retain base64 canvases for
-        // every previously selected image in the browser heap.
-        if (state.currentId !== imageId) state.drafts.delete(imageId);
-      })
       .catch((error) => { setStatus(error.message, "error"); });
   };
   if (immediate) return write();

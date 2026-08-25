@@ -63,7 +63,6 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     if (!isCurrentGeneration(generation)) return;
     releaseStaleImageVersions(imageId, imageCacheKey(record), candidateCacheKey(imageId, candidateBundle.candidateRevision));
     state.currentId = imageId;
-    if (previousImageId && previousImageId !== imageId) state.drafts.delete(previousImageId);
     state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
     state.currentImage = image;
     state.candidates = candidateBundle.candidates;
