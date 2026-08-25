@@ -1065,15 +1065,15 @@ async function main() {
     });
     assert.equal(eta.polled, eta.first, "ETA is retained between image completions");
     assert.notEqual(eta.completed, eta.first, "ETA is recalculated after an image completes");
-    const legacyDraftManualExclusion = await page.evaluate(() => {
+    const draftWithoutManualExclusionForced = await page.evaluate(() => {
       state.settings.detection.exclude_forced_default = false;
-      state.drafts.set("sample", { add: "", exclusion: "" });
+      state.drafts.set("sample", { add: "", exclusion: "", forceExclusion: true });
       const forced = draftPayload(["sample"]).sample.manualExclusionForced;
       state.drafts.delete("sample");
       state.settings.detection.exclude_forced_default = true;
       return forced;
     });
-    assert.equal(legacyDraftManualExclusion, false, "a legacy draft inherits the configured manual-exclusion default");
+    assert.equal(draftWithoutManualExclusionForced, false, "drafts without manualExclusionForced use the configured default and ignore the removed alias");
     await assertDesktopLayout(page, 1024, 768);
     await assertSettingsDialogLayout(page, 1024, 768, "ja", modelDownloadRequests);
     await page.evaluate(() => loadTranslations("en"));
