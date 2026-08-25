@@ -198,7 +198,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsExcludeForcedDefault").checked = settings.detection.exclude_forced_default !== false;
   $("#settingsSamType").value = settings.models.sam_model_type;
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === settings.models.sam_model_type; });
-  $("#settingsSamModel").value = samCheckpointPaths[settings.models.sam_model_type] || settings.models.sam_checkpoint || "";
+  $("#settingsSamModel").value = samCheckpointPaths[settings.models.sam_model_type] || "";
   $("#settingsProvider").value = settings.models.provider;
   syncProviderSelection();
   $("#settingsApplyColor").value = settings.display.apply_color;

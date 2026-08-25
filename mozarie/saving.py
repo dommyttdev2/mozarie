@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+
 from .core import *
 from .core import _read_mosaic_divisor, _read_save_suffix
 from .config import validate_output_directory_ready
 from .image_io import *
-from . import image_io as _image_io
-
-globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
+from .image_io import _replace_record_with_rendered_output
 
 class SavingMixin:
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(IO_CHUNK_BYTES):
+                digest.update(chunk)
+        return digest.hexdigest()
     def start_apply(
         self,
         image_ids: list[str],
@@ -93,6 +100,8 @@ class SavingMixin:
         suffix: str = "_censored",
     ) -> BrowserSaveRender:
         record = self.image_snapshot(image_id)
+        if draft is None:
+            draft = self.workspace_store.manual(image_id, self._encode_workspace_mask)
         draft_masks = decode_draft_masks(draft, record.width, record.height)
         manual_exclude_forced = draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True))
         removed_candidate_ids = {str(value) for value in draft.get("removedCandidateIds", [])} if isinstance(draft, dict) else set()
@@ -304,7 +313,13 @@ class SavingMixin:
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
                         record.asset_revision = record_snapshot.asset_revision + 1
-                    if deleted or cleared:
+                    if source_action == "overwrite":
+                        source_hash = self._sha256_file(token_details.rendered_path) if record.source_kind == "session" and token_details.rendered_path else None
+                        self.workspace_store.commit_saved_image(
+                            image_id, mtime_ns=record_snapshot.mtime_ns, size_bytes=record_snapshot.size_bytes,
+                            source_hash=source_hash, clear_manual=deleted or cleared,
+                        )
+                    elif deleted or cleared:
                         self.workspace_store.delete_manual([image_id])
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
@@ -364,6 +379,8 @@ class SavingMixin:
                         if isinstance(draft_or_mask, np.ndarray):
                             mask = draft_or_mask
                         else:
+                            if draft_or_mask is None:
+                                draft_or_mask = self.workspace_store.manual(record.image_id, self._encode_workspace_mask)
                             draft_masks = decode_draft_masks(draft_or_mask, record.width, record.height)
                             manual_exclude_forced = draft_manual_exclusion_forced(
                                 draft_or_mask, self.settings["detection"].get("exclude_forced_default", True),
@@ -404,7 +421,13 @@ class SavingMixin:
                         self.candidates[record.image_id] = []
                         self._touch_candidates(record.image_id)
                         self._persist_candidates(record.image_id)
-                        self.workspace_store.delete_manual([record.image_id])
+                        if not copy_to_default:
+                            self.workspace_store.commit_saved_image(
+                                record.image_id, mtime_ns=output_stat.st_mtime_ns, size_bytes=output_stat.st_size,
+                                source_hash=None, clear_manual=True,
+                            )
+                        else:
+                            self.workspace_store.delete_manual([record.image_id])
                         self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
                     self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
                     self.invalidate_sam_image(record.image_id)

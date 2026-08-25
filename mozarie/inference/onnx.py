@@ -158,9 +158,15 @@ class BaseOnnxModel:
         self.device = device
         self.session = create_session(path, device, gpu_device)
         self.input_name = self.session.get_inputs()[0].name
+        self.run_options = None
+        if device.lower() != "cpu":
+            self.run_options = ort.RunOptions()
+            self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{int(gpu_device)}")
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:
-        return [np.asarray(value) for value in self.session.run(None, {self.input_name: tensor})]
+        feeds = {self.input_name: tensor}
+        outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+        return [np.asarray(value) for value in outputs]
 
     @property
     def providers(self) -> tuple[str, ...]:

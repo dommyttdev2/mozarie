@@ -3,10 +3,7 @@ from __future__ import annotations
 from .core import *
 from .core import _read_detection_parallelism, _read_target_classes
 from .image_io import *
-from . import image_io as _image_io
 from .runtime_types import DetectionModels
-
-globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
 
 class DetectionMixin:
     def start_detection(
@@ -51,7 +48,8 @@ class DetectionMixin:
         return path
 
     def _configured_sam_path(self) -> Path:
-        raw_path = str(self.settings.get("models", {}).get("sam_checkpoint", "")).strip()
+        models = self.settings.get("models", {})
+        raw_path = str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
         if not raw_path:
             raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。")
         path = Path(raw_path).expanduser()
@@ -86,6 +84,26 @@ class DetectionMixin:
                     self._set_detection_model_preparation(False)
             return models.hand
 
+    def _boundary_hand_boxes(self, rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """Load only the hand detector for an interactive boundary request."""
+        if not self.settings["models"]["hand_detection_enabled"]:
+            return []
+        with self.lock:
+            hand = self.boundary_hand_model
+        if hand is None:
+            self._set_detection_model_preparation(True)
+            try:
+                hand = HandDetector(
+                    self._configured_model_path("hand_detection", "手の検出"),
+                    device=str(self.settings["models"].get("provider", "gpu")),
+                    gpu_device=int(self.settings["models"].get("gpu_device", 0)),
+                )
+            finally:
+                self._set_detection_model_preparation(False)
+            with self.lock:
+                self.boundary_hand_model = hand
+        return hand.detect_boxes(rgb, HAND_CONFIDENCE)
+
     def _detect_worker(
         self,
         records: list[ImageRecord],
@@ -100,7 +118,8 @@ class DetectionMixin:
         models: DetectionModels | None = None
         try:
             mode = str(self.settings["detection"]["mode"])
-            worker_count = min(_read_detection_parallelism(parallelism), len(records))
+            requested_parallelism = _read_detection_parallelism(parallelism)
+            worker_count = min(1 if self.settings["models"]["provider"] == "gpu" else requested_parallelism, len(records))
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
@@ -233,33 +252,18 @@ class DetectionMixin:
         if hand_boxes:
             fallback_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
             if self.settings["models"].get("hand_segmentation_enabled"):
-                try:
-                    with self.hand_segmentation_lock:
-                        if self._hand_segmentation_failed_job_generation == self.job_generation:
-                            specialist_predictor = None
-                        else:
-                            specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
-                        if specialist_predictor is not None:
-                            rejected: list[tuple[int, int, int, int]] = []
-                            for padded_box in fallback_boxes:
-                                masks, _scores, _ = specialist_predictor.predict(
-                                    point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
-                                )
-                                confirmed = accepted_specialist_hand_mask(masks, shape, padded_box)
-                                if confirmed is None:
-                                    rejected.append(padded_box)
-                                else:
-                                    hand_mask = np.maximum(hand_mask, confirmed)
-                            fallback_boxes = rejected
-                except ClientError as exc:
-                    # The optional specialist must never make ordinary hand
-                    # detection unavailable. One failed checkpoint is skipped
-                    # for the rest of this job, not retried for every image.
-                    with self.lock:
-                        already_disabled = self._hand_segmentation_failed_job_generation == self.job_generation
-                        self._hand_segmentation_failed_job_generation = self.job_generation
-                    if not already_disabled:
-                        LOGGER.warning("HandSegNetをこのジョブでは使用しません: %s", exc)
+                with self.hand_segmentation_lock:
+                    specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
+                    for padded_box in fallback_boxes:
+                        masks, _scores, _ = specialist_predictor.predict(
+                            point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
+                        )
+                        confirmed = accepted_specialist_hand_mask(masks, shape, padded_box)
+                        if confirmed is not None:
+                            hand_mask = np.maximum(hand_mask, confirmed)
+                # HandSegNet is authoritative when enabled: rejected specialist
+                # masks are dropped rather than silently changing to SAM output.
+                fallback_boxes = []
         return detected, hand_mask, fallback_boxes
 
     @staticmethod
@@ -519,10 +523,27 @@ class DetectionMixin:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。")
-            refined_boundary = self._refine_detected_segments(
-                self._ensure_models(), record, rgb, [boundary_segment]
-            )[0]
-            refined_boundary = self._finalize_exclusions(rgb, [refined_boundary])[0]
+            hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
+            hand_boxes = [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None]
+            if hand_boxes:
+                if self.settings["models"].get("hand_segmentation_enabled"):
+                    with self.hand_segmentation_lock:
+                        specialist = self._hand_segmentation_predictor_for(record, rgb)
+                        for box in hand_boxes:
+                            masks, _scores, _ = specialist.predict(
+                                point_coords=None, point_labels=None, box=np.asarray(box, dtype=np.float32), multimask_output=False,
+                            )
+                            confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
+                            if confirmed is not None:
+                                hand_mask = np.maximum(hand_mask, confirmed)
+                else:
+                    with self.sam_lock:
+                        hand_mask = self._apply_sam_hand_fallback(
+                            self._sam_predictor_for(record, rgb), hand_boxes, rgb.shape[:2], hand_mask
+                        )
+            if np.any(hand_mask):
+                boundary_segment["image_exclusions"] = {"hand": hand_mask}
+            boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
             candidate_id = uuid.uuid4().hex
             created = [Candidate(
                 candidate_id=candidate_id,
@@ -533,8 +554,8 @@ class DetectionMixin:
             )]
             masks = [np.asarray(clipped, dtype=np.uint8)]
             exclusions = {
-                **dict(refined_boundary.get("image_exclusions", {})),
-                **dict(refined_boundary.get("exclusions", {})),
+                **dict(boundary_segment.get("image_exclusions", {})),
+                **dict(boundary_segment.get("exclusions", {})),
             }
             for exclusion_kind, exclusion_mask in exclusions.items():
                 if not np.any(exclusion_mask):

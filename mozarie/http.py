@@ -173,7 +173,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
-                configured = all(str(models.get(key, "")).strip() for key in ("target_segmentation", "sam_checkpoint"))
+                configured = bool(str(models.get("target_segmentation", "")).strip()) and bool(
+                    str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
+                )
                 configured = configured and all(
                     not bool(models.get(enabled_key)) or bool(str(models.get(path_key, "")).strip())
                     for enabled_key, path_key in (
@@ -236,6 +238,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             path = unquote(parsed.path)
             if path == "/api/import/file":
                 self._require_binary_import_request()
+                self._upload_sha256 = None
                 name = unquote(self.headers.get("X-Mozarie-Name", ""))
                 relative_path = unquote(self.headers.get("X-Mozarie-Relative-Path", ""))
                 client_key = unquote(self.headers.get("X-Mozarie-Client-Key", ""))
@@ -250,7 +253,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         # Browser uploads have no trustworthy native path.
                         # Streamed content fingerprints let the fallback match
                         # a complete folder manifest after all files arrive.
-                        source_hash = _file_sha256(staged_path)
+                        source_hash = getattr(self, "_upload_sha256", None) or _file_sha256(staged_path)
                         try:
                             # Keep implicit API callers from splitting a
                             # parallel empty-catalog upload across IDs. This
@@ -274,6 +277,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self._json({"imported": imported, "catalogId": STATE.catalog_id, "provisional": STATE.browser_catalog_provisional, "workspaceVersion": 1})
                 finally:
                     STATE.end_import_transfer()
+                    self._upload_sha256 = None
                 return
             self._require_json_request()
             payload = self._read_json_body()
@@ -475,6 +479,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         staging_dir.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         remaining = content_length
+        digest = hashlib.sha256()
         try:
             with tempfile.NamedTemporaryFile(dir=staging_dir, suffix=".upload.tmp", delete=False) as handle:
                 temporary_path = Path(handle.name)
@@ -483,8 +488,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     if not chunk:
                         raise ClientError("画像データを最後まで読み込めません。")
                     handle.write(chunk)
+                    digest.update(chunk)
                     remaining -= len(chunk)
                 handle.flush()
+            self._upload_sha256 = digest.hexdigest()
             result = temporary_path
             temporary_path = None
             return result

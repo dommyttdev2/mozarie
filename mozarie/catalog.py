@@ -4,9 +4,7 @@ import warnings
 
 from .core import *
 from .image_io import *
-from . import image_io as _image_io
-
-globals().update({name: value for name, value in vars(_image_io).items() if not name.startswith("__")})
+from .image_io import _valid_color
 
 class CatalogMixin:
     @staticmethod
@@ -590,7 +588,9 @@ class CatalogMixin:
                         record.image_id = str(stored["image_id"]); record.hidden = bool(stored["hidden"]); record.reviewed = bool(stored["reviewed"])
                         if source_hash: self.browser_import_hashes[record.relative_path] = source_hash
                         _revision, restored = self.workspace_store.hydrate_candidates(record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace)
-                        if restored: self.candidates[record.image_id] = restored; self.candidate_revisions[record.image_id] = _revision
+                        if restored or _revision:
+                            self.candidates[record.image_id] = restored
+                            self.candidate_revisions[record.image_id] = _revision
                     imported[index]["imageId"] = record.image_id
                     self.images[record.image_id] = record
                     self.order.append(record.image_id)
@@ -849,6 +849,7 @@ class CatalogMixin:
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
         with self.lock:
+            manual_effective_ids = self.workspace_store.manual_effective_mask_ids(list(self.order))
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
@@ -867,13 +868,17 @@ class CatalogMixin:
                             candidate.enabled and candidate.role == CandidateRole.APPLY
                             for candidate in self.candidates.get(image_id, [])
                         ),
+                        "hasEffectiveMask": image_id in manual_effective_ids or any(
+                            candidate.enabled and candidate.role == CandidateRole.APPLY
+                            for candidate in self.candidates.get(image_id, [])
+                        ),
                         "candidateRevision": self._candidate_revision(image_id),
                         "hidden": record.hidden,
                         "reviewed": record.reviewed,
                     }
                 )
             return {
-                "root": str(self.root) if self.root else "",
+                "root": str(self.root) if self.root else None,
                 "images": output,
                 "catalogGeneration": self.catalog_generation,
                 "workspace": self.catalog_id is not None,
@@ -1016,8 +1021,8 @@ class CatalogMixin:
                 candidate.color = color
             if "forced" in payload:
                 candidate.forced = payload["forced"]
-            self._touch_candidates(image_id)
-            self._persist_candidates(image_id)
+            revision = self._touch_candidates(image_id)
+            self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
             return self._candidate_revision(image_id)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
@@ -1040,7 +1045,10 @@ class CatalogMixin:
                     for item in selected:
                         item.enabled = operation == "enable"
                 revision = self._touch_candidates(image_id)
-                self._persist_candidates(image_id)
+                if operation == "delete":
+                    self._persist_candidates(image_id)
+                else:
+                    self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
             for path in paths:
                 path.unlink(missing_ok=True)
             return revision

@@ -23,12 +23,30 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class WorkspaceStore:
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "workspaces.sqlite3"
         self._lock = threading.RLock()
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Inspect an existing database before issuing any write-capable pragma,
+        # DDL, or cleanup statement. v0.4 intentionally has no migrations.
+        existing = self.path.exists()
+        if existing:
+            with sqlite3.connect(self.path, factory=_ClosingConnection) as db:
+                db.row_factory = sqlite3.Row
+                tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "meta" not in tables:
+                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
+                version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if version_row is None:
+                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
+                version = int(version_row["value"])
+                if version > self.VERSION:
+                    raise RuntimeError("workspace database is newer than this Mozarie version")
+                if version != self.VERSION:
+                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+                self._validate_schema(db, tables)
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
@@ -63,19 +81,27 @@ class WorkspaceStore:
                     exclusion_erase_enabled INTEGER NOT NULL DEFAULT 1,
                     exclusion_forced INTEGER NOT NULL DEFAULT 1,
                     removed_candidate_ids TEXT NOT NULL DEFAULT '[]', candidate_revision INTEGER NOT NULL DEFAULT 0,
+                    has_effective_mask INTEGER NOT NULL DEFAULT 0,
                     updated_at INTEGER NOT NULL
                 );
             """)
-            # A process cannot own an upload that survived a restart. These
-            # partial browser manifests are never safe restoration targets.
-            db.execute("DELETE FROM catalogs WHERE identity_hash LIKE 'browser-provisional:%'")
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(images)")}
-            if "source_hash" not in columns:
-                db.execute("ALTER TABLE images ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
-            version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if version_row and int(version_row["value"]) > self.VERSION:
-                raise RuntimeError("workspace database is newer than this Mozarie version")
-            db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
+            if not existing:
+                db.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
+
+    @staticmethod
+    def _validate_schema(db: sqlite3.Connection, tables: set[str]) -> None:
+        required = {
+            "catalogs": {"catalog_id", "identity_hash", "created_at", "updated_at"},
+            "images": {"catalog_id", "relative_path", "image_id", "size_bytes", "mtime_ns", "source_hash", "hidden", "reviewed", "candidate_revision", "updated_at"},
+            "candidates": {"image_id", "candidate_id", "class_name", "confidence", "mask_png", "enabled", "color", "source", "origin", "refinement", "role", "forced", "deleted"},
+            "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "has_effective_mask", "updated_at"},
+        }
+        if not set(required) <= tables:
+            raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+        for table, columns in required.items():
+            present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            if not columns <= present:
+                raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
@@ -136,12 +162,6 @@ class WorkspaceStore:
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-
-    def unique_catalog_for_file(self, relative_path: str, source_hash: str) -> str | None:
-        if not source_hash: return None
-        with self._connect() as db:
-            rows = db.execute("SELECT DISTINCT catalog_id FROM images WHERE relative_path=? AND source_hash=?", (relative_path, source_hash)).fetchall()
-        return str(rows[0]["catalog_id"]) if len(rows) == 1 else None
 
     def best_catalog_for_manifest(self, entries: list[tuple[str, str]], exclude_catalog: str) -> str | None:
         """Return a browser catalogue only for a unique strict-majority match."""
@@ -219,6 +239,35 @@ class WorkspaceStore:
         with self._lock, self._connect() as db:
             db.execute(f"UPDATE images SET {','.join(updates)},updated_at=? WHERE image_id=?", values)
 
+    def commit_saved_image(self, image_id: str, *, mtime_ns: int, size_bytes: int, source_hash: str | None, clear_manual: bool) -> None:
+        """Persist the source fingerprint and cleared manual state as one save commit."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if source_hash is None:
+                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
+                else:
+                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,source_hash=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, source_hash, time.time_ns(), image_id))
+                if clear_manual:
+                    db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def update_candidate_metadata(self, image_id: str, revision: int, candidates: list[Any]) -> None:
+        """Update lightweight candidate controls without reading or rewriting PNG blobs."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("UPDATE images SET candidate_revision=?, reviewed=0, updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
+                for candidate in candidates:
+                    db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
     def replace_candidates(self, image_id: str, revision: int, candidates: list[Any]) -> None:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -282,11 +331,21 @@ class WorkspaceStore:
         removed = payload.get("removedCandidateIds", [])
         if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed): raise ValueError("invalid removed candidates")
         with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO manual_edits VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
+            has_effective_mask = int(bool(add) and bool(payload.get("manualEnabled", True)))
+            db.execute("""INSERT INTO manual_edits VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 add_png=excluded.add_png,exclusion_png=excluded.exclusion_png,exclusion_erase_png=excluded.exclusion_erase_png,
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
-                exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,updated_at=excluded.updated_at""",
-                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),time.time_ns()))
+                exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
+                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),has_effective_mask,time.time_ns()))
+
+    def manual_effective_mask_ids(self, image_ids: list[str]) -> set[str]:
+        """Return manual-mask presence from indexed scalar metadata only."""
+        if not image_ids:
+            return set()
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._connect() as db:
+            rows = db.execute(f"SELECT image_id FROM manual_edits WHERE has_effective_mask=1 AND image_id IN ({placeholders})", image_ids).fetchall()
+        return {str(row["image_id"]) for row in rows}
 
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:

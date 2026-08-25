@@ -1,4 +1,4 @@
-"""Mozarie's small executable entry point and backwards-compatible API surface."""
+"""Mozarie's small executable entry point."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from mozarie.core import *  # noqa: F403
-from mozarie.image_io import *  # noqa: F403
-from mozarie.image_io import _apply_mosaic_to_image, _assert_image_suffix_matches_format, _decode_mask, _default_output_destination
+from mozarie.core import LOGGER, LOG_DATE_FORMAT, LOG_FORMAT
 from mozarie.state import DetectionModels, STATE, StudioState
-from mozarie.http import MosaicHandler, _read_candidate_revision, _read_detection_parallelism, _read_mosaic_divisor, _read_save_suffix, _read_target_classes, _start_update_after_response
+from mozarie.http import MosaicHandler
 
 
 def _open_browser(url: str) -> None:

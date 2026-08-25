@@ -375,7 +375,7 @@ def draft_manual_exclusion_forced(raw_draft: Any, default: bool = True) -> bool:
     """Use the configured default for drafts created before per-exclusion state existed."""
     if not isinstance(raw_draft, dict):
         return default
-    return raw_draft.get("manualExclusionForced", raw_draft.get("forceExclusion", default)) is not False
+    return raw_draft.get("manualExclusionForced", default) is not False
 
 
 def unique_session_import_destination(path: Path, reserved: set[Path] | None = None) -> Path:

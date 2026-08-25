@@ -107,6 +107,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.worker_thread: threading.Thread | None = None
         self.job_control: JobControl | None = None
         self.models: DetectionModels | None = None
+        self.boundary_hand_model: Any | None = None
         self.sam_predictor: Any | None = None
         self.sam_image_id: str | None = None
         self.sam_lock = threading.RLock()
@@ -115,7 +116,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # SAM and HandSegNet both retain large CUDA embeddings. One shared
         # re-entrant lock prevents their peak allocations from overlapping.
         self.hand_segmentation_lock = self.sam_lock
-        self._hand_segmentation_failed_job_generation: int | None = None
         self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
 
@@ -140,9 +140,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
                 "hand_detection", "hand_detection_enabled", "provider", "gpu_device",
             }
-            sam_keys = {"sam_checkpoints", "sam_checkpoint", "sam_model_type", "provider", "gpu_device"}
+            sam_keys = {"sam_checkpoints", "sam_model_type", "provider", "gpu_device"}
             if any(settings["models"].get(key) != previous_models.get(key) for key in detection_keys):
                 self.models = None
+                self.boundary_hand_model = None
             if any(settings["models"].get(key) != previous_models.get(key) for key in sam_keys):
                 self.sam_predictor = None
                 self.sam_image_id = None
@@ -167,6 +168,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
             self.settings = self.settings_store.reset()
             self.models = None
+            self.boundary_hand_model = None
             self.sam_predictor = None
             self.sam_image_id = None
             self.hand_segmentation_predictor = None
@@ -191,8 +193,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         """Report configured model files without loading model data."""
         models = (settings or self.settings)["models"]
         result: dict[str, dict[str, Any]] = {}
-        def add_status(key: str, *, required: bool, enabled: bool, required_suffix: str | None = None) -> None:
-            raw = str(models.get(key, "")).strip()
+        def add_status(key: str, *, required: bool, enabled: bool, required_suffix: str | None = None, raw_path: str | None = None) -> None:
+            raw = str(models.get(key, "") if raw_path is None else raw_path).strip()
             if not required and not enabled:
                 result[key] = {
                     "required": False,
@@ -235,7 +237,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             enabled=bool(models.get("hand_detection_enabled")) and bool(models.get("hand_segmentation_enabled")),
             required_suffix=".safetensors",
         )
-        add_status("sam_checkpoint", required=True, enabled=True)
+        add_status("sam_checkpoint", required=True, enabled=True, raw_path=str(models["sam_checkpoints"].get(models["sam_model_type"], "")))
         sam_files = {
             "vit_b": "sam_vit_b_01ec64.pth",
             "vit_l": "sam_vit_l_0b3195.pth",
