@@ -816,6 +816,7 @@ async function main() {
     assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
@@ -969,8 +970,9 @@ async function main() {
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears after a successful response");
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\).*GPU 0:/, "status shows actual GPU names, VRAM, and the incompatibility");
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\)$/, "status shows actual GPU names, VRAM, and the incompatibility without a fabricated fallback device");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
+    assert.equal(await page.locator('#settingsGpuDevice option[value="0"]').count(), 0, "a pending or mismatched setting never creates a fake GPU 0 option");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
@@ -1279,19 +1281,20 @@ async function main() {
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
-    assert.equal(await page.locator("#detectParallelism").isDisabled(), true, "GPU detection keeps the visible worker count fixed at one");
+    assert.equal(await page.locator("#detectParallelism").isDisabled(), false, "GPU keeps the same editable worker control");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "2", "the saved worker count is shown without rewriting it");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    await page.locator("#detectParallelism").fill("3");
+    await page.locator("#detectParallelism").fill("4");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    assert.equal(await page.locator("#detectParallelism").inputValue(), "1", "GPU hides the stored CPU worker count behind one effective worker");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "GPU preserves the requested worker count");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    assert.equal(await page.locator("#detectParallelism").inputValue(), "3", "switching back to CPU restores its stored worker count");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "switching providers does not rewrite the worker count");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
     assert.equal(detectRequests.length, 2, "starting settings should call detection once");
     assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
-    assert.equal(detectRequests[1].parallelism, 3, "dialog parallelism should be submitted");
+    assert.equal(detectRequests[1].parallelism, 4, "dialog parallelism should be submitted on GPU");
     assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
     await page.reload({ waitUntil: "networkidle" });

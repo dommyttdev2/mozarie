@@ -148,41 +148,34 @@ function handleToolRailKeydown(event) {
 }
 
 function renderSettingsStatus(status) {
-  state.settingsStatus = status;
+  if (status) state.settingsStatus = status;
   const gpuSelect = $("#settingsGpuDevice");
   const selected = gpuSelect.value || String(state.settings?.models?.gpu_device ?? 0);
-  const configured = String(state.settings?.models?.gpu_device ?? 0);
   gpuSelect.textContent = "";
-  const gpus = status?.gpus || [];
-  if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; option.disabled = true; gpuSelect.append(option); }
-  else for (const gpu of gpus) {
+  const gpus = Array.isArray(status?.gpus) ? status.gpus : (state.settingsStatus?.gpus || []);
+  for (const gpu of gpus) {
     const option = document.createElement("option"); option.value = String(gpu.id);
     const memory = gpuMemoryLabel(gpu.totalMemory);
     option.textContent = `GPU ${gpu.id}: ${gpu.name}${memory ? ` / VRAM: ${memory} GB` : ""}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
-  if (![...gpuSelect.children].some((option) => option.value === selected)) {
-    const option = document.createElement("option"); option.value = selected; option.textContent = `GPU ${selected}: ${t("settings.gpuUnavailable")}`; option.disabled = true; gpuSelect.append(option);
+  if (gpus.length) {
+    const selectedOption = [...gpuSelect.options].find((option) => option.value === selected && !option.disabled);
+    const firstSupported = [...gpuSelect.options].find((option) => !option.disabled);
+    gpuSelect.value = selectedOption?.value || firstSupported?.value || "";
   }
-  gpuSelect.value = selected;
+  syncProviderSelection();
   renderModelStatus();
 }
 
 function syncProviderSelection() {
   const gpu = $("#settingsProvider").value === "gpu";
-  $("#settingsGpuDevice").disabled = !gpu;
-  const parallelism = $("#detectParallelism");
-  if (gpu && !parallelism.disabled) {
-    const value = Number(parallelism.value);
-    state.cpuDetectionParallelism = Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
-  }
-  parallelism.disabled = gpu;
-  parallelism.value = String(gpu ? 1 : state.cpuDetectionParallelism);
+  const gpuSelect = $("#settingsGpuDevice");
+  gpuSelect.disabled = !gpu || ![...gpuSelect.options].some((option) => !option.disabled);
 }
 
 function setSettingsForm(settings, status = null) {
   state.settings = settings;
-  state.cpuDetectionParallelism = Number(settings.detection?.parallelism) || 2;
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
@@ -219,7 +212,7 @@ function setSettingsForm(settings, status = null) {
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
-  $("#detectParallelism").value = String(settings.models.provider === "gpu" ? 1 : state.cpuDetectionParallelism);
+  $("#detectParallelism").value = String(settings.detection?.parallelism || 2);
   setDetectionTargets(settings.detection.targets);
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
@@ -269,7 +262,7 @@ function settingsPayload() {
     importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
-      parallelism: $("#settingsProvider").value === "gpu" ? state.cpuDetectionParallelism : detectionParallelism(),
+      parallelism: detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
       exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),

@@ -146,6 +146,17 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 settings = self.settings_store.validate_update(update)
                 if settings["saving"]["default_output_directory"] != previous_output_directory:
                     validate_output_directory_ready(settings["saving"]["default_output_directory"])
+                gpu_selection_changed = any(
+                    settings["models"].get(key) != previous_models.get(key)
+                    for key in {"provider", "gpu_device"}
+                )
+                if settings["models"]["provider"] == "gpu" and gpu_selection_changed:
+                    selected_gpu = next(
+                        (gpu for gpu in cuda_device_statuses(torch_module()) if gpu["id"] == settings["models"]["gpu_device"]),
+                        None,
+                    )
+                    if not selected_gpu or not selected_gpu["supported"]:
+                        raise ClientError("選択したGPUは使用できません。対応しているGPUを選ぶか、CPUへ切り替えてください。", "gpu_unsupported")
                 settings = self.settings_store.save(settings)
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc

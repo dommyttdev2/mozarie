@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter, _class_names
-from mozarie.inference.onnx import BaseOnnxModel, Letterbox, class_aware_nms_indices, create_session, nms_indices
+from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, nms_indices
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -46,6 +46,15 @@ class OnnxAdapterTests(unittest.TestCase):
                 },
             ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
+
+    def test_default_gpu_does_not_pass_a_redundant_device_id(self) -> None:
+        with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]):
+            self.assertEqual(available_providers("gpu", 0), [("CUDAExecutionProvider", {
+                "arena_extend_strategy": "kSameAsRequested",
+                "cudnn_conv_algo_search": "HEURISTIC",
+                "cudnn_conv_use_max_workspace": "0",
+                "do_copy_in_default_stream": "1",
+            }), "CPUExecutionProvider"])
 
     def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
         cpu = BaseOnnxModel.__new__(BaseOnnxModel)

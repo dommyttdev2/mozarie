@@ -130,7 +130,7 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
-            worker_count = min(1 if self.settings["models"]["provider"] == "gpu" else requested_parallelism, len(records))
+            worker_count = min(requested_parallelism, len(records))
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):

@@ -721,6 +721,35 @@ class MozarieTests(unittest.TestCase):
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
+    def test_settings_rejects_an_unknown_or_unsupported_gpu_selection(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["sm_89"],
+            device_count=lambda: 2,
+            get_device_capability=lambda index: [(8, 9), (6, 1)][index],
+            get_device_name=lambda index: ["RTX Test", "Legacy Test"][index],
+            get_device_properties=lambda index: types.SimpleNamespace(total_memory=[16, 3][index] * 1024 ** 3),
+        )
+        state = self.new_state()
+        state.settings["models"].update({"provider": "cpu", "gpu_device": 0})
+        for gpu_device in (1, 9):
+            with self.subTest(gpu_device=gpu_device):
+                update = copy.deepcopy(state.settings)
+                update["models"].update({"provider": "gpu", "gpu_device": gpu_device})
+                with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+                     patch.object(state.settings_store, "save") as save, \
+                     self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
+                    state.update_settings(update)
+                self.assertEqual(raised.exception.error_code, "gpu_unsupported")
+                save.assert_not_called()
+
+        update = copy.deepcopy(state.settings)
+        update["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+             patch.object(state.settings_store, "save", return_value=update) as save:
+            state.update_settings(update)
+        save.assert_called_once_with(update)
+
     def test_cuda_status_ignores_ptx_only_arches(self):
         cuda = types.SimpleNamespace(
             is_available=lambda: True,

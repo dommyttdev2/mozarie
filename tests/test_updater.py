@@ -609,6 +609,14 @@ class UpdaterTests(unittest.TestCase):
         install_index = batch.index('"%PYTHON%" -m pip install --upgrade pip')
         self.assertLess(batch.index("call :validate_python"), install_index)
 
+    def test_requirements_pin_the_official_cuda_runtime_without_replacing_pypi(self):
+        requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("--extra-index-url https://download.pytorch.org/whl/cu130", requirements)
+        self.assertIn("torch==2.13.0+cu130", requirements)
+        self.assertIn("torchvision==0.28.0+cu130", requirements)
+        self.assertIn("onnxruntime-gpu==1.27.0", requirements)
+        self.assertNotIn("--index-url https://download.pytorch.org/whl/cu130", requirements)
+
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
         for name in ("setup.bat", "run.bat"):
