@@ -1,4 +1,5 @@
 function canvasSizeForImage(image) {
+  releaseMosaicPreview();
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   blinkCanvas.width = image.width; blinkCanvas.height = image.height;
   addCtx.clearRect(0, 0, image.width, image.height);
@@ -17,6 +18,7 @@ function canvasSizeForImage(image) {
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
+  releaseMosaicPreview();
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
   state.maskDirty = false;
