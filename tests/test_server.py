@@ -1056,10 +1056,10 @@ class MozarieTests(unittest.TestCase):
 
     def test_browser_opener_logs_result_without_raising(self):
         with patch("server.webbrowser.open", return_value=True) as open_browser:
-            with self.assertLogs(core_module.LOGGER, "INFO") as logs:
+            with patch.object(core_module.LOGGER, "info") as info:
                 _open_browser("http://127.0.0.1:8765")
         open_browser.assert_called_once_with("http://127.0.0.1:8765")
-        self.assertIn("既定ブラウザを開きました", "\n".join(logs.output))
+        info.assert_not_called()
 
         with patch("server.webbrowser.open", return_value=False):
             with self.assertLogs(core_module.LOGGER, "WARNING") as logs:
@@ -1085,7 +1085,7 @@ class MozarieTests(unittest.TestCase):
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
             server_entry.main()
 
-        basic_config.assert_called_once_with(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        basic_config.assert_called_once_with(level=logging.WARNING, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
         server_class.assert_called_once_with(("127.0.0.1", 9876), MosaicHandler)
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
@@ -1107,7 +1107,7 @@ class MozarieTests(unittest.TestCase):
         finally:
             state_module.STATE.settings = original_settings
 
-    def test_http_log_message_logs_successful_api_posts_and_errors_only(self):
+    def test_http_log_message_silences_success_and_client_errors(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
         with patch.object(core_module.LOGGER, "info") as info, patch.object(core_module.LOGGER, "warning") as warning:
@@ -1124,25 +1124,27 @@ class MozarieTests(unittest.TestCase):
             handler.command = "POST"
             handler.path = "/api/detect"
             handler.log_message('"%s" %s %s', "POST /api/detect HTTP/1.1", "200", "10")
-            info.assert_called_once()
+            info.assert_not_called()
 
             handler.command = "GET"
             handler.path = "/missing"
             handler.log_message('"%s" %s %s', "GET /missing HTTP/1.1", "404", "10")
+            warning.assert_not_called()
+
+            handler.path = "/api/failure"
+            handler.log_message('"%s" %s %s', "GET /api/failure HTTP/1.1", "500", "10")
             warning.assert_called_once()
 
     def test_job_lifecycle_logs_start_completion_and_failure(self):
         state = self.new_state()
         record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
-        with patch("server.threading.Thread"):
-            with self.assertLogs(core_module.LOGGER, "INFO") as logs:
-                state._start_job("detect", [record], lambda *_args, **_kwargs: None)
-        self.assertIn("バックグラウンド処理を開始", "\n".join(logs.output))
-        self.assertIn(JOB_LABELS["detect"], "\n".join(logs.output))
+        with patch("server.threading.Thread"), patch.object(core_module.LOGGER, "debug") as debug:
+            state._start_job("detect", [record], lambda *_args, **_kwargs: None)
+        debug.assert_called_once()
 
-        with self.assertLogs(core_module.LOGGER, "INFO") as logs:
+        with patch.object(core_module.LOGGER, "debug") as debug:
             state._finish_job()
-        self.assertIn("バックグラウンド処理が完了", "\n".join(logs.output))
+        debug.assert_called_once()
 
         try:
             raise RuntimeError("test failure")
@@ -3010,7 +3012,7 @@ class MozarieTests(unittest.TestCase):
         specialist.predict.assert_called_once()
         self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
-    def test_specialist_handseg_rejection_does_not_call_generic_sam(self):
+    def test_specialist_handseg_rejection_uses_generic_sam(self):
         state = self.new_state()
         state.settings["models"]["hand_segmentation_enabled"] = True
         events: list[str] = []
@@ -3040,8 +3042,8 @@ class MozarieTests(unittest.TestCase):
                 [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
             )
         self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
-        generic.assert_not_called()
-        self.assertFalse(np.any(result[0]["_confirmed_hand"]))
+        generic.predict.assert_called_once()
+        self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
     def test_specialist_client_error_propagates_without_generic_sam(self):
         state = self.new_state()
@@ -3405,7 +3407,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
 
-    def test_high_precision_refinement_drops_all_targets_when_sam_is_incompatible(self):
+    def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
@@ -3420,9 +3422,11 @@ class MozarieTests(unittest.TestCase):
             segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "target"}
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
                 refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), [segment])
-            self.assertEqual(refined, [])
+            self.assertEqual(len(refined), 1)
+            self.assertEqual(refined[0]["refinement"], "sam_fallback")
+            self.assertTrue(np.array_equal(refined[0]["mask"] > 0, mask > 0))
 
-    def test_high_precision_refinement_keeps_non_targets_and_drops_only_failed_targets(self):
+    def test_high_precision_refinement_keeps_non_targets_and_failed_detector_masks(self):
         state = self.new_state()
         source = np.zeros((12, 12), dtype=np.uint8); source[2:10, 2:10] = 255
         good = source.astype(bool); good[2:4, 2:4] = False
@@ -3439,12 +3443,13 @@ class MozarieTests(unittest.TestCase):
             {"class_name": "pussy", "mask": source.copy(), "confidence": 0.8, "source": "target"},
         ]
         refined = state._high_precision_segments_with_predictor(np.zeros((12, 12, 3), dtype=np.uint8), segments, predictor)
-        self.assertEqual(len(refined), 2)
+        self.assertEqual(len(refined), 3)
         self.assertIs(refined[0], non_target)
         self.assertEqual(refined[1]["class_name"], "penis")
         self.assertEqual(refined[1]["refinement"], "sam_high_precision")
+        self.assertEqual(refined[2]["refinement"], "sam_fallback")
 
-    def test_high_precision_refinement_drops_target_without_sam_prompt(self):
+    def test_high_precision_refinement_keeps_target_without_sam_prompt(self):
         state = self.new_state()
         source = np.zeros((12, 12), dtype=np.uint8); source[3:9, 3:9] = 255
         segment = {"class_name": "penis", "mask": source, "confidence": 0.8, "source": "target"}
@@ -3456,10 +3461,11 @@ class MozarieTests(unittest.TestCase):
             refined = state._high_precision_segments_with_predictor(
                 np.zeros((12, 12, 3), dtype=np.uint8), [segment, non_target], predictor
             )
-        self.assertEqual(refined, [non_target])
+        self.assertEqual(refined, [segment, non_target])
+        self.assertEqual(segment["refinement"], "sam_fallback")
         predictor.predict.assert_not_called()
 
-    def test_high_precision_detection_emits_no_candidates_when_all_targets_fail(self):
+    def test_high_precision_detection_keeps_candidates_when_all_targets_fail(self):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
@@ -3481,8 +3487,8 @@ class MozarieTests(unittest.TestCase):
                 state, "_sam_predictor_for", return_value=FakePredictor()
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
-            self.assertEqual(candidates, [])
-            self.assertEqual(list((state.cache_dir / record.image_id).glob(".mozarie-pending-*")), [])
+            self.assertEqual([candidate.class_name for candidate in candidates], ["penis", "pussy"])
+            self.assertEqual([candidate.refinement for candidate in candidates], ["sam_fallback", "sam_fallback"])
 
     def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
         state = self.new_state()
@@ -4588,7 +4594,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.candidates[first_id], [])
             self.assertEqual(second.read_bytes(), original_second)
 
-    def test_apply_all_empty_masks_reports_a_job_error(self):
+    def test_apply_all_empty_masks_completes_without_changing_images(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
@@ -4600,8 +4606,8 @@ class MozarieTests(unittest.TestCase):
 
             state._apply_worker([record], 100, {})
 
-            self.assertEqual(state.job.state, "error")
-            self.assertIn("保存するモザイク範囲", state.job.error)
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.total, 0)
             self.assertEqual(source.read_bytes(), original)
 
     def test_copy_save_empty_record_does_not_consume_a_later_output_name(self):

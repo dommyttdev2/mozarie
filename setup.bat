@@ -3,17 +3,22 @@ chcp 65001 >nul
 setlocal
 set "APP_DIR=%~dp0"
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
-
 if not exist "%PYTHON%" call :create_venv
 if errorlevel 1 goto :missing_python
 if not exist "%PYTHON%" goto :missing_python
 call :validate_python
 if errorlevel 1 goto :python_too_old
 
-"%PYTHON%" -m pip install --upgrade pip
+echo [Mozarie] Preparing required packages. This may download several GB on the first run.
+"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet --upgrade pip
 if errorlevel 1 goto :failed
-"%PYTHON%" -m pip install -r "%APP_DIR%requirements.txt"
+"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet -r "%APP_DIR%requirements.txt"
 if errorlevel 1 goto :failed
+"%PYTHON%" -m pip check
+if errorlevel 1 goto :failed
+"%PYTHON%" -c "import onnxruntime as ort, torch; raise SystemExit(0 if torch.version.cuda and 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
+if errorlevel 1 goto :failed
+>"%APP_DIR%.venv\.mozarie-ready" echo ready
 echo [Mozarie] Setup complete. Run run.bat.
 pause
 exit /b 0
@@ -34,7 +39,7 @@ exit /b 0
 exit /b %ERRORLEVEL%
 
 :failed
-echo [Mozarie] Setup failed. .venv was left in place for inspection.
+echo [Mozarie] Setup failed. Check the message above and run setup.bat again.
 pause
 exit /b 1
 

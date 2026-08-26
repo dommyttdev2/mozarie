@@ -606,7 +606,7 @@ class UpdaterTests(unittest.TestCase):
         batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         version_check = '"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize(\'P\') == 8 else 1)"'
         self.assertIn(version_check, batch)
-        install_index = batch.index('"%PYTHON%" -m pip install --upgrade pip')
+        install_index = batch.index('"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet --upgrade pip')
         self.assertLess(batch.index("call :validate_python"), install_index)
 
     def test_requirements_pin_the_official_cuda_runtime_without_replacing_pypi(self):
@@ -619,17 +619,16 @@ class UpdaterTests(unittest.TestCase):
 
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
-        for name in ("setup.bat", "run.bat"):
-            with self.subTest(name=name):
-                batch = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
-                self.assertIn(expected_loop, batch)
-                self.assertEqual(batch.count("py -%%V -m venv"), 1)
-                self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
-                self.assertNotIn("python -m venv", batch)
-                if name == "setup.bat":
-                    self.assertNotIn("MOZARIE_PYTHON", batch)
-                else:
-                    self.assertIn('if defined MOZARIE_PYTHON (', batch)
+        setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
+        run = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
+        self.assertIn(expected_loop, setup)
+        self.assertEqual(setup.count("py -%%V -m venv"), 1)
+        self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', setup)
+        self.assertNotIn("python -m venv", setup)
+        self.assertNotIn("MOZARIE_PYTHON", setup)
+        self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
+        self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
+        self.assertNotIn("pip install", run)
 
     @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
     def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):

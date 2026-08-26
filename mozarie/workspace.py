@@ -409,6 +409,17 @@ class WorkspaceStore:
             rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({placeholders})", image_ids).fetchall()
         return {str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows}
 
+    def manual_mask_statuses(self, image_ids: list[str]) -> dict[str, tuple[bool, int]]:
+        if not image_ids:
+            return {}
+        placeholders = ",".join("?" for _ in image_ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT image_id,has_effective_mask,candidate_revision FROM manual_edits WHERE image_id IN ({placeholders})",
+                image_ids,
+            ).fetchall()
+        return {str(row["image_id"]): (bool(row["has_effective_mask"]), int(row["candidate_revision"])) for row in rows}
+
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:
             return
