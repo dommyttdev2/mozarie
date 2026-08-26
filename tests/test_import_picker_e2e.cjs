@@ -308,6 +308,7 @@ async function assertDesktopLayout(page, width, height) {
   await page.setViewportSize({ width, height });
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
+  if (width === 1024) assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "the 1024px inspector keeps its usable 270px width");
   await assertVisibleButtons(page, `${width}x${height} edit`);
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
@@ -466,6 +467,17 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
+  const modelNames = language === "ja"
+    ? ["基本モデル", "NTD11", "Sensitive", "輪郭を補正", "手 (anime_hand_detection)", "手 (HandSegNet anime SDXL)", "白い液"]
+    : ["Primary model", "NTD11", "Sensitive", "Refine contours", "Hands (anime_hand_detection)", "Hands (HandSegNet anime SDXL)", "White fluid"];
+  const modelActionNames = [
+    ...modelNames.slice(0, 6).map((model) => `${model} ${language === "ja" ? "ダウンロード" : "Download"}`),
+    ...modelNames.slice(0, 6).map((model) => `${model} ${language === "ja" ? "参照" : "Browse"}`),
+    ...modelNames.map((model) => `${model} ${language === "ja" ? "この設定の説明" : "About this option"}`),
+    language === "ja" ? "SAM・手モデルをダウンロード" : "Download SAM & hand models",
+  ];
+  assert.equal(new Set(modelActionNames).size, modelActionNames.length, `model action expectations are unique at ${width}x${height} (${language})`);
+  for (const name of modelActionNames) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 1, `model action has one accessible name: ${name} at ${width}x${height} (${language})`);
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556"],
@@ -1214,6 +1226,7 @@ async function main() {
     assert.equal(await page.locator("#galleryPaneContent").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#galleryPaneContent").evaluate((pane) => pane.inert), true);
     assert.equal(await page.locator("#galleryPane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 40);
+    assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "collapsing the gallery keeps the 1024px inspector width");
     assert.ok(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width) > stageWidth, "collapsing the gallery must enlarge the canvas");
     await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
@@ -1405,6 +1418,15 @@ async function main() {
     await page.locator("#settingsDialog").evaluate((dialog) => dialog.showModal());
     await page.locator("#settingsCloseButton").click();
     assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "settings close button still closes the dialog");
+    await page.locator("#settingsButton").focus();
+    await page.locator("#settingsButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsDialog").open);
+    await page.locator("#settingsCloseButton").click();
+    assert.equal(await page.evaluate(() => document.activeElement.id), "settingsButton", "async settings opening restores focus to its invoker");
+    await page.locator('[data-model-help="ntd11"]').focus();
+    await page.locator('[data-model-help="ntd11"]').click();
+    await page.locator("#modelHelpCloseButton").click();
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.modelHelp), "ntd11", "model help restores focus to its invoker");
     await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
     const mosaicHelpPoints = await dialogPointerPoints(page, "#mosaicHelpDialog");
     await page.mouse.click(mosaicHelpPoints.outside.x, mosaicHelpPoints.outside.y, { button: "right" });
