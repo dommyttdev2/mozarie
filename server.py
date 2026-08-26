@@ -10,6 +10,12 @@ import webbrowser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
@@ -22,11 +28,11 @@ from mozarie.http import MosaicHandler
 def _open_browser(url: str) -> None:
     try:
         if not webbrowser.open(url):
-            LOGGER.warning("既定ブラウザを開けませんでした: %s", url)
+            LOGGER.warning("ブラウザを自動で開けませんでした。次のURLを開いてください: %s", url)
     except OSError:
-        LOGGER.warning("既定ブラウザを開けませんでした: %s", url)
+        LOGGER.warning("ブラウザを自動で開けませんでした。次のURLを開いてください: %s", url)
     except Exception:
-        LOGGER.exception("既定ブラウザを開けませんでした: %s", url)
+        LOGGER.exception("ブラウザを自動で開けませんでした。次のURLを開いてください: %s", url)
 
 
 def _schedule_browser_open(url: str) -> threading.Timer:
@@ -37,7 +43,6 @@ def _schedule_browser_open(url: str) -> threading.Timer:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
     LOGGER.setLevel(logging.INFO)
     parser = argparse.ArgumentParser(description="Run Mozarie locally.")
     parser.add_argument("--port", type=int, default=None, help="Override the saved local port for this start only.")

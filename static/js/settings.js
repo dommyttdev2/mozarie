@@ -147,10 +147,10 @@ function handleToolRailKeydown(event) {
   focusElement(items[next]);
 }
 
-function renderSettingsStatus(status) {
+function renderSettingsStatus(status, selectedDevice = null) {
   if (status) state.settingsStatus = status;
   const gpuSelect = $("#settingsGpuDevice");
-  const selected = String(state.settings?.models?.gpu_device ?? gpuSelect.value ?? "");
+  const selected = selectedDevice == null ? gpuSelect.value : String(selectedDevice);
   gpuSelect.textContent = "";
   const gpus = Array.isArray(status?.gpus) ? status.gpus : (state.settingsStatus?.gpus || []);
   for (const gpu of gpus) {
@@ -202,7 +202,6 @@ function setSettingsForm(settings, status = null) {
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === settings.models.sam_model_type; });
   $("#settingsSamModel").value = samCheckpointPaths[settings.models.sam_model_type] || "";
   $("#settingsProvider").value = settings.models.provider;
-  renderSettingsStatus(status || state.settingsStatus);
   syncProviderSelection();
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
@@ -223,7 +222,7 @@ function setSettingsForm(settings, status = null) {
   $("#confirmOverwriteSource").checked = settings.confirmations?.overwriteSource !== false;
   $("#confirmDeleteSourceAfterCopy").checked = settings.confirmations?.deleteSourceAfterCopy !== false;
   renderShortcutBindings(settings.shortcuts?.bindings || {}, settings.shortcuts?.actions || {});
-  renderSettingsStatus(status);
+  renderSettingsStatus(status || state.settingsStatus, settings.models.gpu_device);
 }
 
 const SHORTCUT_LABELS = { previous: "settings.shortcut.previous", next: "settings.shortcut.next", previousVisible: "settings.shortcut.previousVisible", nextVisible: "settings.shortcut.nextVisible", first: "settings.shortcut.first", last: "settings.shortcut.last", reviewAndNext: "settings.shortcut.reviewAndNext", toggleOverview: "settings.shortcut.toggleOverview", undo: "settings.shortcut.undo", redo: "settings.shortcut.redo" };
@@ -246,6 +245,7 @@ function shortcutActionsPayload() { return Object.fromEntries([...document.query
 
 function settingsPayload() {
   storeSelectedSamPath();
+  const gpuDevice = $("#settingsGpuDevice").value;
   return {
     general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcutsEnabled").checked },
     models: {
@@ -253,7 +253,8 @@ function settingsPayload() {
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
       hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: modelCardEnabled("hand_segmentation"),
-      sam_checkpoints: { ...samCheckpointPaths }, sam_model_type: selectedSamType(), provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
+      sam_checkpoints: { ...samCheckpointPaths }, sam_model_type: selectedSamType(), provider: $("#settingsProvider").value,
+      gpu_device: gpuDevice === "" ? state.settings.models.gpu_device : Number(gpuDevice),
     },
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,

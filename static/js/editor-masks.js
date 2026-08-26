@@ -528,6 +528,7 @@ function paintStroke(from, to, tool, size) {
 
 function fillAt(point, tool = state.tool) {
   if (!state.currentImage) return;
+  enableManualLayerForTool(tool);
   const width = originalCanvas.width; const height = originalCanvas.height;
   const pixels = originalCtx.getImageData(0, 0, width, height).data;
   const x = Math.min(width - 1, Math.max(0, Math.floor(point.x))); const y = Math.min(height - 1, Math.max(0, Math.floor(point.y)));
@@ -576,10 +577,14 @@ function drawStroke(from, to, tool, size = Number($("#brushSize").value)) {
   paintStroke(from, to, tool, size);
 }
 
+function enableManualLayerForTool(tool) {
+  if (["brush", "mosaic_eraser", "bucket"].includes(tool) && !state.manualEnabled) state.manualEnabled = true;
+  if (["eraser", "exclude_bucket"].includes(tool) && !state.manualExclusionEnabled) state.manualExclusionEnabled = true;
+  if (tool === "exclude_eraser" && !state.manualExclusionEraseEnabled) state.manualExclusionEraseEnabled = true;
+}
+
 function beginManualStroke(point) {
-  if (["brush", "mosaic_eraser"].includes(state.tool) && !state.manualEnabled) state.manualEnabled = true;
-  if (state.tool === "eraser" && !state.manualExclusionEnabled) state.manualExclusionEnabled = true;
-  if (state.tool === "exclude_eraser" && !state.manualExclusionEraseEnabled) state.manualExclusionEraseEnabled = true;
+  enableManualLayerForTool(state.tool);
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");

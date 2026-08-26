@@ -420,6 +420,13 @@ class WorkspaceStore:
             ).fetchall()
         return {str(row["image_id"]): (bool(row["has_effective_mask"]), int(row["candidate_revision"])) for row in rows}
 
+    def update_manual_effective_mask(self, image_id: str, effective: bool, revision: int) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO manual_edits(image_id,candidate_revision,has_effective_mask,updated_at)
+                VALUES(?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
+                candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
+                (image_id, int(revision), int(effective), time.time_ns()))
+
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:
             return

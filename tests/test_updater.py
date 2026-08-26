@@ -559,6 +559,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app = make_install(root / "install")
+            (app / ".venv").mkdir()
             source = make_source(root / "source")
             with patch("updater.fetch_latest_release", return_value=make_release()), \
                     patch("updater.download_archive"), \
@@ -569,6 +570,7 @@ class UpdaterTests(unittest.TestCase):
                 result = updater.perform_update(app, input_fn=lambda _prompt: "y")
             self.assertEqual(result, updater.EXIT_UPDATED)
             apply.assert_called_once_with(source, app)
+            self.assertEqual((app / ".venv" / ".mozarie-ready").read_text(encoding="utf-8"), "ready\n")
             messages = [call.args[0] for call in output.call_args_list if call.args]
             self.assertIn("v1.1.0 → v1.2.0", messages)
             self.assertIn("v1.1.0 から v1.2.0 へアップデートしました。", messages)

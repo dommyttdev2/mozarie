@@ -509,6 +509,7 @@ function postMosaicPreview(payload) {
 
 function rebuildMosaicPreview() {
   if (!state.mosaicPreviewEnabled || !state.currentImage || typeof Worker !== "function") return;
+  if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
   prepareOriginalImage();
   flushMaskComposition();
   const generation = ++state.mosaicPreviewGeneration;
@@ -522,18 +523,17 @@ function rebuildMosaicPreview() {
     worker.onmessage = ({ data }) => {
       if (state.mosaicWorker !== worker) return;
       state.mosaicWorkerBusy = false;
-      if (data.generation === state.mosaicPreviewGeneration && state.currentImage) {
+      if (data.generation === state.mosaicPreviewGeneration && !state.mosaicPending && state.currentImage) {
         mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0);
         render();
       }
-      const next = state.mosaicPending;
-      state.mosaicPending = null;
-      if (next) postMosaicPreview(next);
+      const pending = state.mosaicPending;
+      state.mosaicPending = false;
+      if (pending) rebuildMosaicPreview();
     };
     worker.onerror = () => { if (state.mosaicWorker === worker) releaseMosaicPreview(); };
   }
-  if (state.mosaicWorkerBusy) state.mosaicPending = payload;
-  else postMosaicPreview(payload);
+  postMosaicPreview(payload);
 }
 
 function requestMosaicPreview() {

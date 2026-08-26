@@ -93,7 +93,7 @@ class GenericYoloSegmenter(BaseOnnxModel):
         class_ids_for_rows = np.argmax(rows[:, 4:4 + class_count], axis=1)
         scores_for_rows = rows[np.arange(len(rows)), 4 + class_ids_for_rows]
         mapped_names = np.asarray([
-            "pussy" if name in {"pussy", "vagina"} else "penis" if name == "penis" else ""
+            "pussy" if name in {"pussy", "vagina"} else "penis" if name == "penis" else "testicles" if name == "testicles" else ""
             for name in self.class_names
         ], dtype=object)
         selected_rows = np.flatnonzero(
@@ -103,7 +103,7 @@ class GenericYoloSegmenter(BaseOnnxModel):
             row = rows[row_index]
             class_id = int(class_ids_for_rows[row_index])
             raw_name = self.class_names[class_id]
-            class_name = "pussy" if raw_name in {"pussy", "vagina"} else "penis" if raw_name == "penis" else None
+            class_name = "pussy" if raw_name in {"pussy", "vagina"} else "penis" if raw_name == "penis" else "testicles" if raw_name == "testicles" else None
             score = float(scores_for_rows[row_index])
             if class_name not in targets:
                 continue

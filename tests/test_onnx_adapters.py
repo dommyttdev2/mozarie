@@ -142,6 +142,23 @@ class OnnxAdapterTests(unittest.TestCase):
             segments = detector.detect(np.zeros((10, 10, 3), dtype=np.uint8), 0.5, "generic")
         self.assertEqual([(segment["class_name"], segment["source"]) for segment in segments], [("pussy", "generic")])
 
+    def test_generic_detect_keeps_testicles_only_for_penis_target(self) -> None:
+        detector = GenericYoloSegmenter.__new__(GenericYoloSegmenter)
+        detector.input_size = 10; detector.class_names = ("penis", "testicles")
+        channels = 4 + len(detector.class_names) + 32
+        prediction = np.zeros((1, channels, 2), dtype=np.float32)
+        prediction[0, :4, :] = np.asarray([[3, 7], [3, 7], [4, 4], [4, 4]], dtype=np.float32)
+        prediction[0, 4, 0] = 0.9
+        prediction[0, 5, 1] = 0.95
+        prediction[0, 4 + len(detector.class_names):, :] = 1.0
+        detector.run = lambda _tensor: [prediction, np.ones((1, 32, 4, 4), dtype=np.float32)]
+        transform = Letterbox(1, 0, 0, 10, 10, 10, 10)
+        with patch("mozarie.inference.generic_yolo_segment.letterbox_bgr", return_value=(np.zeros((1, 3, 10, 10)), transform)):
+            penis = detector.detect(np.zeros((10, 10, 3), dtype=np.uint8), 0.5, "ntd", {"penis", "testicles"})
+            pussy = detector.detect(np.zeros((10, 10, 3), dtype=np.uint8), 0.5, "ntd", {"pussy"})
+        self.assertEqual({segment["class_name"] for segment in penis}, {"penis", "testicles"})
+        self.assertEqual(pussy, [])
+
     def test_generic_detect_vector_filter_keeps_first_ties_and_target_subset(self) -> None:
         detector = GenericYoloSegmenter.__new__(GenericYoloSegmenter)
         detector.input_size = 10; detector.class_names = ("vagina", "penis", "arm")

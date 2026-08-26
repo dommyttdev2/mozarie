@@ -306,6 +306,28 @@ class MozarieTests(unittest.TestCase):
             with patch.object(reopened.workspace_store, "manual", side_effect=AssertionError("manual draft read")):
                 self.assertEqual({item["id"]: item["hasEffectiveMask"] for item in reopened.catalog_snapshot()["images"]}, expected)
 
+    def test_effective_mask_status_tracks_candidate_apply_and_full_exclude(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            apply_path = state.cache_dir / image_id / "apply.png"; exclude_path = state.cache_dir / image_id / "exclude.png"
+            apply_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(apply_path)
+            Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(exclude_path)
+            state.candidates[image_id] = [
+                Candidate("apply", "penis", 0.9, apply_path),
+                Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
+            ]
+            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            state.set_candidate_state(image_id, "apply", {"enabled": True})
+            self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            state.set_candidate_state(image_id, "exclude", {"enabled": False})
+            self.assertTrue(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            state.set_candidate_state(image_id, "apply", {"enabled": False})
+            self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            reopened = self.new_state(); reopened.set_root(str(root))
+            self.assertFalse(reopened.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+
     def test_session_import_path_collision_keeps_native_image_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1064,7 +1086,7 @@ class MozarieTests(unittest.TestCase):
         with patch("server.webbrowser.open", return_value=False):
             with self.assertLogs(core_module.LOGGER, "WARNING") as logs:
                 _open_browser("http://127.0.0.1:8765")
-        self.assertIn("既定ブラウザを開けませんでした", "\n".join(logs.output))
+        self.assertIn("ブラウザを自動で開けませんでした。次のURLを開いてください", "\n".join(logs.output))
 
     def test_browser_open_is_scheduled_once_as_daemon(self):
         with patch("server.threading.Timer") as timer_class:
@@ -1085,7 +1107,7 @@ class MozarieTests(unittest.TestCase):
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
             server_entry.main()
 
-        basic_config.assert_called_once_with(level=logging.WARNING, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        basic_config.assert_not_called()
         server_class.assert_called_once_with(("127.0.0.1", 9876), MosaicHandler)
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
@@ -3141,7 +3163,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
         hand_boxes.assert_called_once()
-        self.assertEqual(predictor.predict.call_count, 3)
+        self.assertEqual(predictor.predict.call_count, 2)
         self.assertTrue(all(np.count_nonzero(segment["_confirmed_hand"]) == 8 for segment in result))
         self.assertTrue(all(np.count_nonzero(segment["mask"]) == 64 for segment in result))
 
@@ -3406,6 +3428,11 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate["source"] for candidate in candidates[1:]], ["hand_exclusion", "fluid_exclusion"])
             self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
+
+    def test_hand_refinement_skips_outside_boxes_and_clips_partial_boxes(self):
+        mask = np.zeros((12, 12), dtype=np.uint8); mask[4:8, 4:8] = 255
+        boxes = [(0, 0, 3, 3), (2, 5, 6, 7), (9, 9, 12, 12)]
+        self.assertEqual(StudioState._hand_boxes_over_apply(boxes, [mask]), [(4, 5, 6, 7)])
 
     def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
@@ -4448,10 +4475,12 @@ class MozarieTests(unittest.TestCase):
                 catalog_thread.start(); job_thread.start()
                 self.assertTrue(catalog_done.wait(2))
                 self.assertTrue(job_done.wait(2))
-                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                mutation.start()
                 release.set()
-                worker.join(2); catalog_thread.join(2); job_thread.join(2)
+                worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
+            self.assertFalse(mutation.is_alive())
             self.assertIsInstance(outcome.get("error"), ClientError)
             self.assertIn("候補が変更", str(outcome["error"]))
 
@@ -5929,11 +5958,14 @@ class MozarieTests(unittest.TestCase):
                 thread = threading.Thread(target=run_render)
                 thread.start()
                 self.assertTrue(render_started.wait(2))
-                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                mutation.start()
                 allow_render_to_finish.set()
                 thread.join(2)
+                mutation.join(2)
 
             self.assertFalse(thread.is_alive())
+            self.assertFalse(mutation.is_alive())
             self.assertNotIn("error", outcome)
             self.assertTrue(np.any(observed["mask"]))
             _output, _record, rendered_revision, save_token = outcome["result"]

@@ -188,6 +188,7 @@ class DetectionMixin:
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)
+                        self._refresh_effective_mask_status(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 finally:
                     self.invalidate_sam_image(record.image_id)
@@ -254,6 +255,19 @@ class DetectionMixin:
         hand_model = self._ensure_hand_model(models)
         return hand_model.detect_boxes(rgb, HAND_CONFIDENCE)
 
+    @staticmethod
+    def _hand_boxes_over_apply(boxes: list[tuple[int, int, int, int]], masks: list[np.ndarray]) -> list[tuple[int, int, int, int]]:
+        """Limit expensive hand segmentation to the final target envelope."""
+        coordinates = np.argwhere(np.any(np.asarray(masks) > 0, axis=0)) if masks else np.empty((0, 2), dtype=int)
+        if not len(coordinates):
+            return []
+        top, left = coordinates.min(axis=0); bottom, right = coordinates.max(axis=0) + 1
+        clipped: list[tuple[int, int, int, int]] = []
+        for box_left, box_top, box_right, box_bottom in boxes:
+            overlap = (max(box_left, int(left)), max(box_top, int(top)), min(box_right, int(right)), min(box_bottom, int(bottom)))
+            if overlap[0] < overlap[2] and overlap[1] < overlap[3]: clipped.append(overlap)
+        return clipped
+
     def _hand_refinement_context(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], np.ndarray, list[tuple[int, int, int, int]]]:
@@ -265,7 +279,11 @@ class DetectionMixin:
         fallback_boxes: list[tuple[int, int, int, int]] = []
         hand_boxes = self._hand_boxes(models, rgb)
         if hand_boxes:
-            fallback_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
+            padded_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
+            fallback_boxes = self._hand_boxes_over_apply(
+                padded_boxes,
+                [np.asarray(segment["mask"]) for segment in detected],
+            ) if detected else padded_boxes
             if self.settings["models"].get("hand_segmentation_enabled"):
                 with self.hand_segmentation_lock:
                     specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
@@ -562,7 +580,10 @@ class DetectionMixin:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。")
             hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
-            hand_boxes = [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None]
+            hand_boxes = self._hand_boxes_over_apply(
+                [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
+                [clipped],
+            )
             if hand_boxes:
                 if self.settings["models"].get("hand_segmentation_enabled"):
                     fallback_boxes: list[tuple[int, int, int, int]] = []
@@ -637,6 +658,7 @@ class DetectionMixin:
                         self.candidates.setdefault(image_id, []).extend(created)
                         revision = self._touch_candidates(image_id)
                         self._persist_candidates(image_id)
+                    self._refresh_effective_mask_status(image_id)
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)
