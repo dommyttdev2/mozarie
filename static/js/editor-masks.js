@@ -577,10 +577,14 @@ function drawStroke(from, to, tool, size = Number($("#brushSize").value)) {
 }
 
 function beginManualStroke(point) {
+  if (["brush", "mosaic_eraser"].includes(state.tool) && !state.manualEnabled) state.manualEnabled = true;
+  if (state.tool === "eraser" && !state.manualExclusionEnabled) state.manualExclusionEnabled = true;
+  if (state.tool === "exclude_eraser" && !state.manualExclusionEraseEnabled) state.manualExclusionEraseEnabled = true;
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
+  flushMaskComposition(); requestMosaicPreview();
 }
 
 function appendManualStrokePoint(point) {
@@ -588,6 +592,14 @@ function appendManualStrokePoint(point) {
   const previous = state.activeStroke.points.at(-1);
   state.activeStroke.points.push({ ...point });
   drawStroke(previous, point, state.activeStroke.tool, state.activeStroke.size);
+  flushMaskComposition(); requestMosaicPreview();
+}
+
+function cancelManualStroke() {
+  if (!state.activeStroke) return;
+  state.activeStroke = null;
+  rebuildManualMaskFromHistory();
+  requestMosaicPreview(); renderCandidates(); render();
 }
 
 function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx, exclusionEraseContext = exclusionEraseCtx) {

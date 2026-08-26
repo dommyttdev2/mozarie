@@ -150,7 +150,7 @@ function handleToolRailKeydown(event) {
 function renderSettingsStatus(status) {
   if (status) state.settingsStatus = status;
   const gpuSelect = $("#settingsGpuDevice");
-  const selected = gpuSelect.value || String(state.settings?.models?.gpu_device ?? 0);
+  const selected = String(state.settings?.models?.gpu_device ?? gpuSelect.value ?? "");
   gpuSelect.textContent = "";
   const gpus = Array.isArray(status?.gpus) ? status.gpus : (state.settingsStatus?.gpus || []);
   for (const gpu of gpus) {
@@ -202,6 +202,7 @@ function setSettingsForm(settings, status = null) {
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === settings.models.sam_model_type; });
   $("#settingsSamModel").value = samCheckpointPaths[settings.models.sam_model_type] || "";
   $("#settingsProvider").value = settings.models.provider;
+  renderSettingsStatus(status || state.settingsStatus);
   syncProviderSelection();
   $("#settingsApplyColor").value = settings.display.apply_color;
   $("#settingsExcludeColor").value = settings.display.exclude_color;
@@ -230,8 +231,8 @@ function renderShortcutBindings(bindings, actions) {
   const root = $("#shortcutBindings"); root.textContent = "";
   for (const [action, labelKey] of Object.entries(SHORTCUT_LABELS)) {
     const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = t(labelKey);
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false;
-    const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off";
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false; enabled.setAttribute("aria-label", `${t(labelKey)} ${t("settings.on")}`);
+    const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off"; input.setAttribute("aria-label", t(labelKey));
     input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, enabled, input); root.append(row);
   }
 }
@@ -548,9 +549,9 @@ function setSettingsGpuLoading(loading) {
 
 async function refreshSettingsStatus() {
   const generation = ++settingsStatusGeneration;
-  const snapshot = JSON.stringify(settingsPayload());
   setSettingsGpuLoading(true);
   try {
+    const snapshot = JSON.stringify(settingsPayload());
     const data = await api("/api/settings/status", { method: "POST", body: snapshot });
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}

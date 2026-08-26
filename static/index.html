@@ -251,7 +251,7 @@
       <section id="settingsPanelGeneral" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabGeneral" data-settings-panel="general">
         <label class="form-row"><span data-i18n="settings.language">言語</span><select id="settingsLanguage"><option value="ja">日本語</option><option value="en">English</option></select></label>
         <label class="form-row"><span data-i18n="settings.port">次回起動時のポート</span><input id="settingsPort" type="number" min="1024" max="65535" step="1"></label>
-        <div class="form-row"><span data-i18n="settings.defaultOutputDirectory">既定の保存先</span><span class="inline-field"><input id="settingsDefaultOutputDirectory" type="text" spellcheck="false"><button id="settingsChooseOutputDirectory" type="button" data-i18n="settings.browseOutputDirectory">変更</button></span></div>
+        <div class="form-row"><span data-i18n="settings.defaultOutputDirectory">既定の保存先</span><span class="inline-field"><input id="settingsDefaultOutputDirectory" type="text" spellcheck="false" data-i18n-aria-label="settings.defaultOutputDirectory" aria-label="既定の保存先"><button id="settingsChooseOutputDirectory" type="button" data-i18n="settings.browseOutputDirectory">変更</button></span></div>
         <label class="form-row"><span data-i18n="settings.importParallelism">画像読み込み同時処理数</span><input id="settingsImportParallelism" type="number" min="1" max="10" step="1"></label>
         <label class="form-row"><span data-i18n="settings.saveParallelism">ファイル保存同時処理数</span><input id="settingsSaveParallelism" type="number" min="1" max="8" step="1"></label>
         <label class="choice-row"><input id="settingsOpenBrowser" type="checkbox"><span data-i18n="settings.openBrowser">起動時にブラウザを開く</span></label>

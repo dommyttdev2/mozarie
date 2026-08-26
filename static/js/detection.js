@@ -20,6 +20,7 @@ function syncDetectionTargetSwitch(input) {
 function validateDetectionTargets(targetClasses, target = null) {
   const message = targetClasses.length ? "" : t("error.detectionTargetsRequired");
   if (target) { target.textContent = message; target.hidden = !message; }
+  if (target?.id === "detectTargetValidation") $("#detectStartButton").disabled = !targetClasses.length;
   return !message;
 }
 

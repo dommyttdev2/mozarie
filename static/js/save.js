@@ -328,7 +328,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(body.error || t("error.requestFailed")); error.code = body.error_code || ""; throw error; }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           await ensureHandlePermission(access, true);
           await writeSourceHandle(access, binary);
@@ -340,7 +340,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); throw new Error(body.error || t("error.requestFailed")); }
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(body.error || t("error.requestFailed")); error.code = body.error_code || ""; throw error; }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
@@ -377,7 +377,12 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           const entry = save.entries[nextEntry++];
           if (!entry) return;
           try { await saveEntry(entry); }
-          catch (error) { save.failed = true; throw error; }
+          catch (error) {
+            // A stale candidate can become fully excluded after the dialog was
+            // opened. It is not a failed save and must never trigger deletion.
+            if (error?.code === "no_effective_mask") continue;
+            save.failed = true; throw error;
+          }
         }
       }));
       const failed = settled.find((result) => result.status === "rejected");
