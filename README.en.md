@@ -74,7 +74,7 @@ Review the source terms and licenses for each model and the [third-party notices
 
 ## Use
 
-Automatic detection always uses one worker on GPU to keep VRAM use stable. On CPU, you can choose one to four workers.
+Choose one to four workers for automatic detection on either GPU or CPU. A job targeting one image uses one worker.
 
 1. Import images or a folder.
 2. Run automatic detection for the current image or all images.

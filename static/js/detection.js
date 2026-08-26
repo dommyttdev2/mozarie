@@ -1,5 +1,4 @@
 function detectionParallelism() {
-  if ($("#settingsProvider")?.value === "gpu") return 1;
   const value = Number($("#detectParallelism").value);
   return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
 }
@@ -21,6 +20,7 @@ function syncDetectionTargetSwitch(input) {
 function validateDetectionTargets(targetClasses, target = null) {
   const message = targetClasses.length ? "" : t("error.detectionTargetsRequired");
   if (target) { target.textContent = message; target.hidden = !message; }
+  if (target?.id === "detectTargetValidation") $("#detectStartButton").disabled = !targetClasses.length;
   return !message;
 }
 
@@ -39,11 +39,11 @@ function openDetectionDialog(imageIds) {
   state.pendingDetectionTargetIds = [...imageIds];
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
-  $("#detectParallelism").disabled = $("#settingsProvider")?.value === "gpu";
+  $("#detectParallelism").disabled = false;
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
-  $("#detectDialog").showModal();
+  showModalFromInvoker($("#detectDialog"));
 }
 
 async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {
@@ -74,8 +74,7 @@ async function startDetectionFromDialog(event) {
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    const storedParallelism = $("#settingsProvider")?.value === "gpu" ? state.cpuDetectionParallelism : parallelism;
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism: storedParallelism, targets: targetClasses };
+    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
     try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
     catch (error) { setStatus(error.message, "error"); return; }
   }

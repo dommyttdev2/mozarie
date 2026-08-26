@@ -1,3 +1,12 @@
+const modalInvokers = new WeakMap();
+
+function showModalFromInvoker(dialog, invoker = document.activeElement) {
+  if (dialog.open) return;
+  if (invoker?.isConnected && !invoker.disabled) modalInvokers.set(dialog, invoker);
+  else modalInvokers.delete(dialog);
+  dialog.showModal();
+}
+
 function modelHelpInfo(key) {
   const source = (label, url) => ({ source: label, url });
   const english = $("#settingsLanguage")?.value === "en";
@@ -33,7 +42,7 @@ function openModelHelp(key) {
   $("#modelHelpCommand").textContent = info.command || "";
   $("#modelHelpCopyResult").textContent = "";
   $("#modelHelpSamTable").hidden = key !== "precision";
-  $("#modelHelpDialog").showModal();
+  showModalFromInvoker($("#modelHelpDialog"));
 }
 
 async function copyCommand(commandId, resultId) {
@@ -45,6 +54,13 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("close", () => {
+    const invoker = modalInvokers.get(dialog);
+    modalInvokers.delete(dialog);
+    setTimeout(() => {
+      if (invoker?.isConnected && !invoker.disabled && !dialog.open) focusElement(invoker);
+    }, 0);
+  }));
   const lightDismiss = (dialog, close) => {
     let backdropPointerId = null;
     const isBackdrop = (event) => {
@@ -66,13 +82,9 @@ function bindEvents() {
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
-    const language = state.settings?.general?.language || "ja";
     if (state.settings?.models && state.settings?.display && state.settings?.detection) {
       setSettingsForm(state.settings, state.settingsStatus);
-    } else {
-      $("#settingsLanguage").value = language;
     }
-    void loadTranslations(language);
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
@@ -123,6 +135,7 @@ function bindEvents() {
     if (!activeDetection()) openDetectionDialog(state.images.filter((image) => !isHidden(image)).map((image) => image.id));
   };
   $("#detectAllButton").addEventListener("click", detectAll);
+  document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) setHidden(image, !isHidden(image)); });
@@ -228,7 +241,7 @@ function bindEvents() {
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
-    $("#mosaicHelpDialog").showModal();
+    showModalFromInvoker($("#mosaicHelpDialog"));
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
   lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());
@@ -367,7 +380,10 @@ function bindEvents() {
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
     canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
-    if (wasDrawing && manualStrokeStarted) completeManualStroke();
+    if (manualStrokeStarted) {
+      if (cancelled) cancelManualStroke();
+      else if (wasDrawing) completeManualStroke();
+    }
     if (!cancelled && wasDrawing && state.tool === "boundary_brush") completeBoundaryBrushStroke();
     if (cancelled && state.tool === "boundary_brush") state.boundaryBrushStroke = null;
     if (!cancelled && wasDrawing && boundaryStarted && !isBusy() && !state.importing && event?.button === 0) {

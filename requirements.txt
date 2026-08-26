@@ -1,8 +1,9 @@
-numpy>=1.26
-Pillow>=10.0
-opencv-python>=4.8
-onnxruntime-gpu>=1.17
-torch>=2.2
-torchvision>=0.17
+numpy>=1.26,<3
+Pillow>=11.3,<12
+opencv-python>=4.8,<5
+onnxruntime-gpu==1.27.0
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130
 segment-anything @ https://github.com/facebookresearch/segment-anything/archive/dca509fe793f601edb92606367a655c15ac00fdf.tar.gz
-safetensors>=0.4
+safetensors>=0.4,<1

@@ -306,6 +306,28 @@ class MozarieTests(unittest.TestCase):
             with patch.object(reopened.workspace_store, "manual", side_effect=AssertionError("manual draft read")):
                 self.assertEqual({item["id"]: item["hasEffectiveMask"] for item in reopened.catalog_snapshot()["images"]}, expected)
 
+    def test_effective_mask_status_tracks_candidate_apply_and_full_exclude(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            apply_path = state.cache_dir / image_id / "apply.png"; exclude_path = state.cache_dir / image_id / "exclude.png"
+            apply_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(apply_path)
+            Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(exclude_path)
+            state.candidates[image_id] = [
+                Candidate("apply", "penis", 0.9, apply_path),
+                Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
+            ]
+            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            state.set_candidate_state(image_id, "apply", {"enabled": True})
+            self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            state.set_candidate_state(image_id, "exclude", {"enabled": False})
+            self.assertTrue(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            state.set_candidate_state(image_id, "apply", {"enabled": False})
+            self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+            reopened = self.new_state(); reopened.set_root(str(root))
+            self.assertFalse(reopened.catalog_snapshot()["images"][0]["hasEffectiveMask"])
+
     def test_session_import_path_collision_keeps_native_image_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -721,6 +743,63 @@ class MozarieTests(unittest.TestCase):
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
+    def test_settings_rejects_an_unknown_or_unsupported_gpu_selection(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["sm_89"],
+            device_count=lambda: 2,
+            get_device_capability=lambda index: [(8, 9), (6, 1)][index],
+            get_device_name=lambda index: ["RTX Test", "Legacy Test"][index],
+            get_device_properties=lambda index: types.SimpleNamespace(total_memory=[16, 3][index] * 1024 ** 3),
+        )
+        state = self.new_state()
+        state.settings["models"].update({"provider": "cpu", "gpu_device": 0})
+        for gpu_device in (1, 9):
+            with self.subTest(gpu_device=gpu_device):
+                update = copy.deepcopy(state.settings)
+                update["models"].update({"provider": "gpu", "gpu_device": gpu_device})
+                with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+                     patch.object(state.settings_store, "save") as save, \
+                     self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
+                    state.update_settings(update)
+                self.assertEqual(raised.exception.error_code, "gpu_unsupported")
+                save.assert_not_called()
+
+        update = copy.deepcopy(state.settings)
+        update["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+             patch.object(state.settings_store, "save", return_value=update) as save:
+            state.update_settings(update)
+        save.assert_called_once_with(update)
+
+        unchanged_invalid = copy.deepcopy(state.settings)
+        unchanged_invalid["models"].update({"provider": "gpu", "gpu_device": 1})
+        state.settings = unchanged_invalid
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+             patch.object(state.settings_store, "save") as save, \
+             self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
+            state.update_settings(unchanged_invalid)
+        self.assertEqual(raised.exception.error_code, "gpu_unsupported")
+        save.assert_not_called()
+
+    def test_detection_rejects_an_unsupported_gpu_before_loading_models(self):
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            get_arch_list=lambda: ["sm_89"],
+            device_count=lambda: 2,
+            get_device_capability=lambda index: [(8, 9), (6, 1)][index],
+            get_device_name=lambda index: ["RTX Test", "Legacy Test"][index],
+            get_device_properties=lambda index: types.SimpleNamespace(total_memory=[16, 3][index] * 1024 ** 3),
+        )
+        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+             patch.object(state, "_start_job") as start:
+            with self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
+                state.start_detection([])
+        self.assertEqual(raised.exception.error_code, "gpu_unsupported")
+        start.assert_not_called()
+
     def test_cuda_status_ignores_ptx_only_arches(self):
         cuda = types.SimpleNamespace(
             is_available=lambda: True,
@@ -999,15 +1078,15 @@ class MozarieTests(unittest.TestCase):
 
     def test_browser_opener_logs_result_without_raising(self):
         with patch("server.webbrowser.open", return_value=True) as open_browser:
-            with self.assertLogs(core_module.LOGGER, "INFO") as logs:
+            with patch.object(core_module.LOGGER, "info") as info:
                 _open_browser("http://127.0.0.1:8765")
         open_browser.assert_called_once_with("http://127.0.0.1:8765")
-        self.assertIn("既定ブラウザを開きました", "\n".join(logs.output))
+        info.assert_not_called()
 
         with patch("server.webbrowser.open", return_value=False):
             with self.assertLogs(core_module.LOGGER, "WARNING") as logs:
                 _open_browser("http://127.0.0.1:8765")
-        self.assertIn("既定ブラウザを開けませんでした", "\n".join(logs.output))
+        self.assertIn("ブラウザを自動で開けませんでした。次のURLを開いてください", "\n".join(logs.output))
 
     def test_browser_open_is_scheduled_once_as_daemon(self):
         with patch("server.threading.Timer") as timer_class:
@@ -1028,7 +1107,7 @@ class MozarieTests(unittest.TestCase):
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
             server_entry.main()
 
-        basic_config.assert_called_once_with(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        basic_config.assert_not_called()
         server_class.assert_called_once_with(("127.0.0.1", 9876), MosaicHandler)
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
@@ -1050,7 +1129,20 @@ class MozarieTests(unittest.TestCase):
         finally:
             state_module.STATE.settings = original_settings
 
-    def test_http_log_message_logs_successful_api_posts_and_errors_only(self):
+    def test_main_reports_bind_error_without_traceback(self):
+        with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
+                patch.object(core_module.LOGGER, "error") as error, \
+                patch.object(core_module.LOGGER, "exception") as exception, \
+                patch.object(state_module.STATE, "shutdown") as shutdown, \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            with self.assertRaises(SystemExit) as raised:
+                server_entry.main()
+        self.assertEqual(raised.exception.code, 1)
+        error.assert_called_once_with("Mozarieを起動できません。ポート%sは使用中です。", 9876)
+        exception.assert_not_called()
+        shutdown.assert_called_once()
+
+    def test_http_log_message_silences_success_and_client_errors(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
         with patch.object(core_module.LOGGER, "info") as info, patch.object(core_module.LOGGER, "warning") as warning:
@@ -1067,25 +1159,27 @@ class MozarieTests(unittest.TestCase):
             handler.command = "POST"
             handler.path = "/api/detect"
             handler.log_message('"%s" %s %s', "POST /api/detect HTTP/1.1", "200", "10")
-            info.assert_called_once()
+            info.assert_not_called()
 
             handler.command = "GET"
             handler.path = "/missing"
             handler.log_message('"%s" %s %s', "GET /missing HTTP/1.1", "404", "10")
+            warning.assert_not_called()
+
+            handler.path = "/api/failure"
+            handler.log_message('"%s" %s %s', "GET /api/failure HTTP/1.1", "500", "10")
             warning.assert_called_once()
 
     def test_job_lifecycle_logs_start_completion_and_failure(self):
         state = self.new_state()
         record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
-        with patch("server.threading.Thread"):
-            with self.assertLogs(core_module.LOGGER, "INFO") as logs:
-                state._start_job("detect", [record], lambda *_args, **_kwargs: None)
-        self.assertIn("バックグラウンド処理を開始", "\n".join(logs.output))
-        self.assertIn(JOB_LABELS["detect"], "\n".join(logs.output))
+        with patch("server.threading.Thread"), patch.object(core_module.LOGGER, "debug") as debug:
+            state._start_job("detect", [record], lambda *_args, **_kwargs: None)
+        debug.assert_called_once()
 
-        with self.assertLogs(core_module.LOGGER, "INFO") as logs:
+        with patch.object(core_module.LOGGER, "debug") as debug:
             state._finish_job()
-        self.assertIn("バックグラウンド処理が完了", "\n".join(logs.output))
+        debug.assert_called_once()
 
         try:
             raise RuntimeError("test failure")
@@ -1105,7 +1199,7 @@ class MozarieTests(unittest.TestCase):
                     server_entry.main()
         self.assertEqual(raised.exception.code, 1)
         shutdown.assert_called_once_with()
-        self.assertIn("サーバーを起動できません", "\n".join(logs.output))
+        self.assertIn("Mozarieを起動できません。ポート9876は使用中です。", "\n".join(logs.output))
 
     def test_server_imports_from_an_isolated_unrelated_working_directory(self):
         root = Path(__file__).resolve().parents[1]
@@ -1647,6 +1741,7 @@ class MozarieTests(unittest.TestCase):
             ensure.assert_called_once()
             self.assertEqual(set(seen_models), {id(base_models)})
             self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.parallelism, 2)
             self.assertEqual(state.job.completed, 2)
             self.assertEqual(set(state.job.completed_image_ids), {record.image_id for record in records})
             self.assertTrue(all(state._candidate_revision(record.image_id) == 1 for record in records))
@@ -2693,7 +2788,7 @@ class MozarieTests(unittest.TestCase):
         predictor = object()
         state.sam_predictor = predictor
         state.sam_image_id = "image"
-        with patch.object(state.settings_store, "save", return_value=next_settings):
+        with patch.object(state, "_require_supported_gpu"), patch.object(state.settings_store, "save", return_value=next_settings):
             state.update_settings(next_settings)
         self.assertIsNone(state.models)
         self.assertIs(state.sam_predictor, predictor)
@@ -2702,7 +2797,7 @@ class MozarieTests(unittest.TestCase):
     def test_settings_only_probe_a_changed_output_directory_and_saves_general_settings(self):
         state = self.new_state()
         unchanged = copy.deepcopy(state.settings)
-        with patch.object(state_module, "validate_output_directory_ready") as ready, \
+        with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=unchanged) as save:
             state.update_settings(unchanged)
         ready.assert_not_called()
@@ -2710,7 +2805,7 @@ class MozarieTests(unittest.TestCase):
 
         changed = copy.deepcopy(state.settings)
         changed["general"]["language"] = "en" if changed["general"]["language"] == "ja" else "ja"
-        with patch.object(state_module, "validate_output_directory_ready") as ready, \
+        with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=changed) as save:
             state.update_settings(changed)
         ready.assert_not_called()
@@ -2719,7 +2814,7 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             changed_output = copy.deepcopy(state.settings)
             changed_output["saving"]["default_output_directory"] = directory
-            with patch.object(state_module, "validate_output_directory_ready") as ready, \
+            with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
                  patch.object(state.settings_store, "save", return_value=changed_output) as save:
                 state.update_settings(changed_output)
         ready.assert_called_once_with(directory)
@@ -2732,7 +2827,7 @@ class MozarieTests(unittest.TestCase):
         next_settings["models"]["hand_segmentation_enabled"] = True
         models = object()
         state.models = models
-        with patch.object(state.settings_store, "save", return_value=next_settings):
+        with patch.object(state, "_require_supported_gpu"), patch.object(state.settings_store, "save", return_value=next_settings):
             state.update_settings(next_settings)
         self.assertIs(state.models, models)
 
@@ -2742,7 +2837,7 @@ class MozarieTests(unittest.TestCase):
         state.sam_predictor = sam; state.hand_segmentation_predictor = handseg
         next_settings = copy.deepcopy(state.settings)
         next_settings["models"]["target_segmentation"] = "another.onnx"
-        with patch.object(state.settings_store, "save", return_value=next_settings), \
+        with patch.object(state, "_require_supported_gpu"), patch.object(state.settings_store, "save", return_value=next_settings), \
              patch.object(state, "_release_gpu_cache") as release:
             state.update_settings(next_settings)
         self.assertIsNone(state.models)
@@ -2758,7 +2853,7 @@ class MozarieTests(unittest.TestCase):
         state.models = models
         state.sam_predictor = object()
         state.sam_image_id = "image"
-        with patch.object(state.settings_store, "save", return_value=next_settings):
+        with patch.object(state, "_require_supported_gpu"), patch.object(state.settings_store, "save", return_value=next_settings):
             state.update_settings(next_settings)
         self.assertIs(state.models, models)
         self.assertIsNone(state.sam_predictor)
@@ -2952,7 +3047,7 @@ class MozarieTests(unittest.TestCase):
         specialist.predict.assert_called_once()
         self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
-    def test_specialist_handseg_rejection_does_not_call_generic_sam(self):
+    def test_specialist_handseg_rejection_uses_generic_sam(self):
         state = self.new_state()
         state.settings["models"]["hand_segmentation_enabled"] = True
         events: list[str] = []
@@ -2982,8 +3077,8 @@ class MozarieTests(unittest.TestCase):
                 [{"class_name": "penis", "confidence": 0.8, "mask": genital, "source": "target"}],
             )
         self.assertEqual(events, ["specialist-enter", "specialist-predict", "specialist-exit"])
-        generic.assert_not_called()
-        self.assertFalse(np.any(result[0]["_confirmed_hand"]))
+        generic.predict.assert_called_once()
+        self.assertTrue(np.any(result[0]["_confirmed_hand"]))
 
     def test_specialist_client_error_propagates_without_generic_sam(self):
         state = self.new_state()
@@ -3081,7 +3176,7 @@ class MozarieTests(unittest.TestCase):
         ):
             result = state._refine_detected_segments(Mock(), record, Image.new("RGB", (16, 16), "white"), segments)
         hand_boxes.assert_called_once()
-        self.assertEqual(predictor.predict.call_count, 3)
+        self.assertEqual(predictor.predict.call_count, 2)
         self.assertTrue(all(np.count_nonzero(segment["_confirmed_hand"]) == 8 for segment in result))
         self.assertTrue(all(np.count_nonzero(segment["mask"]) == 64 for segment in result))
 
@@ -3347,7 +3442,12 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([candidate["enabled"] for candidate in candidates], [True, True, True])
             self.assertTrue(all(candidate["origin"] == "boundary" for candidate in candidates))
 
-    def test_high_precision_refinement_drops_all_targets_when_sam_is_incompatible(self):
+    def test_hand_refinement_skips_outside_boxes_and_clips_partial_boxes(self):
+        mask = np.zeros((12, 12), dtype=np.uint8); mask[4:8, 4:8] = 255
+        boxes = [(0, 0, 3, 3), (2, 5, 6, 7), (9, 9, 12, 12)]
+        self.assertEqual(StudioState._hand_boxes_over_apply(boxes, [mask]), [(4, 5, 6, 7)])
+
+    def test_high_precision_refinement_keeps_detector_mask_when_sam_is_incompatible(self):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
@@ -3362,9 +3462,11 @@ class MozarieTests(unittest.TestCase):
             segment = {"class_name": "penis", "mask": mask.copy(), "confidence": 0.8, "source": "target"}
             with patch.object(state, "_sam_predictor_for", return_value=FakePredictor()):
                 refined = state._high_precision_segments(DetectionModels(target=object()), record, np.zeros((12, 12, 3), dtype=np.uint8), [segment])
-            self.assertEqual(refined, [])
+            self.assertEqual(len(refined), 1)
+            self.assertEqual(refined[0]["refinement"], "sam_fallback")
+            self.assertTrue(np.array_equal(refined[0]["mask"] > 0, mask > 0))
 
-    def test_high_precision_refinement_keeps_non_targets_and_drops_only_failed_targets(self):
+    def test_high_precision_refinement_keeps_non_targets_and_failed_detector_masks(self):
         state = self.new_state()
         source = np.zeros((12, 12), dtype=np.uint8); source[2:10, 2:10] = 255
         good = source.astype(bool); good[2:4, 2:4] = False
@@ -3381,12 +3483,13 @@ class MozarieTests(unittest.TestCase):
             {"class_name": "pussy", "mask": source.copy(), "confidence": 0.8, "source": "target"},
         ]
         refined = state._high_precision_segments_with_predictor(np.zeros((12, 12, 3), dtype=np.uint8), segments, predictor)
-        self.assertEqual(len(refined), 2)
+        self.assertEqual(len(refined), 3)
         self.assertIs(refined[0], non_target)
         self.assertEqual(refined[1]["class_name"], "penis")
         self.assertEqual(refined[1]["refinement"], "sam_high_precision")
+        self.assertEqual(refined[2]["refinement"], "sam_fallback")
 
-    def test_high_precision_refinement_drops_target_without_sam_prompt(self):
+    def test_high_precision_refinement_keeps_target_without_sam_prompt(self):
         state = self.new_state()
         source = np.zeros((12, 12), dtype=np.uint8); source[3:9, 3:9] = 255
         segment = {"class_name": "penis", "mask": source, "confidence": 0.8, "source": "target"}
@@ -3398,10 +3501,11 @@ class MozarieTests(unittest.TestCase):
             refined = state._high_precision_segments_with_predictor(
                 np.zeros((12, 12, 3), dtype=np.uint8), [segment, non_target], predictor
             )
-        self.assertEqual(refined, [non_target])
+        self.assertEqual(refined, [segment, non_target])
+        self.assertEqual(segment["refinement"], "sam_fallback")
         predictor.predict.assert_not_called()
 
-    def test_high_precision_detection_emits_no_candidates_when_all_targets_fail(self):
+    def test_high_precision_detection_keeps_candidates_when_all_targets_fail(self):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
@@ -3423,8 +3527,8 @@ class MozarieTests(unittest.TestCase):
                 state, "_sam_predictor_for", return_value=FakePredictor()
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
-            self.assertEqual(candidates, [])
-            self.assertEqual(list((state.cache_dir / record.image_id).glob(".mozarie-pending-*")), [])
+            self.assertEqual([candidate.class_name for candidate in candidates], ["penis", "pussy"])
+            self.assertEqual([candidate.refinement for candidate in candidates], ["sam_fallback", "sam_fallback"])
 
     def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
         state = self.new_state()
@@ -3780,6 +3884,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
+        state.settings["models"]["provider"] = "cpu"
         record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
@@ -3803,6 +3908,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(first_root / "first.png")
             Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
             state = self.new_state()
+            state.settings["models"]["provider"] = "cpu"
             first_id = state.set_root(str(first_root))[0]["id"]
             original_start_job = state._start_job
 
@@ -4360,8 +4466,16 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             catalog_done = threading.Event()
             job_done = threading.Event()
+            revision_changed = threading.Event()
             outcome = {}
             original_open = jobs_module.Image.open
+            original_touch = state._touch_candidates
+
+            def touch_candidates(changed_image_id):
+                revision = original_touch(changed_image_id)
+                if changed_image_id == image_id:
+                    revision_changed.set()
+                return revision
 
             def delayed_open(path, *args, **kwargs):
                 if Path(path) == mask_path:
@@ -4375,7 +4489,8 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open), \
+                 patch.object(state, "_touch_candidates", side_effect=touch_candidates):
                 worker = threading.Thread(target=compose)
                 worker.start()
                 self.assertTrue(opened.wait(2))
@@ -4384,10 +4499,13 @@ class MozarieTests(unittest.TestCase):
                 catalog_thread.start(); job_thread.start()
                 self.assertTrue(catalog_done.wait(2))
                 self.assertTrue(job_done.wait(2))
-                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                mutation.start()
+                self.assertTrue(revision_changed.wait(2))
                 release.set()
-                worker.join(2); catalog_thread.join(2); job_thread.join(2)
+                worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
+            self.assertFalse(mutation.is_alive())
             self.assertIsInstance(outcome.get("error"), ClientError)
             self.assertIn("候補が変更", str(outcome["error"]))
 
@@ -4530,7 +4648,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.candidates[first_id], [])
             self.assertEqual(second.read_bytes(), original_second)
 
-    def test_apply_all_empty_masks_reports_a_job_error(self):
+    def test_apply_all_empty_masks_completes_without_changing_images(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
             Image.new("RGB", (16, 16), "white").save(source)
@@ -4542,8 +4660,8 @@ class MozarieTests(unittest.TestCase):
 
             state._apply_worker([record], 100, {})
 
-            self.assertEqual(state.job.state, "error")
-            self.assertIn("保存するモザイク範囲", state.job.error)
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.total, 0)
             self.assertEqual(source.read_bytes(), original)
 
     def test_copy_save_empty_record_does_not_consume_a_later_output_name(self):
@@ -5865,11 +5983,14 @@ class MozarieTests(unittest.TestCase):
                 thread = threading.Thread(target=run_render)
                 thread.start()
                 self.assertTrue(render_started.wait(2))
-                state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                mutation.start()
                 allow_render_to_finish.set()
                 thread.join(2)
+                mutation.join(2)
 
             self.assertFalse(thread.is_alive())
+            self.assertFalse(mutation.is_alive())
             self.assertNotIn("error", outcome)
             self.assertTrue(np.any(observed["mask"]))
             _output, _record, rendered_revision, save_token = outcome["result"]

@@ -51,7 +51,7 @@ function renderGallery(force = false) {
     item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
     item.querySelector(".gallery-meta").textContent = `${image.width} × ${image.height}`;
     const reviewBadge = item.querySelector(".gallery-review-badge");
-    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : "";
+    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.onclick = () => selectCatalogImage(image.id);
     item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
@@ -180,7 +180,7 @@ function renderOverview(force = false) {
     preview.alt = image.relativePath;
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
     item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
-    item.querySelector(".overview-review-badge").textContent = isReviewed(image) ? t("review.reviewedBadge") : "";
+    item.querySelector(".overview-review-badge").textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.title = image.relativePath;
     const states = [image.relativePath];
     if (isReviewed(image)) states.push(t("overview.stateReviewed"));

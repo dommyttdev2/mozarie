@@ -10,7 +10,7 @@ from PIL import Image, ImageOps
 
 from .core import (
     DEFAULT_COLORS, DEFAULT_DETECTION_CONFIDENCE, HAND_CONFIDENCE,
-    REFINEMENT_LABELS, SOURCE_LABELS, TARGET_CLASSES, Candidate, CandidateRole,
+    DETECTED_TARGET_CLASSES, REFINEMENT_LABELS, SOURCE_LABELS, TARGET_CLASSES, Candidate, CandidateRole,
     ClientError, ImageRecord, JobControl, accepted_hand_sam_mask,
     accepted_specialist_hand_mask, arbitrate_segment_sources, clip_mask_to_roi,
     confidence_for_source, detection_tiles, materialize_tile_mask,
@@ -35,6 +35,7 @@ class DetectionMixin:
         # The gate makes initial job setup mutually exclusive with boundary
         # inference and model-cache replacement.
         with self.inference_lock:
+            self._require_supported_gpu()
             records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
             args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
@@ -130,7 +131,7 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
-            worker_count = min(1 if self.settings["models"]["provider"] == "gpu" else requested_parallelism, len(records))
+            worker_count = min(requested_parallelism, len(records))
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
@@ -187,6 +188,7 @@ class DetectionMixin:
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)
+                        self._refresh_effective_mask_status(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 finally:
                     self.invalidate_sam_image(record.image_id)
@@ -217,9 +219,10 @@ class DetectionMixin:
         rgb = np.asarray(rgb)
         height, width = rgb.shape[:2]
         targets = target_classes or TARGET_CLASSES
+        model_targets = targets | ({"testicles"} if "penis" in targets else set())
         segments = (models.target.detect(rgb, confidence) if targets == TARGET_CLASSES
-                    else models.target.detect(rgb, confidence, targets))
-        collected = [segment for segment in segments if segment["mask"].shape == (height, width)]
+                    else models.target.detect(rgb, confidence, model_targets))
+        collected = [segment for segment in segments if segment["class_name"] in model_targets and segment["mask"].shape == (height, width)]
         for source, model in models.auxiliaries:
             tiled_segments: list[dict[str, Any]] = []
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
@@ -227,8 +230,10 @@ class DetectionMixin:
                 if targets == TARGET_CLASSES:
                     detected_segments = model.detect(tile, confidence_for_source(source, confidence), source)
                 else:
-                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, targets)
+                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, model_targets)
                 for segment in detected_segments:
+                    if segment["class_name"] not in model_targets:
+                        continue
                     local_mask = np.asarray(segment["mask"], dtype=np.uint8)
                     if local_mask.shape != (tile_height, tile_width):
                         continue
@@ -250,21 +255,39 @@ class DetectionMixin:
         hand_model = self._ensure_hand_model(models)
         return hand_model.detect_boxes(rgb, HAND_CONFIDENCE)
 
+    @staticmethod
+    def _hand_boxes_over_apply(boxes: list[tuple[int, int, int, int]], masks: list[np.ndarray]) -> list[tuple[int, int, int, int]]:
+        """Limit expensive hand segmentation to the final target envelope."""
+        coordinates = np.argwhere(np.any(np.asarray(masks) > 0, axis=0)) if masks else np.empty((0, 2), dtype=int)
+        if not len(coordinates):
+            return []
+        top, left = coordinates.min(axis=0); bottom, right = coordinates.max(axis=0) + 1
+        clipped: list[tuple[int, int, int, int]] = []
+        for box_left, box_top, box_right, box_bottom in boxes:
+            overlap = (max(box_left, int(left)), max(box_top, int(top)), min(box_right, int(right)), min(box_bottom, int(bottom)))
+            if overlap[0] < overlap[2] and overlap[1] < overlap[3]: clipped.append(overlap)
+        return clipped
+
     def _hand_refinement_context(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], np.ndarray, list[tuple[int, int, int, int]]]:
         """Gather all non-SAM hand evidence before the single SAM section."""
         rgb = np.asarray(rgb)
-        detected = [segment for segment in segments if segment["class_name"] in TARGET_CLASSES]
+        detected = [segment for segment in segments if segment["class_name"] in DETECTED_TARGET_CLASSES]
         shape = rgb.shape[:2]
         hand_mask = np.zeros(shape, dtype=np.uint8)
         fallback_boxes: list[tuple[int, int, int, int]] = []
         hand_boxes = self._hand_boxes(models, rgb)
         if hand_boxes:
-            fallback_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
+            padded_boxes = [box for box in (padded_hand_box(box, shape) for box in hand_boxes) if box is not None]
+            fallback_boxes = self._hand_boxes_over_apply(
+                padded_boxes,
+                [np.asarray(segment["mask"]) for segment in detected],
+            ) if detected else padded_boxes
             if self.settings["models"].get("hand_segmentation_enabled"):
                 with self.hand_segmentation_lock:
                     specialist_predictor = self._hand_segmentation_predictor_for(record, rgb)
+                    unconfirmed_boxes: list[tuple[int, int, int, int]] = []
                     for padded_box in fallback_boxes:
                         masks, _scores, _ = specialist_predictor.predict(
                             point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=False,
@@ -272,9 +295,9 @@ class DetectionMixin:
                         confirmed = accepted_specialist_hand_mask(masks, shape, padded_box)
                         if confirmed is not None:
                             hand_mask = np.maximum(hand_mask, confirmed)
-                # HandSegNet is authoritative when enabled: rejected specialist
-                # masks are dropped rather than silently changing to SAM output.
-                fallback_boxes = []
+                        else:
+                            unconfirmed_boxes.append(padded_box)
+                    fallback_boxes = unconfirmed_boxes
         return detected, hand_mask, fallback_boxes
 
     @staticmethod
@@ -319,23 +342,34 @@ class DetectionMixin:
 
     def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
+        apply_union = np.zeros(np.asarray(rgb).shape[:2], dtype=np.uint8)
         for segment in segments:
-            if segment.get("class_name") not in TARGET_CLASSES:
+            if segment.get("class_name") not in DETECTED_TARGET_CLASSES:
                 continue
             final_mask = np.asarray(segment["mask"] > 0, dtype=np.uint8)
+            apply_union = np.maximum(apply_union, final_mask)
             exclusions: dict[str, np.ndarray] = {}
             if segment["class_name"] == "penis" and self.settings["detection"]["fluid_exclusion_enabled"]:
                 fluid_mask = white_fluid_mask(rgb, final_mask)
                 if np.any(fluid_mask):
                     exclusions["fluid"] = fluid_mask
             segment["exclusions"] = exclusions
+        # A hand is useful only where there is a final target.  This prevents a
+        # boundary operation from adding a full-image hand exclusion candidate.
+        for segment in segments:
+            if not segment.get("image_exclusions"):
+                continue
+            segment["image_exclusions"] = {
+                kind: np.where(apply_union > 0, np.asarray(mask, dtype=np.uint8), 0).astype(np.uint8)
+                for kind, mask in segment["image_exclusions"].items()
+            }
         return segments
 
     def _high_precision_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Keep target regions only when semantic SAM refinement succeeds."""
-        if not any(segment.get("class_name") in TARGET_CLASSES for segment in segments):
+        """Refine target regions, preserving detector evidence if SAM cannot."""
+        if not any(segment.get("class_name") in DETECTED_TARGET_CLASSES for segment in segments):
             return segments
         with self.sam_lock:
             predictor = self._sam_predictor_for(record, rgb)
@@ -346,13 +380,15 @@ class DetectionMixin:
     ) -> list[dict[str, Any]]:
         refined_segments: list[dict[str, Any]] = []
         for segment in segments:
-            if segment.get("class_name") not in TARGET_CLASSES:
+            if segment.get("class_name") not in DETECTED_TARGET_CLASSES:
                 refined_segments.append(segment)
                 continue
             source_mask = (np.asarray(segment.get("_detector_mask", segment["mask"])) > 0).astype(np.uint8)
             hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
             coordinates = np.argwhere(source_mask > 0)
             if not len(coordinates):
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             top, left = coordinates.min(axis=0)
             bottom, right = coordinates.max(axis=0) + 1
@@ -362,6 +398,10 @@ class DetectionMixin:
                    min(width, int(right + padding)), min(height, int(bottom + padding)))
             prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
             if not len(prompt_points):
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             masks, scores, logits = predictor.predict(
                 point_coords=prompt_points,
@@ -372,6 +412,10 @@ class DetectionMixin:
             clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
             selected = select_semantic_sam_mask(clipped_masks, scores, source_mask, hand_mask, prompt_points, labels)
             if selected is None:
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             refined, selected_index = selected
             hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
@@ -440,7 +484,7 @@ class DetectionMixin:
                     role=CandidateRole.EXCLUDE,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
                 ))
-            if segment["class_name"] not in TARGET_CLASSES:
+            if segment["class_name"] not in DETECTED_TARGET_CLASSES:
                 continue
             apply_mask = np.asarray(segment["mask"]).copy()
             # Keep the detector/SAM mask intact.  Hands and fluid are separate
@@ -536,9 +580,13 @@ class DetectionMixin:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。")
             hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
-            hand_boxes = [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None]
+            hand_boxes = self._hand_boxes_over_apply(
+                [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
+                [clipped],
+            )
             if hand_boxes:
                 if self.settings["models"].get("hand_segmentation_enabled"):
+                    fallback_boxes: list[tuple[int, int, int, int]] = []
                     with self.hand_segmentation_lock:
                         specialist = self._hand_segmentation_predictor_for(record, rgb)
                         for box in hand_boxes:
@@ -548,6 +596,13 @@ class DetectionMixin:
                             confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
                             if confirmed is not None:
                                 hand_mask = np.maximum(hand_mask, confirmed)
+                            else:
+                                fallback_boxes.append(box)
+                    if fallback_boxes:
+                        with self.sam_lock:
+                            hand_mask = self._apply_sam_hand_fallback(
+                                self._sam_predictor_for(record, rgb), fallback_boxes, rgb.shape[:2], hand_mask
+                            )
                 else:
                     with self.sam_lock:
                         hand_mask = self._apply_sam_hand_fallback(
@@ -603,6 +658,7 @@ class DetectionMixin:
                         self.candidates.setdefault(image_id, []).extend(created)
                         revision = self._touch_candidates(image_id)
                         self._persist_candidates(image_id)
+                    self._refresh_effective_mask_status(image_id)
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)

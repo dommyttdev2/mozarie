@@ -242,6 +242,7 @@
   "errorCode.model_picker_invalid": "選択したモデルファイルが正しくありません。",
   "errorCode.model_download_invalid": "ダウンロードするモデルの種類が正しくありません。",
   "errorCode.hand_segmentation_invalid": "設定でHandSegNet anime SDXLのモデルを指定してください。",
+  "errorCode.gpu_unavailable": "GPU推論を初期化できません。CPUへ切り替えるか、Mozarieを再セットアップしてください。",
   "errorCode.gpu_out_of_memory": "GPUメモリが不足しました。",
   "errorCode.gpu_out_of_memory_parallel": "GPUメモリが不足しました。同時実行数を1に下げるか、他のGPUアプリを閉じてもう一度実行してください。",
   "errorCode.gpu_out_of_memory_single": "GPUメモリが不足しました。他のGPUアプリを閉じるか、CPUまたは小さいSAMモデル（vit_b）を選択してください。",

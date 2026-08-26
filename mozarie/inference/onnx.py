@@ -18,6 +18,11 @@ _dll_directory_handles: list[object] = []
 _cuda_runtime_handles: list[object] = []
 
 
+def _gpu_unavailable_error() -> Exception:
+    from ..core import ClientError
+    return ClientError("GPU推論を初期化できません。CPUへ切り替えるか、Mozarieを再セットアップしてください。", "gpu_unavailable")
+
+
 def _register_torch_dll_directory() -> None:
     """Keep PyTorch's CUDA runtime DLLs visible to ONNX Runtime on Windows."""
     if os.name != "nt":
@@ -61,16 +66,18 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if device.lower() == "cpu":
         return ["CPUExecutionProvider"]
     if "CUDAExecutionProvider" not in available:
-        raise RuntimeError("CUDAExecutionProvider is unavailable. Select CPU or install ONNX Runtime GPU.")
+        raise _gpu_unavailable_error()
+    options = {
+        "arena_extend_strategy": "kSameAsRequested",
+        "cudnn_conv_algo_search": "HEURISTIC",
+        "cudnn_conv_use_max_workspace": "0",
+        "do_copy_in_default_stream": "1",
+    }
+    if int(gpu_device) != 0:
+        options["device_id"] = int(gpu_device)
     return [(
         "CUDAExecutionProvider",
-        {
-            "device_id": int(gpu_device),
-            "arena_extend_strategy": "kSameAsRequested",
-            "cudnn_conv_algo_search": "HEURISTIC",
-            "cudnn_conv_use_max_workspace": "0",
-            "do_copy_in_default_stream": "1",
-        },
+        options,
     ), "CPUExecutionProvider"]
 
 
@@ -81,7 +88,7 @@ def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device, gpu_device))
     if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
-        raise RuntimeError("CUDAExecutionProvider could not create the ONNX inference session.")
+        raise _gpu_unavailable_error()
     return session
 
 

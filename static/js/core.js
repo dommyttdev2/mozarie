@@ -7,7 +7,6 @@ const state = {
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   draftSaveChains: new Map(),
-  cpuDetectionParallelism: 2,
   tool: "brush", panning: false, drawing: false, boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
@@ -15,7 +14,7 @@ const state = {
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false,
+  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null,
   outputDirectoryPicking: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
@@ -200,7 +199,7 @@ function showProcessing(processing) {
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
   $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
   $("#processingCancelButton").disabled = cancelling;
-  if (!modal.open) modal.showModal();
+  showModalFromInvoker(modal);
 }
 
 function closeProcessing() {
@@ -276,7 +275,7 @@ function abortCatalogLoads() {
 }
 function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
-function imageHasMask(image) { return state.maskStatus.get(image.id) ?? Number(image.enabledCandidateCount || 0) > 0; }
+function imageHasMask(image) { return state.maskStatus.get(image.id) ?? image.hasEffectiveMask === true; }
 function saveTargets(mode = "masked") {
   if (mode === "current") return state.currentId && imageHasMask(currentRecord()) ? [state.currentId] : [];
   return state.images.filter((image) => !isHidden(image) && imageHasMask(image) && (mode !== "reviewed" || isReviewed(image))).map((image) => image.id);
@@ -424,7 +423,7 @@ function updateActionButtons() {
   $("#saveAllButton").disabled = running || mutatingCandidates || saveTargets().length === 0;
   const currentSaveDisabled = running || mutatingCandidates || !hasImage || !imageHasMask(current);
   $("#saveButton").disabled = currentSaveDisabled;
-  $("#applyStartButton").disabled = running || mutatingCandidates || Boolean(applyRestrictionMessage());
+  $("#applyStartButton").disabled = running || mutatingCandidates || state.applyTargetIds.length === 0 || Boolean(applyRestrictionMessage());
   $("#overviewButton").disabled = running || state.images.length === 0;
   $("#previousImageButton").disabled = running || switchingImages || imageIndex() <= 0;
   $("#nextImageButton").disabled = running || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;

@@ -41,6 +41,8 @@ class SavingMixin:
         copy_to_default: bool = False,
         suffix: str = "_censored",
     ) -> bool:
+        if not image_ids:
+            return False
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if not copy_to_default and any(record.source_kind != "filesystem" for record in records):
             raise ClientError("一時画像はコピー保存を選んでください。")
@@ -160,7 +162,7 @@ class SavingMixin:
                 add_mask, exclusion_mask, exclusion_erase_mask = draft_masks
                 enabled_apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
                 if not enabled_apply_candidates and add_mask is None:
-                    raise ClientError("保存するモザイク範囲がありません。")
+                    raise ClientError("保存するモザイク範囲がありません。", "no_effective_mask")
                 for candidate in candidates:
                     try:
                         self.materialize_candidate_mask(candidate, image_id)
@@ -185,7 +187,7 @@ class SavingMixin:
                     forced_exclude_masks, manual_exclude_forced, exclusion_erase_mask,
                 )
                 if mask is None or not np.any(mask):
-                    raise ClientError("保存するモザイク範囲がありません。")
+                    raise ClientError("保存するモザイク範囲がありません。", "no_effective_mask")
                 output = render_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                 source_fingerprint = (record.mtime_ns, record.size_bytes)
                 if copy_to_default:
@@ -455,8 +457,6 @@ class SavingMixin:
             )
             if failures:
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
-            elif len(empty_indices) == len(records):
-                self._fail_job(ClientError("保存するモザイク範囲がありません。"), job_generation, catalog_generation)
             elif control is not None and control.cancel_requested.is_set():
                 self._cancel_job(job_generation, catalog_generation)
             else:

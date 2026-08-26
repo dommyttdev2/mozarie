@@ -146,6 +146,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 settings = self.settings_store.validate_update(update)
                 if settings["saving"]["default_output_directory"] != previous_output_directory:
                     validate_output_directory_ready(settings["saving"]["default_output_directory"])
+                self._require_supported_gpu(settings["models"])
                 settings = self.settings_store.save(settings)
             except SettingsError as exc:
                 raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
@@ -169,6 +170,21 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     and any(settings["models"].get(key) != previous_models.get(key) for key in resource_keys)):
                 self._release_gpu_cache(provider="gpu", gpu_device=int(previous_models.get("gpu_device", 0)))
             return self.settings
+
+    @staticmethod
+    def _gpu_selection_error() -> ClientError:
+        return ClientError("選択したGPUは使用できません。対応しているGPUを選ぶか、CPUへ切り替えてください。", "gpu_unsupported")
+
+    def _require_supported_gpu(self, models: dict[str, Any] | None = None) -> None:
+        models = models or self.settings["models"]
+        if models["provider"] != "gpu":
+            return
+        selected_gpu = next(
+            (gpu for gpu in cuda_device_statuses(torch_module()) if gpu["id"] == models["gpu_device"]),
+            None,
+        )
+        if not selected_gpu or not selected_gpu["supported"]:
+            raise self._gpu_selection_error()
 
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:

@@ -688,9 +688,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             return
 
         path = urlparse(self.path).path
-        if 200 <= status < 400:
-            if path.startswith("/api/") and self.command == "POST":
-                LOGGER.info("API %s %s -> %d", self.command, path, status)
+        if status < 500:
             return
         LOGGER.warning("HTTP %s %s -> %d", self.command, path, status)
 

@@ -559,6 +559,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app = make_install(root / "install")
+            (app / ".venv").mkdir()
             source = make_source(root / "source")
             with patch("updater.fetch_latest_release", return_value=make_release()), \
                     patch("updater.download_archive"), \
@@ -569,6 +570,7 @@ class UpdaterTests(unittest.TestCase):
                 result = updater.perform_update(app, input_fn=lambda _prompt: "y")
             self.assertEqual(result, updater.EXIT_UPDATED)
             apply.assert_called_once_with(source, app)
+            self.assertEqual((app / ".venv" / ".mozarie-ready").read_text(encoding="utf-8"), "ready\n")
             messages = [call.args[0] for call in output.call_args_list if call.args]
             self.assertIn("v1.1.0 → v1.2.0", messages)
             self.assertIn("v1.1.0 から v1.2.0 へアップデートしました。", messages)
@@ -606,22 +608,29 @@ class UpdaterTests(unittest.TestCase):
         batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         version_check = '"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize(\'P\') == 8 else 1)"'
         self.assertIn(version_check, batch)
-        install_index = batch.index('"%PYTHON%" -m pip install --upgrade pip')
+        install_index = batch.index('"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet --upgrade pip')
         self.assertLess(batch.index("call :validate_python"), install_index)
+
+    def test_requirements_pin_the_official_cuda_runtime_without_replacing_pypi(self):
+        requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("--extra-index-url https://download.pytorch.org/whl/cu130", requirements)
+        self.assertIn("torch==2.13.0+cu130", requirements)
+        self.assertIn("torchvision==0.28.0+cu130", requirements)
+        self.assertIn("onnxruntime-gpu==1.27.0", requirements)
+        self.assertNotIn("--index-url https://download.pytorch.org/whl/cu130", requirements)
 
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
-        for name in ("setup.bat", "run.bat"):
-            with self.subTest(name=name):
-                batch = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
-                self.assertIn(expected_loop, batch)
-                self.assertEqual(batch.count("py -%%V -m venv"), 1)
-                self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
-                self.assertNotIn("python -m venv", batch)
-                if name == "setup.bat":
-                    self.assertNotIn("MOZARIE_PYTHON", batch)
-                else:
-                    self.assertIn('if defined MOZARIE_PYTHON (', batch)
+        setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
+        run = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
+        self.assertIn(expected_loop, setup)
+        self.assertEqual(setup.count("py -%%V -m venv"), 1)
+        self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', setup)
+        self.assertNotIn("python -m venv", setup)
+        self.assertNotIn("MOZARIE_PYTHON", setup)
+        self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
+        self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
+        self.assertNotIn("pip install", run)
 
     @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
     def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):
@@ -640,6 +649,19 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
             self.assertFalse((app / ".venv").exists())
+
+    def test_run_requires_ready_marker_without_bootstrapping(self):
+        batch = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
+        self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
+        self.assertIn('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required', batch)
+        self.assertLess(
+            batch.index('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required'),
+            batch.index("\n:start\n"),
+        )
+        self.assertNotIn("pip", batch.lower())
+        self.assertNotIn("call setup.bat", batch.lower())
+        self.assertNotIn("-m venv", batch.lower())
+        self.assertNotIn("call :create_venv", batch.lower())
 
 
 if __name__ == "__main__":

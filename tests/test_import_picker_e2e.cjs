@@ -53,7 +53,7 @@ function startFixtureServer() {
   let deferFullSettings = false;
   let deferUpdateStatus = false;
   let currentJob = { kind: "idle", state: "idle" };
-  const settings = {
+  let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
@@ -76,7 +76,11 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/settings") {
       settingsRequests.push(requestUrl.search);
-      if (request.method === "POST") settingsActions.push({ path: requestPath, method: request.method });
+      if (request.method === "POST") {
+        let body = ""; for await (const chunk of request) body += chunk;
+        settings = JSON.parse(body);
+        settingsActions.push({ path: requestPath, method: request.method });
+      }
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
       if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
@@ -304,6 +308,7 @@ async function assertDesktopLayout(page, width, height) {
   await page.setViewportSize({ width, height });
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
+  if (width === 1024) assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "the 1024px inspector keeps its usable 270px width");
   await assertVisibleButtons(page, `${width}x${height} edit`);
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
@@ -462,6 +467,17 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   for (const selector of ["#settingsTargetModel", "#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) {
     assert.equal(await page.locator(selector).getAttribute("placeholder"), expectedPathPlaceholder, `${selector} has the localized path placeholder at ${width}x${height} (${language})`);
   }
+  const modelNames = language === "ja"
+    ? ["基本モデル", "NTD11", "Sensitive", "輪郭を補正", "手 (anime_hand_detection)", "手 (HandSegNet anime SDXL)", "白い液"]
+    : ["Primary model", "NTD11", "Sensitive", "Refine contours", "Hands (anime_hand_detection)", "Hands (HandSegNet anime SDXL)", "White fluid"];
+  const modelActionNames = [
+    ...modelNames.slice(0, 6).map((model) => `${model} ${language === "ja" ? "ダウンロード" : "Download"}`),
+    ...modelNames.slice(0, 6).map((model) => `${model} ${language === "ja" ? "参照" : "Browse"}`),
+    ...modelNames.map((model) => `${model} ${language === "ja" ? "この設定の説明" : "About this option"}`),
+    language === "ja" ? "SAM・手モデルをダウンロード" : "Download SAM & hand models",
+  ];
+  assert.equal(new Set(modelActionNames).size, modelActionNames.length, `model action expectations are unique at ${width}x${height} (${language})`);
+  for (const name of modelActionNames) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 1, `model action has one accessible name: ${name} at ${width}x${height} (${language})`);
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
     ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556"],
@@ -816,6 +832,7 @@ async function main() {
     assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
@@ -969,8 +986,13 @@ async function main() {
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears after a successful response");
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\).*GPU 0:/, "status shows actual GPU names, VRAM, and the incompatibility");
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\)$/, "status shows actual GPU names, VRAM, and the incompatibility without a fabricated fallback device");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
+    assert.equal(await page.locator('#settingsGpuDevice option[value="0"]').count(), 0, "a pending or mismatched setting never creates a fake GPU 0 option");
+    await page.locator("#settingsGpuDevice").selectOption("3");
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the supported GPU choice remains selected after saving");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
@@ -1204,6 +1226,7 @@ async function main() {
     assert.equal(await page.locator("#galleryPaneContent").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#galleryPaneContent").evaluate((pane) => pane.inert), true);
     assert.equal(await page.locator("#galleryPane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 40);
+    assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "collapsing the gallery keeps the 1024px inspector width");
     assert.ok(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width) > stageWidth, "collapsing the gallery must enlarge the canvas");
     await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
@@ -1279,22 +1302,30 @@ async function main() {
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
-    assert.equal(await page.locator("#detectParallelism").isDisabled(), true, "GPU detection keeps the visible worker count fixed at one");
+    assert.equal(await page.locator("#detectParallelism").isDisabled(), false, "GPU keeps the same editable worker control");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "2", "the saved worker count is shown without rewriting it");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    await page.locator("#detectParallelism").fill("3");
+    await page.locator("#detectParallelism").fill("4");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    assert.equal(await page.locator("#detectParallelism").inputValue(), "1", "GPU hides the stored CPU worker count behind one effective worker");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "GPU preserves the requested worker count");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-    assert.equal(await page.locator("#detectParallelism").inputValue(), "3", "switching back to CPU restores its stored worker count");
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "switching providers does not rewrite the worker count");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
     assert.equal(detectRequests.length, 2, "starting settings should call detection once");
     assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
-    assert.equal(detectRequests[1].parallelism, 3, "dialog parallelism should be submitted");
+    assert.equal(detectRequests[1].parallelism, 4, "dialog parallelism should be submitted on GPU");
     assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
+    await page.locator("#settingsButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option[value='3']"));
+    assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the saved GPU choice survives reopening after reload");
+    await page.locator("#settingsCloseButton").click();
+    await page.locator("#detectAllButton").click();
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "the saved GPU worker count survives reload");
+    await page.locator("#detectDialog").evaluate((dialog) => dialog.close());
     holdDetection(true);
     await page.locator("#detectAllButton").click();
     await page.locator("#detectStartButton").click();
@@ -1387,6 +1418,24 @@ async function main() {
     await page.locator("#settingsDialog").evaluate((dialog) => dialog.showModal());
     await page.locator("#settingsCloseButton").click();
     assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "settings close button still closes the dialog");
+    await page.locator("#settingsButton").focus();
+    assert.equal(await page.evaluate(() => document.activeElement.id), "settingsButton", "settings trigger receives focus before its async opening");
+    await page.locator("#settingsButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsDialog").open);
+    await page.locator("#settingsCloseButton").click();
+    await page.waitForFunction(() => document.activeElement.id === "settingsButton");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "settingsButton", "async settings opening restores focus to its invoker");
+    await page.locator("#settingsButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsDialog").open);
+    await page.locator('[data-settings-tab="models"]').click();
+    await page.locator('[data-model-help="ntd11"]').focus();
+    await page.locator('[data-model-help="ntd11"]').click();
+    await page.waitForFunction(() => document.querySelector("#modelHelpDialog").open);
+    await page.locator("#modelHelpCloseButton").click();
+    await page.waitForFunction(() => document.activeElement?.dataset?.modelHelp === "ntd11");
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.modelHelp), "ntd11", "model help restores focus to its invoker");
+    await page.locator("#settingsCloseButton").click();
+    await page.waitForFunction(() => document.activeElement.id === "settingsButton");
     await page.locator("#mosaicHelpDialog").evaluate((dialog) => dialog.showModal());
     const mosaicHelpPoints = await dialogPointerPoints(page, "#mosaicHelpDialog");
     await page.mouse.click(mosaicHelpPoints.outside.x, mosaicHelpPoints.outside.y, { button: "right" });

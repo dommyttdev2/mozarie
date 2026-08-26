@@ -256,7 +256,7 @@ class JobsMixin:
             )
             self._job_output_slots: dict[int, str] = {}
             self.job_control = control
-        LOGGER.info("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
+        LOGGER.debug("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
         thread = threading.Thread(
             target=worker,
             args=(records, *args),
@@ -499,7 +499,7 @@ class JobsMixin:
             finished = True
         if finished:
             self._release_gpu_job_memory()
-        LOGGER.info("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
+        LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         gpu_oom = self._gpu_oom_client_error(exc)

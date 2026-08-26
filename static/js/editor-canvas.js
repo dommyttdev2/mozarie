@@ -1,4 +1,5 @@
 function canvasSizeForImage(image) {
+  releaseMosaicPreview();
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
   blinkCanvas.width = image.width; blinkCanvas.height = image.height;
   addCtx.clearRect(0, 0, image.width, image.height);
@@ -17,6 +18,7 @@ function canvasSizeForImage(image) {
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
+  releaseMosaicPreview();
   state.history = []; state.historyIndex = 0; state.activeStroke = null; state.hover = null; clearBoundaryInteraction();
   state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
   state.maskDirty = false;
@@ -298,7 +300,12 @@ function syncCurrentCandidateRecord() { syncCandidateRecord(state.currentId, sta
 function syncStoredMaskStatus(imageId, candidates) {
   const draft = state.drafts.get(imageId);
   if (!draft) return;
-  state.maskStatus.set(imageId, draft.hasEffectiveMask === true);
+  const record = state.images.find((image) => image.id === imageId);
+  if (draft.hasEffectiveMask === true || Number(draft.candidateRevision || 0) === Number(record?.candidateRevision || 0)) {
+    state.maskStatus.set(imageId, draft.hasEffectiveMask === true);
+  } else {
+    state.maskStatus.delete(imageId);
+  }
 }
 
 async function refreshCandidateRecord(imageId, syncMask = false) {
@@ -420,7 +427,11 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
   state.manualExclusionForced = draft?.manualExclusionForced ?? (state.settings?.detection?.exclude_forced_default !== false);
   state.manualMaskPresent = false;
   const candidateRevisionMatches = !draft || Number(draft.candidateRevision) === Number(currentRecord()?.candidateRevision || 0);
-  state.removedCandidateIds = new Set(candidateRevisionMatches ? (draft?.removedCandidateIds || []) : []);
+  const currentCandidateIds = new Set(state.candidates.map((candidate) => candidate.id));
+  // A new auto-detection revision replaces candidate IDs.  Keep removals for
+  // IDs that still exist, rather than restoring a deleted boundary candidate.
+  const retainedRemovedIds = (draft?.removedCandidateIds || []).filter((id) => currentCandidateIds.has(id));
+  state.removedCandidateIds = new Set(retainedRemovedIds);
   if (!draft) { resetHistoryToCurrentManualMask(); updateCandidateStatus(); renderCandidates(); return true; }
   const [addImage, exclusionImage, exclusionEraseImage, historyAddImage, historyExclusionImage, historyExclusionEraseImage] = images;
     if (addImage) addCtx.drawImage(addImage, 0, 0);
@@ -437,7 +448,9 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
       const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
       const candidateOperation = (stroke) => ["removeCandidates", "restoreCandidates", "addCandidates"].includes(stroke.kind);
       state.history = candidateRevisionMatches ? originalHistory : originalHistory.filter((stroke) => !candidateOperation(stroke));
-      state.historyRemovedCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.removedCandidateIds || []) : []);
+      state.historyRemovedCandidateIds = new Set(candidateRevisionMatches
+        ? (draft.historyBase.removedCandidateIds || []).filter((id) => currentCandidateIds.has(id))
+        : retainedRemovedIds);
       state.historyCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id)) : state.candidates.map((candidate) => candidate.id));
       const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
       state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
@@ -476,6 +489,8 @@ function releaseMosaicPreview() {
   state.mosaicPreviewGeneration += 1;
   state.mosaicWorker?.terminate?.();
   state.mosaicWorker = null;
+  state.mosaicWorkerBusy = false;
+  state.mosaicPending = null;
   mosaicCanvas.width = mosaicCanvas.height = 1;
 }
 
@@ -485,8 +500,16 @@ function prepareOriginalImage() {
   originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height); originalCtx.drawImage(state.currentImage, 0, 0);
 }
 
+function postMosaicPreview(payload) {
+  const worker = state.mosaicWorker;
+  if (!worker) return;
+  state.mosaicWorkerBusy = true;
+  worker.postMessage(payload, [payload.source, payload.mask]);
+}
+
 function rebuildMosaicPreview() {
-  if (!state.mosaicPreviewEnabled || !state.currentImage) return;
+  if (!state.mosaicPreviewEnabled || !state.currentImage || typeof Worker !== "function") return;
+  if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
   prepareOriginalImage();
   flushMaskComposition();
   const generation = ++state.mosaicPreviewGeneration;
@@ -494,16 +517,23 @@ function rebuildMosaicPreview() {
   const maskPixels = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data;
   const mask = new Uint8Array(originalCanvas.width * originalCanvas.height);
   for (let index = 0; index < mask.length; index += 1) mask[index] = maskPixels[index * 4 + 3];
-  state.mosaicWorker?.terminate?.();
-  if (typeof Worker !== "function") return;
-  const worker = state.mosaicWorker = new Worker("/js/masked-mosaic-worker.js");
-  worker.onmessage = ({ data }) => {
-    worker.terminate(); if (state.mosaicWorker === worker) state.mosaicWorker = null;
-    if (data.generation !== state.mosaicPreviewGeneration || !state.currentImage) return;
-    mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0); render();
-  };
-  worker.onerror = () => { worker.terminate(); if (state.mosaicWorker === worker) state.mosaicWorker = null; };
-  worker.postMessage({ source: source.data.buffer, mask: mask.buffer, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation }, [source.data.buffer, mask.buffer]);
+  const payload = { source: source.data.buffer, mask: mask.buffer, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation };
+  if (!state.mosaicWorker) {
+    const worker = state.mosaicWorker = new Worker("/js/masked-mosaic-worker.js");
+    worker.onmessage = ({ data }) => {
+      if (state.mosaicWorker !== worker) return;
+      state.mosaicWorkerBusy = false;
+      if (data.generation === state.mosaicPreviewGeneration && !state.mosaicPending && state.currentImage) {
+        mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0);
+        render();
+      }
+      const pending = state.mosaicPending;
+      state.mosaicPending = false;
+      if (pending) rebuildMosaicPreview();
+    };
+    worker.onerror = () => { if (state.mosaicWorker === worker) releaseMosaicPreview(); };
+  }
+  postMosaicPreview(payload);
 }
 
 function requestMosaicPreview() {

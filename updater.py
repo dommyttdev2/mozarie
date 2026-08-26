@@ -329,7 +329,7 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> None:
     if not python.is_file():
         raise UpdateError(tr("requirements_failed"))
     result = subprocess.run(
-        [str(python), "-m", "pip", "install", "-r", str(incoming)],
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "--quiet", "-r", str(incoming)],
         cwd=str(app_dir),
         check=False,
     )
@@ -461,6 +461,9 @@ def perform_update(
         install_requirements(source_root, app_dir)
         print(tr("updating"))
         apply_update(source_root, app_dir)
+        ready_marker = app_dir / ".venv" / ".mozarie-ready"
+        if ready_marker.parent.is_dir():
+            ready_marker.write_text("ready\n", encoding="utf-8")
 
     print(tr("version_change", current=current, latest=latest))
     print(tr("updated", current=current, latest=latest))

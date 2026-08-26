@@ -61,6 +61,9 @@ SESSION_BASE_DIR = Path(tempfile.gettempdir()) / "Mozarie"
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 TARGET_CLASSES = {"pussy", "penis"}
+# NTD reports testicles as part of the penis target.  The setting remains the
+# simple penis/pussy choice, while detection keeps that companion class.
+DETECTED_TARGET_CLASSES = TARGET_CLASSES | {"testicles"}
 SOURCE_PRIORITY = {"target": 3, "ntd11": 2, "sensitive": 1}
 TARGET_OVERLAP_IOU = 0.20
 TARGET_CONTAINMENT = 0.60

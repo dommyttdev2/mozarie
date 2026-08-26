@@ -147,42 +147,35 @@ function handleToolRailKeydown(event) {
   focusElement(items[next]);
 }
 
-function renderSettingsStatus(status) {
-  state.settingsStatus = status;
+function renderSettingsStatus(status, selectedDevice = null) {
+  if (status) state.settingsStatus = status;
   const gpuSelect = $("#settingsGpuDevice");
-  const selected = gpuSelect.value || String(state.settings?.models?.gpu_device ?? 0);
-  const configured = String(state.settings?.models?.gpu_device ?? 0);
+  const selected = selectedDevice == null ? gpuSelect.value : String(selectedDevice);
   gpuSelect.textContent = "";
-  const gpus = status?.gpus || [];
-  if (!gpus.length) { const option = document.createElement("option"); option.value = configured; option.textContent = `GPU ${configured}`; option.disabled = true; gpuSelect.append(option); }
-  else for (const gpu of gpus) {
+  const gpus = Array.isArray(status?.gpus) ? status.gpus : (state.settingsStatus?.gpus || []);
+  for (const gpu of gpus) {
     const option = document.createElement("option"); option.value = String(gpu.id);
     const memory = gpuMemoryLabel(gpu.totalMemory);
     option.textContent = `GPU ${gpu.id}: ${gpu.name}${memory ? ` / VRAM: ${memory} GB` : ""}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
-  if (![...gpuSelect.children].some((option) => option.value === selected)) {
-    const option = document.createElement("option"); option.value = selected; option.textContent = `GPU ${selected}: ${t("settings.gpuUnavailable")}`; option.disabled = true; gpuSelect.append(option);
+  if (gpus.length) {
+    const selectedOption = [...gpuSelect.options].find((option) => option.value === selected && !option.disabled);
+    const firstSupported = [...gpuSelect.options].find((option) => !option.disabled);
+    gpuSelect.value = selectedOption?.value || firstSupported?.value || "";
   }
-  gpuSelect.value = selected;
+  syncProviderSelection();
   renderModelStatus();
 }
 
 function syncProviderSelection() {
   const gpu = $("#settingsProvider").value === "gpu";
-  $("#settingsGpuDevice").disabled = !gpu;
-  const parallelism = $("#detectParallelism");
-  if (gpu && !parallelism.disabled) {
-    const value = Number(parallelism.value);
-    state.cpuDetectionParallelism = Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
-  }
-  parallelism.disabled = gpu;
-  parallelism.value = String(gpu ? 1 : state.cpuDetectionParallelism);
+  const gpuSelect = $("#settingsGpuDevice");
+  gpuSelect.disabled = !gpu || ![...gpuSelect.options].some((option) => !option.disabled);
 }
 
 function setSettingsForm(settings, status = null) {
   state.settings = settings;
-  state.cpuDetectionParallelism = Number(settings.detection?.parallelism) || 2;
   $("#settingsLanguage").value = settings.general.language;
   $("#settingsOpenBrowser").checked = settings.general.open_browser;
   $("#settingsPort").value = String(settings.general.port);
@@ -219,7 +212,7 @@ function setSettingsForm(settings, status = null) {
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
   setDetectionConfidence(settings.detection.threshold);
-  $("#detectParallelism").value = String(settings.models.provider === "gpu" ? 1 : state.cpuDetectionParallelism);
+  $("#detectParallelism").value = String(settings.detection?.parallelism || 2);
   setDetectionTargets(settings.detection.targets);
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
@@ -229,7 +222,7 @@ function setSettingsForm(settings, status = null) {
   $("#confirmOverwriteSource").checked = settings.confirmations?.overwriteSource !== false;
   $("#confirmDeleteSourceAfterCopy").checked = settings.confirmations?.deleteSourceAfterCopy !== false;
   renderShortcutBindings(settings.shortcuts?.bindings || {}, settings.shortcuts?.actions || {});
-  renderSettingsStatus(status);
+  renderSettingsStatus(status || state.settingsStatus, settings.models.gpu_device);
 }
 
 const SHORTCUT_LABELS = { previous: "settings.shortcut.previous", next: "settings.shortcut.next", previousVisible: "settings.shortcut.previousVisible", nextVisible: "settings.shortcut.nextVisible", first: "settings.shortcut.first", last: "settings.shortcut.last", reviewAndNext: "settings.shortcut.reviewAndNext", toggleOverview: "settings.shortcut.toggleOverview", undo: "settings.shortcut.undo", redo: "settings.shortcut.redo" };
@@ -237,8 +230,8 @@ function renderShortcutBindings(bindings, actions) {
   const root = $("#shortcutBindings"); root.textContent = "";
   for (const [action, labelKey] of Object.entries(SHORTCUT_LABELS)) {
     const row = document.createElement("label"); row.className = "form-row"; const text = document.createElement("span"); text.textContent = t(labelKey);
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false;
-    const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off";
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.dataset.shortcutEnabled = action; enabled.checked = actions[action] !== false; enabled.setAttribute("aria-label", `${t(labelKey)} ${t("settings.on")}`);
+    const input = document.createElement("input"); input.type = "text"; input.dataset.shortcutAction = action; input.value = bindings[action] || ""; input.autocomplete = "off"; input.setAttribute("aria-label", t(labelKey));
     input.addEventListener("keydown", (event) => { event.preventDefault(); input.value = shortcutFromEvent(event); }); row.append(text, enabled, input); root.append(row);
   }
 }
@@ -252,6 +245,7 @@ function shortcutActionsPayload() { return Object.fromEntries([...document.query
 
 function settingsPayload() {
   storeSelectedSamPath();
+  const gpuDevice = $("#settingsGpuDevice").value;
   return {
     general: { ...state.settings.general, language: $("#settingsLanguage").value, open_browser: $("#settingsOpenBrowser").checked, port: Number($("#settingsPort").value), shortcuts_enabled: $("#settingsShortcutsEnabled").checked },
     models: {
@@ -259,7 +253,8 @@ function settingsPayload() {
       sensitive: $("#settingsSensitiveModel").value.trim(), sensitive_enabled: modelCardEnabled("sensitive"),
       hand_detection: $("#settingsHandModel").value.trim(), hand_detection_enabled: modelCardEnabled("hand_detection"),
       hand_segmentation: $("#settingsHandSegmentationModel").value.trim(), hand_segmentation_enabled: modelCardEnabled("hand_segmentation"),
-      sam_checkpoints: { ...samCheckpointPaths }, sam_model_type: selectedSamType(), provider: $("#settingsProvider").value, gpu_device: Number($("#settingsGpuDevice").value),
+      sam_checkpoints: { ...samCheckpointPaths }, sam_model_type: selectedSamType(), provider: $("#settingsProvider").value,
+      gpu_device: gpuDevice === "" ? state.settings.models.gpu_device : Number(gpuDevice),
     },
     display: {
       apply_color: $("#settingsApplyColor").value, exclude_color: $("#settingsExcludeColor").value,
@@ -269,7 +264,7 @@ function settingsPayload() {
     importing: { parallelism: normaliseImportParallelism($("#settingsImportParallelism").value) },
     detection: {
       threshold: normaliseDetectionConfidence($("#detectConfidenceNumber").value),
-      parallelism: $("#settingsProvider").value === "gpu" ? state.cpuDetectionParallelism : detectionParallelism(),
+      parallelism: detectionParallelism(),
       mode: $("#settingsPrecisionToggle").checked ? "high_precision" : "standard",
       fluid_exclusion_enabled: $("#settingsFluidToggle").checked,
       exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),
@@ -314,6 +309,7 @@ function moveSettingsTab(event) {
 
 async function openSettings() {
   if (isBusy()) return;
+  const invoker = document.activeElement;
   if (!state.settings) {
     try {
       const data = await api("/api/settings?status=0");
@@ -322,7 +318,7 @@ async function openSettings() {
     } catch (error) { setStatus(error.message, "error"); return; }
   }
   setSettingsForm(state.settings, state.settingsStatus);
-  selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
+  selectSettingsTab("general"); $("#settingsResult").textContent = ""; showModalFromInvoker($("#settingsDialog"), invoker);
   void refreshSettingsStatus();
 }
 
@@ -501,7 +497,7 @@ function showUnsupportedModelDownload(key) {
   $("#modelDownloadActions").hidden = true;
   $("#modelDownloadStart").hidden = true;
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
-  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+  showModalFromInvoker($("#modelDownloadDialog"));
 }
 
 function modelDownloadConfirmation(key) {
@@ -518,7 +514,7 @@ function modelDownloadConfirmation(key) {
   $("#modelDownloadStatus").hidden = false; $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadActions").hidden = false;
   $("#modelDownloadStart").hidden = false; $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
-  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+  showModalFromInvoker($("#modelDownloadDialog"));
 }
 
 function startModelDownload(key) {
@@ -555,9 +551,9 @@ function setSettingsGpuLoading(loading) {
 
 async function refreshSettingsStatus() {
   const generation = ++settingsStatusGeneration;
-  const snapshot = JSON.stringify(settingsPayload());
   setSettingsGpuLoading(true);
   try {
+    const snapshot = JSON.stringify(settingsPayload());
     const data = await api("/api/settings/status", { method: "POST", body: snapshot });
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
