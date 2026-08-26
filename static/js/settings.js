@@ -309,6 +309,7 @@ function moveSettingsTab(event) {
 
 async function openSettings() {
   if (isBusy()) return;
+  const invoker = document.activeElement;
   if (!state.settings) {
     try {
       const data = await api("/api/settings?status=0");
@@ -317,7 +318,7 @@ async function openSettings() {
     } catch (error) { setStatus(error.message, "error"); return; }
   }
   setSettingsForm(state.settings, state.settingsStatus);
-  selectSettingsTab("general"); $("#settingsResult").textContent = ""; $("#settingsDialog").showModal();
+  selectSettingsTab("general"); $("#settingsResult").textContent = ""; showModalFromInvoker($("#settingsDialog"), invoker);
   void refreshSettingsStatus();
 }
 
@@ -496,7 +497,7 @@ function showUnsupportedModelDownload(key) {
   $("#modelDownloadActions").hidden = true;
   $("#modelDownloadStart").hidden = true;
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error"); $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
-  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+  showModalFromInvoker($("#modelDownloadDialog"));
 }
 
 function modelDownloadConfirmation(key) {
@@ -513,7 +514,7 @@ function modelDownloadConfirmation(key) {
   $("#modelDownloadStatus").hidden = false; $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadActions").hidden = false;
   $("#modelDownloadStart").hidden = false; $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
-  const dialog = $("#modelDownloadDialog"); if (!dialog.open) dialog.showModal();
+  showModalFromInvoker($("#modelDownloadDialog"));
 }
 
 function startModelDownload(key) {

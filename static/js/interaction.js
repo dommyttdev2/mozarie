@@ -59,7 +59,7 @@ function confirmAction(title, message, key = null) {
       $("#confirmNeverShow").checked = false; resolve(accepted);
     };
     dialog.addEventListener("close", finish, { once: true });
-    dialog.showModal();
+    showModalFromInvoker(dialog);
   });
 }
 function confirmationRequired(key) {

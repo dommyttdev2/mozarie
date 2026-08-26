@@ -650,6 +650,26 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
             self.assertFalse((app / ".venv").exists())
 
+    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
+    def test_run_ready_environment_starts_without_setup_or_pip(self):
+        root_batch = Path(__file__).parents[1] / "run.bat"
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"; app.mkdir()
+            shutil.copy2(root_batch, app / "run.bat")
+            python = app / ".venv" / "Scripts" / "python.exe"; python.parent.mkdir(parents=True)
+            shutil.copy2(sys.executable, python)
+            shutil.copy2(Path(sys.executable).parent.parent / "pyvenv.cfg", app / ".venv" / "pyvenv.cfg")
+            (app / ".venv" / ".mozarie-ready").write_text("ready\n", encoding="utf-8")
+            marker = app / "server-ran.txt"
+            (app / "server.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ok', encoding='utf-8')",
+                encoding="utf-8",
+            )
+            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
+            self.assertNotIn("pip", result.stdout.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

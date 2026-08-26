@@ -1,3 +1,12 @@
+const modalInvokers = new WeakMap();
+
+function showModalFromInvoker(dialog, invoker = document.activeElement) {
+  if (dialog.open) return;
+  if (invoker?.isConnected && !invoker.disabled) modalInvokers.set(dialog, invoker);
+  else modalInvokers.delete(dialog);
+  dialog.showModal();
+}
+
 function modelHelpInfo(key) {
   const source = (label, url) => ({ source: label, url });
   const english = $("#settingsLanguage")?.value === "en";
@@ -33,7 +42,7 @@ function openModelHelp(key) {
   $("#modelHelpCommand").textContent = info.command || "";
   $("#modelHelpCopyResult").textContent = "";
   $("#modelHelpSamTable").hidden = key !== "precision";
-  $("#modelHelpDialog").showModal();
+  showModalFromInvoker($("#modelHelpDialog"));
 }
 
 async function copyCommand(commandId, resultId) {
@@ -45,17 +54,12 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
-  const modalInvokers = new WeakMap();
-  document.addEventListener("click", (event) => {
-    const invoker = event.target.closest?.("button, [role=button]");
-    const openBefore = new Set([...document.querySelectorAll("dialog[open]")]);
-    queueMicrotask(() => document.querySelectorAll("dialog[open]").forEach((dialog) => {
-      if (!openBefore.has(dialog) && invoker) modalInvokers.set(dialog, invoker);
-    }));
-  });
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("close", () => {
     const invoker = modalInvokers.get(dialog);
-    if (invoker?.isConnected && !invoker.disabled) focusElement(invoker);
+    modalInvokers.delete(dialog);
+    setTimeout(() => {
+      if (invoker?.isConnected && !invoker.disabled && !dialog.open) focusElement(invoker);
+    }, 0);
   }));
   const lightDismiss = (dialog, close) => {
     let backdropPointerId = null;
@@ -78,13 +82,9 @@ function bindEvents() {
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
-    const language = state.settings?.general?.language || "ja";
     if (state.settings?.models && state.settings?.display && state.settings?.detection) {
       setSettingsForm(state.settings, state.settingsStatus);
-    } else {
-      $("#settingsLanguage").value = language;
     }
-    void loadTranslations(language);
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
@@ -241,7 +241,7 @@ function bindEvents() {
   document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
-    $("#mosaicHelpDialog").showModal();
+    showModalFromInvoker($("#mosaicHelpDialog"));
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
   lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());

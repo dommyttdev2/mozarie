@@ -43,7 +43,7 @@ function openDetectionDialog(imageIds) {
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
   $("#detectTargetCount").textContent = t("detectDialog.target", { count: imageIds.length });
-  $("#detectDialog").showModal();
+  showModalFromInvoker($("#detectDialog"));
 }
 
 async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {

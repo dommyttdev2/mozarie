@@ -199,7 +199,7 @@ function showProcessing(processing) {
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
   $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
   $("#processingCancelButton").disabled = cancelling;
-  if (!modal.open) modal.showModal();
+  showModalFromInvoker(modal);
 }
 
 function closeProcessing() {

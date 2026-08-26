@@ -1129,6 +1129,19 @@ class MozarieTests(unittest.TestCase):
         finally:
             state_module.STATE.settings = original_settings
 
+    def test_main_reports_bind_error_without_traceback(self):
+        with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
+                patch.object(core_module.LOGGER, "error") as error, \
+                patch.object(core_module.LOGGER, "exception") as exception, \
+                patch.object(state_module.STATE, "shutdown") as shutdown, \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            with self.assertRaises(SystemExit) as raised:
+                server_entry.main()
+        self.assertEqual(raised.exception.code, 1)
+        error.assert_called_once_with("Mozarieを起動できません。ポート%sは使用中です。", 9876)
+        exception.assert_not_called()
+        shutdown.assert_called_once()
+
     def test_http_log_message_silences_success_and_client_errors(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
@@ -1186,7 +1199,7 @@ class MozarieTests(unittest.TestCase):
                     server_entry.main()
         self.assertEqual(raised.exception.code, 1)
         shutdown.assert_called_once_with()
-        self.assertIn("サーバーを起動できません", "\n".join(logs.output))
+        self.assertIn("Mozarieを起動できません。ポート9876は使用中です。", "\n".join(logs.output))
 
     def test_server_imports_from_an_isolated_unrelated_working_directory(self):
         root = Path(__file__).resolve().parents[1]

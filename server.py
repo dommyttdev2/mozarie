@@ -53,11 +53,11 @@ def main() -> None:
     try:
         http_server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
     except OSError:
-        LOGGER.exception("サーバーを起動できません")
+        LOGGER.error("Mozarieを起動できません。ポート%sは使用中です。", port)
         state_module.STATE.shutdown()
         raise SystemExit(1) from None
     url = f"http://127.0.0.1:{port}"
-    LOGGER.info("Mozarie を起動しました: %s", url)
+    LOGGER.info("Mozarieを起動しました: %s", url)
     if state_module.STATE.settings["general"]["open_browser"]:
         _schedule_browser_open(url)
     try:

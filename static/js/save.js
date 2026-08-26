@@ -64,6 +64,7 @@ function refreshApplyTargets() {
 }
 
 async function openApplyDialog(options = {}) {
+  const invoker = document.activeElement;
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const initialMode = Array.isArray(options) ? "current" : (options.initialMode || "masked");
   if (isBusy() || state.importing) return;
@@ -82,7 +83,7 @@ async function openApplyDialog(options = {}) {
   $("#applyCancelButton").hidden = true;
   $("#applySettings").disabled = false;
   setApplyResult(""); syncApplyMode();
-  $("#applyDialog").showModal();
+  showModalFromInvoker($("#applyDialog"), invoker);
 }
 
 function draftPayload(imageIds) {
@@ -523,7 +524,7 @@ function showRunningApply(job) {
   $("#applyPauseButton").hidden = false;
   $("#applyCancelButton").hidden = false;
   const dialog = $("#applyDialog");
-  if (!dialog.open) dialog.showModal();
+  showModalFromInvoker(dialog);
 }
 
 async function finishApplyJob(job) {
