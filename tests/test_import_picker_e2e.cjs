@@ -53,7 +53,7 @@ function startFixtureServer() {
   let deferFullSettings = false;
   let deferUpdateStatus = false;
   let currentJob = { kind: "idle", state: "idle" };
-  const settings = {
+  let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
@@ -76,7 +76,11 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/settings") {
       settingsRequests.push(requestUrl.search);
-      if (request.method === "POST") settingsActions.push({ path: requestPath, method: request.method });
+      if (request.method === "POST") {
+        let body = ""; for await (const chunk of request) body += chunk;
+        settings = JSON.parse(body);
+        settingsActions.push({ path: requestPath, method: request.method });
+      }
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
       if (!requestUrl.search && deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
       reply();
@@ -973,6 +977,10 @@ async function main() {
     assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\)$/, "status shows actual GPU names, VRAM, and the incompatibility without a fabricated fallback device");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
     assert.equal(await page.locator('#settingsGpuDevice option[value="0"]').count(), 0, "a pending or mismatched setting never creates a fake GPU 0 option");
+    await page.locator("#settingsGpuDevice").selectOption("3");
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the supported GPU choice remains selected after saving");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
@@ -1298,6 +1306,13 @@ async function main() {
     assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
+    await page.locator("#settingsButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option[value='3']"));
+    assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the saved GPU choice survives reopening after reload");
+    await page.locator("#settingsCloseButton").click();
+    await page.locator("#detectAllButton").click();
+    assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "the saved GPU worker count survives reload");
+    await page.locator("#detectDialog").evaluate((dialog) => dialog.close());
     holdDetection(true);
     await page.locator("#detectAllButton").click();
     await page.locator("#detectStartButton").click();

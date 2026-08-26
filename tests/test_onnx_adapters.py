@@ -56,6 +56,15 @@ class OnnxAdapterTests(unittest.TestCase):
                 "do_copy_in_default_stream": "1",
             }), "CPUExecutionProvider"])
 
+    def test_gpu_session_keeps_model_loading_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"invalid")
+            with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=RuntimeError("invalid model")):
+                with self.assertRaisesRegex(RuntimeError, "invalid model"):
+                    create_session(path, "gpu", 0)
+
     def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
         cpu = BaseOnnxModel.__new__(BaseOnnxModel)
         cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()

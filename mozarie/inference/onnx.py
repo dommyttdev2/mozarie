@@ -86,13 +86,7 @@ def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.
         raise FileNotFoundError(path)
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    providers = available_providers(device, gpu_device)
-    try:
-        session = ort.InferenceSession(str(path), sess_options=options, providers=providers)
-    except Exception as exc:
-        if device.lower() != "cpu":
-            raise _gpu_unavailable_error() from exc
-        raise
+    session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device, gpu_device))
     if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
         raise _gpu_unavailable_error()
     return session

@@ -240,6 +240,7 @@
   "errorCode.model_picker_invalid": "The selected model file is invalid.",
   "errorCode.model_download_invalid": "The requested model download is invalid.",
   "errorCode.hand_segmentation_invalid": "Select a HandSegNet anime SDXL model in Settings.",
+  "errorCode.gpu_unavailable": "GPU inference could not be initialized. Switch to CPU or run Mozarie setup again.",
   "errorCode.gpu_out_of_memory": "GPU memory is full.",
   "errorCode.gpu_out_of_memory_parallel": "GPU memory is full. Set parallel processing to 1 or close other GPU applications, then try again.",
   "errorCode.gpu_out_of_memory_single": "GPU memory is full. Close other GPU applications, switch to CPU, or select the smaller SAM model (vit_b).",

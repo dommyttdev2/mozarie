@@ -35,6 +35,7 @@ class DetectionMixin:
         # The gate makes initial job setup mutually exclusive with boundary
         # inference and model-cache replacement.
         with self.inference_lock:
+            self._require_supported_gpu()
             records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
             args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
