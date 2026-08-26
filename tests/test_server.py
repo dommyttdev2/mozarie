@@ -3884,6 +3884,7 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_mode_is_read_only_from_saved_settings(self):
         state = self.new_state()
+        state.settings["models"]["provider"] = "cpu"
         record = ImageRecord(image_id="test", path=Path(__file__), relative_path="test.png", width=1, height=1, mtime_ns=0)
         with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
             state.start_detection(["test"], 0.65)
@@ -3907,6 +3908,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(first_root / "first.png")
             Image.new("RGB", (16, 16), "black").save(second_root / "second.png")
             state = self.new_state()
+            state.settings["models"]["provider"] = "cpu"
             first_id = state.set_root(str(first_root))[0]["id"]
             original_start_job = state._start_job
 
@@ -4464,8 +4466,16 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             catalog_done = threading.Event()
             job_done = threading.Event()
+            revision_changed = threading.Event()
             outcome = {}
             original_open = jobs_module.Image.open
+            original_touch = state._touch_candidates
+
+            def touch_candidates(changed_image_id):
+                revision = original_touch(changed_image_id)
+                if changed_image_id == image_id:
+                    revision_changed.set()
+                return revision
 
             def delayed_open(path, *args, **kwargs):
                 if Path(path) == mask_path:
@@ -4479,7 +4489,8 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open), \
+                 patch.object(state, "_touch_candidates", side_effect=touch_candidates):
                 worker = threading.Thread(target=compose)
                 worker.start()
                 self.assertTrue(opened.wait(2))
@@ -4490,6 +4501,7 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(job_done.wait(2))
                 mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
                 mutation.start()
+                self.assertTrue(revision_changed.wait(2))
                 release.set()
                 worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
