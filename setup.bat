@@ -2,6 +2,15 @@
 chcp 65001 >nul
 setlocal
 set "APP_DIR=%~dp0"
+if /i "%~1"=="--locked" goto :locked
+for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
+  py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
+  if not errorlevel 1 exit /b 0
+)
+echo [Mozarie] Setup could not acquire the maintenance lock. Close Mozarie or another setup/update, then try again.
+exit /b 1
+
+:locked
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
 echo [Mozarie] [1/5] Checking Python environment...
 if not exist "%PYTHON%" call :create_venv
@@ -9,10 +18,6 @@ if errorlevel 1 goto :missing_python
 if not exist "%PYTHON%" goto :missing_python
 call :validate_python
 if errorlevel 1 goto :python_too_old
-
-"%PYTHON%" -X utf8 "%APP_DIR%updater.py" --check-running
-if "%ERRORLEVEL%"=="30" goto :mozarie_running
-if errorlevel 1 goto :failed
 
 echo [Mozarie] [2/5] Preparing the installer...
 "%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip
