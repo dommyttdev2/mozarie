@@ -149,7 +149,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 self._require_supported_gpu(settings["models"])
                 settings = self.settings_store.save(settings)
             except SettingsError as exc:
-                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings") from exc
             self.settings = settings
             detection_keys = {
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
@@ -186,6 +186,25 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not selected_gpu or not selected_gpu["supported"]:
             raise self._gpu_selection_error()
 
+    def diagnose_gpu_runtime(self) -> tuple[str, ...]:
+        """Exercise a disposable ONNX session without retaining it in model state."""
+        from .inference.onnx import diagnose_session
+        with self.inference_lock:
+            with self.lock:
+                if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中はGPU推論を確認できません。", "operation_in_progress")
+                models = dict(self.settings["models"])
+            self._require_supported_gpu(models)
+            try:
+                return diagnose_session(
+                    self._configured_model_path("target_segmentation", "対象セグメンテーション"),
+                    "gpu", int(models.get("gpu_device", 0)),
+                )
+            except ClientError:
+                raise
+            except Exception as exc:
+                raise ClientError("GPU推論を確認できません。CUDA環境とモデルファイルを確認してください。", "gpu_unavailable") from exc
+
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
             if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
@@ -195,7 +214,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 settings = self.settings_store.default_settings()
                 validate_output_directory_ready(settings["saving"]["default_output_directory"])
             except SettingsError as exc:
-                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings") from exc
             self.settings = self.settings_store.reset()
             self.models = None
             self.hand_model = None

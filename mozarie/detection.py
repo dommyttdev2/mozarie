@@ -63,7 +63,7 @@ class DetectionMixin:
             raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"{label}モデルが見つかりません: {path}", "model_file_missing")
+            raise ClientError(f"{label}モデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() != ".onnx":
             raise ClientError(f"{label}モデルにはONNXファイルを指定してください。", "model_file_invalid")
         return path
@@ -75,7 +75,7 @@ class DetectionMixin:
             raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"SAMモデルが見つかりません: {path}", "model_file_missing")
+            raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
             raise ClientError("SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください。", "sam_checkpoint_invalid")
         return path
@@ -299,6 +299,24 @@ class DetectionMixin:
         return detected, hand_mask, fallback_boxes
 
     @staticmethod
+    def _fallback_hand_boxes_mask(
+        shape: tuple[int, int], boxes: list[tuple[int, int, int, int]], detected: list[dict[str, Any]],
+    ) -> np.ndarray:
+        """Use detector boxes only inside the existing APPLY union.
+
+        This is the safe standard-mode fallback when a contour model is off or
+        does not accept its result.  Publishing a whole box would hide nearby
+        content that the target detector did not select.
+        """
+        apply_union = np.zeros(shape, dtype=np.uint8)
+        for segment in detected:
+            apply_union = np.maximum(apply_union, np.asarray(segment["mask"]) > 0)
+        fallback = np.zeros(shape, dtype=np.uint8)
+        for left, top, right, bottom in boxes:
+            fallback[top:bottom, left:right] = 1
+        return np.where(apply_union > 0, fallback * 255, 0).astype(np.uint8)
+
+    @staticmethod
     def _attach_hand_evidence(segments: list[dict[str, Any]], detected: list[dict[str, Any]], hand_mask: np.ndarray) -> list[dict[str, Any]]:
         for segment in detected:
             segment["_detector_mask"] = np.asarray(segment["mask"]).copy()
@@ -313,7 +331,8 @@ class DetectionMixin:
     @staticmethod
     def _apply_sam_hand_fallback(
         predictor: Any, fallback_boxes: list[tuple[int, int, int, int]], shape: tuple[int, int], hand_mask: np.ndarray,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
+        unconfirmed: list[tuple[int, int, int, int]] = []
         for padded_box in fallback_boxes:
             masks, scores, _ = predictor.predict(
                 point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
@@ -321,7 +340,9 @@ class DetectionMixin:
             confirmed = accepted_hand_sam_mask(masks, scores, shape, padded_box)
             if confirmed is not None:
                 hand_mask = np.maximum(hand_mask, confirmed)
-        return hand_mask
+            else:
+                unconfirmed.append(padded_box)
+        return hand_mask, unconfirmed
 
     def _refine_detected_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
@@ -335,7 +356,7 @@ class DetectionMixin:
         if fallback_boxes:
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
-                hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
+                hand_mask, _unconfirmed = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
         return self._attach_hand_evidence(segments, detected, hand_mask)
 
     def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -454,10 +475,19 @@ class DetectionMixin:
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
                 if fallback_boxes:
-                    hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, rgb.shape[:2], hand_mask)
+                    hand_mask, unconfirmed_boxes = self._apply_sam_hand_fallback(
+                        predictor, fallback_boxes, rgb.shape[:2], hand_mask,
+                    )
+                    hand_mask = np.maximum(
+                        hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], unconfirmed_boxes, detected),
+                    )
                 segments = self._attach_hand_evidence(segments, detected, hand_mask)
                 segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
         else:
+            # Standard detection intentionally has no SAM dependency.  A hand
+            # box is still a useful exclusion after it is constrained to the
+            # detector's APPLY union.
+            hand_mask = np.maximum(hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], fallback_boxes, detected))
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
         segments = self._finalize_exclusions(rgb, segments)
         candidates: list[Candidate] = []
@@ -596,15 +626,11 @@ class DetectionMixin:
                             else:
                                 fallback_boxes.append(box)
                     if fallback_boxes:
-                        with self.sam_lock:
-                            hand_mask = self._apply_sam_hand_fallback(
-                                self._sam_predictor_for(record, rgb), fallback_boxes, rgb.shape[:2], hand_mask
-                            )
-                else:
-                    with self.sam_lock:
-                        hand_mask = self._apply_sam_hand_fallback(
-                            self._sam_predictor_for(record, rgb), hand_boxes, rgb.shape[:2], hand_mask
+                        hand_mask = np.maximum(
+                            hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], fallback_boxes, [boundary_segment]),
                         )
+                else:
+                    hand_mask = self._fallback_hand_boxes_mask(rgb.shape[:2], hand_boxes, [boundary_segment])
             if np.any(hand_mask):
                 boundary_segment["image_exclusions"] = {"hand": hand_mask}
             boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]

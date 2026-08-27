@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import sqlite3
 import sys
 import threading
 import time
@@ -142,7 +143,6 @@ class JobsMixin:
 
 
     def request_cancel(self) -> Job:
-        cancelled = False
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
                 raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
@@ -156,15 +156,8 @@ class JobsMixin:
                     raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
                 control.cancel_requested.set()
                 control.pause_requested.clear()
-                if self.job.state == "paused":
-                    self._resume_job_clock()
-                    self.job.state = "cancelled"
-                    self.job.ended_at = time.time()
-                    self.job.current = ""
-                    cancelled = True
+                self.job.cancel_requested = True
                 job = self.job
-        if cancelled:
-            self._release_gpu_job_memory()
         return job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
@@ -286,6 +279,7 @@ class JobsMixin:
             if self._job_is_current(job_generation, catalog_generation):
                 self._resume_job_clock()
                 self.job.state = "cancelled"
+                self.job.cancel_requested = False
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
@@ -494,6 +488,7 @@ class JobsMixin:
                 return
             self._resume_job_clock()
             self.job.state = "complete"
+            self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.completed = self.job.total
             self.job.current = ""
@@ -509,7 +504,15 @@ class JobsMixin:
         gpu_oom = self._gpu_oom_client_error(exc)
         if not isinstance(exc, ClientError):
             message = str(exc).lower()
-            if any(marker in message for marker in (
+            if isinstance(exc, sqlite3.DatabaseError):
+                exc = ClientError("作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error")
+            elif self.job.kind == "apply" and isinstance(exc, OSError):
+                exc = ClientError("保存先に書き込めませんでした。保存先と空き容量を確認してください。", "output_unavailable")
+            elif self.settings["models"].get("provider") == "gpu" and any(marker in message for marker in (
+                "cuda", "cudnn", "execution provider", "provider bridge",
+            )):
+                exc = ClientError("GPU推論を実行できません。CPUへ切り替えるか、CUDA環境を確認してください。", "gpu_unavailable")
+            elif any(marker in message for marker in (
                 "no kernel image is available", "does not include kernels for this gpu", "not compatible with the current pytorch installation",
             )):
                 exc = ClientError(
@@ -523,12 +526,15 @@ class JobsMixin:
                     "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
                     "memory_allocation_failed",
                 )
+            elif any(marker in message for marker in ("onnx", "protobuf", "invalid graph", "load model")):
+                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
             kind = self.job.kind
             self._resume_job_clock()
             self.job.state = "error"
+            self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
             self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""

@@ -1185,6 +1185,14 @@ class MozarieTests(unittest.TestCase):
         exception.assert_not_called()
         shutdown.assert_called_once()
 
+    def test_server_suppresses_normal_client_disconnect_tracebacks(self):
+        server = Mock()
+        with patch("server.sys.exc_info", return_value=(BrokenPipeError, BrokenPipeError(), None)), patch(
+            "server.ThreadingHTTPServer.handle_error",
+        ) as report:
+            server_entry._handle_server_error(server, Mock(), ("127.0.0.1", 1))
+        report.assert_not_called()
+
     def test_http_log_message_silences_success_and_client_errors(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
@@ -1655,10 +1663,15 @@ class MozarieTests(unittest.TestCase):
         state.request_cancel()
         self.assertTrue(state.job_control.cancel_requested.is_set())
         self.assertFalse(state.job_control.pause_requested.is_set())
+        self.assertTrue(state.job.cancel_requested)
 
         state.job.state = "paused"
         state.request_cancel()
+        self.assertTrue(state.job.cancel_requested)
+        self.assertEqual(state.job.state, "paused")
+        state._cancel_job()
         self.assertEqual(state.job.state, "cancelled")
+        self.assertFalse(state.job.cancel_requested)
 
     def test_cancel_before_claim_never_starts_another_record(self):
         state = self.new_state()
@@ -3704,6 +3717,63 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(candidates[1].role, domain_module.CandidateRole.EXCLUDE)
             self.assertTrue(candidates[1].enabled)
 
+    def test_standard_hand_box_fallback_is_an_apply_constrained_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply = np.zeros((12, 12), dtype=np.uint8); apply[4:9, 4:9] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply, "source": "target"}]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [(2, 2, 7, 7)]),
+            ), patch.object(state, "_sam_predictor_for") as sam:
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="standard")
+            sam.assert_not_called()
+            self.assertEqual([candidate.source for candidate in candidates], ["hand_exclusion", "target"])
+            with Image.open(candidates[0].mask_path) as mask_file:
+                mask = np.asarray(mask_file)
+            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
+            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+
+    def test_high_precision_rejected_hand_sam_uses_the_constrained_box(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply = np.zeros((12, 12), dtype=np.uint8); apply[4:9, 4:9] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply, "source": "target"}]
+            rejected = np.zeros((1, 12, 12), dtype=bool); rejected[0, 2:7, 2:7] = True
+            predictor = Mock(); predictor.predict.return_value = rejected, np.asarray([0.1]), None
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [(2, 2, 7, 7)]),
+            ), patch.object(state, "_sam_predictor_for", return_value=predictor), patch.object(
+                state, "_high_precision_segments_with_predictor", side_effect=lambda _rgb, values, _predictor: values,
+            ):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            with Image.open(candidates[0].mask_path) as mask_file:
+                mask = np.asarray(mask_file)
+            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
+            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+
+    def test_gpu_diagnostic_uses_a_disposable_session_without_model_cache_changes(self):
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "target_segmentation": "target.onnx", "gpu_device": 2})
+        state.models = object(); state.hand_model = object()
+        with patch.object(state, "_require_supported_gpu") as require, patch.object(
+            state, "_configured_model_path", return_value=Path("target.onnx"),
+        ), patch(
+            "mozarie.inference.onnx.diagnose_session", return_value=("CUDAExecutionProvider", "CPUExecutionProvider"),
+        ) as diagnose:
+            self.assertEqual(state.diagnose_gpu_runtime(), ("CUDAExecutionProvider", "CPUExecutionProvider"))
+        require.assert_called_once()
+        diagnose.assert_called_once()
+        self.assertIsNotNone(state.models)
+        self.assertIsNotNone(state.hand_model)
+
     def test_detect_image_persists_a_real_broad_fluid_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -5000,6 +5070,64 @@ class MozarieTests(unittest.TestCase):
                 connection.close()
             httpd.shutdown()
             httpd.server_close()
+
+    def test_malformed_candidate_api_route_is_a_client_error(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            body = json.dumps({"enabled": True}).encode("utf-8")
+            connection.request("POST", "/api/candidate/missing-part", body, {
+                "Content-Type": "application/json",
+                "X-Mozarie-Token": state_module.STATE.session_token,
+                "Origin": f"http://127.0.0.1:{httpd.server_port}",
+            })
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 400)
+            self.assertEqual(payload["error_code"], "input_invalid")
+            self.assertNotIn("ValueError", payload["error"])
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_unexpected_http_error_does_not_expose_runtime_text(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(RuntimeError("sqlite disk I/O error"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
+        payload, status = handler._json.call_args.args
+        self.assertEqual(status, http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(payload["error_code"], "internal_error")
+        self.assertNotIn("sqlite", payload["error"])
+
+    def test_database_http_error_has_a_stable_general_code(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(sqlite3.DatabaseError("database disk image is malformed"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
+        payload, _status = handler._json.call_args.args
+        self.assertEqual(payload["error_code"], "workspace_database_error")
+        self.assertNotIn("malformed", payload["error"])
+
+    def test_apply_output_error_has_a_stable_general_code(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="apply", state="running")
+        state._fail_job(PermissionError("G:/private/output"))
+        self.assertEqual(state.job.error_code, "output_unavailable")
+        self.assertNotIn("private", state.job.error)
+
+    def test_gpu_runtime_error_has_a_stable_general_code(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = core_module.Job(kind="detect", state="running")
+        state._fail_job(RuntimeError("CUDAExecutionProvider failed with private details"))
+        self.assertEqual(state.job.error_code, "gpu_unavailable")
+        self.assertNotIn("private", state.job.error)
 
     def test_save_render_returns_the_one_time_token_in_a_response_header(self):
         from http.server import ThreadingHTTPServer

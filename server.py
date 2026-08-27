@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import threading
+import types
 import webbrowser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +23,15 @@ if str(APP_DIR) not in sys.path:
 
 from mozarie.core import LOGGER, LOG_DATE_FORMAT, LOG_FORMAT
 import mozarie.state as state_module
-from mozarie.http import MosaicHandler
+from mozarie.http import CLIENT_DISCONNECT_ERRORS, MosaicHandler
+
+
+def _handle_server_error(server: ThreadingHTTPServer, request, client_address) -> None:  # type: ignore[no-untyped-def]
+    """Avoid a terminal traceback when a browser closes a normal request."""
+    exception = sys.exc_info()[1]
+    if isinstance(exception, CLIENT_DISCONNECT_ERRORS):
+        return
+    ThreadingHTTPServer.handle_error(server, request, client_address)
 
 
 def _open_browser(url: str) -> None:
@@ -52,6 +61,7 @@ def main() -> None:
     state_module.STATE.cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         http_server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
+        http_server.handle_error = types.MethodType(_handle_server_error, http_server)
     except OSError:
         LOGGER.error("Mozarieを起動できません。ポート%sは使用中です。", port)
         state_module.STATE.shutdown()

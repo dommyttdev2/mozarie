@@ -22,7 +22,7 @@ class OnnxAdapterTests(unittest.TestCase):
         self.assertEqual(nms_indices(boxes, [0.9, 0.8, 0.7], 0.5), [0, 2])
         self.assertEqual(class_aware_nms_indices(boxes[:2], [0.9, 0.8], ["penis", "pussy"], 0.5), [0, 1])
 
-    def test_create_session_prefers_cuda_then_allows_cpu_fallback(self) -> None:
+    def test_create_session_prefers_cuda_without_runtime_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
@@ -46,6 +46,8 @@ class OnnxAdapterTests(unittest.TestCase):
                 },
             ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
+            cuda_session.disable_fallback.assert_called_once_with()
+            cpu_session.disable_fallback.assert_called_once_with()
 
     def test_default_gpu_does_not_pass_a_redundant_device_id(self) -> None:
         with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]):
@@ -62,8 +64,13 @@ class OnnxAdapterTests(unittest.TestCase):
             path.write_bytes(b"invalid")
             with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=RuntimeError("invalid model")):
-                with self.assertRaisesRegex(RuntimeError, "invalid model"):
+                with self.assertRaisesRegex(Exception, "検出モデル"):
                     create_session(path, "gpu", 0)
+
+    def test_create_session_reports_missing_model_without_its_path(self) -> None:
+        with self.assertRaisesRegex(Exception, "検出モデル") as raised:
+            create_session(Path("C:/private/missing.onnx"), "cpu")
+        self.assertNotIn("private", str(raised.exception))
 
     def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
         cpu = BaseOnnxModel.__new__(BaseOnnxModel)

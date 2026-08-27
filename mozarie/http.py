@@ -4,6 +4,7 @@ import io
 import json
 import mimetypes
 import os
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -239,7 +240,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/workspace/manual/"):
                 self._json({"draft": STATE.manual_workspace(path.removeprefix("/api/workspace/manual/"))})
             elif path.startswith("/api/mask/"):
-                _, _, _, image_id, candidate_id = path.split("/", 4)
+                image_id, candidate_id = _route_ids(path, "/api/mask/")
                 self._send_candidate_mask(image_id, candidate_id, _request_version(parsed.query))
             else:
                 self._send_static(path)
@@ -358,6 +359,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json(response)
             elif path == "/api/settings/status":
                 self._json({"status": STATE.preview_settings_status(payload)})
+            elif path == "/api/settings/gpu-diagnostic":
+                self._json({"ok": True, "providers": list(STATE.diagnose_gpu_runtime())})
             elif path == "/api/settings/reset":
                 settings = STATE.reset_settings()
                 response = {"settings": settings, "version": _local_version()}
@@ -436,7 +439,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/job/cancel":
                 self._json(STATE.request_cancel().as_dict())
             elif path.startswith("/api/candidate/"):
-                _, _, _, image_id, candidate_id = path.split("/", 4)
+                image_id, candidate_id = _route_ids(path, "/api/candidate/")
                 revision = STATE.set_candidate_state(image_id, candidate_id, payload)
                 self._json({"ok": True, "candidateRevision": revision})
             else:
@@ -461,7 +464,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 image_id = path.removeprefix("/api/catalog/image/")
                 self._json({"images": STATE.remove_image_from_catalog(image_id)})
             elif path.startswith("/api/candidate/"):
-                _, _, _, image_id, candidate_id = path.split("/", 4)
+                image_id, candidate_id = _route_ids(path, "/api/candidate/")
                 deleted = STATE.delete_candidate(image_id, candidate_id)
                 self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
             elif path.startswith("/api/workspace/manual/"):
@@ -616,9 +619,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
         self._binary(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
 
     def _client_error(self, error: Exception, status: HTTPStatus, default_code: str | None = None) -> None:
-        code = getattr(error, "error_code", default_code or "request_failed")
-        params = getattr(error, "params", {})
-        self._json({"error": str(error), "error_code": code, "params": params}, status)
+        if isinstance(error, ClientError):
+            message, code, params = str(error), error.error_code, error.params
+        elif isinstance(error, sqlite3.DatabaseError):
+            message, code, params = "作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error", {}
+        else:
+            message, code, params = "処理に失敗しました。もう一度お試しください。", default_code or "request_failed", {}
+        self._json({"error": message, "error_code": code, "params": params}, status)
 
     def _binary(
         self,
@@ -691,6 +698,17 @@ def _request_version(query: str) -> str | None:
     if len(values) != 1 or not values[0]:
         raise ClientError("画像の版番号が不正です。", "stale_asset")
     return values[0]
+
+
+def _route_ids(path: str, prefix: str) -> tuple[str, str]:
+    """Read the two required opaque ids from a fixed API route."""
+    try:
+        image_id, candidate_id = path.removeprefix(prefix).split("/", 1)
+    except ValueError as exc:
+        raise ClientError("APIの指定が正しくありません。", "input_invalid") from exc
+    if not image_id or not candidate_id or "/" in candidate_id:
+        raise ClientError("APIの指定が正しくありません。", "input_invalid")
+    return image_id, candidate_id
 
 
 def _read_candidate_revision(value: Any) -> int:
