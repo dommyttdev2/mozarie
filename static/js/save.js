@@ -685,13 +685,17 @@ async function finishDetectionJob(job) {
   state.images = data.images;
   pruneSourceAccess();
   state.maskStatus.clear();
+  // Auto-detection replaces candidate IDs and mask bitmaps. Never allow a
+  // cached bundle (including the currently pinned one) to survive that
+  // revision boundary.
+  for (const imageId of targetIds) releaseCandidateBundles(imageId);
   markImagesUnreviewed(targetIds, false);
   state.handledDetectionStartedAt = job.startedAt;
   state.detectionTargetIds = [];
   state.detectCancelRequested = false;
   closeProcessing();
   if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
-    await selectImage(keepCurrent, true);
+    await selectImage(keepCurrent, true, { saveCurrentDraft: false });
   }
   renderCatalogViews();
   return invoker;

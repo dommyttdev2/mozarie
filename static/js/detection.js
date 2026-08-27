@@ -59,6 +59,10 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
   state.detectionStarting = true;
   updateActionButtons();
   try {
+    // Freeze the current manual layers before the server replaces automatic
+    // candidates. The completion refresh must not save the old candidate set
+    // against the new candidate revision.
+    await saveDraft();
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;

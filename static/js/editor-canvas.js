@@ -175,6 +175,7 @@ function releaseStaleImageVersions(imageId, imageKey, candidateKey) {
 
 function releaseCandidateBundles(imageId) {
   for (const [key] of state.candidateBundleCache.items) if (key.startsWith(`${imageId}:`)) state.candidateBundleCache.delete(key);
+  for (const key of state.candidateInflight.keys()) if (key.startsWith(`${imageId}:`)) state.candidateInflight.delete(key);
   if (state.currentId === imageId) state.candidateImages = new Map();
 }
 
