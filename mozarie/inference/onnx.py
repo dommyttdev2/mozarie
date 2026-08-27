@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..runtime import runtime_backend
+from ..runtime import directml_ort_device_id, runtime_backend
 
 
 _dll_directory_handles: list[object] = []
@@ -78,7 +78,7 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
-        return [("DmlExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        return [("DmlExecutionProvider", {"device_id": directml_ort_device_id(gpu_device)}), "CPUExecutionProvider"]
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {

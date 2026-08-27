@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+from functools import lru_cache
 import importlib
 import os
 from types import MethodType
@@ -8,6 +10,34 @@ from typing import Any
 
 
 BACKENDS = {"cuda", "directml", "cpu"}
+_DXGI_ERROR_NOT_FOUND = 0x887A0002
+
+
+class _Guid(ctypes.Structure):
+    _fields_ = [
+        ("data1", ctypes.c_uint32),
+        ("data2", ctypes.c_uint16),
+        ("data3", ctypes.c_uint16),
+        ("data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _Luid(ctypes.Structure):
+    _fields_ = [("low_part", ctypes.c_uint32), ("high_part", ctypes.c_int32)]
+
+
+class _DxgiAdapterDesc(ctypes.Structure):
+    _fields_ = [
+        ("description", ctypes.c_wchar * 128),
+        ("vendor_id", ctypes.c_uint32),
+        ("device_id", ctypes.c_uint32),
+        ("subsystem_id", ctypes.c_uint32),
+        ("revision", ctypes.c_uint32),
+        ("dedicated_video_memory", ctypes.c_size_t),
+        ("dedicated_system_memory", ctypes.c_size_t),
+        ("shared_system_memory", ctypes.c_size_t),
+        ("adapter_luid", _Luid),
+    ]
 
 
 @dataclass(frozen=True)
@@ -61,6 +91,79 @@ def runtime_backend(*, ort_module: Any | None = None, torch_module: Any | None =
 
 def directml_module() -> Any:
     return importlib.import_module("torch_directml")
+
+
+def _com_method(pointer: ctypes.c_void_p, index: int, result: Any, *arguments: Any) -> Any:
+    table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *arguments)(table[index])
+
+
+@lru_cache(maxsize=1)
+def _dxgi_adapter_names() -> tuple[str, ...]:
+    """Return adapter descriptions in the order used by the DirectML ORT EP."""
+    if os.name != "nt":
+        return ()
+    factory = ctypes.c_void_p()
+    factory_iid = _Guid(
+        0x770AAE78,
+        0xF26F,
+        0x4DBA,
+        (ctypes.c_ubyte * 8)(0xA8, 0x29, 0x25, 0x3C, 0x83, 0xD1, 0xB3, 0x87),
+    )
+    create_factory = ctypes.WinDLL("dxgi").CreateDXGIFactory1
+    create_factory.argtypes = [ctypes.POINTER(_Guid), ctypes.POINTER(ctypes.c_void_p)]
+    create_factory.restype = ctypes.c_long
+    if create_factory(ctypes.byref(factory_iid), ctypes.byref(factory)) != 0:
+        return ()
+    names: list[str] = []
+    try:
+        enum_adapters = _com_method(
+            factory, 7, ctypes.c_long, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
+        )
+        for index in range(64):
+            adapter = ctypes.c_void_p()
+            result = enum_adapters(factory, index, ctypes.byref(adapter))
+            if result != 0:
+                if result & 0xFFFFFFFF == _DXGI_ERROR_NOT_FOUND:
+                    break
+                return ()
+            try:
+                description = _DxgiAdapterDesc()
+                get_description = _com_method(
+                    adapter, 8, ctypes.c_long, ctypes.POINTER(_DxgiAdapterDesc)
+                )
+                if get_description(adapter, ctypes.byref(description)) != 0:
+                    return ()
+                names.append(str(description.description).rstrip("\0"))
+            finally:
+                _com_method(adapter, 2, ctypes.c_ulong)(adapter)
+    finally:
+        _com_method(factory, 2, ctypes.c_ulong)(factory)
+    return tuple(names)
+
+
+def directml_ort_device_id(device_id: int, module: Any | None = None) -> int:
+    """Translate a torch-directml index to ONNX Runtime's DXGI adapter index.
+
+    torch-directml orders adapters by GPU preference while the DirectML ONNX
+    Runtime provider uses DXGI enumeration order. The two numeric IDs therefore
+    cannot be shared on multi-GPU systems.
+    """
+    directml = module or directml_module()
+    selected_id = int(device_id)
+    selected_name = str(directml.device_name(selected_id)).rstrip("\0").strip().casefold()
+    if not selected_name:
+        return selected_id
+    occurrence = sum(
+        str(directml.device_name(index)).rstrip("\0").strip().casefold() == selected_name
+        for index in range(selected_id)
+    )
+    matches = [
+        index
+        for index, name in enumerate(_dxgi_adapter_names())
+        if name.strip().casefold() == selected_name
+    ]
+    return matches[occurrence] if occurrence < len(matches) else selected_id
 
 
 def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str | None = None) -> Any:
