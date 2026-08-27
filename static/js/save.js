@@ -221,13 +221,14 @@ async function writeSourceHandle(access, response) {
   try {
     stream = await access.fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" });
   } catch (error) {
-    // Older File System Access implementations reject the new option. A real
-    // exclusive-writer conflict must remain an error; never retry around it.
-    if (!["TypeError", "NotSupportedError"].includes(error?.name)) {
+    // Older File System Access implementations reject the new option. Only
+    // actual exclusive-writer conflicts become the retryable busy guidance.
+    if (["NoModificationAllowedError", "InvalidStateError"].includes(error?.name)) {
       const busy = new Error("source_busy");
       busy.code = "source_busy";
       throw busy;
     }
+    if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
     stream = await access.fileHandle.createWritable({ keepExistingData: false });
   }
   try {
@@ -379,7 +380,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             resetCurrentDraft();
           }
         }
-        if (save.removeAfterSave && save.removeOnlyMasked && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
+        if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
         if (committed.stale) save.stale += 1;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
         pruneSourceAccess();
@@ -424,9 +425,6 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         showApplyError(error);
       }
       if (catalogCurrent) {
-        if (save.removeAfterSave && !save.removeOnlyMasked && !save.cancelled && !save.failed && !save.stale && save.completed === save.entries.length) {
-          save.removableImageIds = new Set(save.initialOrder);
-        }
         try {
           await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
         } catch (error) {
@@ -558,7 +556,7 @@ async function finishApplyJob(job) {
     const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
     const completedImageIds = Array.isArray(job.completedImageIds)
       ? job.completedImageIds
-      : (job.state === "complete" ? requestedImageIds : []);
+      : [];
     const reloadCurrent = Boolean(keepCurrent && completedImageIds.includes(keepCurrent));
     const data = await api("/api/images");
     if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
@@ -573,18 +571,12 @@ async function finishApplyJob(job) {
     state.maskStatus.clear();
     for (const imageId of completedImageIds) state.drafts.delete(imageId);
     state.applyTargetIds = requestedImageIds;
-    const snapshot = state.applyCatalogSnapshot;
-    const fullyCompleted = job.state === "complete" && completedImageIds.length === requestedImageIds.length;
-    const removableImageIds = job.removeAfterSave && fullyCompleted && snapshot?.removeOnlyMasked === false
-      ? snapshot.order
-      : completedImageIds;
-    const removalOrder = snapshot?.removeOnlyMasked === false ? snapshot.order : previousOrder;
-    const removalRecords = snapshot?.removeOnlyMasked === false ? snapshot.recordsById : previousImagesById;
-    if (job.removeAfterSave && removableImageIds.length && (fullyCompleted || snapshot?.removeOnlyMasked !== false)) {
-      await removeCompletedImagesFromCatalog(removableImageIds, removalOrder, removalRecords);
+    const removableImageIds = completedImageIds;
+    if (job.removeAfterSave && removableImageIds.length) {
+      await removeCompletedImagesFromCatalog(removableImageIds, previousOrder, previousImagesById);
       if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     }
-    const removedAfterSave = Boolean(job.removeAfterSave && removableImageIds.length && (fullyCompleted || snapshot?.removeOnlyMasked !== false));
+    const removedAfterSave = Boolean(job.removeAfterSave && removableImageIds.length);
     if (removedAfterSave) {
       // removeCompletedImagesFromCatalog already selects the next surviving image.
     } else if (reloadCurrent) {

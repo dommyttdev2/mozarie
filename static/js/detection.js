@@ -77,17 +77,17 @@ async function startDetectionFromDialog(event) {
   const parallelism = detectionParallelism();
   const targetClasses = detectionTargets("dialogTarget");
   if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation"))) return;
-  setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
+    const settings = structuredClone(state.settings);
+    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses };
     try {
-      const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) });
+      const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settings) });
       state.settings = saved.settings;
       setSettingsForm(saved.settings, state.settingsStatus);
     }
-    catch (error) { showUserError(error); return; }
+    catch (error) { setSettingsForm(state.settings, state.settingsStatus); showUserError(error); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);
 }

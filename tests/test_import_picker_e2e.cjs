@@ -52,6 +52,7 @@ function startFixtureServer() {
   const pendingUpdateStatus = [];
   let deferFullSettings = false;
   let deferUpdateStatus = false;
+  let failNextSettingsSave = false;
   let currentJob = { kind: "idle", state: "idle" };
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
@@ -79,6 +80,12 @@ function startFixtureServer() {
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
         const submittedSettings = JSON.parse(body);
+        if (failNextSettingsSave) {
+          failNextSettingsSave = false;
+          response.writeHead(500, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error_code: "internal_error" }));
+          return;
+        }
         if (submittedSettings.models.target_segmentation === "no-gpu.onnx" && submittedSettings.models.provider === "gpu") {
           response.writeHead(400, { "Content-Type": "application/json" });
           response.end(JSON.stringify({ error_code: "gpu_unsupported" }));
@@ -275,7 +282,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -742,12 +749,12 @@ async function main() {
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
-  let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
+  let cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     const settingsFailurePage = await browser.newPage();
     await settingsFailurePage.addInitScript(() => {
@@ -976,7 +983,7 @@ async function main() {
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="hand_detection"]').click();
     await page.locator("#modelDownloadStart").click();
-    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open, null, { timeout: 3000 });
     assert.equal(await page.locator("#modelDownloadStatus").textContent(), "", "download errors do not remain inside the download modal");
     assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /fixture download failed/, "raw download errors are not shown");
     await page.locator("#errorDialogClose").click();
@@ -1387,6 +1394,22 @@ async function main() {
 
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
+    const persistedDetection = await page.evaluate(() => structuredClone(state.settings.detection));
+    failNextSettingsSave();
+    await page.locator("#detectAllButton").click();
+    await page.locator("#dialogTargetPussy").evaluate((input) => { input.checked = false; input.dispatchEvent(new Event("change", { bubbles: true })); });
+    await page.locator("#detectConfidenceNumber").fill("0.67");
+    await page.locator("#detectParallelism").fill("4");
+    await page.locator("#detectStartButton").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    const failedDetectionSave = await page.evaluate(() => ({
+      settings: state.settings.detection,
+      dialogOpen: document.querySelector("#detectDialog").open,
+      allDisabled: document.querySelector("#detectAllButton").disabled,
+      currentDisabled: document.querySelector("#detectCurrentButton").disabled,
+    }));
+    assert.deepEqual(failedDetectionSave, { settings: persistedDetection, dialogOpen: false, allDisabled: false, currentDisabled: true }, "a failed detection-settings save leaves persisted targets and main actions untouched");
+    await page.locator("#errorDialogClose").click();
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
@@ -1864,7 +1887,7 @@ async function main() {
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
-    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
+    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
     await browser?.close();
     if (server) await closeServer(server);
