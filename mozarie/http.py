@@ -756,6 +756,5 @@ def _update_status() -> dict[str, Any]:
 
 def _start_update_after_response(http_server: ThreadingHTTPServer) -> None:
     time.sleep(0.2)
+    http_server.mozarie_update_requested = True
     http_server.shutdown()
-    STATE.shutdown()
-    subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))

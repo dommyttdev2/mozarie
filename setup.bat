@@ -4,8 +4,11 @@ setlocal
 set "APP_DIR=%~dp0"
 if /i "%~1"=="--locked" goto :locked
 for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
-  py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
-  if not errorlevel 1 exit /b 0
+  py -%%V -c "import sys; raise SystemExit(0)" >nul 2>nul
+  if not errorlevel 1 (
+    py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
+    exit /b %ERRORLEVEL%
+  )
 )
 echo [Mozarie] Setup could not acquire the maintenance lock. Close Mozarie or another setup/update, then try again.
 exit /b 1
@@ -31,7 +34,7 @@ echo [Mozarie] [4/5] Checking installed packages...
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking GPU support...
 "%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"
-if errorlevel 1 goto :gpu_cpu
+if errorlevel 1 goto :failed
 :setup_ready
 >"%APP_DIR%.venv\.mozarie-ready" echo ready
 echo [Mozarie] Setup complete. Run run.bat.
@@ -58,10 +61,6 @@ echo [Mozarie] Setup failed. Check the message above and run setup.bat again.
 echo [Mozarie] If Windows denied access, close other setup windows and run setup.bat again. Administrator rights are not required. / Windowsにアクセスを拒否された場合は、ほかのsetupを閉じてsetup.batを再実行してください。管理者として実行する必要はありません。
 pause
 exit /b 1
-
-:gpu_cpu
-echo [Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。
-goto :setup_ready
 
 :mozarie_running
 echo [Mozarie] Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。

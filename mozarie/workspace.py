@@ -340,6 +340,22 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
+    def clear_image_workspaces(self, revisions: dict[str, int]) -> None:
+        """Clear candidate and manual state for a batch before publishing it."""
+        if not revisions:
+            return
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for image_id, revision in revisions.items():
+                    db.execute("DELETE FROM candidates WHERE image_id=?", (image_id,))
+                    db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))
+                    db.execute("UPDATE images SET candidate_revision=?,reviewed=0,updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
     def prune_catalog_images(self, catalog_id: str, relative_paths: set[str]) -> None:
         """Drop rows for files absent from a complete folder scan only."""
         with self._lock, self._connect() as db:

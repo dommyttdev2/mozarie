@@ -536,11 +536,11 @@ class CatalogMixin:
                     for record in records
                     for candidate in self.candidates.get(record.image_id, [])
                 ]
+                revisions = {record.image_id: self._candidate_revision(record.image_id) + 1 for record in records}
+                self.workspace_store.clear_image_workspaces(revisions)
                 for record in records:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
-                    self._persist_candidates(record.image_id)
-                self.workspace_store.delete_manual([record.image_id for record in records])
             self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
 
@@ -945,6 +945,11 @@ class CatalogMixin:
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
+                candidate_revision = self._candidate_revision(image_id)
+                stored_effective, stored_revision = manual_mask_statuses.get(image_id, (False, -1))
+                has_effective_mask = stored_effective if stored_revision == candidate_revision else any(
+                    candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])
+                )
                 item = {
                     "id": record.image_id,
                     "relativePath": record.relative_path,
@@ -959,11 +964,8 @@ class CatalogMixin:
                         candidate.enabled and candidate.role == CandidateRole.APPLY
                         for candidate in self.candidates.get(image_id, [])
                     ),
-                    "hasEffectiveMask": manual_mask_statuses.get(image_id, (
-                        any(candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])),
-                        -1,
-                    ))[0],
-                    "candidateRevision": self._candidate_revision(image_id),
+                    "hasEffectiveMask": has_effective_mask,
+                    "candidateRevision": candidate_revision,
                     "hidden": record.hidden,
                     "reviewed": record.reviewed,
                 }

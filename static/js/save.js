@@ -365,7 +365,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken: response.saveToken,
           }); }
           catch (error) {
-            if (sourceChanged) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (sourceChanged && isDefinitiveCommitRejection(error)) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -384,7 +384,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           let committed;
           try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
           catch (error) {
-            try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (isDefinitiveCommitRejection(error)) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -493,6 +493,8 @@ async function commitBrowserSaveWithRetry(payload) {
     }
   }
 }
+
+function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.status) && error.status >= 400 && error.status < 500; }
 
 async function startApplyFromDialog(event) {
   event.preventDefault();

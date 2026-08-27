@@ -20,10 +20,15 @@ def _runtime_modules():
     return np, ort, torch, datasets
 
 
-def _gpu_is_ready(np, ort, torch, datasets) -> bool:
+def _gpu_is_ready(np, ort, torch, datasets, device: int) -> bool:
     if not torch.cuda.is_available() or "CUDAExecutionProvider" not in ort.get_available_providers():
         return False
-    session = ort.InferenceSession(datasets.get_example("mul_1.onnx"), providers=["CUDAExecutionProvider"])
+    if device < 0 or device >= torch.cuda.device_count():
+        return False
+    torch.ones((1,), device=f"cuda:{device}").add_(1).cpu()
+    session = ort.InferenceSession(
+        datasets.get_example("mul_1.onnx"), providers=["CUDAExecutionProvider"], provider_options=[{"device_id": str(device)}],
+    )
     session.disable_fallback()
     if session.get_providers()[0] != "CUDAExecutionProvider":
         return False
@@ -43,7 +48,9 @@ def _switch_to_cpu() -> bool:
 
 def main() -> int:
     try:
-        if not _gpu_is_ready(*_runtime_modules()):
+        settings = SettingsStore(APP_DIR).load()
+        device = int(settings["models"].get("gpu_device", 0))
+        if not _gpu_is_ready(*_runtime_modules(), device):
             return 0 if _switch_to_cpu() else 1
     except Exception:
         return 0 if _switch_to_cpu() else 1

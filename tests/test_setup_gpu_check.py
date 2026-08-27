@@ -21,11 +21,12 @@ class SetupGpuCheckTests(unittest.TestCase):
             get_providers=lambda: ["CUDAExecutionProvider"],
             run=lambda *_args: None,
         )
-        store = SimpleNamespace(save=Mock(side_effect=save_error))
+        store = SimpleNamespace(save=Mock(side_effect=save_error), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        tensor = Mock(); tensor.add_.return_value = tensor; tensor.cpu.return_value = tensor
         runtime = (
-            SimpleNamespace(ones=lambda *_args, **_kwargs: object(), float32=object()),
+            SimpleNamespace(ones=Mock(return_value=object()), float32=object()),
             SimpleNamespace(get_available_providers=lambda: providers, InferenceSession=lambda *_args, **_kwargs: session),
-            SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda)),
+            SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda, device_count=lambda: 1), ones=Mock(return_value=tensor)),
             SimpleNamespace(get_example=lambda _name: "model.onnx"),
         )
         output = io.StringIO()

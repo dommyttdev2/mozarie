@@ -6483,12 +6483,13 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(rendered_revision, revision)
             self.assertTrue(output)
 
-    def test_update_stops_server_and_state_before_launching_batch(self):
+    def test_update_request_only_stops_the_http_server(self):
         events = []
         http_server = Mock(); http_server.shutdown.side_effect = lambda: events.append("server")
-        with patch.object(http_module.time, "sleep"), patch.object(state_module.STATE, "shutdown", side_effect=lambda: events.append("state")), patch.object(http_module.subprocess, "Popen", side_effect=lambda *args, **kwargs: events.append("batch")):
+        with patch.object(http_module.time, "sleep"):
             http_module._start_update_after_response(http_server)
-        self.assertEqual(events, ["server", "state", "batch"])
+        self.assertEqual(events, ["server"])
+        self.assertTrue(http_server.mozarie_update_requested)
 
     def test_update_start_can_only_be_reserved_once(self):
         http_module._update_start_requested = False

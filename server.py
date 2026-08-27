@@ -34,6 +34,7 @@ def _handle_server_error(server: ThreadingHTTPServer, request, client_address) -
 
 
 def _open_browser(url: str) -> None:
+    launch_update = False
     try:
         if not webbrowser.open(url):
             LOGGER.warning("ブラウザを自動で開けませんでした。次のURLを開いてください: %s", url)
@@ -92,9 +93,13 @@ def main() -> None:
                 http_server.server_close()
                 state.shutdown()
                 LOGGER.info("Mozarieを終了しました")
+            launch_update = bool(getattr(http_server, "mozarie_update_requested", False))
     except UpdateError:
         LOGGER.error("Mozarie is busy with setup or update. / setupまたは更新が完了してから起動してください。")
         raise SystemExit(1) from None
+    if launch_update:
+        import subprocess
+        subprocess.Popen([str(APP_DIR / "update.bat")], cwd=str(APP_DIR), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
 
 
 if __name__ == "__main__":

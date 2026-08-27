@@ -363,10 +363,6 @@ class SavingMixin:
                         record.size_bytes = record_snapshot.size_bytes
                         record.asset_revision = record_snapshot.asset_revision + 1
                     if deleted:
-                        # Browser deletion must remove the durable image row as
-                        # well as the in-memory catalogue, otherwise a later
-                        # import can attach to a ghost workspace record.
-                        self.workspace_store.delete_images([image_id])
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
                         self.images.pop(image_id, None)
