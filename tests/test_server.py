@@ -2846,23 +2846,33 @@ class MozarieTests(unittest.TestCase):
         from http.server import ThreadingHTTPServer
 
         state = self.new_state()
-        state.settings["models"].update({"provider": "cpu", "target_segmentation": "target.onnx", "sam_checkpoints": {"vit_b": "", "vit_l": "", "vit_h": ""}})
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+        status = {
+            "models": {
+                "target_segmentation": {"required": True, "enabled": True, "valid": True},
+                "sam_checkpoint": {"required": False, "enabled": False, "valid": False},
+                "hand_segmentation": {"required": False, "enabled": False, "valid": False},
+            },
+            "gpus": [{"id": 0, "name": "Test GPU", "supported": True}],
+        }
+
+        def health(status_value):
+            with patch.object(http_module, "STATE", state), patch.object(state, "settings_status", return_value=status_value):
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                connection.request("GET", "/api/health")
+                response = connection.getresponse(); payload = json.loads(response.read())
+                connection.close()
+            return payload["modelsConfigured"]
+
         try:
-            with patch.object(http_module, "STATE", state):
-                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                connection.request("GET", "/api/health")
-                response = connection.getresponse(); payload = json.loads(response.read())
-                connection.close()
-            self.assertTrue(payload["modelsConfigured"])
-            state.settings["detection"]["mode"] = "high_precision"
-            with patch.object(http_module, "STATE", state):
-                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                connection.request("GET", "/api/health")
-                response = connection.getresponse(); payload = json.loads(response.read())
-                connection.close()
-            self.assertFalse(payload["modelsConfigured"])
+            for provider in ("cpu", "gpu"):
+                state.settings["models"]["provider"] = provider
+                self.assertTrue(health(status))
+                handseg_missing = copy.deepcopy(status); handseg_missing["models"]["hand_segmentation"] = {"required": False, "enabled": True, "valid": False}
+                self.assertFalse(health(handseg_missing))
+                high_precision_missing_sam = copy.deepcopy(status); high_precision_missing_sam["models"]["sam_checkpoint"] = {"required": True, "enabled": True, "valid": False}
+                self.assertFalse(health(high_precision_missing_sam))
         finally:
             httpd.shutdown(); httpd.server_close()
 
@@ -2981,13 +2991,31 @@ class MozarieTests(unittest.TestCase):
         mask = np.zeros((10, 10), dtype=np.uint8); mask[2:8, 2:8] = 255
         target = Mock(); target.detect.return_value = [{"class_name": "penis", "confidence": 0.6, "mask": mask, "source": "target"}]
         auxiliary = Mock()
-        auxiliary.detect.side_effect = lambda tile, _confidence, source: [{
+        auxiliary.detect.side_effect = lambda tile, _confidence, source, _targets: [{
             "class_name": "penis", "confidence": 0.9, "mask": np.full(tile.shape[:2], 255, dtype=np.uint8), "source": source,
         }]
         models = DetectionModels(target=target, auxiliaries=[("ntd11", auxiliary)])
         segments = state._detect_arbitrated_segments(models, np.zeros((10, 10, 3), dtype=np.uint8), 0.5)
         self.assertEqual([segment["source"] for segment in segments], ["target"])
         self.assertEqual(auxiliary.detect.call_count, len(detection_tiles(10, 10)))
+
+    def test_auxiliaries_receive_default_and_selected_target_sets(self):
+        state = self.new_state()
+        target = Mock(); target.detect.return_value = []
+        seen: list[tuple[str, set[str]]] = []
+
+        def detect(tile, _confidence, source, targets):
+            seen.append((source, set(targets)))
+            return []
+
+        models = DetectionModels(target=target, auxiliaries=[("ntd11", Mock(detect=detect)), ("sensitive", Mock(detect=detect))])
+        image = np.zeros((10, 10, 3), dtype=np.uint8)
+        for selected, expected in ((TARGET_CLASSES, {"penis", "pussy", "testicles"}), ({"penis"}, {"penis", "testicles"}), ({"pussy"}, {"pussy"})):
+            seen.clear()
+            state._detect_arbitrated_segments(models, image, 0.5, selected)
+            self.assertTrue(seen)
+            self.assertEqual({source for source, _targets in seen}, {"ntd11", "sensitive"})
+            self.assertTrue(all(targets == expected for _source, targets in seen))
 
     def test_hand_model_verification_occurs_once_after_first_load(self):
         state = self.new_state()

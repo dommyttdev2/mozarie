@@ -228,10 +228,7 @@ class DetectionMixin:
             tiled_segments: list[dict[str, Any]] = []
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
                 tile = rgb[y_offset:y_offset + tile_height, x_offset:x_offset + tile_width]
-                if targets == TARGET_CLASSES:
-                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source)
-                else:
-                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, model_targets)
+                detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, model_targets)
                 for segment in detected_segments:
                     if segment["class_name"] not in model_targets:
                         continue
