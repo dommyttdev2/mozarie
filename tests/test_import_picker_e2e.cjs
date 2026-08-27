@@ -635,7 +635,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   });
   assert.equal(downloadCommandLayout.buttonBelow && downloadCommandLayout.noOverlap && downloadCommandLayout.hit && downloadCommandLayout.actionsFollowPre && downloadCommandLayout.fits, true, `download command and copy control are separate and usable at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
-  if (!await page.locator("#settingsPrecisionToggle").isChecked()) await page.locator("#settingsPrecisionToggle").check();
+  if (!await page.locator("#settingsPrecisionToggle").isChecked()) await page.locator("#settingsPrecisionCard .model-switch-track").click();
   await page.waitForFunction(() => !document.querySelector('[data-model-download="sam"]').disabled);
   await page.locator('[data-model-download="sam"]').click();
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルをダウンロード" : "Download model", `supported model restores the download title at ${width}x${height} (${language})`);
@@ -870,7 +870,7 @@ async function main() {
     for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
       assert.equal(await page.locator(selector).first().isDisabled(), true, `standard mode disables ${selector}`);
     }
-    await page.locator("#settingsPrecisionToggle").check();
+    await page.locator("#settingsPrecisionCard .model-switch-track").click();
     await page.waitForFunction(() => !document.querySelector("#settingsSamModel").disabled);
     for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
       assert.equal(await page.locator(selector).first().isDisabled(), false, `high precision enables ${selector}`);
@@ -905,10 +905,10 @@ async function main() {
     assert.match(await page.locator('[data-sam-status="vit_l"]').textContent(), /外部ファイル|External file/, "configured SAM path is identified as external");
     assert.match(await page.locator('[data-sam-status="vit_b"]').textContent(), /未取得|Not acquired/, "unconfigured SAM variants remain selectable and show their status");
     const retainedSamPath = await page.locator("#settingsSamModel").inputValue();
-    await page.locator("#settingsPrecisionToggle").uncheck();
+    await page.locator("#settingsPrecisionCard .model-switch-track").click();
     assert.equal(await page.locator("#settingsSamModel").isDisabled(), true, "standard mode disables an existing SAM path without clearing it");
     assert.equal(await page.locator("#settingsSamModel").inputValue(), retainedSamPath, "standard mode keeps the existing SAM path for a later high precision run");
-    await page.locator("#settingsPrecisionToggle").check();
+    await page.locator("#settingsPrecisionCard .model-switch-track").click();
     await page.waitForFunction(() => !document.querySelector("#settingsSamModel").disabled);
     await page.locator("#settingsTargetModel").fill("legacy-sam-status.onnx");
     await page.evaluate(() => refreshSettingsStatus());
