@@ -87,10 +87,31 @@ def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
 
 
 def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
-    """Avoid torch-directml's failure when SAM concatenates an empty tensor."""
+    """Avoid torch-directml failures on SAM's zero-length tensor operations."""
     encoder = model.prompt_encoder
     if getattr(encoder, "_mozarie_directml_safe", False):
         return
+
+    def embed_points(this: Any, points: Any, labels: Any, pad: bool) -> Any:
+        points = points + 0.5
+        if pad:
+            padding_point = torch.zeros((points.shape[0], 1, 2), device=points.device)
+            padding_label = -torch.ones((labels.shape[0], 1), device=labels.device)
+            points = torch.cat([points, padding_point], dim=1)
+            labels = torch.cat([labels, padding_label], dim=1)
+        point_embedding = this.pe_layer.forward_with_coords(points, this.input_image_size)
+        # Boolean assignment with no selected elements fails in torch-directml.
+        # Arithmetic masks preserve SAM's result without constructing a 0x256 view.
+        not_a_point = (labels == -1).unsqueeze(-1)
+        point_embedding = torch.where(
+            not_a_point,
+            this.not_a_point_embed.weight.reshape(1, 1, -1),
+            point_embedding,
+        )
+        for label, embedding in enumerate(this.point_embeddings[:2]):
+            weight = (labels == label).unsqueeze(-1).to(dtype=point_embedding.dtype)
+            point_embedding = point_embedding + weight * embedding.weight.reshape(1, 1, -1)
+        return point_embedding
 
     def forward(this: Any, points: Any, boxes: Any, masks: Any) -> tuple[Any, Any]:
         batch_size = this._get_batch_size(points, boxes, masks)
@@ -117,5 +138,6 @@ def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
             )
         return sparse_embeddings, dense_embeddings
 
+    encoder._embed_points = MethodType(embed_points, encoder)
     encoder.forward = MethodType(forward, encoder)
     encoder._mozarie_directml_safe = True
