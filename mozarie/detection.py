@@ -198,13 +198,10 @@ class DetectionMixin:
                                     or self.images.get(record.image_id) is not record):
                                 self._discard_candidates(candidates)
                                 return
-                            self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                            self._touch_candidates(record.image_id)
-                            self._persist_candidates(record.image_id)
+                            self._commit_candidate_snapshot(record.image_id, [*boundary_candidates, *candidates], replace=True)
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)
-                        self._refresh_effective_mask_status(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 finally:
                     self.invalidate_sam_image(record.image_id)
@@ -693,10 +690,9 @@ class DetectionMixin:
                     with self.lock:
                         if self.images.get(image_id) is not record:
                             raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
-                        self.candidates.setdefault(image_id, []).extend(created)
-                        revision = self._touch_candidates(image_id)
-                        self._persist_candidates(image_id)
-                    self._refresh_effective_mask_status(image_id)
+                        revision = self._commit_candidate_snapshot(
+                            image_id, [*self.candidates.get(image_id, []), *created], replace=True,
+                        )
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)

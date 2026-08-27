@@ -286,7 +286,7 @@ class MozarieTests(unittest.TestCase):
             })
             with state.workspace_store._connect() as db:
                 before = tuple(db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone())
-            with patch.object(state.workspace_store, "update_candidate_metadata", side_effect=sqlite3.OperationalError("injected")):
+            with patch.object(state.workspace_store, "commit_candidate_state", side_effect=sqlite3.OperationalError("injected")):
                 with self.assertRaises(sqlite3.OperationalError):
                     state.set_candidate_state(image_id, "candidate", {"enabled": False})
             self.assertTrue(state.candidates[image_id][0].enabled)
@@ -313,6 +313,47 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(json.loads(row["removed_candidate_ids"]), [])
             self.assertEqual(row["candidate_revision"], revision)
             self.assertFalse(row["has_effective_mask"])
+
+    def test_manual_save_failure_leaves_the_existing_workspace_row_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            original = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 0, "hasEffectiveMask": False}
+            state.save_manual_workspace(image_id, original)
+            before = state.manual_workspace(image_id)
+            with patch.object(state.workspace_store, "save_manual", side_effect=sqlite3.OperationalError("injected")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.save_manual_workspace(image_id, {**original, "manualEnabled": False})
+            self.assertEqual(state.manual_workspace(image_id), before)
+
+    def test_manual_save_and_candidate_toggle_serialize_to_one_final_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            entered = threading.Event(); release = threading.Event()
+            original_save = state.workspace_store.save_manual
+
+            def delayed_save(*args, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(2))
+                return original_save(*args, **kwargs)
+
+            draft = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 1, "hasEffectiveMask": False}
+            with patch.object(state.workspace_store, "save_manual", side_effect=delayed_save):
+                manual = threading.Thread(target=lambda: state.save_manual_workspace(image_id, draft))
+                manual.start(); self.assertTrue(entered.wait(2))
+                toggle = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                toggle.start(); time.sleep(0.05)
+                self.assertTrue(toggle.is_alive())
+                release.set(); manual.join(2); toggle.join(2)
+            self.assertFalse(manual.is_alive()); self.assertFalse(toggle.is_alive())
+            revision = state._candidate_revision(image_id)
+            self.assertEqual(revision, 2)
+            self.assertEqual(state.workspace_store.manual_mask_statuses([image_id])[image_id], (False, revision))
 
     def test_catalog_snapshot_uses_the_persisted_manual_effective_mask(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4783,16 +4824,19 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(job_done.wait(2))
                 mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
                 mutation.start()
-                deadline = time.monotonic() + 2
-                while state._candidate_revision(image_id) == 1 and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                self.assertGreater(state._candidate_revision(image_id), 1)
+                time.sleep(0.05)
+                # Per-image serialization keeps a manual toggle from racing
+                # an in-flight mask composition.  Other catalogue reads above
+                # remain responsive while this image waits.
+                self.assertTrue(mutation.is_alive())
+                self.assertEqual(state._candidate_revision(image_id), 1)
                 release.set()
                 worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
             self.assertFalse(mutation.is_alive())
-            self.assertIsInstance(outcome.get("error"), ClientError)
-            self.assertIn("候補が変更", str(outcome["error"]))
+            self.assertGreater(state._candidate_revision(image_id), 1)
+            self.assertNotIn("error", outcome)
+            self.assertIsNotNone(outcome.get("mask"))
 
     def test_list_candidates_prunes_missing_masks_and_advances_revision_once(self):
         with tempfile.TemporaryDirectory() as directory:

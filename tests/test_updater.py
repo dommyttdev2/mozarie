@@ -736,7 +736,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertLess(batch.index(marker_removal), batch.index(requirements))
         self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
         self.assertIn('"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"', batch)
-        self.assertIn("GPU unavailable. Switched the detection runtime to CPU; change it later in Settings.", batch)
+        gpu_check = (Path(__file__).parents[1] / "setup_gpu_check.py").read_text(encoding="utf-8")
+        self.assertIn("GPU unavailable. Switched the detection runtime to CPU; change it later in Settings.", gpu_check)
         self.assertIn("setup_gpu_check.py", updater.MANAGED_FILES)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):

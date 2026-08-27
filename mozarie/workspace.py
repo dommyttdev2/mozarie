@@ -429,53 +429,43 @@ class WorkspaceStore:
         db.execute("""UPDATE manual_edits SET removed_candidate_ids=?,candidate_revision=?,has_effective_mask=?,updated_at=?
             WHERE image_id=?""", (json.dumps(sorted(set(removed) & candidate_ids)), revision, int(effective), time.time_ns(), image_id))
 
-    def update_candidate_metadata(self, image_id: str, revision: int, candidates: list[Any], effective: bool | None = None) -> None:
-        """Update lightweight candidate controls without reading or rewriting PNG blobs."""
+    def commit_candidate_state(self, image_id: str, revision: int, candidates: list[Any], effective: bool, *, replace: bool) -> None:
+        """Atomically store one complete candidate/manual revision before publication."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute("UPDATE images SET candidate_revision=?, reviewed=0, updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
-                for candidate in candidates:
-                    db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
-                if effective is not None:
-                    self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
+                if replace:
+                    db.execute("UPDATE candidates SET deleted=1 WHERE image_id=?", (image_id,))
+                    for candidate in candidates:
+                        try:
+                            with candidate.mask_path.open("rb") as handle:
+                                mask = handle.read()
+                        except OSError:
+                            # Restored candidates intentionally do not materialise
+                            # every PNG. Keep their existing durable mask while
+                            # updating just the requested metadata.
+                            row = db.execute(
+                                "SELECT mask_png FROM candidates WHERE image_id=? AND candidate_id=?",
+                                (image_id, candidate.candidate_id),
+                            ).fetchone()
+                            mask = row["mask_png"] if row else None
+                            if not isinstance(mask, bytes):
+                                continue
+                        self._require_png_mask(mask)
+                        db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
+                            ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
+                            (image_id,candidate.candidate_id,candidate.class_name,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
+                    db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
+                else:
+                    for candidate in candidates:
+                        db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
+                self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-
-    def replace_candidates(self, image_id: str, revision: int, candidates: list[Any], effective: bool | None = None) -> None:
-        with self._lock, self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                db.execute("UPDATE images SET candidate_revision=?, reviewed=0, updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
-                db.execute("UPDATE candidates SET deleted=1 WHERE image_id=?", (image_id,))
-                for candidate in candidates:
-                    try:
-                        with candidate.mask_path.open("rb") as handle:
-                            mask = handle.read()
-                    except OSError:
-                        # Restored candidates intentionally do not materialise
-                        # every PNG.  Keep their existing durable mask while
-                        # updating just the requested metadata.
-                        row = db.execute(
-                            "SELECT mask_png FROM candidates WHERE image_id=? AND candidate_id=?",
-                            (image_id, candidate.candidate_id),
-                        ).fetchone()
-                        mask = row["mask_png"] if row else None
-                        if not isinstance(mask, bytes):
-                            continue
-                    self._require_png_mask(mask)
-                    db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
-                        ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
-                        (image_id,candidate.candidate_id,candidate.class_name,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
-                db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
-                if effective is not None:
-                    self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
-                db.execute("COMMIT")
-            except Exception:
-                db.execute("ROLLBACK"); raise
 
     def hydrate_candidates(self, image_id: str, directory: Path, candidate_factory: Any) -> tuple[int, list[Any]]:
         with self._connect() as db:
@@ -561,17 +551,6 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
-    def manual_effective_masks(self, image_ids: list[str]) -> dict[str, bool]:
-        """Return the persisted manual-mask state; omitted IDs have no manual row."""
-        if not image_ids:
-            return {}
-        with self._connect() as db:
-            result: dict[str, bool] = {}
-            for chunk in _chunks(image_ids):
-                rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk).fetchall()
-                result.update({str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows})
-        return result
-
     def manual_mask_statuses(self, image_ids: list[str]) -> dict[str, tuple[bool, int]]:
         if not image_ids:
             return {}
@@ -584,13 +563,6 @@ class WorkspaceStore:
                 ).fetchall()
                 result.update({str(row["image_id"]): (bool(row["has_effective_mask"]), int(row["candidate_revision"])) for row in rows})
         return result
-
-    def update_manual_effective_mask(self, image_id: str, effective: bool, revision: int) -> None:
-        with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO manual_edits(image_id,candidate_revision,has_effective_mask,updated_at)
-                VALUES(?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
-                candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
-                (image_id, int(revision), int(effective), time.time_ns()))
 
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:

@@ -171,8 +171,11 @@ class SavingMixin:
                     except FileNotFoundError as exc:
                         with self.lock:
                             if self.images.get(image_id) is not None:
-                                self._remove_candidate_unchecked(image_id, candidate.candidate_id)
-                                self._touch_candidates(image_id)
+                                self._commit_candidate_snapshot(
+                                    image_id,
+                                    [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate.candidate_id],
+                                    replace=True,
+                                )
                         raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
