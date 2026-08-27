@@ -729,6 +729,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(marker_removal, batch)
         self.assertIn(self_upgrade, batch)
         self.assertIn(requirements, batch)
+        self.assertNotIn("--quiet", requirements)
+        self.assertNotIn(">nul", requirements)
         self.assertNotIn("--no-cache-dir", requirements)
         self.assertNotIn("Checking that Mozarie is closed", batch)
         self.assertNotIn("--no-cache-dir", (Path(__file__).parents[1] / "updater.py").read_text(encoding="utf-8"))
@@ -739,7 +741,9 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(":mozarie_running", batch)
         self.assertIn("Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。", batch)
         self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
-        self.assertIn("Setup will finish with CPU mode", batch)
+        self.assertIn('"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"', batch)
+        self.assertIn("GPU unavailable. CPU will be used; change it later in Settings.", batch)
+        self.assertIn("setup_gpu_check.py", updater.MANAGED_FILES)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):
         requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()

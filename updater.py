@@ -41,6 +41,7 @@ MANAGED_FILES = (
     "requirements.txt",
     "run.bat",
     "setup.bat",
+    "setup_gpu_check.py",
     "server.py",
     "THIRD_PARTY_NOTICES.md",
     "VERSION",

@@ -25,7 +25,7 @@ echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking GPU support...
-"%PYTHON%" -c "import numpy as np, onnxruntime as ort, torch; from onnxruntime import datasets; gpu=torch.cuda.is_available() and 'CUDAExecutionProvider' in ort.get_available_providers(); session=ort.InferenceSession(datasets.get_example('mul_1.onnx'),providers=['CUDAExecutionProvider']) if gpu else None; (session.disable_fallback(), session.run(None,{'X':np.ones((3,2),dtype=np.float32)}), (_ for _ in ()).throw(RuntimeError('CUDA session was not selected')) if session.get_providers()[0] != 'CUDAExecutionProvider' else None) if session else None; print('[Mozarie] GPU is ready.' if gpu else '[Mozarie] No usable GPU was found. Mozarie will use CPU; you can change this later in Settings.')"
+"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"
 if errorlevel 1 goto :gpu_cpu
 :setup_ready
 >"%APP_DIR%.venv\.mozarie-ready" echo ready
@@ -55,7 +55,7 @@ pause
 exit /b 1
 
 :gpu_cpu
-echo [Mozarie] GPU support could not be started. Setup will finish with CPU mode; you can retry GPU later in Settings.
+echo [Mozarie] GPU unavailable. CPU will be used; change it later in Settings. / GPUは利用できません。CPUを使用します。後で設定から変更できます。
 goto :setup_ready
 
 :mozarie_running

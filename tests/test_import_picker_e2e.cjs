@@ -508,7 +508,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   for (const name of modelActionNames) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 1, `model action has one accessible name: ${name} at ${width}x${height} (${language})`);
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
-    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556"],
+    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.com/api/download/models/2350456?fileId=2240838"],
     sensitive: ["sugarknight/sensitive-detect", ".pt → .onnx", "https://huggingface.co/sugarknight/sensitive-detect"],
     precision: ["Meta Segment Anything (SAM)", ".pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection", ".onnx", "https://huggingface.co/deepghs/anime_hand_detection"],
@@ -600,11 +600,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
     : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redへログインしてNTD11のZIPをダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。匿名の直リンクは使えません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
-    : "NTD11 is an optional model that supplements areas missed by the primary model. Sign in to Civitai.red, download and extract the NTD11 ZIP, convert the included .pt file to ONNX, then select it with Browse. Anonymous direct links cannot be used. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は成人向けの任意モデルです。Civitai.comへログインして年齢確認を済ませてから、下のリンクでZIPを取得・展開し、含まれる.ptをONNXへ変換して「参照」から指定してください。匿名アクセスで取得できるとは限りません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
+    : "NTD11 is an optional adult model. Sign in to Civitai.com and complete its age check before using the link below to download and extract the ZIP. Convert the included .pt file to ONNX, then select it with Browse. Anonymous access may not work. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
-  await assertExternalPreparationLink(page, "https://civitai.red/models/1313556", `NTD11 at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://civitai.com/api/download/models/2350456?fileId=2240838", `NTD11 at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), ntdCommand, `NTD11 download shows its conversion command at ${width}x${height} (${language})`);
   assert.doesNotMatch(ntdCommand, /\n|pip install/, `NTD11 conversion is one command at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `NTD11 preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
@@ -948,9 +948,9 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redへログインしてNTD11のZIPをダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。匿名の直リンクは使えません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は成人向けの任意モデルです。Civitai.comへログインして年齢確認を済ませてから、下のリンクでZIPを取得・展開し、含まれる.ptをONNXへ変換して「参照」から指定してください。匿名アクセスで取得できるとは限りません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
-    await assertExternalPreparationLink(page, "https://civitai.red/models/1313556", "NTD11");
+    await assertExternalPreparationLink(page, "https://civitai.com/api/download/models/2350456?fileId=2240838", "NTD11");
     assert.equal(await page.locator("#modelDownloadCommand").textContent(), '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
