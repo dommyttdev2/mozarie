@@ -5,7 +5,15 @@ import types
 import unittest
 from unittest.mock import patch
 
-from mozarie.runtime import directml_devices, patch_directml_sam_prompt_encoder, runtime_backend, torch_device
+from mozarie.runtime import (
+    DirectMLDeviceMappingError,
+    _DxgiAdapter,
+    directml_devices,
+    directml_ort_device_id,
+    patch_directml_sam_prompt_encoder,
+    runtime_backend,
+    torch_device,
+)
 
 
 class RuntimeBackendTests(unittest.TestCase):
@@ -38,6 +46,56 @@ class RuntimeBackendTests(unittest.TestCase):
         with patch("mozarie.runtime.directml_module", return_value=directml):
             self.assertEqual(torch_device(torch, "gpu", 1, backend="directml"), ("dml", 1))
         self.assertEqual(torch_device(torch, "cpu", 9, backend="directml"), "cpu")
+
+    def test_directml_ort_mapping_uses_luid_not_adapter_name_or_order(self) -> None:
+        directml = types.SimpleNamespace(
+            device_count=lambda: 2,
+            device_name=lambda index: ["Same GPU", "Different spelling"][index],
+            device_luid=lambda index: [(20, 0), (10, 0)][index],
+        )
+        adapters = (_DxgiAdapter("GPU one", (10, 0)), _DxgiAdapter("GPU two", (20, 0)))
+        with patch("mozarie.runtime._dxgi_adapters", return_value=adapters):
+            self.assertEqual(directml_ort_device_id(0, directml), 1)
+            self.assertEqual(directml_ort_device_id(1, directml), 0)
+
+    def test_directml_ort_mapping_rejects_ambiguous_or_unavailable_identity(self) -> None:
+        directml = types.SimpleNamespace(device_count=lambda: 2, device_name=lambda _index: "Same GPU")
+        with patch("mozarie.runtime._dxgi_adapters", return_value=(
+            _DxgiAdapter("Same GPU", (10, 0)), _DxgiAdapter("Same GPU", (20, 0)),
+        )):
+            with self.assertRaisesRegex(DirectMLDeviceMappingError, "cannot be matched"):
+                directml_ort_device_id(1, directml)
+        with patch("mozarie.runtime._dxgi_adapters", return_value=()):
+            with self.assertRaisesRegex(DirectMLDeviceMappingError, "cannot be matched"):
+                directml_ort_device_id(0, directml)
+
+    def test_directml_ort_mapping_rejects_duplicate_luid_matches(self) -> None:
+        directml = types.SimpleNamespace(
+            device_count=lambda: 1,
+            device_name=lambda _index: "GPU",
+            adapter_luid=lambda _index: (10, 0),
+        )
+        with patch("mozarie.runtime._dxgi_adapters", return_value=(
+            _DxgiAdapter("GPU A", (10, 0)), _DxgiAdapter("GPU B", (10, 0)),
+        )):
+            with self.assertRaisesRegex(DirectMLDeviceMappingError, "multiple DXGI adapters"):
+                directml_ort_device_id(0, directml)
+
+    def test_directml_ort_mapping_allows_only_the_provably_single_adapter_case(self) -> None:
+        directml = types.SimpleNamespace(device_count=lambda: 1, device_name=lambda _index: "Name does not matter")
+        with patch("mozarie.runtime._dxgi_adapters", return_value=(_DxgiAdapter("Different name", (10, 0)),)):
+            self.assertEqual(directml_ort_device_id(0, directml), 0)
+        with self.assertRaisesRegex(DirectMLDeviceMappingError, "unavailable"):
+            directml_ort_device_id(1, directml)
+
+    def test_directml_ort_mapping_normalizes_integer_luids(self) -> None:
+        directml = types.SimpleNamespace(
+            device_count=lambda: 1,
+            device_name=lambda _index: "GPU",
+            device_luid=lambda _index: (3 << 32) | 7,
+        )
+        with patch("mozarie.runtime._dxgi_adapters", return_value=(_DxgiAdapter("GPU", (7, 3)),)):
+            self.assertEqual(directml_ort_device_id(0, directml), 0)
 
     def test_directml_sam_patch_does_not_cat_an_empty_sparse_tensor(self) -> None:
         class Encoder:

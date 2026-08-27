@@ -103,7 +103,12 @@ def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device:
     if profile == "cuda":
         providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
     elif profile == "directml":
-        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        try:
+            from mozarie.runtime import directml_ort_device_id
+            ort_device = directml_ort_device_id(gpu_device)
+        except Exception as exc:
+            raise ProfileError(f"The selected DirectML device {gpu_device} cannot be mapped to ONNX Runtime: {exc}") from exc
+        providers = [(expected, {"device_id": ort_device}), "CPUExecutionProvider"]
 
     helper = onnx.helper
     tensor_proto = onnx.TensorProto

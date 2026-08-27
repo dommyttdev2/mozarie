@@ -564,12 +564,13 @@ async function refreshSettingsStatus() {
   const generation = ++settingsStatusGeneration;
   setSettingsGpuLoading(true);
   try {
-    const snapshot = JSON.stringify(settingsPayload());
+    const previewSettings = settingsPayload();
+    const snapshot = JSON.stringify(previewSettings);
     const data = await api("/api/settings/status", { method: "POST", body: snapshot });
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
     if (generation !== settingsStatusGeneration || snapshot !== currentSnapshot) return;
-    renderSettingsStatus(data.status);
+    renderSettingsStatus(data.status, previewSettings.models.gpu_device);
   } catch (error) {
     if (generation === settingsStatusGeneration) showUserError(error);
   } finally {

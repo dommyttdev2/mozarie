@@ -16,6 +16,7 @@ from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter, _class_
 from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, diagnose_runtime, nms_indices
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
+from mozarie.runtime import DirectMLDeviceMappingError
 
 
 class OnnxAdapterTests(unittest.TestCase):
@@ -68,14 +69,23 @@ class OnnxAdapterTests(unittest.TestCase):
             session.get_providers.return_value = ["DmlExecutionProvider", "CPUExecutionProvider"]
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), \
                  patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.directml_ort_device_id", return_value=4), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session) as create:
                 self.assertIs(create_session(path, "gpu", 1), session)
             options = create.call_args.kwargs["sess_options"]
             self.assertFalse(options.enable_mem_pattern)
             self.assertEqual(options.execution_mode, 0)
             self.assertEqual(create.call_args.kwargs["providers"], [
-                ("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider",
+                ("DmlExecutionProvider", {"device_id": 4}), "CPUExecutionProvider",
             ])
+
+    def test_directml_ambiguous_gpu_mapping_is_reported_without_falling_back(self) -> None:
+        with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), \
+             patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
+             patch("mozarie.inference.onnx.directml_ort_device_id", side_effect=DirectMLDeviceMappingError("ambiguous")):
+            with self.assertRaises(Exception) as raised:
+                available_providers("gpu", 1)
+        self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_device_mapping_unavailable")
 
     def test_gpu_session_keeps_model_loading_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

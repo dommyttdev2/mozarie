@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..runtime import directml_ort_device_id, runtime_backend
+from ..runtime import DirectMLDeviceMappingError, directml_ort_device_id, runtime_backend
 
 
 _dll_directory_handles: list[object] = []
@@ -78,7 +78,15 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
-        return [("DmlExecutionProvider", {"device_id": directml_ort_device_id(gpu_device)}), "CPUExecutionProvider"]
+        try:
+            ort_device = directml_ort_device_id(gpu_device)
+        except DirectMLDeviceMappingError as exc:
+            from ..core import ClientError
+            raise ClientError(
+                "選択したDirectML GPUをONNX Runtimeへ安全に対応付けられません。GPUを1台だけ有効にするか、LUID対応のtorch-directmlを使用してください。",
+                "gpu_device_mapping_unavailable",
+            ) from exc
+        return [("DmlExecutionProvider", {"device_id": ort_device}), "CPUExecutionProvider"]
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {

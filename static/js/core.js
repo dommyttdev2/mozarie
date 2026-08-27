@@ -77,6 +77,7 @@ function errorCodeTranslationKey(code, params = {}) {
 
 const USER_ERROR_CODES = {
   gpu_unsupported: "gpu_not_available", gpu_unavailable: "gpu_runtime_unavailable",
+  gpu_device_mapping_unavailable: "gpu_device_mapping_unavailable",
   gpu_out_of_memory: "gpu_memory_low", memory_allocation_failed: "system_memory_low",
   no_effective_mask: "no_mosaic_area", stale_asset: "image_changed",
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",

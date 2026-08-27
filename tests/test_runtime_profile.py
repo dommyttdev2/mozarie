@@ -33,7 +33,8 @@ class RuntimeProfileTests(unittest.TestCase):
         onnx = SimpleNamespace(helper=helper, TensorProto=SimpleNamespace(FLOAT=1))
         np = SimpleNamespace(float32="float32", ones=lambda *_args, **_kwargs: [[1.0]])
 
-        self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
+        with patch("mozarie.runtime.directml_ort_device_id", return_value=3):
+            self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
 
     def test_rejects_cross_profile_install_before_pip(self) -> None:
         with patch.object(runtime_profile, "installed_profile", return_value="directml"):

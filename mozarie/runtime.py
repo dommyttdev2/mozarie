@@ -41,6 +41,16 @@ class _DxgiAdapterDesc(ctypes.Structure):
 
 
 @dataclass(frozen=True)
+class _DxgiAdapter:
+    name: str
+    luid: tuple[int, int]
+
+
+class DirectMLDeviceMappingError(RuntimeError):
+    """The selected torch-directml device cannot be proven to match DXGI."""
+
+
+@dataclass(frozen=True)
 class RuntimeDevice:
     id: int
     name: str
@@ -99,8 +109,8 @@ def _com_method(pointer: ctypes.c_void_p, index: int, result: Any, *arguments: A
 
 
 @lru_cache(maxsize=1)
-def _dxgi_adapter_names() -> tuple[str, ...]:
-    """Return adapter descriptions in the order used by the DirectML ORT EP."""
+def _dxgi_adapters() -> tuple[_DxgiAdapter, ...]:
+    """Return DXGI adapters and their stable LUIDs in ORT enumeration order."""
     if os.name != "nt":
         return ()
     factory = ctypes.c_void_p()
@@ -115,7 +125,7 @@ def _dxgi_adapter_names() -> tuple[str, ...]:
     create_factory.restype = ctypes.c_long
     if create_factory(ctypes.byref(factory_iid), ctypes.byref(factory)) != 0:
         return ()
-    names: list[str] = []
+    adapters: list[_DxgiAdapter] = []
     try:
         enum_adapters = _com_method(
             factory, 7, ctypes.c_long, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)
@@ -134,12 +144,43 @@ def _dxgi_adapter_names() -> tuple[str, ...]:
                 )
                 if get_description(adapter, ctypes.byref(description)) != 0:
                     return ()
-                names.append(str(description.description).rstrip("\0"))
+                adapters.append(_DxgiAdapter(
+                    str(description.description).rstrip("\0"),
+                    (int(description.adapter_luid.low_part), int(description.adapter_luid.high_part)),
+                ))
             finally:
                 _com_method(adapter, 2, ctypes.c_ulong)(adapter)
     finally:
         _com_method(factory, 2, ctypes.c_ulong)(factory)
-    return tuple(names)
+    return tuple(adapters)
+
+
+def _luid_key(value: Any) -> tuple[int, int] | None:
+    def normalize(low: Any, high: Any) -> tuple[int, int]:
+        normalized_low = int(low) & 0xFFFFFFFF
+        normalized_high = int(high) & 0xFFFFFFFF
+        if normalized_high >= 0x80000000:
+            normalized_high -= 0x100000000
+        return normalized_low, normalized_high
+
+    if isinstance(value, _Luid):
+        return normalize(value.low_part, value.high_part)
+    if isinstance(value, int):
+        return normalize(value, value >> 32)
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            return normalize(value[0], value[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _directml_luid(module: Any, device_id: int) -> tuple[int, int] | None:
+    for attribute in ("device_luid", "adapter_luid"):
+        getter = getattr(module, attribute, None)
+        if callable(getter):
+            return _luid_key(getter(device_id))
+    return None
 
 
 def directml_ort_device_id(device_id: int, module: Any | None = None) -> int:
@@ -151,19 +192,25 @@ def directml_ort_device_id(device_id: int, module: Any | None = None) -> int:
     """
     directml = module or directml_module()
     selected_id = int(device_id)
-    selected_name = str(directml.device_name(selected_id)).rstrip("\0").strip().casefold()
-    if not selected_name:
-        return selected_id
-    occurrence = sum(
-        str(directml.device_name(index)).rstrip("\0").strip().casefold() == selected_name
-        for index in range(selected_id)
+    count = int(directml.device_count())
+    if selected_id < 0 or selected_id >= count:
+        raise DirectMLDeviceMappingError(f"DirectML device {selected_id} is unavailable.")
+    adapters = _dxgi_adapters()
+    selected_luid = _directml_luid(directml, selected_id)
+    if selected_luid is not None:
+        matches = [index for index, adapter in enumerate(adapters) if adapter.luid == selected_luid]
+        if len(matches) == 1:
+            return matches[0]
+        reason = "no DXGI adapter" if not matches else "multiple DXGI adapters"
+        raise DirectMLDeviceMappingError(
+            f"DirectML device {selected_id} LUID has {reason} with the same identity."
+        )
+    if count == 1 and len(adapters) == 1:
+        return 0
+    raise DirectMLDeviceMappingError(
+        "The selected DirectML GPU cannot be matched to ONNX Runtime safely. "
+        "Multiple adapters require an LUID-capable torch-directml runtime."
     )
-    matches = [
-        index
-        for index, name in enumerate(_dxgi_adapter_names())
-        if name.strip().casefold() == selected_name
-    ]
-    return matches[occurrence] if occurrence < len(matches) else selected_id
 
 
 def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str | None = None) -> Any:
