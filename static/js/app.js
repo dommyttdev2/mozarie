@@ -289,6 +289,7 @@ function bindEvents() {
     if (image) setReviewed(image, !isReviewed(image));
     closeCatalogContextMenu();
   });
+  $("#copyImagePathMenuItem").addEventListener("click", () => { void copyContextMenuImagePath(); });
   $("#removeImageMenuItem").addEventListener("click", () => { const image = state.images.find((item) => item.id === state.contextMenuImageId); if (image) setHidden(image, !isHidden(image)); closeCatalogContextMenu(); });
   $("#gallery").addEventListener("dragenter", (event) => {
     if (!event.dataTransfer?.types?.includes("Files")) return;
@@ -437,9 +438,10 @@ function bindEvents() {
     }
     const menu = $("#catalogContextMenu");
     if (menu.matches?.(":popover-open")) {
-      const items = [...menu.querySelectorAll("button:not([disabled])")];
+      const items = [...menu.querySelectorAll("button:not([disabled]):not([hidden])")];
       const currentIndex = items.indexOf(document.activeElement);
       if (event.key === "Escape") { event.preventDefault(); closeCatalogContextMenu(); return; }
+      if (event.key === "Tab") { closeCatalogContextMenu({ restoreFocus: false }); return; }
       if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && items.length) {
         event.preventDefault();
         const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1

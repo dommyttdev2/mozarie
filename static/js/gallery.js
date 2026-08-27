@@ -57,6 +57,7 @@ function renderGallery(force = false) {
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
+    item.setAttribute("aria-haspopup", "menu");
     item.setAttribute("aria-label", `${image.relativePath}、${isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")}`);
     item.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id); }
@@ -191,6 +192,7 @@ function renderOverview(force = false) {
     grid.append(item);
     item.tabIndex = 0;
     item.setAttribute("role", "button");
+    item.setAttribute("aria-haspopup", "menu");
     item.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectOverviewImage(image.id, event); }
       else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
