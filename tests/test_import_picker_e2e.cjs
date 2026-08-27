@@ -439,6 +439,19 @@ async function assertNoUserFacingInternalModelDetails(locator, message) {
   assert.doesNotMatch(await locator.evaluate((element) => element.innerHTML), USER_FACING_INTERNAL_MODEL_DETAIL, message);
 }
 
+async function assertNoVisibleUserFacingInternalModelDetails(locator, message) {
+  assert.doesNotMatch(await locator.textContent(), USER_FACING_INTERNAL_MODEL_DETAIL, message);
+}
+
+async function assertExternalPreparationLink(page, href, message) {
+  const link = page.locator("#modelDownloadItems a");
+  assert.equal(await link.getAttribute("href"), href, `${message} uses the direct source URL`);
+  assert.equal(await link.getAttribute("target"), "_blank", `${message} opens in a new tab`);
+  assert.equal(await link.getAttribute("rel"), "noreferrer", `${message} omits the referrer`);
+  assert.equal(await link.getAttribute("download"), null, `${message} has no download attribute`);
+  assert.doesNotMatch(await link.getAttribute("href"), /\/api\/model-download\/start/, `${message} does not use the download API`);
+}
+
 async function assertSettingsDialogLayout(page, width, height, language, modelDownloadRequests) {
   await page.setViewportSize({ width, height });
   await page.locator("#settingsButton").click();
@@ -503,6 +516,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     await assertNoUserFacingInternalModelDetails(page.locator("#modelHelpDialog"), `${key} help omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
     assert.equal(await page.locator("#modelHelpDialog").evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth), true, `${key} help does not overflow at ${width}x${height} (${language})`);
     if (key === "ntd11" || key === "sensitive") {
+      const expectedCommand = key === "ntd11"
+        ? (language === "ja" ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu' : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu')
+        : (language === "ja" ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu' : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu');
+      assert.equal(await page.locator("#modelHelpCommand").textContent(), expectedCommand, `${key} help uses the setup-installed yolo command at ${width}x${height} (${language})`);
+      assert.doesNotMatch(expectedCommand, /\n|pip install/, `${key} help keeps conversion to one command at ${width}x${height} (${language})`);
       const helpCommandLayout = await page.locator("#modelHelpDialog").evaluate((dialog) => {
         const pre = dialog.querySelector("#modelHelpCommand"); const button = dialog.querySelector("#modelHelpCopy");
         const preBox = pre.getBoundingClientRect(); const buttonBox = button.getBoundingClientRect();
@@ -556,23 +574,24 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     ? "配布元から基本モデルのONNXを取得し、「参照」から指定してください。変換は不要です。"
     : "Get the primary model ONNX from the source, then select it with Browse. No conversion is required.", `primary model explains direct preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `primary model opens the preparation dialog at ${width}x${height} (${language})`);
-  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/01miku/anime-nsfw-segm-yolo26", `primary model links to its source at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx?download=true", `primary model at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
-  await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `primary model preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
+  await assertNoVisibleUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `primary model preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
   const ntd11Download = page.locator('[data-model-download="ntd11"]');
   await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
   const ntdCommand = language === "ja"
-    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
-    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
+    ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。"
-    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
+    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse. Login is required to download. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
-  assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556", `NTD11 download keeps its source link at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", `NTD11 at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), ntdCommand, `NTD11 download shows its conversion command at ${width}x${height} (${language})`);
+  assert.doesNotMatch(ntdCommand, /\n|pip install/, `NTD11 conversion is one command at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `NTD11 preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector} at ${width}x${height} (${language})`);
   await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
@@ -582,12 +601,14 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   const sensitiveDownload = page.locator('[data-model-download="sensitive"]');
   await sensitiveDownload.scrollIntoViewIfNeeded(); await sensitiveDownload.click();
   const sensitiveCommand = language === "ja"
-    ? 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
-    : 'python -m pip install "ultralytics==8.4.75"\nyolo export model="path\\to\\downloaded\\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
+    ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
+    : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。"
-    : "Sensitive is an optional model that supplements areas missed by the primary model. Get a Sensitive .pt file from the source, convert it to ONNX, then select it with Browse.", `Sensitive download explains preparation at ${width}x${height} (${language})`);
+    ? "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
+    : "Sensitive is an optional model that supplements areas missed by the primary model. Get a Sensitive .pt file from the source, convert it to ONNX, then select it with Browse. After setup, run the command below in PowerShell from the Mozarie folder.", `Sensitive download explains preparation at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://huggingface.co/sugarknight/sensitive-detect/resolve/b7ec7a528841aac3d52411fb4d031d51a8225e40/sensitive_detect_v07.pt?download=true", `Sensitive at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), sensitiveCommand, `Sensitive download shows its conversion command at ${width}x${height} (${language})`);
+  assert.doesNotMatch(sensitiveCommand, /\n|pip install/, `Sensitive conversion is one command at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `Sensitive preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `Sensitive hides ${selector} at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadCopy").click();
@@ -885,20 +906,20 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
-    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://civitai.red/models/1313556", "NTD11 download links to its source");
-    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
+    await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", "NTD11");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="sensitive"]').click();
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。", "Sensitive download explains how to prepare its model");
-    assert.equal(await page.locator("#modelDownloadItems a").getAttribute("href"), "https://huggingface.co/sugarknight/sensitive-detect", "Sensitive download links to its source");
-    assert.equal(await page.locator("#modelDownloadCommand").textContent(), 'python -m pip install "ultralytics==8.4.75"\nyolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "Sensitive download shows its conversion commands");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "Sensitiveは基本モデルの見落としを補う任意モデルです。配布元からSensitiveの.ptを取得し、ONNXへ変換して、「参照」から指定してください。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "Sensitive download explains how to prepare its model");
+    await assertExternalPreparationLink(page, "https://huggingface.co/sugarknight/sensitive-detect/resolve/b7ec7a528841aac3d52411fb4d031d51a8225e40/sensitive_detect_v07.pt?download=true", "Sensitive");
+    assert.equal(await page.locator("#modelDownloadCommand").textContent(), '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "Sensitive download shows its conversion commands");
     await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
     await page.locator("#modelDownloadCopy").click();
     assert.match(await page.locator("#modelDownloadCopyResult").textContent(), /コピーしました|Copied/, "conversion command copy reports success locally");
-    assert.match(await page.evaluate(() => window.__copiedCommand), /yolo export/, "conversion command copy uses the Clipboard API");
+    assert.match(await page.evaluate(() => window.__copiedCommand), /yolo\.exe" export/, "conversion command copy uses the Clipboard API");
     assert.equal(modelDownloadRequests.length, requestsBeforeModelPreparation, "preparation dialogs make no download API requests");
     assert.doesNotMatch(`${await page.locator("#modelDownloadMessage").textContent()} ${await page.locator("#modelDownloadStatus").textContent()}`, /MIT|ライセンスのまま|変換済みONNX|already converted/i, "Sensitive download omits implementation and license rationale");
     await page.locator("#modelDownloadClose").click();

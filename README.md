@@ -54,18 +54,18 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 
 > **`.pt` ファイルの注意:** NTD を含むPyTorchの`.pt`は、読み込み時にpickle経由のコードを実行し得るため、ここに記載した配布元以外から入手した`.pt`は実行しないでください。
 
+`setup.bat`実行後、MozarieフォルダーでPowerShellを開き、次のコマンドを実行します。
+
 NTD11の変換:
 
 ```powershell
-python -m pip install "ultralytics==8.4.75"
-yolo export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+& ".\.venv\Scripts\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 Sensitiveの変換:
 
 ```powershell
-python -m pip install "ultralytics==8.4.75"
-yolo export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+& ".\.venv\Scripts\yolo.exe" export model="ダウンロードしたSensitiveの.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 変換すると同じフォルダーに同名の`.onnx`が生成されます。設定でそのONNXを指定し、モデルの状態が有効であることを確認してから検出を実行してください。

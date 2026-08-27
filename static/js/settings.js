@@ -446,14 +446,14 @@ function setModelDownloadGuide(command = "") {
 }
 
 const MODEL_DOWNLOAD_INFO = {
-  target: { name: "01miku/anime-nsfw-segm-yolo26", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26" },
+  target: { name: "01miku/anime-nsfw-segm-yolo26", source: "Hugging Face", url: "https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/1697d5d1827b6a818b350b44bf3ec27f08837a2a/nsfw-anime-xl-x1280.onnx?download=true" },
   hand_detection: { name: "deepghs/anime_hand_detection", source: "Hugging Face", url: "https://huggingface.co/deepghs/anime_hand_detection" },
   hand_segmentation: { name: "HandSegNet anime SDXL", source: "Hugging Face", url: "https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl" },
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/models/1313556" },
-  sensitive: { name: "sugarknight/sensitive-detect", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/api/download/models/2350456?fileId=2240838" },
+  sensitive: { name: "sugarknight/sensitive-detect", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect/resolve/b7ec7a528841aac3d52411fb4d031d51a8225e40/sensitive_detect_v07.pt?download=true" },
 };
 
 function renderModelDownloadItems(keys) {
@@ -482,7 +482,7 @@ function modelPreparationCommand(key) {
   const path = key === "ntd11"
     ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
     : (english ? "path\\to\\downloaded\\Sensitive.pt" : "ダウンロードしたSensitiveの.ptファイルのパス");
-  return `python -m pip install "ultralytics==8.4.75"\nyolo export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
+  return `& ".\\.venv\\Scripts\\yolo.exe" export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
 }
 
 function showUnsupportedModelDownload(key) {
