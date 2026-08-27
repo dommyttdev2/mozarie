@@ -16,9 +16,10 @@ from .core import (
     confidence_for_source, detection_tiles, materialize_tile_mask,
     merge_tile_segment, padded_hand_box, read_boundary_request,
     read_polygon_boundary_request, sam_refinement_prompts,
-    select_best_sam_mask, select_semantic_sam_mask, white_fluid_mask,
+    select_best_sam_mask, select_semantic_sam_mask,
     _read_detection_parallelism, _read_target_classes,
 )
+from .fluid import white_fluid_mask
 from .inference.generic_yolo_segment import GenericYoloSegmenter
 from .inference.yolo_detect import HandDetector
 from .inference.yolo_segment import TargetSegmenter
