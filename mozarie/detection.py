@@ -84,7 +84,10 @@ class DetectionMixin:
         models = self.settings.get("models", {})
         raw_path = str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
         if not raw_path:
-            raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。", "model_not_configured")
+            raise ClientError(
+                "SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。",
+                "sam_checkpoint_missing",
+            )
         path = Path(raw_path).expanduser()
         if not path.is_file():
             raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")

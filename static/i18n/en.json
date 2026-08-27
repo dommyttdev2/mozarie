@@ -238,6 +238,7 @@
   "errorCode.mask_not_found": "The mosaic range was not found.",
   "errorCode.catalog_changed": "The image list changed. Try again.",
   "errorCode.model_profile_invalid": "The selected model file cannot be used.",
+  "errorCode.sam_checkpoint_missing": "Download or select the active SAM checkpoint in the Models settings tab.",
   "errorCode.sam_checkpoint_invalid": "The precise-detection checkpoint must match the selected vit_b, vit_l, or vit_h model type.",
   "errorCode.sam_provider_unavailable": "Precise detection is unavailable with the selected processing method.",
   "errorCode.model_picker_busy": "Close the other file picker and try again.",

@@ -240,6 +240,7 @@
   "errorCode.mask_not_found": "指定したモザイク範囲が見つかりません。",
   "errorCode.catalog_changed": "画像一覧が更新されたため、操作をやり直してください。",
   "errorCode.model_profile_invalid": "選択したモデルファイルは使用できません。",
+  "errorCode.sam_checkpoint_missing": "設定のモデルタブで、選択中のSAMチェックポイントをダウンロードまたは指定してください。",
   "errorCode.sam_checkpoint_invalid": "「輪郭を補正」のチェックポイントは、選択した vit_b / vit_l / vit_h と一致している必要があります。",
   "errorCode.sam_provider_unavailable": "「輪郭を補正」を選択した実行方法で利用できません。",
   "errorCode.model_picker_busy": "別のファイル選択を閉じてからもう一度実行してください。",
