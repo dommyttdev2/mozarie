@@ -115,6 +115,12 @@ class TranslationContractTests(unittest.TestCase):
             dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
             self.assertTrue(dictionary["errorCode.gpu_unavailable"])
 
+    def test_detection_cancellation_explains_that_the_current_image_may_finish(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for language in ("ja", "en"):
+            dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            self.assertRegex(dictionary["status.detectCancelling"], r"現在の画像|current image")
+
     def test_user_error_dialog_has_a_complete_translation_for_every_presentation_code(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")

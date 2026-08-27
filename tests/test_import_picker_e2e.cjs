@@ -1453,6 +1453,7 @@ async function main() {
     failCancel(false);
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
+    assert.match(await page.locator("#connectionStatus").textContent(), /現在の画像は完了する場合があります/, "cancellation is shown immediately with the in-flight image notice");
     await page.locator("#processingCancelButton").evaluate((button) => button.click());
     assert.equal(cancelRequests(), 2, "a processing cancel cannot be sent twice");
     holdDetection(false);

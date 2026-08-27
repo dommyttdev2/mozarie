@@ -89,7 +89,8 @@ const USER_ERROR_CODES = {
   save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
   source_busy: "source_busy",
   clipboard_write_failed: "clipboard_write_failed",
-  workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", model_not_configured: "model_not_configured",
+  workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", workspace_database_error: "workspace_write_failed",
+  output_unavailable: "output_folder_unavailable", model_not_configured: "model_not_configured",
   model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed",
   gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
   input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
@@ -240,7 +241,7 @@ function showProcessing(processing) {
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
   $("#processingProgressText").textContent = progressText(current);
-  const cancelling = Boolean(state.detectCancelRequested || state.importSession?.cancelled);
+  const cancelling = Boolean(current.cancelRequested || state.detectCancelRequested || state.importSession?.cancelled);
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
   $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
   $("#processingCancelButton").disabled = cancelling;
@@ -579,6 +580,10 @@ function discardCatalogNodes(nodes, container) {
 }
 
 function updateProgress(job) {
+  if (job?.kind === "detect" && job.cancelRequested) {
+    state.detectCancelRequested = true;
+    setStatusKey("status.detectCancelling", {}, "running");
+  }
   if (job?.kind !== "apply" && ["running", "pausing", "paused"].includes(job?.state)) showProcessing(job);
   updateActionButtons();
 }

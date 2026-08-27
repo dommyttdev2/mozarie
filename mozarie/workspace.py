@@ -27,6 +27,10 @@ def _chunks(values: list[str]) -> list[list[str]]:
     return [values[index:index + _BULK_CHUNK_SIZE] for index in range(0, len(values), _BULK_CHUNK_SIZE)]
 
 
+class WorkspaceOpenError(RuntimeError):
+    """The durable workspace cannot be safely opened as the current schema."""
+
+
 class _ClosingConnection(sqlite3.Connection):
     """sqlite's context manager commits but does not close on Windows."""
     def __exit__(self, *args: Any) -> None:
@@ -47,23 +51,7 @@ class WorkspaceStore:
         # DDL, or cleanup statement. v0.4 intentionally has no migrations.
         existing = self.path.exists()
         if existing:
-            with sqlite3.connect(self.path, factory=_ClosingConnection) as db:
-                db.row_factory = sqlite3.Row
-                tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if "meta" not in tables:
-                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
-                version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-                if version_row is None:
-                    raise RuntimeError("workspace database is not a Mozarie v0.4 database")
-                try:
-                    version = int(version_row["value"])
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4") from exc
-                if version > self.VERSION:
-                    raise RuntimeError("workspace database is newer than this Mozarie version")
-                if version != self.VERSION:
-                    raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
-                self._validate_schema(db, tables)
+            self._inspect_existing()
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
@@ -105,6 +93,32 @@ class WorkspaceStore:
             if not existing:
                 db.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
 
+    def _inspect_existing(self) -> None:
+        """Read existing workspaces through SQLite's read-only URI mode."""
+        try:
+            uri = f"{self.path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True, factory=_ClosingConnection) as db:
+                db.row_factory = sqlite3.Row
+                tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "meta" not in tables:
+                    raise WorkspaceOpenError("workspace database is not a Mozarie v0.4 database")
+                version_row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+                if version_row is None:
+                    raise WorkspaceOpenError("workspace database is not a Mozarie v0.4 database")
+                try:
+                    version = int(version_row["value"])
+                except (TypeError, ValueError) as exc:
+                    raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4") from exc
+                if version > self.VERSION:
+                    raise WorkspaceOpenError("workspace database is newer than this Mozarie version")
+                if version != self.VERSION:
+                    raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
+                self._validate_schema(db, tables)
+        except WorkspaceOpenError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise WorkspaceOpenError("workspace database cannot be opened") from exc
+
     @staticmethod
     def _validate_schema(db: sqlite3.Connection, tables: set[str]) -> None:
         required = {
@@ -114,11 +128,11 @@ class WorkspaceStore:
             "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "has_effective_mask", "updated_at"},
         }
         if not set(required) <= tables:
-            raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+            raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
         for table, columns in required.items():
             present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
             if not columns <= present:
-                raise RuntimeError("workspace database must be recreated for Mozarie v0.4")
+                raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)

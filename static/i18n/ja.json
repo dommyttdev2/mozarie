@@ -19,7 +19,7 @@
   "status.saving": "ファイルを保存しています...",
   "status.saved": "保存しました。",
   "status.detectStarted": "自動検出を開始しました",
-  "status.detectCancelling": "自動検出を停止しています。現在の画像の処理が終わるまでお待ちください。",
+  "status.detectCancelling": "自動検出の停止を受け付けました。現在の画像は完了する場合があります。",
   "status.detectCancelled": "自動検出を停止しました。{completed}件は検出済みです。",
   "status.applyStarted": "ファイルを保存しています",
   "status.detectProgress": "自動検出 {completed} / {total} {current}",

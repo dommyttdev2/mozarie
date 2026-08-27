@@ -508,10 +508,8 @@ class JobsMixin:
                 exc = ClientError("作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error")
             elif self.job.kind == "apply" and isinstance(exc, OSError):
                 exc = ClientError("保存先に書き込めませんでした。保存先と空き容量を確認してください。", "output_unavailable")
-            elif self.settings["models"].get("provider") == "gpu" and any(marker in message for marker in (
-                "cuda", "cudnn", "execution provider", "provider bridge",
-            )):
-                exc = ClientError("GPU推論を実行できません。CPUへ切り替えるか、CUDA環境を確認してください。", "gpu_unavailable")
+            elif self.job.kind == "detect" and isinstance(exc, (ValueError, IndexError)):
+                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
             elif any(marker in message for marker in (
                 "no kernel image is available", "does not include kernels for this gpu", "not compatible with the current pytorch installation",
             )):
@@ -528,6 +526,8 @@ class JobsMixin:
                 )
             elif any(marker in message for marker in ("onnx", "protobuf", "invalid graph", "load model")):
                 exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
+            elif self.job.kind == "detect":
+                exc = ClientError("検出を完了できませんでした。もう一度実行してください。", "internal_error")
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return

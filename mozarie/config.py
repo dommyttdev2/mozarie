@@ -75,10 +75,11 @@ class SettingsStore:
                 temporary_path.unlink(missing_ok=True)
         return settings
 
-    def reset(self) -> dict[str, Any]:
+    def reset(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         """Forget only this machine's override and return tracked defaults."""
+        settings = settings if settings is not None else self.default_settings()
         self.local_path.unlink(missing_ok=True)
-        return self.load()
+        return settings
 
 
 def _expect_dict(value: Any, name: str) -> dict[str, Any]:
@@ -223,14 +224,23 @@ def _validate_output_directory(value: Any) -> str:
 
 
 def validate_output_directory_ready(value: str | Path) -> Path:
-    """Require an existing output folder; the actual save reports write errors."""
+    """Require a usable folder without leaving a probe file behind."""
     raw = os.fspath(value)
     if "\x00" in raw:
         raise SettingsError("saving.default_output_directory must not contain NUL")
     path = Path(raw).expanduser()
     if not path.is_absolute() or not path.is_dir():
         raise SettingsError("saving.default_output_directory must be an existing directory")
-    return path.resolve()
+    path = path.resolve()
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="xb", dir=path, prefix=".mozarie-output-check-", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(b"ok")
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return path
 
 
 def _validate_targets(value: Any) -> list[str]:

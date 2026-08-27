@@ -1,4 +1,7 @@
 import sqlite3
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import io
@@ -8,7 +11,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from mozarie.catalog import CatalogMixin
-from mozarie.workspace import WorkspaceStore
+from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -128,7 +131,7 @@ class WorkspaceTests(unittest.TestCase):
                 db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(WorkspaceStore.VERSION + 1),))
             connection.close()
             before = store.path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "newer"):
+            with self.assertRaisesRegex(WorkspaceOpenError, "newer"):
                 WorkspaceStore(root)
             self.assertEqual(store.path.read_bytes(), before)
 
@@ -141,7 +144,7 @@ class WorkspaceTests(unittest.TestCase):
                 db.execute("UPDATE meta SET value=? WHERE key='schema_version'", ("not-a-version",))
             connection.close()
             before = store.path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "recreated"):
+            with self.assertRaisesRegex(WorkspaceOpenError, "recreated"):
                 WorkspaceStore(root)
             self.assertEqual(store.path.read_bytes(), before)
 
@@ -158,7 +161,7 @@ class WorkspaceTests(unittest.TestCase):
                         db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
                 connection.close()
                 before = store.path.read_bytes()
-                with self.assertRaisesRegex(RuntimeError, "recreated|not a Mozarie"):
+                with self.assertRaisesRegex(WorkspaceOpenError, "recreated|not a Mozarie"):
                     WorkspaceStore(root)
                 self.assertEqual(store.path.read_bytes(), before)
 
@@ -172,13 +175,43 @@ class WorkspaceTests(unittest.TestCase):
                 db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
             connection.close()
             before = store.path.read_bytes()
-            with self.assertRaisesRegex(RuntimeError, "recreated"):
+            with self.assertRaisesRegex(WorkspaceOpenError, "recreated"):
                 WorkspaceStore(root)
             self.assertEqual(store.path.read_bytes(), before)
             connection = sqlite3.connect(store.path)
             self.assertEqual(connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "2")
             self.assertNotIn("has_effective_mask", {row[1] for row in connection.execute("PRAGMA table_info(manual_edits)")})
             connection.close()
+
+    def test_empty_and_garbage_existing_databases_are_rejected_without_changes(self):
+        for content in (b"", b"not sqlite"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "workspaces.sqlite3"
+                path.write_bytes(content)
+                before = path.read_bytes()
+                with self.assertRaises(WorkspaceOpenError):
+                    WorkspaceStore(path.parent)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_server_exits_with_one_recovery_message_for_a_corrupt_workspace(self):
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"
+            app.mkdir()
+            shutil.copy2(source_root / "server.py", app / "server.py")
+            shutil.copytree(source_root / "mozarie", app / "mozarie")
+            shutil.copytree(source_root / "config", app / "config")
+            data = app / "data"; data.mkdir()
+            database = data / "workspaces.sqlite3"; database.write_bytes(b"not sqlite")
+            before = database.read_bytes()
+            result = subprocess.run(
+                [sys.executable, "server.py", "--port", "0"], cwd=app,
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("作業データを開けません", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(database.read_bytes(), before)
 
     def test_empty_candidate_set_keeps_nonzero_revision_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter, _class_names
-from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, nms_indices
+from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, diagnose_runtime, nms_indices
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -62,10 +62,31 @@ class OnnxAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"invalid")
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]), \
-                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=RuntimeError("invalid model")):
+                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("invalid model"), diagnostic]):
                 with self.assertRaisesRegex(Exception, "検出モデル"):
                     create_session(path, "gpu", 0)
+
+    def test_gpu_model_shape_error_is_not_reported_as_a_gpu_outage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"invalid")
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
+            with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("CUDA model input shape is invalid"), diagnostic]):
+                with self.assertRaises(Exception) as raised:
+                    create_session(path, "gpu", 0)
+            self.assertEqual(getattr(raised.exception, "error_code", None), "model_load_failed")
+
+    def test_identity_runtime_failure_is_reported_as_gpu_unavailable(self) -> None:
+        session = Mock(); session.get_providers.return_value = ["CUDAExecutionProvider"]
+        session.run.side_effect = RuntimeError("provider initialization failed")
+        with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+             patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session):
+            with self.assertRaises(Exception) as raised:
+                diagnose_runtime("gpu", 0)
+        self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_unavailable")
 
     def test_create_session_reports_missing_model_without_its_path(self) -> None:
         with self.assertRaisesRegex(Exception, "検出モデル") as raised:

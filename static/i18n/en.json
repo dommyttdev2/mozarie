@@ -178,7 +178,7 @@
   "status.boundaryDetecting": "Detecting inside boundary...",
   "status.boundaryDone": "Boundary range added.",
   "status.detectCancelled": "Detection cancelled after {completed} image(s).",
-  "status.detectCancelling": "Stopping detection...",
+  "status.detectCancelling": "Stopping detection. The current image may still finish.",
   "status.detectDone": "Detection complete.",
   "status.detectProgress": "Detecting {completed}/{total}: {current}",
   "status.detectStarted": "Detection started.",

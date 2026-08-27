@@ -89,7 +89,15 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
 def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.InferenceSession:
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    session = ort.InferenceSession(model, sess_options=options, providers=available_providers(device, gpu_device))
+    try:
+        session = ort.InferenceSession(model, sess_options=options, providers=available_providers(device, gpu_device))
+    except Exception as exc:
+        # A model parser/data failure is not a GPU outage.  The selected
+        # provider becoming unavailable is identified either before creation
+        # or by ORT returning a CPU-only session below.
+        if getattr(exc, "error_code", None):
+            raise
+        raise _model_load_error() from exc
     # Provider failure must be visible to the user.  ORT otherwise silently
     # recreates this session with a fallback provider during ``run``.
     session.disable_fallback()
@@ -104,10 +112,12 @@ def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.
     try:
         return _create_session(str(path), device, gpu_device)
     except Exception as exc:
-        if getattr(exc, "error_code", None) == "gpu_unavailable":
+        if getattr(exc, "error_code", None):
+            if device.lower() != "cpu" and getattr(exc, "error_code", None) == "model_load_failed":
+                # A fixed identity model distinguishes a corrupt configured
+                # ONNX file from a CUDA provider that cannot initialize.
+                diagnose_runtime(device, gpu_device)
             raise
-        if device.lower() != "cpu" and any(marker in str(exc).casefold() for marker in ("cuda", "cudnn", "execution provider")):
-            raise _gpu_unavailable_error() from exc
         raise _model_load_error() from exc
 
 
@@ -129,8 +139,15 @@ def diagnose_runtime(device: str = "gpu", gpu_device: int = 0) -> tuple[str, ...
     output_value = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1])
     graph = helper.make_graph([helper.make_node("Identity", ["input"], ["output"])], "mozarie-diagnostic", [input_value], [output_value])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    session = _create_session(model.SerializeToString(), device, gpu_device)
-    session.run(None, {"input": np.zeros((1, 1), dtype=np.float32)})
+    try:
+        session = _create_session(model.SerializeToString(), device, gpu_device)
+        session.run(None, {"input": np.zeros((1, 1), dtype=np.float32)})
+    except Exception as exc:
+        if getattr(exc, "error_code", None) == "gpu_unavailable":
+            raise
+        # The diagnostic model and tensor are fixed and valid. A failure here
+        # is therefore a selected-provider runtime failure, not a user model.
+        raise _gpu_unavailable_error() from exc
     return tuple(session.get_providers())
 
 

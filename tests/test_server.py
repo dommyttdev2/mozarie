@@ -2822,7 +2822,7 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=unchanged) as save:
             state.update_settings(unchanged)
-        ready.assert_not_called()
+        ready.assert_called_once_with(unchanged["saving"]["default_output_directory"])
         save.assert_called_once_with(unchanged)
 
         changed = copy.deepcopy(state.settings)
@@ -2830,7 +2830,7 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=changed) as save:
             state.update_settings(changed)
-        ready.assert_not_called()
+        ready.assert_called_once_with(changed["saving"]["default_output_directory"])
         save.assert_called_once_with(changed)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2841,6 +2841,29 @@ class MozarieTests(unittest.TestCase):
                 state.update_settings(changed_output)
         ready.assert_called_once_with(directory)
         save.assert_called_once_with(changed_output)
+
+    def test_output_validation_uses_its_dedicated_user_error_and_does_not_save(self):
+        state = self.new_state()
+        changed = copy.deepcopy(state.settings)
+        changed["saving"]["default_output_directory"] = r"C:\\unavailable"
+        with patch.object(state_module, "validate_output_directory_ready", side_effect=OSError("denied")), \
+             patch.object(state.settings_store, "save") as save:
+            with self.assertRaises(ClientError) as raised:
+                state.update_settings(changed)
+        self.assertEqual(raised.exception.error_code, "output_folder_unavailable")
+        save.assert_not_called()
+
+    def test_failed_reset_output_validation_keeps_the_existing_machine_override(self):
+        state = self.new_state()
+        before = copy.deepcopy(state.settings)
+        with patch.object(state.settings_store, "default_settings", return_value=copy.deepcopy(before)), \
+             patch.object(state_module, "validate_output_directory_ready", side_effect=OSError("denied")), \
+             patch.object(state.settings_store, "reset") as reset:
+            with self.assertRaises(ClientError) as raised:
+                state.reset_settings()
+        self.assertEqual(raised.exception.error_code, "output_folder_unavailable")
+        reset.assert_not_called()
+        self.assertEqual(state.settings, before)
 
     def test_hand_segmentation_setting_keeps_onnx_sessions(self):
         state = self.new_state()
@@ -2910,6 +2933,58 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(status["ntd11"]["enabled"])
         self.assertFalse(status["sensitive"]["enabled"])
         self.assertFalse(status["hand_detection"]["enabled"])
+
+    def test_disabled_optional_onnx_paths_are_never_constructed(self):
+        state = self.new_state()
+        state.settings["models"].update({
+            "ntd11": "bad-ntd11.onnx", "ntd11_enabled": False,
+            "sensitive": "bad-sensitive.onnx", "sensitive_enabled": False,
+            "hand_detection": "bad-hand.onnx", "hand_detection_enabled": False,
+        })
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), \
+             patch.object(detection_module, "TargetSegmenter", return_value=Mock()), \
+             patch.object(detection_module, "GenericYoloSegmenter") as generic, \
+             patch.object(detection_module, "HandDetector") as hand:
+            state._load_detection_models()
+        generic.assert_not_called()
+        hand.assert_not_called()
+
+    def test_gpu_shape_error_is_not_elevated_to_gpu_unavailable(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = core_module.Job(kind="detect", state="running", total=1)
+        state._fail_job(RuntimeError("CUDA model input shape is invalid"))
+        self.assertNotEqual(state.job.error_code, "gpu_unavailable")
+
+    def test_invalid_active_model_outputs_are_reported_without_decoder_details(self):
+        for model_name in ("target", "ntd11", "sensitive", "hand"):
+            with self.subTest(model_name=model_name):
+                state = self.new_state()
+                state.job = core_module.Job(kind="detect", state="running", total=1)
+                state._fail_job(ValueError(f"{model_name} private decoder shape"))
+                self.assertEqual(state.job.error_code, "model_load_failed")
+                self.assertNotIn("private decoder", state.job.error)
+
+    def test_active_onnx_model_loads_hide_runtime_details_for_each_model(self):
+        cases = (
+            ("target", {"ntd11_enabled": False, "sensitive_enabled": False, "hand_detection_enabled": False}, "_load_detection_models", "TargetSegmenter"),
+            ("ntd11", {"ntd11_enabled": True, "sensitive_enabled": False, "hand_detection_enabled": False}, "_load_detection_models", "GenericYoloSegmenter"),
+            ("sensitive", {"ntd11_enabled": False, "sensitive_enabled": True, "hand_detection_enabled": False}, "_load_detection_models", "GenericYoloSegmenter"),
+            ("hand", {"ntd11_enabled": False, "sensitive_enabled": False, "hand_detection_enabled": True}, "_ensure_hand_model", "HandDetector"),
+        )
+        for model_name, settings, method_name, constructor_name in cases:
+            with self.subTest(model_name=model_name):
+                state = self.new_state(); state.settings["models"].update(settings)
+                constructor = getattr(detection_module, constructor_name)
+                with patch.object(state, "_configured_model_path", return_value=Path("model.onnx")), \
+                     patch.object(detection_module, "TargetSegmenter", return_value=Mock()), \
+                     patch.object(detection_module, "GenericYoloSegmenter", return_value=Mock()), \
+                     patch.object(detection_module, "HandDetector", return_value=Mock()), \
+                     patch.object(detection_module, constructor_name, side_effect=RuntimeError(f"{model_name} private model detail")):
+                    with self.assertRaises(ClientError) as raised:
+                        getattr(state, method_name)()
+                self.assertEqual(raised.exception.error_code, "model_load_failed")
+                self.assertNotIn("private model detail", str(raised.exception))
 
     def test_sam_status_is_required_only_for_high_precision(self):
         state = self.new_state()
@@ -3763,10 +3838,8 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "target_segmentation": "target.onnx", "gpu_device": 2})
         state.models = object(); state.hand_model = object()
-        with patch.object(state, "_require_supported_gpu") as require, patch.object(
-            state, "_configured_model_path", return_value=Path("target.onnx"),
-        ), patch(
-            "mozarie.inference.onnx.diagnose_session", return_value=("CUDAExecutionProvider", "CPUExecutionProvider"),
+        with patch.object(state, "_require_supported_gpu") as require, patch(
+            "mozarie.inference.onnx.diagnose_runtime", return_value=("CUDAExecutionProvider", "CPUExecutionProvider"),
         ) as diagnose:
             self.assertEqual(state.diagnose_gpu_runtime(), ("CUDAExecutionProvider", "CPUExecutionProvider"))
         require.assert_called_once()
@@ -5126,7 +5199,7 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"]["provider"] = "gpu"
         state.job = core_module.Job(kind="detect", state="running")
         state._fail_job(RuntimeError("CUDAExecutionProvider failed with private details"))
-        self.assertEqual(state.job.error_code, "gpu_unavailable")
+        self.assertEqual(state.job.error_code, "internal_error")
         self.assertNotIn("private", state.job.error)
 
     def test_save_render_returns_the_one_time_token_in_a_response_header(self):

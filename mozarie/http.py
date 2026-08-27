@@ -621,6 +621,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
     def _client_error(self, error: Exception, status: HTTPStatus, default_code: str | None = None) -> None:
         if isinstance(error, ClientError):
             message, code, params = str(error), error.error_code, error.params
+        elif isinstance(error, StaleMaskError):
+            message, code, params = str(error), default_code or "mask_not_found", {}
         elif isinstance(error, sqlite3.DatabaseError):
             message, code, params = "作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error", {}
         else:

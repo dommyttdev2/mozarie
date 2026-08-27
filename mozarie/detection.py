@@ -49,12 +49,23 @@ class DetectionMixin:
         model_path = self._configured_model_path("target_segmentation", "対象セグメンテーション")
         provider = str(self.settings["models"].get("provider", "gpu"))
         gpu_device = int(self.settings["models"].get("gpu_device", 0))
-        target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
+        try:
+            target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
+        except ClientError:
+            raise
+        except Exception as exc:
+            raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
         auxiliaries: list[tuple[str, GenericYoloSegmenter]] = []
         for key, label in (("ntd11", "NTD11補助モデル"), ("sensitive", "Sensitive補助モデル")):
             if not self.settings["models"][f"{key}_enabled"]:
                 continue
-            auxiliaries.append((key, GenericYoloSegmenter(self._configured_model_path(key, label), device=provider, gpu_device=gpu_device)))
+            try:
+                auxiliary = GenericYoloSegmenter(self._configured_model_path(key, label), device=provider, gpu_device=gpu_device)
+            except ClientError:
+                raise
+            except Exception as exc:
+                raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
+            auxiliaries.append((key, auxiliary))
         return DetectionModels(target=target, auxiliaries=auxiliaries)
 
     def _configured_model_path(self, key: str, label: str) -> Path:
@@ -103,6 +114,10 @@ class DetectionMixin:
                     model_path = self._configured_model_path("hand_detection", "手の検出")
                     provider = str(self.settings["models"].get("provider", "gpu"))
                     hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
+                except ClientError:
+                    raise
+                except Exception as exc:
+                    raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
                 finally:
                     self._set_detection_model_preparation(False)
                 with self.lock:

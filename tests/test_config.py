@@ -89,6 +89,12 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(SettingsError):
                 validate_output_directory_ready(str(target) + "\x00bad")
 
+    def test_output_directory_probe_writes_and_removes_its_temporary_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            self.assertEqual(validate_output_directory_ready(target), target.resolve())
+            self.assertEqual(list(target.iterdir()), [])
+
     def test_valid_settings_are_persisted_only_to_local_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

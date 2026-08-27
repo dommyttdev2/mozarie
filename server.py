@@ -51,24 +51,34 @@ def _schedule_browser_open(url: str) -> threading.Timer:
     return timer
 
 
+def _startup_state() -> state_module.StudioState:
+    error = state_module.STATE_STARTUP_ERROR
+    if error is not None:
+        LOGGER.error("作業データを開けません。data\\workspaces.sqlite3 を退避してから、もう一度起動してください。")
+        raise SystemExit(1)
+    assert state_module.STATE is not None
+    return state_module.STATE
+
+
 def main() -> None:
     LOGGER.setLevel(logging.INFO)
     parser = argparse.ArgumentParser(description="Run Mozarie locally.")
     parser.add_argument("--port", type=int, default=None, help="Override the saved local port for this start only.")
     args = parser.parse_args()
-    port = args.port if args.port is not None else int(state_module.STATE.settings["general"]["port"])
+    state = _startup_state()
+    port = args.port if args.port is not None else int(state.settings["general"]["port"])
     LOGGER.info("Mozarieを準備しています…")
-    state_module.STATE.cache_dir.mkdir(parents=True, exist_ok=True)
+    state.cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         http_server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
         http_server.handle_error = types.MethodType(_handle_server_error, http_server)
     except OSError:
         LOGGER.error("Mozarieを起動できません。ポート%sは使用中です。", port)
-        state_module.STATE.shutdown()
+        state.shutdown()
         raise SystemExit(1) from None
     url = f"http://127.0.0.1:{port}"
     LOGGER.info("Mozarieを起動しました: %s", url)
-    if state_module.STATE.settings["general"]["open_browser"]:
+    if state.settings["general"]["open_browser"]:
         _schedule_browser_open(url)
     try:
         http_server.serve_forever()
@@ -76,7 +86,7 @@ def main() -> None:
         pass
     finally:
         http_server.server_close()
-        state_module.STATE.shutdown()
+        state.shutdown()
         LOGGER.info("Mozarieを終了しました")
 
 
