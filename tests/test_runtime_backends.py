@@ -5,7 +5,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from mozarie.runtime import directml_devices, runtime_backend, torch_device
+from mozarie.runtime import directml_devices, patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 
 
 class RuntimeBackendTests(unittest.TestCase):
@@ -38,6 +38,42 @@ class RuntimeBackendTests(unittest.TestCase):
         with patch("mozarie.runtime.directml_module", return_value=directml):
             self.assertEqual(torch_device(torch, "gpu", 1, backend="directml"), ("dml", 1))
         self.assertEqual(torch_device(torch, "cpu", 9, backend="directml"), "cpu")
+
+    def test_directml_sam_patch_does_not_cat_an_empty_sparse_tensor(self) -> None:
+        class Encoder:
+            embed_dim = 256
+            image_embedding_size = (64, 64)
+            no_mask_embed = types.SimpleNamespace(weight=None)
+
+            @staticmethod
+            def _get_batch_size(_points, _boxes, _masks):
+                return 1
+
+            @staticmethod
+            def _embed_boxes(boxes):
+                return boxes
+
+            @staticmethod
+            def _embed_masks(masks):
+                return masks
+
+            @staticmethod
+            def _get_device():
+                return "privateuseone:0"
+
+        torch = types.SimpleNamespace(
+            empty=lambda *_args, **_kwargs: self.fail("an empty tensor must not be created for a box prompt"),
+            cat=lambda *_args, **_kwargs: self.fail("a single box embedding must not be concatenated"),
+        )
+        encoder = Encoder()
+        model = types.SimpleNamespace(prompt_encoder=encoder)
+        patch_directml_sam_prompt_encoder(model, torch)
+        boxes = object()
+        dense = object()
+        sparse_result, dense_result = encoder.forward(None, boxes, dense)
+        self.assertIs(sparse_result, boxes)
+        self.assertIs(dense_result, dense)
+        self.assertTrue(encoder._mozarie_directml_safe)
 
 
 if __name__ == "__main__":

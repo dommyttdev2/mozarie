@@ -27,7 +27,7 @@ from .core import (
 )
 from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
-from .runtime import runtime_backend, torch_device
+from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 
 class CatalogMixin:
     def _effective_mask_for_draft(self, image_id: str, candidates: list[Candidate], draft: dict[str, Any]) -> bool:
@@ -784,6 +784,8 @@ class CatalogMixin:
                     if provider == "gpu" and backend == "cpu":
                         raise ClientError("SAMをGPUで実行できません。CPUを選ぶかGPU環境を確認してください。", "sam_provider_unavailable")
                     device = torch_device(torch, provider, int(self.settings["models"].get("gpu_device", 0)), backend=backend)
+                    if provider == "gpu" and backend == "directml":
+                        patch_directml_sam_prompt_encoder(model, torch)
                     if provider == "gpu" and backend == "cuda":
                         with warnings.catch_warnings():
                             warnings.filterwarnings(
@@ -841,6 +843,8 @@ class CatalogMixin:
                     if provider == "gpu" and backend == "cpu":
                         raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかGPU環境を確認してください。", "hand_segmentation_invalid")
                     device = torch_device(torch, provider, int(self.settings["models"].get("gpu_device", 0)), backend=backend)
+                    if provider == "gpu" and backend == "directml":
+                        patch_directml_sam_prompt_encoder(model, torch)
                     if provider == "gpu" and backend == "cuda":
                         with warnings.catch_warnings():
                             warnings.filterwarnings(
