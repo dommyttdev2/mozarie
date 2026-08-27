@@ -321,6 +321,8 @@ class SavingMixin:
                             record_snapshot.path.replace(quarantine_path)
                 except ClientError:
                     rendered_path = token_details.rendered_path
+                    with self.lock:
+                        self.browser_save_tokens.pop(save_token, None)
                     if rendered_path is not None:
                         rendered_path.unlink(missing_ok=True)
                     raise

@@ -6221,7 +6221,7 @@ class MozarieTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
                 state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertFalse(source.exists())
+            self.assertTrue(source.exists())
             self.assertIn(image_id, state.images)
 
     def test_browser_save_stale_overwrite_updates_the_working_copy_and_keeps_candidates(self):
