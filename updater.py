@@ -38,7 +38,10 @@ MANAGED_FILES = (
     "LICENSE",
     "README.en.md",
     "README.md",
+    "requirements-cpu.txt",
+    "requirements-directml.txt",
     "requirements.txt",
+    "runtime_profile.py",
     "run.bat",
     "setup.bat",
     "setup_gpu_check.py",
@@ -364,8 +367,13 @@ def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
 
 
 def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
-    incoming = source_root / "requirements.txt"
-    current = app_dir / "requirements.txt"
+    profile = _installed_runtime_profile(app_dir)
+    relative = {
+        "directml": "requirements-directml.txt",
+        "cpu": "requirements-cpu.txt",
+    }.get(profile, "requirements.txt")
+    incoming = source_root / relative
+    current = app_dir / relative
     if not incoming.is_file():
         return False
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
@@ -389,6 +397,15 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     )
     if result.returncode != 0:
         raise UpdateError(tr("requirements_failed"))
+    validator = source_root / "runtime_profile.py"
+    if validator.is_file():
+        result = subprocess.run(
+            [str(python), str(validator), "validate", profile, "--venv", str(app_dir / ".venv")],
+            cwd=str(app_dir),
+            check=False,
+        )
+        if result.returncode != 0:
+            raise UpdateError(tr("requirements_failed"))
     return True
 
 
@@ -405,6 +422,19 @@ def run_gpu_smoke(app_dir: Path = APP_DIR) -> None:
     )
     if result.returncode != 0:
         raise UpdateError(tr("gpu_check_failed"))
+
+
+def _installed_runtime_profile(app_dir: Path) -> str:
+    marker = app_dir / ".venv" / ".mozarie-runtime.json"
+    if marker.is_file():
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+            profile = str(value.get("profile", "")).lower()
+            if profile in {"cuda", "directml", "cpu"}:
+                return profile
+        except (OSError, ValueError, TypeError):
+            pass
+    return "cuda"
 
 
 def _remove_path(path: Path) -> None:

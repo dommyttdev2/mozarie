@@ -13,6 +13,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv-test/
+.test-tmp*/
+
+# Frontend dependencies
+node_modules/
+.playwright-browsers/
 
 # Logs and Windows metadata
 *.log

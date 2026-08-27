@@ -17,12 +17,13 @@ from .core import (
     merge_tile_segment, padded_hand_box, read_boundary_request,
     read_polygon_boundary_request, sam_refinement_prompts,
     select_best_sam_mask, select_semantic_sam_mask,
-    _read_detection_parallelism, _read_target_classes,
+    torch_module, _read_detection_parallelism, _read_target_classes,
 )
 from .fluid import white_fluid_mask
 from .inference.generic_yolo_segment import GenericYoloSegmenter
 from .inference.yolo_detect import HandDetector
 from .inference.yolo_segment import TargetSegmenter
+from .runtime import runtime_backend
 from .runtime_types import DetectionModels
 
 class DetectionMixin:
@@ -147,6 +148,8 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
+            if runtime_backend(torch_module=torch_module()) == "directml":
+                requested_parallelism = 1
             worker_count = min(requested_parallelism, len(records))
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)

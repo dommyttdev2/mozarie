@@ -216,6 +216,7 @@
   "settings.sensitiveModel": "Sensitive",
   "settings.handModel": "Hands (anime_hand_detection)",
   "settings.provider": "Inference provider",
+  "settings.runtimeBackend": "Runtime backend",
   "settings.applyColor": "Apply range color",
   "settings.excludeColor": "Exclusion range color",
   "settings.opacity": "Overlay opacity",

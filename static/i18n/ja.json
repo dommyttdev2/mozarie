@@ -218,6 +218,7 @@
   "settings.on": "ON",
   "settings.off": "OFF",
   "settings.provider": "推論プロバイダー",
+  "settings.runtimeBackend": "実行バックエンド",
   "settings.applyColor": "適用範囲の色",
   "settings.excludeColor": "除外範囲の色",
   "settings.opacity": "オーバーレイの濃さ",

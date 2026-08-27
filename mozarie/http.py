@@ -44,12 +44,13 @@ def _reserve_update_start() -> bool:
 
 
 def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
-    """Format health device data without probing CUDA for a CPU selection."""
+    """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
-        return {"provider": "cpu", "gpuDevice": None, "device": "CPU"}
+        return {"provider": "cpu", "runtimeBackend": "cpu", "gpuDevice": None, "device": "CPU"}
     selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
     name = str(selected["name"]) if selected else "unavailable"
-    return {"provider": "gpu", "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
+    backend = str(selected.get("backend", "cuda")) if selected else "unavailable"
+    return {"provider": "gpu", "runtimeBackend": backend, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
 
 
 def _file_sha256(path: Path) -> str:

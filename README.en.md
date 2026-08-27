@@ -16,13 +16,26 @@ Mozarie is a local Windows app for detecting, reviewing, editing, and saving mos
 ### Requirements
 
 - Windows
-- 64-bit Python 3.11–3.14 (Python Launcher `py`)
+- 64-bit Python (Python Launcher `py`)
+  - NVIDIA/CUDA: Python 3.11–3.14
+  - AMD/DirectML: Python 3.11 or 3.12
 
 ### Setup
 
 ```powershell
 .\setup.bat
 ```
+
+`setup.bat` detects the GPU and selects CUDA when NVIDIA hardware is present, or DirectML when AMD hardware is present without NVIDIA. On systems with both vendors, NVIDIA/CUDA takes priority to preserve the existing CUDA behavior. You can explicitly select a backend before setup when needed.
+
+```powershell
+$env:MOZARIE_RUNTIME = "cuda"      # NVIDIA/CUDA
+$env:MOZARIE_RUNTIME = "directml"  # AMD/DirectML
+$env:MOZARIE_RUNTIME = "cpu"       # CPU only
+.\setup.bat
+```
+
+Do not mix the CUDA and DirectML ONNX Runtime packages in the same `.venv`. If an existing environment does not match the selected backend, `setup.bat` stops without changing its packages. To switch backends, back up `.venv` if needed, remove it, and run `setup.bat` again.
 
 ### Run
 
@@ -92,7 +105,7 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 ## Troubleshooting
 
 - **A model cannot load:** Check the file format and the selected SAM type/file combination.
-- **GPU or CUDA error:** Close other GPU apps, select another GPU, or switch to CPU.
+- **GPU, CUDA, or DirectML error:** Close other GPU apps, select another GPU, or switch to CPU.
 - **Still stuck:** Include the error text in a [GitHub issue](https://github.com/norqis/mozarie/issues).
 
 ## Development
