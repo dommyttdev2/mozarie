@@ -97,9 +97,17 @@ function bindEvents() {
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
-    if (state.settings?.models && state.settings?.display && state.settings?.detection) {
-      setSettingsForm(state.settings, state.settingsStatus);
-    }
+    const saved = state.settings;
+    if (!saved?.models || !saved?.display || !saved?.detection) return;
+    void (async () => {
+      // Changing the select previews a language immediately.  Closing without
+      // saving must restore both that language and the saved settings UI.
+      await loadTranslations(saved.general.language);
+      const focusBeforeRestore = document.activeElement;
+      setSettingsForm(saved, state.settingsStatus);
+      if (!$("#settingsDialog").open && focusBeforeRestore?.isConnected) focusElement(focusBeforeRestore);
+      void refreshSettingsStatus();
+    })();
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });

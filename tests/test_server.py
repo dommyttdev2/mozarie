@@ -6464,6 +6464,12 @@ class MozarieTests(unittest.TestCase):
             http_module._start_update_after_response(http_server)
         self.assertEqual(events, ["server", "state", "batch"])
 
+    def test_update_start_can_only_be_reserved_once(self):
+        http_module._update_start_requested = False
+        self.assertTrue(http_module._reserve_update_start())
+        self.assertFalse(http_module._reserve_update_start())
+        http_module._update_start_requested = False
+
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)
         destination = image_io_module._default_output_destination(record, "_mosaic")

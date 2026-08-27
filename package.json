@@ -2,7 +2,7 @@
   "name": "mozarie",
   "private": true,
   "devDependencies": {
-    "playwright": "1.55.0"
+    "playwright": "^1.55.1"
   },
   "scripts": {
     "check": "node -e \"const fs=require('fs'); const cp=require('child_process'); for (const name of fs.readdirSync('static/js').filter(name => name.endsWith('.js'))) cp.execFileSync(process.execPath, ['--check', 'static/js/'+name], {stdio:'inherit'});\"",

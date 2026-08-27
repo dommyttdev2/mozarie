@@ -306,7 +306,7 @@
   "modelDownload.source": "Source",
   "modelDownload.security": "Size and SHA-256 are checked. This does not guarantee safety.",
   "modelDownload.target": "Get the primary model ONNX from the source, then select it with Browse. No conversion is required.",
-  "modelDownload.ntd11": "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse. Login is required to download. After setup, run the command below in PowerShell from the Mozarie folder.",
+  "modelDownload.ntd11": "NTD11 is an optional model that supplements areas missed by the primary model. Sign in to Civitai.red, download and extract the NTD11 ZIP, convert the included .pt file to ONNX, then select it with Browse. Anonymous direct links cannot be used. After setup, run the command below in PowerShell from the Mozarie folder.",
   "modelDownload.sensitive": "Sensitive is an optional model that supplements areas missed by the primary model. Get a Sensitive .pt file from the source, convert it to ONNX, then select it with Browse. After setup, run the command below in PowerShell from the Mozarie folder.",
   "settings.samModel": "Outline extraction model",
   "settings.samVariant.vitB": "Fast · Lower VRAM · 375 MB",

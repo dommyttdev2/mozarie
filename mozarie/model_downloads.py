@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,33 +155,69 @@ class ModelDownloadManager:
         destination = entry.destination(self.app_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.part")
-        temporary.unlink(missing_ok=True)
+        received = temporary.stat().st_size if temporary.exists() else 0
+        if received > entry.size:
+            temporary.unlink()
+            received = 0
         digest = hashlib.sha256()
-        received = 0
+        if received:
+            with temporary.open("rb") as existing:
+                while chunk := existing.read(1024 * 1024):
+                    digest.update(chunk)
+        if received == entry.size:
+            if hmac.compare_digest(digest.hexdigest(), entry.sha256):
+                os.replace(temporary, destination)
+                return destination
+            temporary.unlink()
+            received = 0
+            digest = hashlib.sha256()
         try:
             opener = build_opener(_HttpsOnlyRedirects())
-            request = Request(entry.url, headers={"User-Agent": "Mozarie model downloader"})
-            with opener.open(request, timeout=30) as response, temporary.open("xb") as handle:
+            headers = {"User-Agent": "Mozarie model downloader"}
+            if received:
+                headers["Range"] = f"bytes={received}-"
+            request = Request(entry.url, headers=headers)
+            with opener.open(request, timeout=30) as response:
                 if not response.geturl().lower().startswith("https://"):
                     raise ModelDownloadError("モデル配布先が安全な HTTPS 接続ではありません。")
+                status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
+                if received and status == 206:
+                    content_range = response.headers.get("Content-Range", "")
+                    if not re.fullmatch(rf"bytes {received}-\d+/{entry.size}", content_range):
+                        raise ModelDownloadError("ダウンロードを再開できませんでした。")
+                elif received:
+                    # A server that ignores Range has returned the entire model.
+                    received = 0
+                    digest = hashlib.sha256()
                 content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) != entry.size:
+                expected_length = entry.size - received
+                if content_length and int(content_length) != expected_length:
                     raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
-                while chunk := response.read(1024 * 1024):
-                    if self._cancel.is_set():
-                        raise ModelDownloadCancelled()
-                    received += len(chunk)
-                    if received > entry.size:
-                        raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
-                    digest.update(chunk)
-                    handle.write(chunk)
-                    self._set(received=received, expected=entry.size)
+                mode = "ab" if received else "wb"
+                with temporary.open(mode) as handle:
+                    while chunk := response.read(1024 * 1024):
+                        if self._cancel.is_set():
+                            raise ModelDownloadCancelled()
+                        received += len(chunk)
+                        if received > entry.size:
+                            raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
+                        digest.update(chunk)
+                        handle.write(chunk)
+                        self._set(received=received, expected=entry.size)
             if received != entry.size:
                 raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
-            if digest.hexdigest() != entry.sha256:
+            if not hmac.compare_digest(digest.hexdigest(), entry.sha256):
                 raise ModelDownloadError("ダウンロードしたモデルを確認できませんでした。")
             os.replace(temporary, destination)
             return destination
-        except Exception:
+        except ModelDownloadCancelled:
+            # Keep a partial file when the user cancels: it can be resumed.
+            raise
+        except (HTTPError, URLError, OSError):
+            # Keep a partial file after an interrupted transfer as well.
+            raise
+        except ModelDownloadError:
+            # A malformed, oversized, or hash-mismatched response cannot be
+            # trusted as the prefix of a later download.
             temporary.unlink(missing_ok=True)
             raise

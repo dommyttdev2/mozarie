@@ -15,18 +15,19 @@ if "%ERRORLEVEL%"=="30" goto :mozarie_running
 if errorlevel 1 goto :failed
 
 echo [Mozarie] [2/5] Preparing the installer...
-"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --quiet --progress-bar on --upgrade pip
+"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip
 if errorlevel 1 goto :failed
 echo [Mozarie] [3/5] Installing required packages. This may download several GB on the first run.
 del /q "%APP_DIR%.venv\.mozarie-ready" >nul 2>nul
-"%PYTHON%" -m pip install --disable-pip-version-check --quiet --progress-bar on -r "%APP_DIR%requirements.txt"
+"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%APP_DIR%requirements.txt"
 if errorlevel 1 goto :failed
 echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking GPU support...
-"%PYTHON%" -c "import onnxruntime as ort, torch; raise SystemExit(0 if torch.version.cuda and 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
-if errorlevel 1 goto :failed
+"%PYTHON%" -c "import numpy as np, onnxruntime as ort, torch; from onnxruntime import datasets; gpu=torch.cuda.is_available() and 'CUDAExecutionProvider' in ort.get_available_providers(); session=ort.InferenceSession(datasets.get_example('mul_1.onnx'),providers=['CUDAExecutionProvider']) if gpu else None; (session.disable_fallback(), session.run(None,{'X':np.ones((3,2),dtype=np.float32)}), (_ for _ in ()).throw(RuntimeError('CUDA session was not selected')) if session.get_providers()[0] != 'CUDAExecutionProvider' else None) if session else None; print('[Mozarie] GPU is ready.' if gpu else '[Mozarie] No usable GPU was found. Mozarie will use CPU; you can change this later in Settings.')"
+if errorlevel 1 goto :gpu_cpu
+:setup_ready
 >"%APP_DIR%.venv\.mozarie-ready" echo ready
 echo [Mozarie] Setup complete. Run run.bat.
 pause
@@ -49,8 +50,13 @@ exit /b %ERRORLEVEL%
 
 :failed
 echo [Mozarie] Setup failed. Check the message above and run setup.bat again.
+echo [Mozarie] If Windows denied access, close other setup windows and run setup.bat again. Administrator rights are not required. / Windowsにアクセスを拒否された場合は、ほかのsetupを閉じてsetup.batを再実行してください。管理者として実行する必要はありません。
 pause
 exit /b 1
+
+:gpu_cpu
+echo [Mozarie] GPU support could not be started. Setup will finish with CPU mode; you can retry GPU later in Settings.
+goto :setup_ready
 
 :mozarie_running
 echo [Mozarie] Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。

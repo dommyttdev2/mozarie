@@ -600,11 +600,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
     : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
-    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse. Login is required to download. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redへログインしてNTD11のZIPをダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。匿名の直リンクは使えません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
+    : "NTD11 is an optional model that supplements areas missed by the primary model. Sign in to Civitai.red, download and extract the NTD11 ZIP, convert the included .pt file to ONNX, then select it with Browse. Anonymous direct links cannot be used. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
-  await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", `NTD11 at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://civitai.red/models/1313556", `NTD11 at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), ntdCommand, `NTD11 download shows its conversion command at ${width}x${height} (${language})`);
   assert.doesNotMatch(ntdCommand, /\n|pip install/, `NTD11 conversion is one command at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `NTD11 preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
@@ -902,7 +902,7 @@ async function main() {
     const statusesBeforeSamBrowse = settingsStatusRequests.length;
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(settingsStatusRequests.length, statusesBeforeSamBrowse + 1, "a successful model pick refreshes status once");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
@@ -948,9 +948,9 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redへログインしてNTD11のZIPをダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。匿名の直リンクは使えません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
-    await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", "NTD11");
+    await assertExternalPreparationLink(page, "https://civitai.red/models/1313556", "NTD11");
     assert.equal(await page.locator("#modelDownloadCommand").textContent(), '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
@@ -976,7 +976,7 @@ async function main() {
     const statusesBeforeSamDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value.includes("models\\sam_vit_l_0b3195.pth"));
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(settingsStatusRequests.length, statusesBeforeSamDownload + 1, "a completed download refreshes status once");
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "sam_vit_l", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
@@ -1035,7 +1035,7 @@ async function main() {
     assert.equal(await page.locator("#settingsGpuDevice").getAttribute("aria-busy"), "true", "GPU selector reports that its options are loading");
     await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
     releaseFullSettings();
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator("#settingsGpuDevice").textContent(), gpuBeforeStaleResponse, "a stale response leaves GPU state unchanged without a message");
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears when a stale response completes");

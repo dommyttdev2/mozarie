@@ -29,6 +29,18 @@ from .model_downloads import ModelDownloadError
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+_update_start_lock = threading.Lock()
+_update_start_requested = False
+
+
+def _reserve_update_start() -> bool:
+    """Avoid launching two updater consoles from repeated UI clicks."""
+    global _update_start_requested
+    with _update_start_lock:
+        if _update_start_requested:
+            return False
+        _update_start_requested = True
+        return True
 
 
 def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
@@ -381,6 +393,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/model-download/cancel":
                 self._json(STATE.model_downloads.cancel())
             elif path == "/api/update/start":
+                if not _reserve_update_start():
+                    raise ClientError("更新を開始しています。完了するまでお待ちください。", "operation_in_progress")
                 self._json({"ok": True})
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
             elif path == "/api/boundary":

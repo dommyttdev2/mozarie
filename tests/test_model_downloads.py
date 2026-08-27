@@ -15,11 +15,13 @@ from mozarie.model_downloads import ModelDownload, ModelDownloadCancelled, Model
 
 
 class _Response:
-    def __init__(self, payload: bytes, url: str = "https://models.example/file", content_length: str | None = None) -> None:
+    def __init__(self, payload: bytes, url: str = "https://models.example/file", content_length: str | None = None, status: int = 200, content_range: str | None = None) -> None:
         self.payload = payload
         self.offset = 0
         self.url = url
+        self.status = status
         self.headers = {} if content_length is None else {"Content-Length": content_length}
+        if content_range is not None: self.headers["Content-Range"] = content_range
 
     def __enter__(self): return self
     def __exit__(self, *args): return False
@@ -72,6 +74,34 @@ class ModelDownloadTests(unittest.TestCase):
         with patch("mozarie.model_downloads.build_opener", return_value=_Opener(_Response(payload))):
             with self.assertRaises(ModelDownloadCancelled): manager._download(entry)
         self.assertFalse(entry.destination(root).exists())
+
+    def test_download_resumes_a_partial_file_after_a_valid_range_response(self) -> None:
+        payload = b"model-data"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        part = entry.destination(root).with_name(".file.onnx.part"); part.parent.mkdir(parents=True); part.write_bytes(payload[:4])
+        opener = _Opener(_Response(payload[4:], content_length=str(len(payload) - 4), status=206, content_range=f"bytes 4-{len(payload) - 1}/{len(payload)}"))
+        with patch("mozarie.model_downloads.build_opener", return_value=opener):
+            destination = manager._download(entry)
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(opener.response.offset, len(payload) - 4)
+
+    def test_download_restarts_when_the_server_ignores_range(self) -> None:
+        payload = b"model-data"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        part = entry.destination(root).with_name(".file.onnx.part"); part.parent.mkdir(parents=True); part.write_bytes(b"old")
+        opener = _Opener(_Response(payload, content_length=str(len(payload))))
+        with patch("mozarie.model_downloads.build_opener", return_value=opener):
+            destination = manager._download(entry)
+        self.assertEqual(destination.read_bytes(), payload)
+
+    def test_complete_verified_part_is_installed_without_another_request(self) -> None:
+        payload = b"model"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        part = entry.destination(root).with_name(".file.onnx.part"); part.parent.mkdir(parents=True); part.write_bytes(payload)
+        with patch("mozarie.model_downloads.build_opener") as build:
+            destination = manager._download(entry)
+        build.assert_not_called()
+        self.assertEqual(destination.read_bytes(), payload)
 
     def test_http_response_is_rejected(self) -> None:
         payload = b"model"; entry = self.entry(payload)

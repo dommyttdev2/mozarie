@@ -49,7 +49,7 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 | 用途 | 用意するもの | 配布元・指定方法 |
 | --- | --- | --- |
 | 基本の性器検出 | 配布元のONNX | [配布元](https://huggingface.co/01miku/anime-nsfw-segm-yolo26)から取得し、**参照**から指定します。変換は不要です。 |
-| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)を取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。 |
+| NTD11補助検出 | NTD11のZIPに含まれる`.pt`を変換したONNX | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556)へログインしてZIPを取得・展開し、含まれる`.pt`を変換して、生成したONNXを**参照**から指定します。匿名の直リンクでは取得できません。 |
 | Sensitive補助検出 | Sensitiveの`.pt`を変換したONNX | [配布元](https://huggingface.co/sugarknight/sensitive-detect)から取得し、変換後のONNXを**参照**から指定します。 |
 
 > **`.pt` ファイルの注意:** NTD を含むPyTorchの`.pt`は、読み込み時にpickle経由のコードを実行し得るため、ここに記載した配布元以外から入手した`.pt`は実行しないでください。

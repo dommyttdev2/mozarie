@@ -143,11 +143,12 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 self.assertTrue(updater.install_requirements(source, app))
-            self.assertEqual(run.call_args.args[0][:3], [str(python), "-m", "pip"])
+            self.assertEqual(run.call_args_list[0].args[0][:3], [str(python), "-m", "pip"])
             self.assertEqual(
-                run.call_args.args[0][3:],
-                ["install", "--disable-pip-version-check", "--quiet", "--progress-bar", "on", "-r", str(source / "requirements.txt")],
+                run.call_args_list[0].args[0][3:],
+                ["install", "--disable-pip-version-check", "--progress-bar", "on", "-r", str(source / "requirements.txt")],
             )
+            self.assertEqual(run.call_args_list[1].args[0], [str(python), "-m", "pip", "check"])
 
     def test_requirements_update_removes_ready_marker_before_pip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -164,6 +165,36 @@ class UpdaterTests(unittest.TestCase):
                 run.return_value.returncode = 0
                 self.assertTrue(updater.install_requirements(source, app))
             self.assertFalse(ready_marker.exists())
+
+    def test_failed_pip_check_leaves_the_install_not_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = make_source(root / "source"); app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"; python.parent.mkdir(parents=True); python.touch()
+            marker = app / ".venv" / ".mozarie-ready"; marker.write_text("ready\n", encoding="utf-8")
+            (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
+            with patch("updater.subprocess.run", side_effect=[type("Result", (), {"returncode": 0})(), type("Result", (), {"returncode": 1})()]):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("requirements_failed"))):
+                    updater.install_requirements(source, app)
+            self.assertFalse(marker.exists())
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.1.0")
+
+    def test_update_lock_rejects_another_updater_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            root = Path(__file__).resolve().parents[1]
+            code = "from pathlib import Path; import sys; sys.path.insert(0,r'%s'); import updater; lock=updater.UpdateLock(Path(r'%s')); lock.__enter__(); print('locked', flush=True); sys.stdin.readline(); lock.close()" % (str(root), str(app))
+            process = subprocess.Popen([sys.executable, "-c", code], cwd=str(Path(__file__).parents[1]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "locked")
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_in_progress"))):
+                    with updater.UpdateLock(app):
+                        pass
+            finally:
+                if process.poll() is None and process.stdin:
+                    process.stdin.write("\n"); process.stdin.close()
+                process.wait(timeout=5)
+                if process.stdout:
+                    process.stdout.close()
 
     def test_unchanged_requirements_leave_ready_marker_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -674,7 +705,7 @@ class UpdaterTests(unittest.TestCase):
         batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         version_check = '"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize(\'P\') == 8 else 1)"'
         self.assertIn(version_check, batch)
-        install_index = batch.index('"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --quiet --progress-bar on --upgrade pip')
+        install_index = batch.index('"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip')
         self.assertLess(batch.index("call :validate_python"), install_index)
 
     def test_setup_shows_five_steps_and_checks_for_a_running_app_before_pip(self):
@@ -685,8 +716,8 @@ class UpdaterTests(unittest.TestCase):
         running_branch = 'if "%ERRORLEVEL%"=="30" goto :mozarie_running'
         failed_branch = "if errorlevel 1 goto :failed"
         marker_removal = 'del /q "%APP_DIR%.venv\\.mozarie-ready" >nul 2>nul'
-        self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --quiet --progress-bar on --upgrade pip'
-        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --quiet --progress-bar on -r "%APP_DIR%requirements.txt"'
+        self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip'
+        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%APP_DIR%requirements.txt"'
 
         for step in range(1, 6):
             self.assertIn(f"[{step}/5]", batch)
@@ -707,6 +738,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertLess(batch.index(marker_removal), batch.index(requirements))
         self.assertIn(":mozarie_running", batch)
         self.assertIn("Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。", batch)
+        self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
+        self.assertIn("Setup will finish with CPU mode", batch)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):
         requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()

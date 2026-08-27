@@ -27,7 +27,7 @@ No model weights are included in this repository. Primary, NTD11, and Sensitive 
 | HandSegNet anime SDXL | [pinned revision `77ff734`](https://huggingface.co/Ov3rLoRd-MLEngineer/handsegnet-anime-sdxl/tree/77ff734683306141e56aef9d491958a82508b41a) | Apache-2.0 |
 | Sensitive checkpoint | [sugarknight/sensitive-detect](https://huggingface.co/sugarknight/sensitive-detect) | AGPL-3.0; user-supplied; its conversion command is run by the user, not by Mozarie |
 | Primary detector ONNX | [01miku/anime-nsfw-segm-yolo26](https://huggingface.co/01miku/anime-nsfw-segm-yolo26) | User-supplied; review the provider's model card and terms |
-| NTD11 checkpoint | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556) | User-supplied; review the provider's model page and terms |
+| NTD11 checkpoint | [Anime NSFW Detection / ADetailer All-in-One](https://civitai.red/models/1313556) | User-supplied; sign in to download the ZIP, extract its `.pt`, and review the provider's terms |
 
 Mozarie installs Segment Anything from GitHub's source archive at the fixed `dca509fe793f601edb92606367a655c15ac00fdf` revision, so installing the Python dependencies does not require Git. Mozarie supports SAM checkpoints supplied by the user. The official Segment Anything repository provides links to its checkpoints and states that SAM is licensed under Apache-2.0. See the [Mozarie model documentation](README.en.md#models) and the [official Segment Anything repository](https://github.com/facebookresearch/segment-anything) for details.
 

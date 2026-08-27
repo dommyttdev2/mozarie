@@ -13,6 +13,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -72,7 +73,8 @@ MESSAGES = {
         "archive_extract": "更新ZIPを展開できませんでした。",
         "archive_missing_app": "更新ZIPにMozarie本体が見つかりません。",
         "requirements_updating": "依存関係を更新しています...",
-        "requirements_failed": "依存関係の更新に失敗しました。本体は変更していません。",
+        "requirements_failed": "依存関係の更新に失敗しました。Mozarie本体は更新していません。setup.bat を実行して復旧してください。",
+        "update_in_progress": "別の更新処理が実行中です。完了してからもう一度実行してください。",
         "update_missing_version": "更新ZIPにVERSIONファイルがありません。",
         "update_backup_failed": "更新前のバックアップを作成できなかったため、本体は変更していません。",
         "update_rollback": "更新に失敗したため、元のファイルへ戻しました。",
@@ -109,7 +111,8 @@ MESSAGES = {
         "archive_extract": "Could not extract the update archive.",
         "archive_missing_app": "The update archive does not contain Mozarie.",
         "requirements_updating": "Updating dependencies...",
-        "requirements_failed": "Could not update dependencies. Mozarie was not changed.",
+        "requirements_failed": "Could not update dependencies. Mozarie was not changed. Run setup.bat to repair the installation.",
+        "update_in_progress": "Another update is already running. Wait for it to finish, then try again.",
         "update_missing_version": "The update archive does not contain a VERSION file.",
         "update_backup_failed": "Could not create a backup before updating. Mozarie was not changed.",
         "update_rollback": "The update failed, so the original files were restored.",
@@ -151,6 +154,44 @@ def read_language(app_dir: Path = APP_DIR) -> str:
 
 class UpdateError(RuntimeError):
     pass
+
+
+class UpdateLock(AbstractContextManager["UpdateLock"]):
+    """One updater at a time, including the confirmation prompt."""
+
+    def __init__(self, app_dir: Path) -> None:
+        self.path = app_dir / ".mozarie-cache" / ".update.lock"
+        self.handle: Any | None = None
+
+    def __enter__(self) -> "UpdateLock":
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.handle = self.path.open("a+b")
+            self.handle.seek(0)
+            if not self.handle.read(1):
+                self.handle.seek(0)
+                self.handle.write(b"0")
+                self.handle.flush()
+            self.handle.seek(0)
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            self.close()
+            raise UpdateError(tr("update_in_progress")) from exc
+        return self
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            self.handle.seek(0)
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        self.handle.close()
+        self.handle = None
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
 
 
 def parse_version(value: str) -> tuple[int, int, int]:
@@ -330,7 +371,14 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
         raise UpdateError(tr("requirements_failed"))
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--progress-bar", "on", "-r", str(incoming)],
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "on", "-r", str(incoming)],
+        cwd=str(app_dir),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise UpdateError(tr("requirements_failed"))
+    result = subprocess.run(
+        [str(python), "-m", "pip", "check"],
         cwd=str(app_dir),
         check=False,
     )
@@ -420,7 +468,7 @@ def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
         pass
 
 
-def perform_update(
+def _perform_update(
     app_dir: Path = APP_DIR,
     *,
     opener: Callable[..., Any] = urllib.request.urlopen,
@@ -472,6 +520,18 @@ def perform_update(
     print(tr("updated", current=current, latest=latest))
     print(tr("restart"))
     return EXIT_UPDATED
+
+
+def perform_update(
+    app_dir: Path = APP_DIR,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    input_fn: Callable[[str], str] = input,
+) -> int:
+    global _language
+    _language = read_language(app_dir)
+    with UpdateLock(app_dir):
+        return _perform_update(app_dir, opener=opener, input_fn=input_fn)
 
 
 def main() -> int:
