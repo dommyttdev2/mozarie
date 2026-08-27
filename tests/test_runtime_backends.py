@@ -54,6 +54,10 @@ class RuntimeBackendTests(unittest.TestCase):
                 return boxes
 
             @staticmethod
+            def _embed_points(_coordinates, _labels, _pad):
+                raise AssertionError("the original DirectML-unsafe point embedding must be replaced")
+
+            @staticmethod
             def _embed_masks(masks):
                 return masks
 
@@ -68,12 +72,15 @@ class RuntimeBackendTests(unittest.TestCase):
         encoder = Encoder()
         model = types.SimpleNamespace(prompt_encoder=encoder)
         patch_directml_sam_prompt_encoder(model, torch)
+        patched_embed_points = encoder._embed_points
         boxes = object()
         dense = object()
         sparse_result, dense_result = encoder.forward(None, boxes, dense)
         self.assertIs(sparse_result, boxes)
         self.assertIs(dense_result, dense)
         self.assertTrue(encoder._mozarie_directml_safe)
+        patch_directml_sam_prompt_encoder(model, torch)
+        self.assertIs(encoder._embed_points, patched_embed_points)
 
 
 if __name__ == "__main__":
