@@ -293,9 +293,9 @@ class SavingMixin:
                     else:
                         record_snapshot = replace(record)
                         catalog_generation = self.catalog_generation
-                        # Claim only after the per-image lock is held. Polling
-                        # cleanup cannot remove the render while source I/O runs.
-                        self.browser_save_tokens.pop(save_token)
+                        # The per-image lock keeps this render alive through
+                        # source I/O; retain its token until the DB commit so a
+                        # failed commit can be retried safely.
 
                 if expired_token:
                     if rendered_path is not None:
@@ -325,9 +325,6 @@ class SavingMixin:
                         rendered_path.unlink(missing_ok=True)
                     raise
                 except OSError as exc:
-                    rendered_path = token_details.rendered_path
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
 
                 try:
@@ -380,6 +377,7 @@ class SavingMixin:
                         candidate_dirs = [self.cache_dir / image_id]
                         self.candidates[image_id] = []
                         self._touch_candidates(image_id)
+                    self.browser_save_tokens.pop(save_token, None)
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
                     rendered_path = token_details.rendered_path
                     if deleted:

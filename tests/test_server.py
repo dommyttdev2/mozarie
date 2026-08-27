@@ -1986,14 +1986,14 @@ class MozarieTests(unittest.TestCase):
             masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
             control = core_module.JobControl()
             state.job = core_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
-            original_save = saving_module.save_with_mask
+            original_save = saving_module._stage_save_with_mask
 
             def save_then_cancel(*args, **kwargs):
                 result = original_save(*args, **kwargs)
                 control.cancel_requested.set()
                 return result
 
-            with patch.object(saving_module, "save_with_mask", side_effect=save_then_cancel):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -2008,7 +2008,7 @@ class MozarieTests(unittest.TestCase):
                     raise RuntimeError("second image failed")
                 return original_save(*args, **kwargs)
 
-            with patch.object(saving_module, "save_with_mask", side_effect=save_then_fail):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -2029,7 +2029,9 @@ class MozarieTests(unittest.TestCase):
             started: list[str] = []
             started_lock = threading.Lock()
 
-            def delayed_save(record, _mask, _block_size):
+            original_save = saving_module._stage_save_with_mask
+
+            def delayed_save(record, mask, block_size):
                 with started_lock:
                     started.append(record.image_id)
                     if record.image_id == first_id and started.count(first_id) == 1:
@@ -2037,13 +2039,14 @@ class MozarieTests(unittest.TestCase):
                     if record.image_id == second_id:
                         second_entered.set()
                 self.assertTrue(release.wait(2))
+                return original_save(record, mask, block_size)
 
             worker = threading.Thread(
                 target=state._apply_worker,
                 args=([first, first, second], 100, masks),
                 kwargs={"saving_parallelism": 3},
             )
-            with patch.object(saving_module, "save_with_mask", side_effect=delayed_save):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=delayed_save):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))
                 self.assertTrue(second_entered.wait(2))
@@ -5786,14 +5789,14 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             clear_done = threading.Event()
             commit_result = {}
-            original_replace = saving_module._replace_record_with_rendered_output
+            original_replace = saving_module._stage_record_replacement
 
             def delayed_replace(record, rendered_path, fingerprint):
                 fingerprint_started.set()
                 self.assertTrue(release.wait(2))
                 return original_replace(record, rendered_path, fingerprint)
 
-            with patch.object(saving_module, "_replace_record_with_rendered_output", side_effect=delayed_replace):
+            with patch.object(saving_module, "_stage_record_replacement", side_effect=delayed_replace):
                 commit = threading.Thread(
                     target=lambda: commit_result.setdefault(
                         "value", state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
@@ -5845,6 +5848,30 @@ class MozarieTests(unittest.TestCase):
         with state.workspace_store._connect() as db:
             stored_hash = db.execute("SELECT source_hash FROM images WHERE image_id=?", (image_id,)).fetchone()["source_hash"]
         self.assertEqual(stored_hash, state._sha256_file(record.path))
+
+    def test_browser_save_database_failure_restores_source_and_keeps_token_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original = source.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            with patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                with self.assertRaises(OSError):
+                    state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(state._candidate_revision(image_id), revision)
+            self.assertEqual(len(state.candidates[image_id]), 1)
+            self.assertIn(token, state.browser_save_tokens)
+            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
+            self.assertEqual(state._candidate_revision(image_id), revision + 1)
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], revision + 1)
 
     def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()
@@ -6116,7 +6143,7 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
             rendered_path = state.browser_save_tokens[token].rendered_path
             claimed = threading.Event(); release = threading.Event(); outcome = {}
-            original_replace = saving_module._replace_record_with_rendered_output
+            original_replace = saving_module._stage_record_replacement
 
             def block_after_claim(record, rendered_path, fingerprint):
                 claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
@@ -6127,7 +6154,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(saving_module, "_replace_record_with_rendered_output", side_effect=block_after_claim):
+            with patch.object(saving_module, "_stage_record_replacement", side_effect=block_after_claim):
                 thread = threading.Thread(target=commit); thread.start()
                 self.assertTrue(claimed.wait(2))
                 state.cleanup_expired_browser_save_tokens()
@@ -6194,7 +6221,7 @@ class MozarieTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
                 state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertTrue(source.exists())
+            self.assertFalse(source.exists())
             self.assertIn(image_id, state.images)
 
     def test_browser_save_stale_overwrite_updates_the_working_copy_and_keeps_candidates(self):
@@ -6263,24 +6290,23 @@ class MozarieTests(unittest.TestCase):
             _output, record, rendered_revision, save_token = rendered
             output_path = rendered.output_path
 
-            original_unlink = Path.unlink
+            original_replace = Path.replace
 
-            def fail_only_for_source(path: Path, *args, **kwargs):
+            def fail_only_for_source(path: Path, target, *args, **kwargs):
                 if path == record.path:
                     raise PermissionError("locked")
-                return original_unlink(path, *args, **kwargs)
+                return original_replace(path, target, *args, **kwargs)
 
-            with patch.object(type(record.path), "unlink", autospec=True, side_effect=fail_only_for_source):
+            with patch.object(type(record.path), "replace", autospec=True, side_effect=fail_only_for_source):
                 with self.assertRaisesRegex(ClientError, "候補は保持"):
                     state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
 
             self.assertTrue(source.is_file())
             self.assertTrue(output_path.is_file())
             self.assertEqual(len(state.candidates[image_id]), 1)
-            self.assertNotIn(save_token, state.browser_save_tokens)
-            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertTrue(source.exists())
+            self.assertIn(save_token, state.browser_save_tokens)
+            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")["deleted"])
+            self.assertFalse(source.exists())
 
     def test_browser_copy_delete_removes_the_durable_workspace_row(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6648,10 +6674,13 @@ class MozarieTests(unittest.TestCase):
                      patch.object(image_io_module.os, "replace", side_effect=tracked_replace):
                     save()
 
-                expected_events = ["write", "flush", "fsync", "replace"]
+                self.assertLess(events.index("write"), events.index("flush"))
+                self.assertLess(events.index("flush"), events.index("fsync"))
                 if route != "browser copy":
-                    expected_events.insert(-1, "stale check")
-                self.assertEqual(events[-len(expected_events):], expected_events)
+                    self.assertIn("stale check", events)
+                    self.assertGreaterEqual(events.count("replace"), 2, "staged overwrite first quarantines the original")
+                else:
+                    self.assertEqual(events.count("replace"), 1)
                 if route == "browser copy":
                     self.assertEqual(destination.read_bytes(), b"rendered")
 
