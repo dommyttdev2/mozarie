@@ -1,4 +1,5 @@
 import ast
+import importlib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +24,17 @@ class FluidTests(unittest.TestCase):
         fluid = white_fluid_mask(rgb, penis)
         self.assertEqual(np.count_nonzero(fluid), 16)
 
+    def test_white_fluid_mask_rejects_an_under_minimum_strict_anchor(self):
+        penis = np.zeros((24, 24), dtype=np.uint8)
+        penis[2:22, 2:22] = 255
+        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+        rgb[6:18, 6:18] = (210, 205, 200)
+        rgb[12, 12:14] = 255
+
+        fluid = white_fluid_mask(rgb, penis)
+
+        self.assertFalse(np.any(fluid))
+
     def test_white_fluid_mask_expands_an_accepted_white_core_into_a_translucent_deposit(self):
         rgb = np.zeros((40, 40, 3), dtype=np.uint8)
         penis = np.zeros((40, 40), dtype=np.uint8)
@@ -42,6 +54,23 @@ class FluidTests(unittest.TestCase):
             rgb[top + 2:top + 6, left + 3:left + 7] = 255
         fluid = white_fluid_mask(rgb, penis)
         self.assertEqual(np.count_nonzero(fluid), 5 * 16 + 4 * (8 * 10 - 16))
+
+    def test_white_fluid_mask_never_exceeds_twenty_percent_of_final_mask(self):
+        rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+        penis = np.zeros((100, 100), dtype=np.uint8)
+        penis[10:90, 10:90] = 255
+        for top in (15, 50):
+            rgb[top:top + 20, 20:52] = 255
+        rgb[40:44, 70:74] = 255
+
+        fluid = white_fluid_mask(rgb, penis)
+
+        cap = int(np.count_nonzero(penis) * 0.20)
+        self.assertEqual(np.count_nonzero(fluid), cap)
+        self.assertLessEqual(np.count_nonzero(fluid), cap)
+        self.assertTrue(np.all(fluid[15:35, 20:52] == 255))
+        self.assertTrue(np.all(fluid[50:70, 20:52] == 255))
+        self.assertFalse(np.any(fluid[40:44, 70:74]))
 
     def test_white_fluid_mask_accepts_small_lines_and_drops(self):
         rgb = np.zeros((32, 32, 3), dtype=np.uint8)
@@ -74,33 +103,50 @@ class FluidTests(unittest.TestCase):
         real_cvt_color = cv2.cvtColor
         real_morphology = cv2.morphologyEx
         real_blur = cv2.blur
+        real_components = cv2.connectedComponentsWithStats
+        real_subtract = cv2.subtract
         shapes = []
-        morphology_calls = []
-        blur_shapes = []
 
         def record_crop(image, *args, **kwargs):
             shapes.append(image.shape[:2])
             return real_cvt_color(image, *args, **kwargs)
 
         def record_morphology(image, operation, kernel, *args, **kwargs):
-            morphology_calls.append((image.shape[:2], kernel.shape))
+            shapes.append(image.shape[:2])
             return real_morphology(image, operation, kernel, *args, **kwargs)
 
         def record_blur(image, *args, **kwargs):
-            blur_shapes.append(image.shape[:2])
+            shapes.append(image.shape[:2])
             return real_blur(image, *args, **kwargs)
+
+        def record_components(image, *args, **kwargs):
+            shapes.append(image.shape[:2])
+            return real_components(image, *args, **kwargs)
+
+        def record_subtract(first, second, *args, **kwargs):
+            shapes.extend((first.shape[:2], second.shape[:2]))
+            return real_subtract(first, second, *args, **kwargs)
 
         with patch.object(cv2, "cvtColor", side_effect=record_crop), \
              patch.object(cv2, "morphologyEx", side_effect=record_morphology), \
-             patch.object(cv2, "blur", side_effect=record_blur):
+             patch.object(cv2, "blur", side_effect=record_blur), \
+             patch.object(cv2, "connectedComponentsWithStats", side_effect=record_components), \
+             patch.object(cv2, "subtract", side_effect=record_subtract):
             fluid = white_fluid_mask(rgb, penis)
-        self.assertEqual(shapes, [(12, 16)])
-        self.assertEqual(morphology_calls, [((12, 16), (3, 3)), ((12, 16), (7, 7)), ((12, 16), (15, 15)), ((12, 16), (3, 3))])
-        self.assertEqual(blur_shapes, [(12, 16)])
+        self.assertTrue(shapes)
+        self.assertTrue(all(height <= 12 and width <= 16 for height, width in shapes))
+        self.assertTrue(all(shape != penis.shape for shape in shapes))
+        self.assertEqual(fluid.shape, penis.shape)
+        self.assertEqual(fluid.dtype, np.uint8)
+        self.assertFalse(np.any(fluid[penis == 0]))
         self.assertEqual(np.count_nonzero(fluid), 16)
 
     def test_white_fluid_mask_uses_only_small_final_crops_at_large_resolutions(self):
         real_cvt_color = cv2.cvtColor
+        real_morphology = cv2.morphologyEx
+        real_blur = cv2.blur
+        real_components = cv2.connectedComponentsWithStats
+        real_subtract = cv2.subtract
         for height, width in ((832, 1216), (1440, 2560), (2160, 3840)):
             rgb = np.zeros((height, width, 3), dtype=np.uint8)
             penis = np.zeros((height, width), dtype=np.uint8)
@@ -113,9 +159,34 @@ class FluidTests(unittest.TestCase):
                 shapes.append(image.shape[:2])
                 return real_cvt_color(image, *args, **kwargs)
 
-            with patch.object(cv2, "cvtColor", side_effect=record_crop):
+            def record_morphology(image, operation, kernel, *args, **kwargs):
+                shapes.append(image.shape[:2])
+                return real_morphology(image, operation, kernel, *args, **kwargs)
+
+            def record_blur(image, *args, **kwargs):
+                shapes.append(image.shape[:2])
+                return real_blur(image, *args, **kwargs)
+
+            def record_components(image, *args, **kwargs):
+                shapes.append(image.shape[:2])
+                return real_components(image, *args, **kwargs)
+
+            def record_subtract(first, second, *args, **kwargs):
+                shapes.extend((first.shape[:2], second.shape[:2]))
+                return real_subtract(first, second, *args, **kwargs)
+
+            with patch.object(cv2, "cvtColor", side_effect=record_crop), \
+                 patch.object(cv2, "morphologyEx", side_effect=record_morphology), \
+                 patch.object(cv2, "blur", side_effect=record_blur), \
+                 patch.object(cv2, "connectedComponentsWithStats", side_effect=record_components), \
+                 patch.object(cv2, "subtract", side_effect=record_subtract):
                 fluid = white_fluid_mask(rgb, penis)
-            self.assertEqual(shapes, [(24, 32)])
+            self.assertTrue(shapes)
+            self.assertTrue(all(crop_height <= 24 and crop_width <= 32 for crop_height, crop_width in shapes))
+            self.assertTrue(all(shape != penis.shape for shape in shapes))
+            self.assertEqual(fluid.shape, penis.shape)
+            self.assertEqual(fluid.dtype, np.uint8)
+            self.assertFalse(np.any(fluid[penis == 0]))
             self.assertEqual(np.count_nonzero(fluid), 16)
 
     def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
@@ -193,6 +264,36 @@ class FluidTests(unittest.TestCase):
             for node in ast.walk(detection_imports)
         ))
         self.assertNotIn("white_fluid_mask", (root / "core.py").read_text(encoding="utf-8"))
+
+    def test_fluid_runtime_import_order_isolated_from_the_test_suite(self):
+        module_names = ("mozarie.fluid", "mozarie.detection", "mozarie.core")
+        missing = object()
+        original_modules = {name: sys.modules.get(name, missing) for name in module_names}
+        package = importlib.import_module("mozarie")
+        original_attributes = {
+            name.rsplit(".", 1)[1]: getattr(package, name.rsplit(".", 1)[1], missing)
+            for name in module_names
+        }
+        try:
+            for order in (module_names, tuple(reversed(module_names))):
+                for name in module_names:
+                    sys.modules.pop(name, None)
+                loaded = {name: importlib.import_module(name) for name in order}
+                self.assertIs(loaded["mozarie.detection"].white_fluid_mask, loaded["mozarie.fluid"].white_fluid_mask)
+                self.assertIs(loaded["mozarie.detection"].Candidate, loaded["mozarie.core"].Candidate)
+                self.assertFalse(hasattr(loaded["mozarie.core"], "white_fluid_mask"))
+        finally:
+            for name in module_names:
+                sys.modules.pop(name, None)
+            for name, module in original_modules.items():
+                if module is not missing:
+                    sys.modules[name] = module
+            for attribute, value in original_attributes.items():
+                if value is missing:
+                    if hasattr(package, attribute):
+                        delattr(package, attribute)
+                else:
+                    setattr(package, attribute, value)
 
 
 if __name__ == "__main__":

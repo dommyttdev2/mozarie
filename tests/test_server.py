@@ -3542,6 +3542,46 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(candidates[1].role, domain_module.CandidateRole.EXCLUDE)
             self.assertTrue(candidates[1].enabled)
 
+    def test_detect_image_persists_a_real_broad_fluid_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"
+            rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+            rgb[12:24, 12:24] = (210, 205, 200)
+            rgb[16:20, 16:20] = 255
+            Image.fromarray(rgb).save(image_path)
+            record = self._record(image_path, 40, 40)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply_mask = np.zeros((40, 40), dtype=np.uint8)
+            apply_mask[5:35, 5:35] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply_mask, "source": "target"}]
+
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_boxes", return_value=[]):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
+
+            self.assertEqual([candidate.source for candidate in candidates], ["target", "fluid_exclusion"])
+            self.assertEqual([candidate.role for candidate in candidates], [
+                domain_module.CandidateRole.APPLY, domain_module.CandidateRole.EXCLUDE,
+            ])
+            self.assertTrue(candidates[1].enabled)
+            with Image.open(candidates[0].mask_path) as stored:
+                persisted_apply = np.asarray(stored)
+            with Image.open(candidates[1].mask_path) as stored:
+                persisted_fluid = np.asarray(stored)
+            self.assertEqual(np.count_nonzero(persisted_apply), 900)
+            self.assertEqual(np.count_nonzero(persisted_fluid), 144)
+            self.assertTrue(np.all(persisted_fluid[12:24, 12:24] == 255))
+            self.assertEqual(np.count_nonzero(persisted_fluid[12:24, 12:24]) - np.count_nonzero(persisted_fluid[16:20, 16:20]), 128)
+            self.assertFalse(np.any(persisted_fluid[persisted_apply == 0]))
+
+            state.settings["detection"]["fluid_exclusion_enabled"] = False
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_boxes", return_value=[]):
+                disabled = state._detect_image(DetectionModels(target=object()), record, 0.5)
+            self.assertEqual([candidate.source for candidate in disabled], ["target"])
+
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
