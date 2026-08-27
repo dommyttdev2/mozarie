@@ -3,19 +3,28 @@ chcp 65001 >nul
 setlocal
 set "APP_DIR=%~dp0"
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
+echo [Mozarie] [1/5] Checking Python environment...
 if not exist "%PYTHON%" call :create_venv
 if errorlevel 1 goto :missing_python
 if not exist "%PYTHON%" goto :missing_python
 call :validate_python
 if errorlevel 1 goto :python_too_old
 
-echo [Mozarie] Preparing required packages. This may download several GB on the first run.
-"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet --upgrade pip
+"%PYTHON%" -X utf8 "%APP_DIR%updater.py" --check-running
+if "%ERRORLEVEL%"=="30" goto :mozarie_running
 if errorlevel 1 goto :failed
-"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar off --quiet -r "%APP_DIR%requirements.txt"
+
+echo [Mozarie] [2/5] Preparing the installer...
+"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --quiet --progress-bar on --upgrade pip
 if errorlevel 1 goto :failed
+echo [Mozarie] [3/5] Installing required packages. This may download several GB on the first run.
+del /q "%APP_DIR%.venv\.mozarie-ready" >nul 2>nul
+"%PYTHON%" -m pip install --disable-pip-version-check --quiet --progress-bar on -r "%APP_DIR%requirements.txt"
+if errorlevel 1 goto :failed
+echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
+echo [Mozarie] [5/5] Checking GPU support...
 "%PYTHON%" -c "import onnxruntime as ort, torch; raise SystemExit(0 if torch.version.cuda and 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
 if errorlevel 1 goto :failed
 >"%APP_DIR%.venv\.mozarie-ready" echo ready
@@ -40,6 +49,11 @@ exit /b %ERRORLEVEL%
 
 :failed
 echo [Mozarie] Setup failed. Check the message above and run setup.bat again.
+pause
+exit /b 1
+
+:mozarie_running
+echo [Mozarie] Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。
 pause
 exit /b 1
 
