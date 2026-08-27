@@ -229,6 +229,7 @@ class WorkspaceTests(unittest.TestCase):
             app = Path(directory) / "app"
             app.mkdir()
             shutil.copy2(source_root / "server.py", app / "server.py")
+            shutil.copy2(source_root / "updater.py", app / "updater.py")
             shutil.copytree(source_root / "mozarie", app / "mozarie")
             shutil.copytree(source_root / "config", app / "config")
             data = app / "data"; data.mkdir()
