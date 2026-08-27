@@ -19,7 +19,7 @@ function sourceCanOverwrite(image) { return image?.sourceKind === "filesystem" |
 function sourceCanDelete(image) {
   if (image?.sourceKind === "filesystem") return true;
   const access = sourceAccessFor(image?.id);
-  return Boolean(access?.fileHandle && (typeof access.fileHandle.remove === "function" || access.parentHandle));
+  return Boolean(access?.fileHandle && access.parentHandle);
 }
 function applyTargetsSupport(capability) {
   return state.applyTargetIds.every((imageId) => {
@@ -49,8 +49,6 @@ function syncApplyMode() {
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
-  $("#removeOnlyMasked").disabled = state.applyRunning || !$("#removeAfterSave").checked;
-  $("#removeOnlyMaskedRow").classList.toggle("muted", !$("#removeAfterSave").checked);
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -242,15 +240,34 @@ async function writeSourceHandle(access, response) {
 }
 
 async function removeSourceHandle(access) {
-  if (typeof access.fileHandle.remove === "function") {
-    await access.fileHandle.remove();
-    return;
-  }
   if (access.parentHandle) {
     await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
     return;
   }
   throw new Error(t("error.sourceDeleteUnavailable", { name: access.fileHandle.name || access.name || "" }));
+}
+
+async function snapshotSourceHandle(access) {
+  const file = await access.fileHandle.getFile();
+  return typeof file.arrayBuffer === "function" ? new Uint8Array(await file.arrayBuffer()) : null;
+}
+
+async function restoreSourceHandle(access, snapshot, deleted) {
+  const handle = deleted
+    ? await access.parentHandle.getFileHandle(access.fileHandle.name || access.name, { create: true })
+    : access.fileHandle;
+  let stream;
+  try {
+    stream = await handle.createWritable({ keepExistingData: false, mode: "exclusive" });
+  } catch (error) {
+    if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
+    stream = await handle.createWritable({ keepExistingData: false });
+  }
+  try { await stream.write(snapshot); await stream.close(); }
+  catch (error) { try { await stream.abort?.(); } catch {} throw error; }
+  access.fileHandle = handle;
+  const file = await handle.getFile();
+  access.name = file.name; access.size = file.size; access.lastModified = file.lastModified;
 }
 
 async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsById) {
@@ -299,13 +316,13 @@ async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsB
   updateActionButtons();
 }
 
-async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false, removeOnlyMasked = true) {
+async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
   const result = await api("/api/save/prepare", {
     method: "POST",
     body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
   });
   const save = {
-    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave, removeOnlyMasked,
+    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
     removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
     catalogEpoch: state.catalogEpoch,
   };
@@ -327,6 +344,8 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         const sourceImage = state.images.find((image) => image.id === entry.imageId);
         const access = sourceAccessFor(entry.imageId);
         let sourceAction = "keep";
+        let sourceSnapshot = null;
+        let sourceChanged = false;
         if (mode === "copy") {
           const response = await api("/api/save/render", {
             method: "POST", body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
@@ -335,13 +354,20 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           if (deleteOriginal) {
             if (access?.fileHandle) {
               await ensureHandlePermission(access, true);
+              sourceSnapshot = await snapshotSourceHandle(access);
               await removeSourceHandle(access);
+              sourceChanged = true;
             }
             sourceAction = "deleted";
           }
-          const committed = await commitBrowserSaveWithRetry({
+          let committed;
+          try { committed = await commitBrowserSaveWithRetry({
             imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken: response.saveToken,
-          });
+          }); }
+          catch (error) {
+            if (sourceChanged) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            throw error;
+          }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else if (access?.fileHandle) {
           const binary = await fetch("/api/save/render", {
@@ -351,9 +377,16 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           await ensureHandlePermission(access, true);
+          sourceSnapshot = await snapshotSourceHandle(access);
           await writeSourceHandle(access, binary);
+          sourceChanged = true;
           sourceAction = "overwrite";
-          const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
+          let committed;
+          try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
+          catch (error) {
+            try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            throw error;
+          }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else if (sourceImage?.sourceKind === "filesystem") {
           const binary = await fetch("/api/save/render", {
@@ -476,12 +509,12 @@ async function startApplyFromDialog(event) {
   state.saveStarting = true;
   state.saving = true;
   state.applyRunning = true;
-  state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])), removeOnlyMasked: $("#removeOnlyMasked").checked };
+  state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
   updateActionButtons();
   if (copy && !$("#deleteOriginal").checked) {
     try {
       await flushDraftSaves(imageIds);
-      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, removeOnlyMasked: $("#removeOnlyMasked").checked, copyToDefault: true }) });
+      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
     } catch (error) { showApplyError(error); return finishSaveStart(); }
   }
@@ -497,7 +530,7 @@ async function startApplyFromDialog(event) {
   try {
     await flushDraftSaves(imageIds);
     state.saveStarting = false;
-    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked, $("#removeOnlyMasked").checked);
+    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
   } catch (error) {
     showApplyError(error);
     state.saving = false;

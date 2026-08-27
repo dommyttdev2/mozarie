@@ -376,16 +376,21 @@ class WorkspaceStore:
         with self._lock, self._connect() as db:
             db.execute(f"UPDATE images SET {','.join(updates)},updated_at=? WHERE image_id=?", values)
 
-    def commit_saved_image(self, image_id: str, *, mtime_ns: int, size_bytes: int, source_hash: str | None, clear_manual: bool) -> None:
-        """Persist the source fingerprint and cleared manual state as one save commit."""
+    def commit_save(self, image_id: str, *, mtime_ns: int | None = None, size_bytes: int | None = None,
+                    source_hash: str | None = None, clear_workspace: bool, delete_image: bool = False) -> None:
+        """Commit one completed save before its in-memory review state is published."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                if source_hash is None:
-                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
-                else:
-                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,source_hash=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, source_hash, time.time_ns(), image_id))
-                if clear_manual:
+                if delete_image:
+                    db.execute("DELETE FROM images WHERE image_id=?", (image_id,))
+                elif mtime_ns is not None and size_bytes is not None:
+                    if source_hash is None:
+                        db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
+                    else:
+                        db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,source_hash=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, source_hash, time.time_ns(), image_id))
+                if clear_workspace and not delete_image:
+                    db.execute("DELETE FROM candidates WHERE image_id=?", (image_id,))
                     db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))
                 db.execute("COMMIT")
             except Exception:

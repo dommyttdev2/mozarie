@@ -271,7 +271,6 @@ function bindEvents() {
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
   lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());
-  $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {
     const paused = state.browserSave ? state.browserSave.paused : state.job?.state === "paused";

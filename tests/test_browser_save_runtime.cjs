@@ -50,7 +50,6 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   getElement("#applySuffix");
   getElement("#deleteOriginal");
   getElement("#removeAfterSave");
-  getElement("#removeOnlyMasked");
   getElement('input[name="saveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
@@ -428,9 +427,10 @@ async function runRepeatedHandleOverwriteCase() {
 
 async function runHandleDeleteAfterCopyCase() {
     let removed = false;
-  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; }, async remove() { removed = true; } };
+  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } }; } };
+  const parentHandle = { async removeEntry(name) { assert.equal(name, "source.png"); removed = true; }, async getFileHandle() { return sourceHandle; } };
   const runtime = createRuntime({ deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
+  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, parentHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
   assert.equal(removed, true, "the source handle is removed only after the copy has been written");
   assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
@@ -452,6 +452,10 @@ async function runQueuedHandleChangeCases() {
       async createWritable() { secondAction = true; return { async write() {}, async close() {}, async abort() {} }; },
       async remove() { secondAction = true; },
     };
+    const parentFor = (handle) => ({
+      async removeEntry() { if (handle === secondHandle) secondAction = true; },
+      async getFileHandle() { return handle; },
+    });
     const runtime = createRuntime({
       initialImages: [first, second],
       entries: [
@@ -466,8 +470,8 @@ async function runQueuedHandleChangeCases() {
         return jsonResponse({ cleared: true, stale: false, images: [] });
       },
     });
-    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, name: "first.png", size: 12, lastModified: 34 });
-    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
+    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, parentHandle: parentFor(firstHandle), name: "first.png", size: 12, lastModified: 34 });
+    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, parentHandle: parentFor(secondHandle), name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
     await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
     await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
     assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
