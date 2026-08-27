@@ -54,18 +54,18 @@ In **Settings > Detection**, select **Download** for the model you need. Mozarie
 
 > **About `.pt` files:** PyTorch `.pt` files, including NTD files, can execute code through pickle while loading, so do not run a `.pt` obtained from any source other than those listed here.
 
+After running `setup.bat`, open PowerShell in the Mozarie folder and run the command below.
+
 Convert NTD11:
 
 ```powershell
-python -m pip install "ultralytics==8.4.75"
-yolo export model="path\to\downloaded\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+& ".\.venv\Scripts\yolo.exe" export model="path\to\downloaded\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 Convert Sensitive:
 
 ```powershell
-python -m pip install "ultralytics==8.4.75"
-yolo export model="path\to\downloaded\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
+& ".\.venv\Scripts\yolo.exe" export model="path\to\downloaded\Sensitive.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu
 ```
 
 The conversion creates a same-stem `.onnx` file in the same folder. Select that ONNX file in Settings, confirm its model status is valid, then run detection.

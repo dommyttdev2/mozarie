@@ -708,13 +708,28 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(":mozarie_running", batch)
         self.assertIn("Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。", batch)
 
-    def test_requirements_pin_the_official_cuda_runtime_without_replacing_pypi(self):
+    def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):
         requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("--extra-index-url https://download.pytorch.org/whl/cu130", requirements)
         self.assertIn("torch==2.13.0+cu130", requirements)
         self.assertIn("torchvision==0.28.0+cu130", requirements)
+        self.assertIn("onnx>=1.12,<2", requirements)
         self.assertIn("onnxruntime-gpu==1.27.0", requirements)
+        self.assertIn("ultralytics==8.4.75", requirements)
         self.assertNotIn("--index-url https://download.pytorch.org/whl/cu130", requirements)
+        self.assertNotIn("onnxruntime", requirements)
+        self.assertNotIn("onnxslim", requirements)
+        self.assertNotIn("openvino", requirements)
+        self.assertNotIn("export-base", requirements)
+
+    def test_requirements_dry_run_contract_covers_every_supported_python_launcher(self):
+        setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
+        requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        for version in ("3.11", "3.12", "3.13", "3.14"):
+            self.assertIn(f"{version}-64", setup)
+        self.assertIn("onnx>=1.12,<2", requirements)
+        self.assertIn("ultralytics==8.4.75", requirements)
+        self.assertFalse(any(requirement.startswith(("onnxslim", "openvino", "export-base")) for requirement in requirements))
 
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("

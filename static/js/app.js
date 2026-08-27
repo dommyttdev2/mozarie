@@ -14,7 +14,7 @@ function modelHelpInfo(key) {
     const path = model === "ntd11"
       ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
       : (english ? "path\\to\\downloaded\\Sensitive.pt" : "ダウンロードしたSensitiveの.ptファイルのパス");
-    return `python -m pip install "ultralytics==8.4.75"\nyolo export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
+    return `& ".\\.venv\\Scripts\\yolo.exe" export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
   };
   const models = {
     target: { model: "01miku/anime-nsfw-segm-yolo26", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26") },
