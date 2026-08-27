@@ -2730,6 +2730,16 @@ class MozarieTests(unittest.TestCase):
             fake_segment_anything.sam_model_registry["vit_l"].assert_called_once_with(checkpoint=None)
             model.load_state_dict.assert_called_once_with({}, strict=True, assign=True)
 
+    def test_missing_sam_checkpoint_has_a_specific_error_code(self):
+        state = self.new_state()
+        state.settings["models"].update({
+            "sam_checkpoints": {"vit_b": "", "vit_l": "", "vit_h": ""},
+            "sam_model_type": "vit_b",
+        })
+        with self.assertRaises(ClientError) as raised:
+            state._configured_sam_path()
+        self.assertEqual(raised.exception.error_code, "sam_checkpoint_missing")
+
     def test_sam_constructor_checkpoint_error_is_a_client_error_but_device_error_propagates(self):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "image.png"; Image.new("RGB", (8, 8), "white").save(image_path)
