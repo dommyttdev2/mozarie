@@ -19,7 +19,6 @@ import binascii
 import argparse
 import atexit
 from concurrent.futures import ThreadPoolExecutor, wait
-import heapq
 import io
 import json
 import logging
@@ -75,9 +74,6 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
-FLUID_MAX_COMPONENTS = 8
-FLUID_MAX_COMPONENT_RATIO = 0.15
-FLUID_MAX_TOTAL_RATIO = 0.20
 SOURCE_LABELS = {
     "target": "対象セグメンテーションモデル",
     "ntd11": "NTD11補助モデル",
@@ -586,46 +582,6 @@ def accepted_specialist_hand_mask(
         clipped[top:bottom, left:right] = mask[top:bottom, left:right]
         return clipped * 255
     return None
-
-
-def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
-    """Find small, neutral-white regions contained by a penis segment."""
-    penis = np.asarray(penis_mask > 0, dtype=np.uint8)
-    penis_area = int(np.count_nonzero(penis))
-    empty = np.zeros_like(penis, dtype=np.uint8)
-    if penis_area == 0:
-        return empty
-    pixels = np.asarray(rgb)
-    hsv = cv2.cvtColor(pixels, cv2.COLOR_RGB2HSV)
-    saturation, value = hsv[:, :, 1], hsv[:, :, 2]
-    channel_min = pixels.min(axis=2)
-    channel_spread = pixels.max(axis=2) - channel_min
-    candidate = (penis > 0) & (saturation <= 80) & (value >= 180) & (channel_spread <= 24) & (channel_min >= 215)
-    seed = candidate & (saturation <= 45) & (value >= 225) & (channel_spread <= 18) & (channel_min >= 230)
-    closed = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)) > 0
-    count, labels, _stats, _centroids = cv2.connectedComponentsWithStats(closed.astype(np.uint8), connectivity=8)
-    minimum = max(4, math.ceil(penis_area * 0.001))
-    maximum = math.floor(penis_area * FLUID_MAX_COMPONENT_RATIO)
-    total_cap = math.floor(penis_area * FLUID_MAX_TOTAL_RATIO)
-    flat_labels = np.asarray(labels).ravel()
-    areas = np.bincount(flat_labels[candidate.ravel()], minlength=count)
-    seed_counts = np.bincount(flat_labels[seed.ravel()], minlength=count)
-    eligible = [
-        label
-        for label in range(1, count)
-        if minimum <= areas[label] <= maximum and seed_counts[label] >= 2 and seed_counts[label] / areas[label] >= 0.10
-    ]
-    candidates = heapq.nlargest(FLUID_MAX_COMPONENTS, eligible, key=lambda label: (areas[label], -label))
-    selected_labels: list[int] = []
-    selected_area = 0
-    for label in candidates:
-        area = int(areas[label])
-        if selected_area + area > total_cap:
-            continue
-        selected_labels.append(label)
-        selected_area += area
-    selected = np.isin(labels, selected_labels) & candidate & (penis > 0)
-    return np.asarray(selected, dtype=np.uint8) * 255
 
 
 def read_detection_confidence(value: Any) -> float:

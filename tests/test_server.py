@@ -45,7 +45,7 @@ from mozarie.core import (  # noqa: E402
     merge_tile_segment, materialize_tile_mask, restore_tile_mask,
     read_boundary_request, read_detection_confidence, padded_hand_box,
     refine_mask_with_hand, select_best_sam_mask, select_semantic_sam_mask,
-    sam_refinement_prompts, white_fluid_mask, LOG_DATE_FORMAT, LOG_FORMAT,
+    sam_refinement_prompts, LOG_DATE_FORMAT, LOG_FORMAT,
 )
 from mozarie.image_io import (  # noqa: E402
     calculate_block_size, save_with_mask, _apply_mosaic_to_image, _decode_mask,
@@ -2459,14 +2459,6 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(padded_hand_box((10, 10, 20, 30), (50, 50)), (8, 8, 22, 32))
         self.assertEqual(padded_hand_box((5, 5, 505, 505), (512, 512)), (0, 0, 512, 512))
 
-    def test_white_fluid_mask_accepts_a_small_strong_white_penis_component(self):
-        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
-        penis = np.zeros((24, 24), dtype=np.uint8)
-        penis[2:22, 2:22] = 255
-        rgb[8:12, 8:12] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
-        self.assertEqual(np.count_nonzero(fluid), 16)
-
     def test_semantic_sam_refinement_uses_safe_points_and_rejects_hand_overlap(self):
         source = np.zeros((16, 16), dtype=np.uint8); source[3:13, 3:13] = 255
         hand = np.zeros_like(source); hand[3:7, 3:7] = 255
@@ -2502,54 +2494,6 @@ class MozarieTests(unittest.TestCase):
         self.assertIsNotNone(accepted_specialist_hand_mask(accepted, (12, 12), (3, 3, 9, 9)))
         outside = np.zeros((1, 12, 12), dtype=bool); outside[0, :3, :3] = True
         self.assertIsNone(accepted_specialist_hand_mask(outside, (12, 12), (3, 3, 9, 9)))
-
-    def test_white_fluid_mask_rejects_large_high_saturation_and_noise_components(self):
-        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
-        penis = np.zeros((24, 24), dtype=np.uint8)
-        penis[2:22, 2:22] = 255
-        rgb[3:13, 3:13] = 255
-        rgb[15:19, 3:7] = (255, 40, 40)
-        rgb[20, 20] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
-        self.assertFalse(np.any(fluid))
-
-    def test_white_fluid_mask_rejects_pale_skin_connected_to_white_seeds(self):
-        rgb = np.zeros((24, 24, 3), dtype=np.uint8)
-        penis = np.zeros((24, 24), dtype=np.uint8)
-        penis[2:22, 2:22] = 255
-        rgb[6:11, 6:14] = (245, 230, 215)
-        rgb[(6, 6, 10, 10), (6, 10, 6, 10)] = 255
-        fluid = white_fluid_mask(Image.fromarray(rgb), penis)
-        self.assertFalse(np.any(fluid))
-
-    def test_white_fluid_mask_filters_many_components_without_per_label_equality_scans(self):
-        class TrackingLabels(np.ndarray):
-            equality_scans = 0
-
-            def __eq__(self, other):
-                type(self).equality_scans += 1
-                return super().__eq__(other)
-
-        rgb = np.zeros((64, 64, 3), dtype=np.uint8)
-        penis = np.full((64, 64), 255, dtype=np.uint8)
-        labels = np.zeros((64, 64), dtype=np.int32)
-        components = []
-        for label, (top, left) in enumerate(((row, column) for row in range(2, 52, 10) for column in range(2, 52, 10)), 1):
-            labels[top:top + 4, left:left + 4] = label
-            rgb[top:top + 4, left:left + 4] = 255
-            components.append((top, left))
-        tracked_labels = labels.view(TrackingLabels)
-        stats = np.zeros((len(components) + 1, 5), dtype=np.int32)
-        with patch.object(
-            cv2,
-            "connectedComponentsWithStats",
-            return_value=(len(components) + 1, tracked_labels, stats, np.zeros((len(components) + 1, 2))),
-        ):
-            fluid = white_fluid_mask(Image.fromarray(rgb), penis)
-        self.assertEqual(TrackingLabels.equality_scans, 0)
-        self.assertEqual(np.count_nonzero(fluid), 8 * 16)
-        for top, left in components[:8]:
-            self.assertTrue(np.all(fluid[top:top + 4, left:left + 4] == 255))
 
     def test_import_rejects_malformed_and_suffix_mismatched_images(self):
         valid = io.BytesIO()
@@ -3597,6 +3541,46 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, domain_module.CandidateRole.EXCLUDE)
             self.assertTrue(candidates[1].enabled)
+
+    def test_detect_image_persists_a_real_broad_fluid_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"
+            rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+            rgb[12:24, 12:24] = (210, 205, 200)
+            rgb[16:20, 16:20] = 255
+            Image.fromarray(rgb).save(image_path)
+            record = self._record(image_path, 40, 40)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply_mask = np.zeros((40, 40), dtype=np.uint8)
+            apply_mask[5:35, 5:35] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply_mask, "source": "target"}]
+
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_boxes", return_value=[]):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5)
+
+            self.assertEqual([candidate.source for candidate in candidates], ["target", "fluid_exclusion"])
+            self.assertEqual([candidate.role for candidate in candidates], [
+                domain_module.CandidateRole.APPLY, domain_module.CandidateRole.EXCLUDE,
+            ])
+            self.assertTrue(candidates[1].enabled)
+            with Image.open(candidates[0].mask_path) as stored:
+                persisted_apply = np.asarray(stored)
+            with Image.open(candidates[1].mask_path) as stored:
+                persisted_fluid = np.asarray(stored)
+            self.assertEqual(np.count_nonzero(persisted_apply), 900)
+            self.assertEqual(np.count_nonzero(persisted_fluid), 144)
+            self.assertTrue(np.all(persisted_fluid[12:24, 12:24] == 255))
+            self.assertEqual(np.count_nonzero(persisted_fluid[12:24, 12:24]) - np.count_nonzero(persisted_fluid[16:20, 16:20]), 128)
+            self.assertFalse(np.any(persisted_fluid[persisted_apply == 0]))
+
+            state.settings["detection"]["fluid_exclusion_enabled"] = False
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_boxes", return_value=[]):
+                disabled = state._detect_image(DetectionModels(target=object()), record, 0.5)
+            self.assertEqual([candidate.source for candidate in disabled], ["target"])
 
     def test_redetection_preserves_boundary_candidates_and_replaces_auto_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
