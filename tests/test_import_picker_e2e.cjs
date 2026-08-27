@@ -78,7 +78,13 @@ function startFixtureServer() {
       settingsRequests.push(requestUrl.search);
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
-        settings = JSON.parse(body);
+        const submittedSettings = JSON.parse(body);
+        if (submittedSettings.models.target_segmentation === "no-gpu.onnx" && submittedSettings.models.provider === "gpu") {
+          response.writeHead(400, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error_code: "gpu_unsupported" }));
+          return;
+        }
+        settings = submittedSettings;
         settingsActions.push({ path: requestPath, method: request.method });
       }
       const reply = () => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } })); };
@@ -92,7 +98,7 @@ function startFixtureServer() {
       settingsStatusRequests.push(submittedSettings);
       const reply = () => {
         const targetPath = submittedSettings.models.target_segmentation;
-        const gpus = targetPath === "gpu-options.onnx"
+        const gpus = targetPath === "no-gpu.onnx" ? [] : targetPath === "gpu-options.onnx"
           ? [{ id: 3, name: "RTX Test", totalMemory: 16 * 1024 ** 3, supported: true }, { id: 4, name: "Legacy Test", totalMemory: 3 * 1024 ** 3, supported: false }]
           : targetPath === "unknown-vram.onnx"
             ? [{ id: 5, name: "Unknown VRAM", supported: true }]
@@ -396,6 +402,8 @@ async function assertConnectionStatusLayout(page, width, height, language) {
     await loadTranslations(selected);
     setStatusKey("error.connectionLost", {}, "error");
   }, language);
+  await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+  await page.evaluate(() => document.querySelector("#errorDialog").close());
   const layout = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const appbar = box(".appbar");
@@ -412,9 +420,8 @@ async function assertConnectionStatusLayout(page, width, height, language) {
       ...dimensions,
     };
   });
-  assert.equal(layout.connectionHidden, false, `connection status is visible at ${width}x${height} (${language})`);
-  assert.equal(layout.parentIsAppbar && layout.inAppbar && layout.settingsHit && layout.rightAligned, true, `connection status stays right-aligned in the header and settings stays clickable at ${width}x${height} (${language})`);
-  assert.ok(layout.gap >= 0 && layout.gap <= 10, `connection status sits immediately left of settings at ${width}x${height} (${language})`);
+  assert.equal(layout.connectionHidden, true, `blocking errors do not remain in the header at ${width}x${height} (${language})`);
+  assert.equal(layout.parentIsAppbar && layout.settingsHit && layout.rightAligned, true, `settings stays clickable while the error dialog is closed at ${width}x${height} (${language})`);
   assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test notification"));
@@ -427,7 +434,8 @@ async function assertConnectionStatusLayout(page, width, height, language) {
   assert.equal(general.inAppbar, true, `ordinary status remains inside the header at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test error", "error"));
-  assert.equal(await page.evaluate(() => !document.querySelector("#connectionStatus").hidden), true, `every global error uses the header at ${width}x${height} (${language})`);
+  assert.equal(await page.evaluate(() => document.querySelector("#errorDialog").open && document.querySelector("#connectionStatus").hidden), true, `every global error uses the error dialog at ${width}x${height} (${language})`);
+  await page.evaluate(() => document.querySelector("#errorDialog").close());
 
   await page.evaluate(() => clearStatus());
   assert.equal(await page.evaluate(() => document.querySelector("#connectionStatus").hidden), true, `clearing status hides the header status at ${width}x${height} (${language})`);
@@ -749,8 +757,10 @@ async function main() {
         : fetchOriginal(...args);
     });
     await settingsFailurePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
-    await settingsFailurePage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
-    assert.match(await settingsFailurePage.locator("#connectionStatus").textContent(), /settings unavailable/, "initial settings failure is shown in the header");
+    await settingsFailurePage.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.match(await settingsFailurePage.locator("#errorDialog").textContent(), /Mozarieに接続できません/, "initial settings failure uses the error dialog");
+    assert.doesNotMatch(await settingsFailurePage.locator("#errorDialog").textContent(), /settings unavailable/, "raw request errors are not shown");
+    await settingsFailurePage.locator("#errorDialog").evaluate((dialog) => dialog.close());
     await settingsFailurePage.locator("#settingsButton").click();
     assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
     await settingsFailurePage.close();
@@ -941,8 +951,10 @@ async function main() {
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="hand_detection"]').click();
     await page.locator("#modelDownloadStart").click();
-    await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture download failed"));
-    assert.match(await page.locator("#modelDownloadStatus").textContent(), /fixture download failed/, "download errors remain inside the download modal");
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.equal(await page.locator("#modelDownloadStatus").textContent(), "", "download errors do not remain inside the download modal");
+    assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /fixture download failed/, "raw download errors are not shown");
+    await page.locator("#errorDialogClose").click();
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 3, "Download all lists three separate models");
@@ -968,12 +980,13 @@ async function main() {
     failModelDownloadStatus(true);
     await page.locator('[data-model-download="sam"]').click();
     await page.locator("#modelDownloadStart").click();
-    await page.waitForFunction(() => document.querySelector("#modelDownloadStatus").textContent.includes("fixture status unavailable"));
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
     assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");
     assert.equal(await page.locator("#modelDownloadClose").isDisabled(), false, "a download status error lets the user close the modal");
     const pollsAfterFailure = modelDownloadPolls();
     await page.waitForTimeout(500);
     assert.equal(modelDownloadPolls(), pollsAfterFailure, "a download status error stops further polling");
+    await page.locator("#errorDialogClose").click();
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(false); resetModelDownload();
     await page.waitForTimeout(50);
@@ -1014,6 +1027,20 @@ async function main() {
     await page.locator("#settingsSaveButton").click();
     await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
     assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the supported GPU choice remains selected after saving");
+    await page.locator("#settingsTargetModel").fill("no-gpu.onnx");
+    await page.evaluate(() => refreshSettingsStatus());
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").disabled);
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "the settings dialog stays open behind the error dialog");
+    assert.equal(await page.locator("#settingsResult").textContent(), "", "settings errors do not remain inline");
+    assert.equal(await page.locator("#connectionStatus").isHidden(), true, "settings errors do not appear in the header");
+    assert.match(await page.locator("#errorDialog").textContent(), /GPUを使えません[\s\S]*CPUを選択してください/, "no usable GPU tells the user to select CPU");
+    assert.equal(await page.locator("dialog[open]").count(), 2, "one error dialog is shown above settings");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#errorDialog").open);
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "Escape closes only the error dialog");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "settingsSaveButton", "closing the error dialog restores focus to its action");
     assert.equal(await page.locator(".help-button").evaluateAll((buttons) => buttons.every((button) => {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
@@ -1078,6 +1105,9 @@ async function main() {
       };
     });
     assert.deepEqual(atomicDraftFailure, { id: true, image: true, candidates: true, fileName: true, empty: true, addPixels: true }, "a rejected manual workspace GET preserves the previous editor atomically");
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /manual draft rejected/, "workspace errors do not expose raw request text");
+    await page.locator("#errorDialogClose").click();
     const delayedDraftSave = await page.evaluate(async () => {
       const originalEncoder = canvasToDataUrl;
       const originalDraft = state.drafts.get(state.currentId);
@@ -1356,7 +1386,9 @@ async function main() {
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => !document.querySelector("#processingCancelButton").disabled);
     assert.equal(cancelRequests(), 1, "a failed processing cancel sends one request and re-enables the button");
-    assert.match(await page.locator("#connectionStatus").textContent(), /cancel failed/, "a failed cancel is shown in the header without leaving the modal locked");
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /cancel failed/, "a failed cancel does not expose raw request text");
+    await page.locator("#errorDialogClose").click();
     failCancel(false);
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
@@ -1739,7 +1771,7 @@ async function main() {
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
-    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
+    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
     await browser?.close();
     if (server) await closeServer(server);

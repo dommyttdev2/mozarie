@@ -267,13 +267,13 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         try {
           if (await reconcileCurrentCandidates(imageId, generation)) {
-            setStatus(error.message, "error");
+            showUserError(error);
             return;
           }
         } catch {
           if (state.currentId === imageId && isCurrentGeneration(generation)) {
             candidate.enabled = previousEnabled; candidate.forced = previousForced; syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
-            setStatus(error.message, "error");
+            showUserError(error);
             return;
           }
         }
@@ -380,7 +380,7 @@ async function batchCandidateOperation(spec) {
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
       setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     } catch (error) {
-      if (state.currentId === imageId && isCurrentGeneration(generation)) setStatus(error.message, "error");
+      if (state.currentId === imageId && isCurrentGeneration(generation)) showUserError(error);
     } finally {
       state.candidateBatchPending.delete(imageId);
       if (state.currentId === imageId && isCurrentGeneration(generation)) renderCandidates();
@@ -409,12 +409,12 @@ async function addBoundaryCandidate() {
       try {
         data = await api("/api/boundary", { method: "POST", body: JSON.stringify(body) });
       } catch (error) {
-        if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error");
+        if (state.currentId === imageId && state.imageGeneration === viewGeneration) showUserError(error);
         break;
       }
       const created = Array.isArray(data.candidates) ? data.candidates : [];
       if (!created.length || !Number.isInteger(data.candidateRevision)) {
-        if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(t("error.boundaryResponse"), "error");
+        if (state.currentId === imageId && state.imageGeneration === viewGeneration) showUserError("internal_error");
         break;
       }
       createdCandidateIds.push(...created.map((candidate) => candidate.id));
@@ -438,7 +438,7 @@ async function addBoundaryCandidate() {
       }
     }
   } catch (error) {
-    if (state.currentId === imageId && state.imageGeneration === viewGeneration) setStatus(error.message, "error");
+    if (state.currentId === imageId && state.imageGeneration === viewGeneration) showUserError(error);
   } finally {
     state.boundaryPending = false;
     if (catalogChanged) renderCatalogViews();
@@ -539,13 +539,13 @@ function fillAt(point, tool = state.tool) {
     applyFillSpans(spans, tool); state.history.splice(state.historyIndex); state.history.push({ tool, spans }); trimHistory();
     state.historyIndex = state.history.length; state.manualMaskPresent = true; state.fillPending = false; scheduleManualWorkspaceSave(); setReviewed(currentRecord(), false); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
   };
-  if (typeof Worker !== "function") { setStatus(t("error.requestFailed"), "error"); return; }
+  if (typeof Worker !== "function") { showUserError("internal_error"); return; }
   state.fillWorker?.terminate?.(); state.fillPending = true;
   let worker;
   try { worker = state.fillWorker = new Worker("/js/flood-fill-worker.js"); }
-  catch { state.fillPending = false; setStatus(t("error.requestFailed"), "error"); return; }
+  catch { state.fillPending = false; showUserError("internal_error"); return; }
   worker.onmessage = ({ data }) => { if (state.fillWorker !== worker) return; state.fillWorker = null; worker.terminate(); apply(data.spans); };
-  worker.onerror = () => { if (state.fillWorker === worker) { state.fillWorker = null; state.fillPending = false; setStatus(t("error.requestFailed"), "error"); } worker.terminate(); };
+  worker.onerror = () => { if (state.fillWorker === worker) { state.fillWorker = null; state.fillPending = false; showUserError("internal_error"); } worker.terminate(); };
   worker.postMessage({ pixels: pixels.buffer, width, height, x, y, tolerance }, [pixels.buffer]);
 }
 

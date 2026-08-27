@@ -113,3 +113,31 @@ class TranslationContractTests(unittest.TestCase):
         for language in ("ja", "en"):
             dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
             self.assertTrue(dictionary["errorCode.gpu_unavailable"])
+
+    def test_user_error_dialog_has_a_complete_translation_for_every_presentation_code(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        codes = set(re.findall(r':\s*"([a-z_]+)"', source.split("const USER_ERROR_CODES", 1)[1].split("};", 1)[0]))
+        codes.add("internal_error")
+        for language in ("ja", "en"):
+            dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for code in codes:
+                for part in ("title", "cause", "action"):
+                    self.assertTrue(dictionary[f"errorDialog.{code}.{part}"], f"{language}: {code}.{part}")
+
+    def test_every_current_backend_error_code_has_a_user_error_presentation(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        aliases = set(re.findall(r'([a-z_]+):\s*"[a-z_]+"', source.split("const USER_ERROR_CODES", 1)[1].split("};", 1)[0]))
+        emitted = {
+            "invalid_request", "request_failed", "internal_error", "api_not_found", "invalid_settings", "job_running",
+            "mask_not_found", "catalog_changed", "model_profile_invalid", "sam_checkpoint_invalid", "sam_provider_unavailable",
+            "model_picker_busy", "model_picker_failed", "model_picker_invalid", "model_download_invalid", "hand_segmentation_invalid",
+            "gpu_unavailable", "gpu_unsupported", "gpu_out_of_memory", "memory_allocation_failed", "no_effective_mask", "stale_asset",
+        }
+        self.assertEqual(emitted - aliases, set())
+
+    def test_api_does_not_use_server_error_text_as_user_interface_copy(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        self.assertNotIn("data.error ||", source)

@@ -208,6 +208,15 @@
     </form>
   </dialog>
 
+  <dialog id="errorDialog" class="modal-dialog error-dialog" role="alertdialog" aria-labelledby="errorDialogTitle" aria-describedby="errorDialogCause errorDialogAction">
+    <section class="dialog-body">
+      <h2 id="errorDialogTitle"></h2>
+      <div class="error-dialog-copy"><p class="fixed-note" data-i18n="errorDialog.causeLabel">原因</p><p id="errorDialogCause"></p></div>
+      <div class="error-dialog-copy"><p class="fixed-note" data-i18n="errorDialog.actionLabel">次にすること</p><p id="errorDialogAction"></p></div>
+      <div class="dialog-actions"><button id="errorDialogClose" type="button" autofocus data-i18n="dialog.close">閉じる</button></div>
+    </section>
+  </dialog>
+
   <dialog id="detectDialog" class="modal-dialog detect-dialog" aria-labelledby="detectDialogTitle" aria-describedby="detectTargetCount detectDialogHelp">
     <form id="detectForm" class="dialog-body">
       <h2 id="detectDialogTitle" data-i18n="detectDialog.title">自動検出の設定</h2>

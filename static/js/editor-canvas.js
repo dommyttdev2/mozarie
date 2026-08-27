@@ -92,7 +92,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
       clearTimeout(state.loadingDelay); state.loadingDelay = null;
       state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
       if (error.code === "stale_asset") invalidateStaleAsset(imageId);
-      setStatus(error.message, "error");
+      showUserError(error);
     }
   }
 }

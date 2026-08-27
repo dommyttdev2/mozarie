@@ -315,7 +315,7 @@ async function openSettings() {
       const data = await api("/api/settings?status=0");
       setSettingsForm(data.settings);
       $("#settingsVersion").textContent = data.version;
-    } catch (error) { setStatus(error.message, "error"); return; }
+    } catch (error) { showUserError(error); return; }
   }
   setSettingsForm(state.settings, state.settingsStatus);
   selectSettingsTab("general"); $("#settingsResult").textContent = ""; showModalFromInvoker($("#settingsDialog"), invoker);
@@ -338,7 +338,7 @@ async function saveSettings(event) {
     if (languageChanged) await loadTranslations();
     result.textContent = t("settings.saved");
     void refreshSettingsStatus();
-  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
+  } catch (error) { showUserError(error, $("#settingsSaveButton")); }
 }
 
 async function resetSettings() {
@@ -352,7 +352,7 @@ async function resetSettings() {
     await loadTranslations();
     result.textContent = t("settings.resetDone");
     void refreshSettingsStatus();
-  } catch (error) { result.textContent = error.message; result.classList.add("error"); }
+  } catch (error) { showUserError(error, $("#settingsResetButton")); }
 }
 
 async function chooseSettingsOutputDirectory() {
@@ -360,7 +360,7 @@ async function chooseSettingsOutputDirectory() {
     const directory = await pickOutputDirectory();
     if (directory) $("#settingsDefaultOutputDirectory").value = directory;
   } catch (error) {
-    if (error?.name !== "AbortError") { $("#settingsResult").textContent = error.message; $("#settingsResult").classList.add("error"); }
+    if (error?.name !== "AbortError") showUserError("output_folder_unavailable", $("#settingsChooseOutputDirectory"));
   }
 }
 
@@ -386,8 +386,7 @@ async function chooseSettingsModelFile(button) {
       void refreshSettingsStatus();
     }
   } catch (error) {
-    $("#settingsResult").textContent = error.message;
-    $("#settingsResult").classList.add("error");
+    showUserError(error, button);
   } finally {
     buttons.forEach((item) => { item.disabled = false; });
     setHandSegmentationAvailable(Boolean($(MODEL_TOGGLE_IDS.hand_detection).checked));
@@ -414,7 +413,7 @@ function renderModelDownload(job) {
     hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"),
   };
   $("#modelDownloadMessage").textContent = job.current ? t("modelDownload.current", { model: labels[job.current] || job.current, completed: job.completed || 0, total: job.total || 1 }) : "";
-  if (job.state === "failed") { status.textContent = job.error || t("modelDownload.failed"); status.classList.add("error"); }
+  if (job.state === "failed") { status.textContent = ""; status.classList.remove("error"); showUserError({ code: job.errorCode || "internal_error" }, $("#modelDownloadClose")); }
   else if (job.state === "cancelled") { status.textContent = t("modelDownload.cancelled"); status.classList.remove("error"); }
   else if (job.state === "complete") { status.textContent = t("modelDownload.complete"); status.classList.remove("error"); }
   else { status.textContent = ""; status.classList.remove("error"); }
@@ -472,7 +471,7 @@ function renderModelDownloadItems(keys) {
 async function refreshModelDownload() {
   try { renderModelDownload(await api("/api/model-download")); } catch (error) {
     if (modelDownloadPoll) { clearInterval(modelDownloadPoll); modelDownloadPoll = null; }
-    $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error");
+    $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error"); showUserError(error, $("#modelDownloadClose"));
     $("#modelDownloadCancel").hidden = true; $("#modelDownloadClose").disabled = false;
   }
 }
@@ -534,11 +533,11 @@ async function beginModelDownload() {
     const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: selectedSamType() }) });
     renderModelDownload(job);
     if (!modelDownloadPoll && ["running", "cancelling"].includes(job.state)) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
-  } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+  } catch (error) { showUserError(error, $("#modelDownloadStart")); }
 }
 
 async function cancelModelDownload() {
-  try { renderModelDownload(await api("/api/model-download/cancel", { method: "POST", body: JSON.stringify({}) })); } catch (error) { $("#modelDownloadStatus").textContent = error.message; $("#modelDownloadStatus").classList.add("error"); }
+  try { renderModelDownload(await api("/api/model-download/cancel", { method: "POST", body: JSON.stringify({}) })); } catch (error) { showUserError(error, $("#modelDownloadCancel")); }
 }
 
 let settingsStatusGeneration = 0;
@@ -560,7 +559,7 @@ async function refreshSettingsStatus() {
     if (generation !== settingsStatusGeneration || snapshot !== currentSnapshot) return;
     renderSettingsStatus(data.status);
   } catch (error) {
-    if (generation === settingsStatusGeneration) setStatus(error.message, "error");
+    if (generation === settingsStatusGeneration) showUserError(error);
   } finally {
     if (generation === settingsStatusGeneration) setSettingsGpuLoading(false);
   }
@@ -584,5 +583,5 @@ async function checkForUpdate({ silent = false } = {}) {
 async function startUpdate() {
   if ($("#checkUpdateButton").dataset.available !== "true") return checkForUpdate();
   if (!await confirmAction(t("update.title"), t("update.message"))) return;
-  try { await api("/api/update/start", { method: "POST", body: JSON.stringify({}) }); } catch (error) { $("#settingsResult").textContent = error.message; }
+  try { await api("/api/update/start", { method: "POST", body: JSON.stringify({}) }); } catch (error) { showUserError(error, $("#checkUpdateButton")); }
 }

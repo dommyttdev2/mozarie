@@ -1,5 +1,7 @@
 const modalInvokers = new WeakMap();
 
+$("#errorDialogClose").addEventListener("click", () => $("#errorDialog").close());
+
 function showModalFromInvoker(dialog, invoker = document.activeElement) {
   if (dialog.open) return;
   if (invoker?.isConnected && !invoker.disabled) modalInvokers.set(dialog, invoker);
@@ -50,7 +52,7 @@ async function copyCommand(commandId, resultId) {
   try {
     await navigator.clipboard.writeText($(commandId).textContent);
     result.textContent = t("command.copied");
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { showUserError(error); }
 }
 
 function bindEvents() {
@@ -270,7 +272,7 @@ function bindEvents() {
       const job = await api(`/api/job/${processing.state === "paused" ? "resume" : "pause"}`, { method: "POST", body: JSON.stringify({}) });
       state.job = job; updateProgress(job); scheduleJobPoll(true);
     }
-    catch (error) { setStatus(error.message, "error"); }
+    catch (error) { showUserError(error, $("#processingPauseButton")); }
   });
   $("#processingCancelButton").addEventListener("click", async () => {
     const processing = state.processing;
@@ -459,12 +461,13 @@ async function initialise() {
     document.body.textContent = "Mozarie を使うには File System Access API 対応ブラウザーが必要です。";
     return;
   }
+  await loadTranslations();
   try {
     const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
     $("#settingsVersion").textContent = settings.version;
   } catch (error) {
-    setStatus(error.message, "error");
+    showUserError(error);
     return;
   }
   await loadTranslations(); bindEvents();
@@ -479,7 +482,7 @@ async function initialise() {
       resetCatalog(data.images, data.root);
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { showUserError(error); }
   if (document.visibilityState === "visible") setTimeout(() => { void checkForUpdate({ silent: true }); }, 1000);
 }
 
