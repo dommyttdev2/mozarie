@@ -121,7 +121,7 @@ JOB_LABELS = {"detect": "自動検出", "apply": "ファイル保存"}
 class ClientError(ValueError):
     """An invalid request that can be shown directly in the UI."""
 
-    def __init__(self, message: str, error_code: str = "invalid_request", params: dict[str, Any] | None = None) -> None:
+    def __init__(self, message: str, error_code: str, params: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.params = params or {}
@@ -145,13 +145,13 @@ def oriented_image_size(image: Image.Image) -> tuple[int, int]:
 def safe_import_relative_path(value: Any) -> Path:
     """Validate a client-provided TEMP-session relative path."""
     if not isinstance(value, str) or not value or "\x00" in value:
-        raise ClientError("画像の相対パスが不正です。")
+        raise ClientError("画像の相対パスが不正です。", "input_invalid")
     normalized = value.replace("\\", "/")
     if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
-        raise ClientError("画像の相対パスが不正です。")
+        raise ClientError("画像の相対パスが不正です。", "input_invalid")
     parts = normalized.split("/")
     if any(not part or part in {".", ".."} or ":" in part for part in parts):
-        raise ClientError("画像の相対パスが不正です。")
+        raise ClientError("画像の相対パスが不正です。", "input_invalid")
     return Path(*parts)
 
 
@@ -540,7 +540,7 @@ def accepted_hand_sam_mask(
     """Return a high-confidence SAM hand mask contained by its padded detection box."""
     left, top, right, bottom = box
     if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
-        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
     box_area = (right - left) * (bottom - top)
     for index in np.argsort(-np.asarray(scores), kind="stable"):
         score = float(scores[index])
@@ -588,9 +588,9 @@ def read_detection_confidence(value: Any) -> float:
     try:
         confidence = float(value)
     except (TypeError, ValueError) as exc:
-        raise ClientError("判定しきい値が正しくありません。") from exc
+        raise ClientError("判定しきい値が正しくありません。", "input_invalid") from exc
     if not 0.10 <= confidence <= 1.00:
-        raise ClientError("判定しきい値は0.10から1.00の範囲で指定してください。")
+        raise ClientError("判定しきい値は0.10から1.00の範囲で指定してください。", "input_invalid")
     return confidence
 
 
@@ -605,16 +605,16 @@ def read_boundary_request(payload: dict[str, Any], width: int, height: int) -> t
         bottom = int(round(float(roi_data["bottom"])))
         point = (float(point_data["x"]), float(point_data["y"]))
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ClientError("境界の範囲またはクリック位置が正しくありません。") from exc
+        raise ClientError("境界の範囲またはクリック位置が正しくありません。", "input_invalid") from exc
 
     if not all(math.isfinite(value) for value in (*point,)):
-        raise ClientError("境界のクリック座標が正しくありません。")
+        raise ClientError("境界のクリック座標が正しくありません。", "input_invalid")
     if not (0 <= left < right <= width and 0 <= top < bottom <= height):
-        raise ClientError("境界の範囲は画像内にドラッグしてください。")
+        raise ClientError("境界の範囲は画像内にドラッグしてください。", "input_invalid")
     inside_x = left <= point[0] < right or (right == width and point[0] == width)
     inside_y = top <= point[1] < bottom or (bottom == height and point[1] == height)
     if not (inside_x and inside_y):
-        raise ClientError("クリック位置は選択範囲の内側にしてください。")
+        raise ClientError("クリック位置は選択範囲の内側にしてください。", "input_invalid")
     return (left, top, right, bottom), (min(point[0], width - 1), min(point[1], height - 1))
 
 
@@ -623,12 +623,12 @@ def read_polygon_boundary_request(payload: dict[str, Any], width: int, height: i
 
     raw_points = payload.get("points")
     if not isinstance(raw_points, list):
-        raise ClientError("4点境界の座標が正しくありません。")
+        raise ClientError("4点境界の座標が正しくありません。", "input_invalid")
     try:
         points = tuple((float(point["x"]), float(point["y"])) for point in raw_points)
         return polygon_roi_and_point(points, width, height)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ClientError("4点境界は画像内の4点で指定してください。") from exc
+        raise ClientError("4点境界は画像内の4点で指定してください。", "input_invalid") from exc
 
 
 def clip_mask_to_roi(mask: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
@@ -642,7 +642,7 @@ def clip_mask_to_roi(mask: np.ndarray, roi: tuple[int, int, int, int]) -> np.nda
 def select_best_sam_mask(masks: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, float]:
     """Select SAM's highest-scoring proposed object mask."""
     if len(masks) == 0 or len(scores) == 0 or len(masks) != len(scores):
-        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+        raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
     index = int(np.argmax(scores))
     return np.asarray(masks[index]), float(scores[index])
 
@@ -743,28 +743,28 @@ def _read_mosaic_divisor(value: Any) -> int:
     try:
         divisor = int(value)
     except (TypeError, ValueError) as exc:
-        raise ClientError("モザイク粗さが正しくありません。") from exc
+        raise ClientError("モザイク粗さが正しくありません。", "input_invalid") from exc
     if not 1 <= divisor <= 10000:
-        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。")
+        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。", "input_invalid")
     return divisor
 
 
 def _read_detection_parallelism(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ClientError("並列数は1から4で指定してください。")
+        raise ClientError("並列数は1から4で指定してください。", "input_invalid")
     return value
 
 
 def _read_save_suffix(value: Any) -> str:
     if not isinstance(value, str) or not value or Path(value).name != value:
-        raise ClientError("ファイル名の末尾は空でない名前として指定してください。")
+        raise ClientError("ファイル名の末尾は空でない名前として指定してください。", "input_invalid")
     return value
 
 
 def _read_target_classes(value: Any) -> set[str]:
     if not isinstance(value, (list, tuple, set)):
-        raise ClientError("検出対象の形式が正しくありません。")
+        raise ClientError("検出対象の形式が正しくありません。", "input_invalid")
     targets = {str(item) for item in value}
     if not targets or not targets <= TARGET_CLASSES:
-        raise ClientError("検出対象は penis または pussy を選択してください。")
+        raise ClientError("検出対象は penis または pussy を選択してください。", "input_invalid")
     return targets

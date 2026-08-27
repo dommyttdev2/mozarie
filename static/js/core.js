@@ -85,6 +85,13 @@ const USER_ERROR_CODES = {
   model_download_invalid: "model_download_failed", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
   mask_not_found: "no_mosaic_area", invalid_settings: "input_invalid", invalid_request: "input_invalid",
   api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", request_failed: "internal_error",
+  image_not_found: "image_not_found", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
+  save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
+  workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", model_not_configured: "model_not_configured",
+  model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed",
+  gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
+  input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
+  model_download_write_failed: "model_download_write_failed", model_download_integrity: "model_download_integrity",
   internal_error: "internal_error",
 };
 

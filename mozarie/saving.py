@@ -45,13 +45,13 @@ class SavingMixin:
             return False
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if not copy_to_default and any(record.source_kind != "filesystem" for record in records):
-            raise ClientError("一時画像はコピー保存を選んでください。")
+            raise ClientError("一時画像はコピー保存を選んでください。", "save_state_changed")
         if not isinstance(drafts, dict):
-            raise ClientError("手描きマスクの形式が正しくありません。")
+            raise ClientError("手描きマスクの形式が正しくありません。", "input_invalid")
         suffix = _read_save_suffix(suffix)
         with self.lock:
             if self.catalog_generation != catalog_generation or any(self.images.get(record.image_id) is not record for record in records):
-                raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
+                raise ClientError("画像一覧が更新されたため、もう一度実行してください。", "save_state_changed")
             records = [replace(record) for record in records]
             output_directory = Path(self.settings["saving"]["default_output_directory"])
             saving_parallelism = int(self.settings.get("saving", {}).get("parallelism", 2))
@@ -59,7 +59,7 @@ class SavingMixin:
             try:
                 output_directory = validate_output_directory_ready(output_directory)
             except SettingsError as exc:
-                raise ClientError("保存先フォルダを使用できません。設定で変更してください。") from exc
+                raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable") from exc
         drafts = {str(image_id): (dict(draft) if isinstance(draft, dict) else draft) for image_id, draft in drafts.items()}
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
@@ -95,7 +95,7 @@ class SavingMixin:
         _read_save_suffix(suffix)
         with self.lock:
             if any(self.images.get(record.image_id) is not record for record in records):
-                raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
             return [
                 {
                     "imageId": record.image_id,
@@ -136,13 +136,13 @@ class SavingMixin:
                 with self.lock:
                     current_record = self.images.get(image_id)
                     if current_record is None or current_record.path != record.path:
-                        raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+                        raise ClientError("画像が見つかりません。フォルダを再読込してください。", "image_not_found")
                     record = replace(current_record)
                     if self._has_active_worker():
-                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
+                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     current_revision = self._candidate_revision(image_id)
                     if revision != current_revision:
-                        raise ClientError("候補が変更されました。保存をやり直してください。")
+                        raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed")
                     catalog_generation = self.catalog_generation
                     # Disabled candidates have no effect on the rendered mask;
                     # do not decode their full-resolution PNGs for every
@@ -173,7 +173,7 @@ class SavingMixin:
                             if self.images.get(image_id) is not None:
                                 self._remove_candidate_unchecked(image_id, candidate.candidate_id)
                                 self._touch_candidates(image_id)
-                        raise ClientError("候補が変更されました。保存をやり直してください。") from exc
+                        raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                     if candidate.role == CandidateRole.APPLY:
@@ -192,14 +192,14 @@ class SavingMixin:
                 source_fingerprint = (record.mtime_ns, record.size_bytes)
                 if copy_to_default:
                     if not configured_output_directory.is_dir():
-                        raise ClientError("保存先フォルダを使用できません。設定で変更してください。")
+                        raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable")
                     output_path = self._reserve_output_destination(
                         record, _read_save_suffix(suffix), configured_output_directory,
                     )
                     try:
                         write_rendered_copy(output_path, output)
                     except OSError as exc:
-                        raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。") from exc
+                        raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。", "save_write_failed") from exc
                     finally:
                         self._release_output_destination(output_path)
                 else:
@@ -217,9 +217,9 @@ class SavingMixin:
                         or (configured_output_directory is not None
                             and Path(self.settings["saving"]["default_output_directory"]).resolve() != configured_output_directory)
                     ):
-                        raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                        raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
                     if self._has_active_worker():
-                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。")
+                        raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     save_token = self._issue_browser_save_token_unchecked(
                         record, current_revision, source_fingerprint, catalog_generation, rendered_path,
                     )
@@ -233,9 +233,9 @@ class SavingMixin:
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:
-            raise ClientError("保存確認トークンがありません。保存をやり直してください。")
+            raise ClientError("保存確認トークンがありません。保存をやり直してください。", "save_state_changed")
         if source_action not in {"keep", "overwrite", "deleted"}:
-            raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。")
+            raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。", "input_invalid")
         rendered_path: Path | None = None
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
@@ -246,31 +246,31 @@ class SavingMixin:
                 receipt = self.browser_save_receipts.get(save_token)
                 if receipt is not None:
                     if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
-                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                     return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted}
                 token_details = self.browser_save_tokens.get(save_token)
                 if token_details is None:
-                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
-                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                 if source_action == "overwrite" and token_details.rendered_path is None:
-                    raise ClientError("コピー保存の確認トークンでは上書き保存できません。")
+                    raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
             image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
                     receipt = self.browser_save_receipts.get(save_token)
                     if receipt is not None:
                         if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
-                            raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                            raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                         return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted}
                     token_details = self.browser_save_tokens.get(save_token)
                     record = self.images.get(image_id)
                     if token_details is None:
-                        raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                        raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
-                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。")
+                        raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                     if source_action == "overwrite" and token_details.rendered_path is None:
-                        raise ClientError("コピー保存の確認トークンでは上書き保存できません。")
+                        raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
                     if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                         expired_token = True
@@ -280,7 +280,7 @@ class SavingMixin:
                     elif catalog_invalid:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                     elif self._has_active_worker():
-                        raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。")
+                        raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
                         record_snapshot = replace(record)
                         catalog_generation = self.catalog_generation
@@ -291,11 +291,11 @@ class SavingMixin:
                 if expired_token:
                     if rendered_path is not None:
                         rendered_path.unlink(missing_ok=True)
-                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。")
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if catalog_invalid:
                     if rendered_path is not None:
                         rendered_path.unlink(missing_ok=True)
-                    raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                    raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
 
                 try:
                     if source_action == "overwrite":
@@ -318,12 +318,12 @@ class SavingMixin:
                     rendered_path = token_details.rendered_path
                     if rendered_path is not None:
                         rendered_path.unlink(missing_ok=True)
-                    raise ClientError("元画像を変更できませんでした。候補は保持しています。") from exc
+                    raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
 
                 with self.lock:
                     record = self.images.get(image_id)
                     if record is None or self.catalog_generation != catalog_generation:
-                        raise ClientError("画像一覧が変更されました。保存をやり直してください。")
+                        raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
                     current_revision = self._candidate_revision(image_id)
                     deleted = source_action == "deleted"
                     cleared = revision == current_revision

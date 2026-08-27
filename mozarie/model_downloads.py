@@ -90,7 +90,7 @@ class ModelDownloadManager:
         self.app_dir = app_dir
         self._lock = threading.RLock()
         self._cancel = threading.Event()
-        self._job: dict[str, Any] = {"state": "idle", "paths": {}}
+        self._job: dict[str, Any] = {"state": "idle", "paths": {}, "errorCode": ""}
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -110,7 +110,7 @@ class ModelDownloadManager:
             self._job = {
                 "state": "running", "key": key, "total": len(keys), "completed": 0,
                 "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size,
-                "paths": {}, "error": "",
+                "paths": {}, "error": "", "errorCode": "",
             }
             threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download").start()
             return self.snapshot()
@@ -140,10 +140,14 @@ class ModelDownloadManager:
             self._set(state="complete", current="", paths=paths)
         except ModelDownloadCancelled:
             self._set(state="cancelled", current="", paths=paths)
-        except (HTTPError, URLError, OSError, ModelDownloadError) as exc:
-            self._set(state="failed", current="", paths=paths, error=str(exc) or "モデルをダウンロードできませんでした。")
+        except (HTTPError, URLError):
+            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_network")
+        except OSError:
+            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_write_failed")
+        except ModelDownloadError:
+            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_integrity")
         except Exception:
-            self._set(state="failed", current="", paths=paths, error="モデルをダウンロードできませんでした。")
+            self._set(state="failed", current="", paths=paths, error="", errorCode="internal_error")
 
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)

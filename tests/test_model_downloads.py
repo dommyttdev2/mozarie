@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from urllib.error import URLError
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -92,6 +93,22 @@ class ModelDownloadTests(unittest.TestCase):
         self.assertEqual(calls, ["sam_vit_b", "hand_detection"])
         self.assertEqual(job["state"], "failed")
         self.assertIn("sam_vit_b", job["paths"])
+
+    def test_download_failures_have_specific_safe_error_codes(self) -> None:
+        cases = (
+            (URLError("offline"), "model_download_network"),
+            (OSError("disk full"), "model_download_write_failed"),
+            (ModelDownloadError("bad hash"), "model_download_integrity"),
+        )
+        for failure, error_code in cases:
+            with self.subTest(error_code=error_code):
+                manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
+                with patch.object(manager, "_download", side_effect=failure):
+                    manager._run(["hand_detection"])
+                job = manager.snapshot()
+                self.assertEqual(job["state"], "failed")
+                self.assertEqual(job["errorCode"], error_code)
+                self.assertEqual(job["error"], "")
 
     def test_only_manifest_keys_can_start_a_download(self) -> None:
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))

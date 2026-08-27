@@ -110,7 +110,7 @@ class CatalogMixin:
 
     def _assert_catalog_mutable(self) -> None:
         if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-            raise ClientError("処理が終了するまで画像一覧を変更できません。")
+            raise ClientError("処理が終了するまで画像一覧を変更できません。", "operation_in_progress")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
         return (
@@ -125,7 +125,7 @@ class CatalogMixin:
     def activate_browser_catalog(self, catalog_id: str | None = None) -> str:
         with self.import_lock:
             if catalog_id and not self.workspace_store.catalog_exists(catalog_id):
-                raise ClientError("保存済みのフォルダ状態が見つかりません。")
+                raise ClientError("保存済みのフォルダ状態が見つかりません。", "folder_not_found")
             # A directory selection is a full reimport. Even when its handle
             # maps to the active ID, discard current session files first so
             # each uploaded relative path reconciles its durable record.
@@ -133,7 +133,7 @@ class CatalogMixin:
             try:
                 self.catalog_id = self.workspace_store.ensure_catalog(catalog_id)
                 self.browser_catalog_provisional = False
-            except ValueError as exc: raise ClientError("カタログIDが正しくありません。") from exc
+            except ValueError as exc: raise ClientError("カタログIDが正しくありません。", "input_invalid") from exc
             return self.catalog_id
 
     def finalize_browser_catalog(self) -> tuple[str | None, dict[str, str]]:
@@ -203,10 +203,10 @@ class CatalogMixin:
 
     def _set_root(self, raw_path: str) -> list[dict[str, Any]]:
         if not raw_path or not isinstance(raw_path, str):
-            raise ClientError("Windowsフォルダを入力してください。")
+            raise ClientError("Windowsフォルダを入力してください。", "input_invalid")
         root = Path(raw_path).expanduser().resolve()
         if not root.is_dir():
-            raise ClientError("指定フォルダが見つかりません。")
+            raise ClientError("指定フォルダが見つかりません。", "folder_not_found")
         with self.lock:
             self._assert_catalog_mutable()
 
@@ -317,10 +317,10 @@ class CatalogMixin:
     def remove_images_from_catalog(self, image_ids: list[str]) -> dict[str, Any]:
         """Remove saved images from the working catalog without deleting source files."""
         if not isinstance(image_ids, list):
-            raise ClientError("画像IDの一覧が正しくありません。")
+            raise ClientError("画像IDの一覧が正しくありません。", "input_invalid")
         requested_ids = list(dict.fromkeys(str(image_id) for image_id in image_ids if str(image_id)))
         if not requested_ids:
-            raise ClientError("削除する画像がありません。")
+            raise ClientError("削除する画像がありません。", "image_not_found")
         with self.import_lock:
             with self.lock:
                 self._assert_catalog_mutable()
@@ -425,7 +425,7 @@ class CatalogMixin:
             if image_lock is not None:
                 return image_lock
             if image_id not in self.images:
-                raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+                raise ClientError("画像が見つかりません。フォルダを再読込してください。", "image_not_found")
             image_lock = threading.RLock()
             self._image_io_locks[image_id] = image_lock
             return image_lock
@@ -512,7 +512,7 @@ class CatalogMixin:
                 stack.enter_context(image_lock)
             with self.lock:
                 if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                    raise ClientError("処理中はモザイク候補をクリアできません。")
+                    raise ClientError("処理中はモザイク候補をクリアできません。", "operation_in_progress")
                 mask_paths = [
                     candidate.mask_path
                     for record in records
@@ -551,13 +551,13 @@ class CatalogMixin:
         source_hash: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(files, list) or not files:
-            raise ClientError("追加する画像がありません。")
+            raise ClientError("追加する画像がありません。", "image_not_found")
 
         with self.lock:
             root = self.root
             catalog_generation = self.catalog_generation
             if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                raise ClientError("処理中は画像を追加できません。")
+                raise ClientError("処理中は画像を追加できません。", "operation_in_progress")
             destination_dir = self._ensure_session()
             if not transfer_active:
                 self.active_import_count += 1
@@ -568,7 +568,7 @@ class CatalogMixin:
             # catalogue commit below remains serialized.
             for file_data in files:
                 if not isinstance(file_data, dict):
-                    raise ClientError("画像データの形式が正しくありません。")
+                    raise ClientError("画像データの形式が正しくありません。", "input_invalid")
                 client_key = str(file_data.get("clientKey") or uuid.uuid4().hex)
                 relative_path = safe_import_relative_path(file_data.get("relativePath", file_data.get("name", "")))
                 if relative_path.suffix.lower() not in IMAGE_SUFFIXES:
@@ -577,7 +577,7 @@ class CatalogMixin:
                 try:
                     staged_path = file_data.get("stagedPath")
                     if not isinstance(staged_path, Path):
-                        raise ClientError("追加画像を読み込めません。")
+                        raise ClientError("追加画像を読み込めません。", "image_read_failed")
                     with staged_path.open("rb") as source, temporary.open("xb") as destination:
                         while chunk := source.read(IO_CHUNK_BYTES):
                             destination.write(chunk)
@@ -595,7 +595,7 @@ class CatalogMixin:
                     or self.job.state in {"running", "pausing", "paused"}
                     or self._has_active_worker()
                 ):
-                    raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。")
+                    raise ClientError("画像一覧が更新されたため、画像の追加を中止しました。もう一度追加してください。", "catalog_changed")
                 added: list[ImageRecord] = []
                 final_paths: list[Path] = []
                 try:
@@ -675,7 +675,7 @@ class CatalogMixin:
         source_hash: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if not isinstance(client_key, str) or not client_key:
-            raise ClientError("追加画像のclientKeyが不正です。")
+            raise ClientError("追加画像のclientKeyが不正です。", "input_invalid")
         return self._import_images([{
             "clientKey": client_key,
             "name": name,
@@ -738,7 +738,7 @@ class CatalogMixin:
                         state_dict = torch.load(str(sam_path), map_location="cpu", mmap=True, weights_only=True)
                         model.load_state_dict(state_dict, strict=True, assign=True)
                     except ImportError as exc:
-                        raise ClientError("SAMのPythonパッケージを読み込めません。") from exc
+                        raise ClientError("SAMのPythonパッケージを読み込めません。", "model_load_failed") from exc
                     except RuntimeError as exc:
                         raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
                     provider = self.settings["models"]["provider"]
@@ -775,12 +775,12 @@ class CatalogMixin:
             if self.hand_segmentation_predictor is None:
                 raw_path = str(self.settings["models"].get("hand_segmentation", "")).strip()
                 if not raw_path:
-                    raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "hand_segmentation_invalid")
+                    raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "model_not_configured")
                 path = Path(raw_path).expanduser()
                 if not path.is_file():
-                    raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "hand_segmentation_invalid")
+                    raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "model_file_missing")
                 if path.suffix.lower() != ".safetensors":
-                    raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "hand_segmentation_invalid")
+                    raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "model_file_invalid")
                 self._set_detection_model_preparation(True)
                 try:
                     try:
@@ -792,14 +792,14 @@ class CatalogMixin:
                             model = sam_model_registry["vit_b"](checkpoint=None)
                         model.load_state_dict(state_dict, strict=True, assign=True)
                     except ImportError as exc:
-                        raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "hand_segmentation_invalid") from exc
+                        raise ClientError("HandSegNetに必要なPythonパッケージを読み込めません。", "model_load_failed") from exc
                     except Exception as exc:
                         if self._is_gpu_out_of_memory(exc):
                             raise
-                        raise ClientError(f"HandSegNetモデルを読み込めません: {exc}", "hand_segmentation_invalid") from exc
+                        raise ClientError("HandSegNetモデルを読み込めません。", "model_load_failed") from exc
                     provider = self.settings["models"]["provider"]
                     if provider == "gpu" and not torch.cuda.is_available():
-                        raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "hand_segmentation_invalid")
+                        raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "gpu_runtime_unavailable")
                     device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
                     if provider == "gpu":
                         with warnings.catch_warnings():
@@ -842,16 +842,16 @@ class CatalogMixin:
             root = self.root
             session_imports_dir = self.session_imports_dir
         if record is None:
-            raise ClientError("画像が見つかりません。フォルダを再読込してください。")
+            raise ClientError("画像が見つかりません。フォルダを再読込してください。", "image_not_found")
         try:
             allowed_root = self._allowed_root_for_record(record, root, session_imports_dir)
             if allowed_root is None:
                 raise ValueError
             record.path.resolve().relative_to(allowed_root.resolve())
         except ValueError as exc:
-            raise ClientError("許可されていない画像パスです。") from exc
+            raise ClientError("許可されていない画像パスです。", "input_invalid") from exc
         if not record.path.is_file():
-            raise ClientError("画像ファイルが見つかりません。")
+            raise ClientError("画像ファイルが見つかりません。", "image_not_found")
         self._assert_record_stat_matches(record)
         return record
 
@@ -860,15 +860,15 @@ class CatalogMixin:
 
     def set_image_flags(self, image_id: str, payload: dict[str, Any]) -> dict[str, bool]:
         if not isinstance(payload, dict):
-            raise ClientError("画像の状態が正しくありません。")
+            raise ClientError("画像の状態が正しくありません。", "input_invalid")
         hidden = payload.get("hidden")
         reviewed = payload.get("reviewed")
         if hidden is not None and not isinstance(hidden, bool) or reviewed is not None and not isinstance(reviewed, bool):
-            raise ClientError("画像の状態が正しくありません。")
+            raise ClientError("画像の状態が正しくありません。", "input_invalid")
         with self.lock:
             record = self.images.get(image_id)
             if record is None:
-                raise ClientError("画像が見つかりません。")
+                raise ClientError("画像が見つかりません。", "image_not_found")
             if hidden is not None: record.hidden = hidden
             if reviewed is not None: record.reviewed = reviewed
             if self.workspace_store.has_image(image_id):
@@ -879,22 +879,22 @@ class CatalogMixin:
     def _decode_workspace_mask(value: Any) -> bytes | None:
         if value is None or value == "": return None
         if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
-            raise ClientError("手描きマスクが正しくありません。")
+            raise ClientError("手描きマスクが正しくありません。", "input_invalid")
         try:
             raw = base64.b64decode(value.split(",", 1)[1], validate=True)
         except (ValueError, binascii.Error) as exc:
-            raise ClientError("手描きマスクが正しくありません。") from exc
+            raise ClientError("手描きマスクが正しくありません。", "input_invalid") from exc
         if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
-            raise ClientError("手描きマスクが正しくありません。")
+            raise ClientError("手描きマスクが正しくありません。", "input_invalid")
         try:
             with Image.open(io.BytesIO(raw)) as image:
                 if image.format != "PNG":
-                    raise ClientError("手描きマスクが正しくありません。")
+                    raise ClientError("手描きマスクが正しくありません。", "input_invalid")
                 image.load()
                 if image.mode not in {"RGBA", "LA", "L", "1"}:
-                    raise ClientError("手描きマスクが正しくありません。")
+                    raise ClientError("手描きマスクが正しくありません。", "input_invalid")
         except (OSError, UnidentifiedImageError) as exc:
-            raise ClientError("手描きマスクが正しくありません。") from exc
+            raise ClientError("手描きマスクが正しくありません。", "input_invalid") from exc
         return raw
 
     @staticmethod
@@ -907,7 +907,7 @@ class CatalogMixin:
         try:
             self.workspace_store.save_manual(image_id, payload, self._decode_workspace_mask)
         except ValueError as exc:
-            raise ClientError("手描き状態を保存できません。") from exc
+            raise ClientError("手描き状態を保存できません。", "workspace_write_failed") from exc
         self._refresh_effective_mask_status(image_id)
 
     def manual_workspace(self, image_id: str) -> dict[str, Any] | None:
@@ -968,7 +968,7 @@ class CatalogMixin:
                 with self.lock:
                     record = self.images.get(image_id)
                     if record is None:
-                        raise ClientError("画像が見つかりません。")
+                        raise ClientError("画像が見つかりません。", "image_not_found")
                     record = replace(record)
                     revision = self._candidate_revision(image_id)
                     snapshot = [replace(candidate) for candidate in self.candidates.get(image_id, [])]
@@ -993,14 +993,14 @@ class CatalogMixin:
                         ],
                         "candidateRevision": self._candidate_revision(image_id),
                     }
-        raise ClientError("検出候補が更新されました。もう一度読み込んでください。")
+        raise ClientError("検出候補が更新されました。もう一度読み込んでください。", "catalog_changed")
 
     def image_snapshot(self, image_id: str) -> ImageRecord:
         """Capture a checked catalogue record before image I/O begins."""
         with self.lock:
             record = self.images.get(image_id)
             if record is None:
-                raise ClientError("画像が見つかりません。")
+                raise ClientError("画像が見つかりません。", "image_not_found")
             return replace(record)
 
     @staticmethod
@@ -1074,23 +1074,23 @@ class CatalogMixin:
         self.image_for_id(image_id)
         with self.lock:
             if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
             candidate = next(
                 (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
                 None,
             )
             if candidate is None:
-                raise ClientError("検出候補が見つかりません。")
+                raise ClientError("検出候補が見つかりません。", "catalog_changed")
             if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
-                raise ClientError("除外候補の強制指定が正しくありません。")
+                raise ClientError("除外候補の強制指定が正しくありません。", "input_invalid")
             if "enabled" in payload:
                 if not isinstance(payload["enabled"], bool):
-                    raise ClientError("候補のON/OFFは真偽値で指定してください。")
+                    raise ClientError("候補のON/OFFは真偽値で指定してください。", "input_invalid")
                 candidate.enabled = payload["enabled"]
             if "color" in payload:
                 color = str(payload["color"])
                 if not _valid_color(color):
-                    raise ClientError("色の形式が正しくありません。")
+                    raise ClientError("色の形式が正しくありません。", "input_invalid")
                 candidate.color = color
             if "forced" in payload:
                 candidate.forced = payload["forced"]
@@ -1105,11 +1105,11 @@ class CatalogMixin:
         role = payload.get("role")
         operation = payload.get("operation")
         if role not in {"apply", "exclude"} or operation not in {"enable", "disable", "delete"}:
-            raise ClientError("候補の一括操作が正しくありません。")
+            raise ClientError("候補の一括操作が正しくありません。", "input_invalid")
         with self.image_io_lock(image_id):
             with self.lock:
                 if self._has_active_worker():
-                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
                 selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
                 if operation == "delete":
                     self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
@@ -1133,7 +1133,7 @@ class CatalogMixin:
         with self.image_io_lock(image_id):
             with self.lock:
                 if self._has_active_worker():
-                    raise ClientError("バックグラウンド処理中は候補を変更できません。")
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
                 candidates = self.candidates.get(image_id, [])
                 candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
                 if candidate is None:

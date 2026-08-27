@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import unittest
@@ -125,16 +126,25 @@ class TranslationContractTests(unittest.TestCase):
                 for part in ("title", "cause", "action"):
                     self.assertTrue(dictionary[f"errorDialog.{code}.{part}"], f"{language}: {code}.{part}")
 
-    def test_every_current_backend_error_code_has_a_user_error_presentation(self) -> None:
+    def test_every_emitted_error_code_has_a_user_error_presentation(self) -> None:
         root = Path(__file__).resolve().parents[1]
         source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
         aliases = set(re.findall(r'([a-z_]+):\s*"[a-z_]+"', source.split("const USER_ERROR_CODES", 1)[1].split("};", 1)[0]))
-        emitted = {
-            "invalid_request", "request_failed", "internal_error", "api_not_found", "invalid_settings", "job_running",
-            "mask_not_found", "catalog_changed", "model_profile_invalid", "sam_checkpoint_invalid", "sam_provider_unavailable",
-            "model_picker_busy", "model_picker_failed", "model_picker_invalid", "model_download_invalid", "hand_segmentation_invalid",
-            "gpu_unavailable", "gpu_unsupported", "gpu_out_of_memory", "memory_allocation_failed", "no_effective_mask", "stale_asset",
-        }
+        emitted: set[str] = set()
+        for path in (root / "mozarie").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name) and node.func.id in {"ClientError", "ForbiddenClientError"}:
+                    self.assertGreaterEqual(len(node.args), 2, f"{path}:{node.lineno} must provide an error code")
+                    self.assertIsInstance(node.args[1], ast.Constant, f"{path}:{node.lineno} must use a literal error code")
+                    self.assertIsInstance(node.args[1].value, str, f"{path}:{node.lineno} must use a string error code")
+                    emitted.add(node.args[1].value)
+                for keyword in node.keywords:
+                    if keyword.arg == "errorCode" and isinstance(keyword.value, ast.Constant) and keyword.value.value:
+                        self.assertIsInstance(keyword.value.value, str, f"{path}:{node.lineno} errorCode must be a string")
+                        emitted.add(keyword.value.value)
         self.assertEqual(emitted - aliases, set())
 
     def test_api_does_not_use_server_error_text_as_user_interface_copy(self) -> None:
