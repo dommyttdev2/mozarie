@@ -178,16 +178,16 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.1.0")
 
-    def test_update_lock_rejects_another_updater_process(self):
+    def test_maintenance_lock_rejects_another_process(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory)
             root = Path(__file__).resolve().parents[1]
-            code = "from pathlib import Path; import sys; sys.path.insert(0,r'%s'); import updater; lock=updater.UpdateLock(Path(r'%s')); lock.__enter__(); print('locked', flush=True); sys.stdin.readline(); lock.close()" % (str(root), str(app))
+            code = "from pathlib import Path; import sys; sys.path.insert(0,r'%s'); import updater; lock=updater.MaintenanceLock(Path(r'%s')); lock.__enter__(); print('locked', flush=True); sys.stdin.readline(); lock.close()" % (str(root), str(app))
             process = subprocess.Popen([sys.executable, "-c", code], cwd=str(Path(__file__).parents[1]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
                 self.assertEqual(process.stdout.readline().strip(), "locked")
                 with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_in_progress"))):
-                    with updater.UpdateLock(app):
+                    with updater.MaintenanceLock(app):
                         pass
             finally:
                 if process.poll() is None and process.stdin:
@@ -708,12 +708,11 @@ class UpdaterTests(unittest.TestCase):
         install_index = batch.index('"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip')
         self.assertLess(batch.index("call :validate_python"), install_index)
 
-    def test_setup_shows_five_steps_and_checks_for_a_running_app_before_pip(self):
+    def test_setup_shows_five_steps_under_the_maintenance_lock_before_pip(self):
         batch = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         setup_check = "echo [Mozarie] [1/5] Checking Python environment..."
         create_venv = 'if not exist "%PYTHON%" call :create_venv'
-        running_check = '"%PYTHON%" -X utf8 "%APP_DIR%updater.py" --check-running'
-        running_branch = 'if "%ERRORLEVEL%"=="30" goto :mozarie_running'
+        maintenance_check = 'py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked'
         failed_branch = "if errorlevel 1 goto :failed"
         marker_removal = 'del /q "%APP_DIR%.venv\\.mozarie-ready" >nul 2>nul'
         self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip'
@@ -724,8 +723,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(batch.count("/5]"), 5)
         self.assertIn(setup_check, batch)
         self.assertLess(batch.index(setup_check), batch.index(create_venv))
-        self.assertIn(running_check, batch)
-        self.assertIn(running_branch, batch)
+        self.assertIn(maintenance_check, batch)
         self.assertIn(marker_removal, batch)
         self.assertIn(self_upgrade, batch)
         self.assertIn(requirements, batch)
@@ -734,15 +732,11 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("--no-cache-dir", requirements)
         self.assertNotIn("Checking that Mozarie is closed", batch)
         self.assertNotIn("--no-cache-dir", (Path(__file__).parents[1] / "updater.py").read_text(encoding="utf-8"))
-        self.assertLess(batch.index("call :validate_python"), batch.index(running_check))
-        self.assertLess(batch.index(running_check), batch.index('"%PYTHON%" -m pip install'))
-        self.assertLess(batch.index(running_branch), batch.index(failed_branch, batch.index(running_check)))
+        self.assertLess(batch.index(maintenance_check), batch.index('"%PYTHON%" -m pip install'))
         self.assertLess(batch.index(marker_removal), batch.index(requirements))
-        self.assertIn(":mozarie_running", batch)
-        self.assertIn("Close Mozarie, then run setup.bat again. / Mozarieを終了してから、もう一度 setup.bat を実行してください。", batch)
         self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
         self.assertIn('"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"', batch)
-        self.assertIn("GPU unavailable. CPU will be used; change it later in Settings.", batch)
+        self.assertIn("GPU unavailable. Switched the detection runtime to CPU; change it later in Settings.", batch)
         self.assertIn("setup_gpu_check.py", updater.MANAGED_FILES)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):

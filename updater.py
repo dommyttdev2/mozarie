@@ -166,7 +166,7 @@ class MaintenanceLock(AbstractContextManager["MaintenanceLock"]):
         self.path = app_dir / ".mozarie-cache" / ".maintenance.lock"
         self.handle: Any | None = None
 
-    def __enter__(self) -> "UpdateLock":
+    def __enter__(self) -> "MaintenanceLock":
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.handle = self.path.open("a+b")
@@ -195,10 +195,6 @@ class MaintenanceLock(AbstractContextManager["MaintenanceLock"]):
 
     def __exit__(self, *_args: Any) -> None:
         self.close()
-
-
-# Kept as a small source-level alias for updater integrations.
-UpdateLock = MaintenanceLock
 
 
 def parse_version(value: str) -> tuple[int, int, int]:

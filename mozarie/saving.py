@@ -344,6 +344,7 @@ class SavingMixin:
                             mtime_ns=record_snapshot.mtime_ns if source_action == "overwrite" else None,
                             size_bytes=record_snapshot.size_bytes if source_action == "overwrite" else None,
                             source_hash=source_hash,
+                            candidate_revision=current_revision + 1 if cleared else None,
                             clear_workspace=deleted or cleared,
                             delete_image=deleted,
                         )
@@ -468,6 +469,7 @@ class SavingMixin:
                                 record.image_id,
                                 mtime_ns=None if copy_to_default else output_stat.st_mtime_ns,
                                 size_bytes=None if copy_to_default else output_stat.st_size,
+                                candidate_revision=self._candidate_revision(record.image_id) + 1,
                                 clear_workspace=True,
                             )
                             if not copy_to_default:

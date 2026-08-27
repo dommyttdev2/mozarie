@@ -377,7 +377,8 @@ class WorkspaceStore:
             db.execute(f"UPDATE images SET {','.join(updates)},updated_at=? WHERE image_id=?", values)
 
     def commit_save(self, image_id: str, *, mtime_ns: int | None = None, size_bytes: int | None = None,
-                    source_hash: str | None = None, clear_workspace: bool, delete_image: bool = False) -> None:
+                    source_hash: str | None = None, candidate_revision: int | None = None,
+                    clear_workspace: bool, delete_image: bool = False) -> None:
         """Commit one completed save before its in-memory review state is published."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -389,6 +390,8 @@ class WorkspaceStore:
                         db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
                     else:
                         db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,source_hash=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, source_hash, time.time_ns(), image_id))
+                if candidate_revision is not None and not delete_image:
+                    db.execute("UPDATE images SET candidate_revision=?,reviewed=0,updated_at=? WHERE image_id=?", (candidate_revision, time.time_ns(), image_id))
                 if clear_workspace and not delete_image:
                     db.execute("DELETE FROM candidates WHERE image_id=?", (image_id,))
                     db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))

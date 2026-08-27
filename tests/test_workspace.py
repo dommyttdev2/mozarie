@@ -203,6 +203,16 @@ class WorkspaceTests(unittest.TestCase):
                 WorkspaceStore(root)
             self.assertEqual(path.read_bytes(), before)
 
+    def test_save_commit_persists_the_cleared_candidate_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            store.commit_save(image_id, candidate_revision=1, clear_workspace=True)
+            reopened = WorkspaceStore(root)
+            self.assertEqual(reopened.hydrate_candidates(image_id, root / "cache", lambda *_args: None)[0], 1)
+
     def test_empty_and_garbage_existing_databases_are_rejected_without_changes(self):
         for content in (b"", b"not sqlite"):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:

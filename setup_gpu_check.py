@@ -7,7 +7,7 @@ from pathlib import Path
 from mozarie.config import SettingsStore
 
 
-CPU_MESSAGE = "[Mozarie] GPU unavailable. CPU will be used; change it later in Settings. / GPUは利用できません。CPUを使用します。後で設定から変更できます。"
+CPU_MESSAGE = "[Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。"
 CPU_SAVE_FAILED_MESSAGE = "[Mozarie] GPU unavailable, but switching to CPU could not be saved. Setup stopped; check config/local.json and run setup again. / GPUは利用できず、CPUへの切替も保存できませんでした。config/local.jsonを確認して、setupをもう一度実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 

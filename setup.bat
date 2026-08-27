@@ -60,7 +60,7 @@ pause
 exit /b 1
 
 :gpu_cpu
-echo [Mozarie] GPU unavailable. CPU will be used; change it later in Settings. / GPUは利用できません。CPUを使用します。後で設定から変更できます。
+echo [Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。
 goto :setup_ready
 
 :mozarie_running
