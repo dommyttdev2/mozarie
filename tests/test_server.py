@@ -1360,6 +1360,28 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(Image.open(record.path).text["prompt"], '{"seed": 123}')
         self.assertEqual(Image.open(record.path).text["workflow"], '{"nodes": []}')
 
+    def test_catalog_snapshot_exposes_only_filesystem_source_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "画像 folder"
+            root.mkdir()
+            source = root / "space 名.png"
+            Image.new("RGB", (8, 8), "white").save(source)
+            state = self.new_state()
+            filesystem = state.set_root(str(root))[0]
+            filesystem_snapshot = state.catalog_snapshot()["images"][0]
+            self.assertEqual(filesystem_snapshot["id"], filesystem["id"])
+            self.assertEqual(filesystem_snapshot["sourcePath"], str(source.resolve()))
+
+            raw = io.BytesIO()
+            Image.new("RGB", (8, 8), "white").save(raw, format="PNG")
+            session = self.new_state()
+            imported = import_image_list_for_test(session, [{
+                "name": "画像 space.png", "data": base64.b64encode(raw.getvalue()).decode("ascii"),
+            }])[0]
+            session_snapshot = session.catalog_snapshot()["images"][0]
+            self.assertEqual(session_snapshot["id"], imported["id"])
+            self.assertNotIn("sourcePath", session_snapshot)
+
     def test_import_preserves_safe_nested_relative_paths_and_same_names(self):
         with tempfile.TemporaryDirectory() as directory:
             raw = io.BytesIO()

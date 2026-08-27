@@ -927,30 +927,31 @@ class CatalogMixin:
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
-                output.append(
-                    {
-                        "id": record.image_id,
-                        "relativePath": record.relative_path,
-                        "sourceKind": record.source_kind,
-                        "width": record.width,
-                        "height": record.height,
-                        "mtimeNs": record.mtime_ns,
-                        "sizeBytes": record.size_bytes,
-                        "assetVersion": self.asset_version(record),
-                        "candidateCount": len(self.candidates.get(image_id, [])),
-                        "enabledCandidateCount": sum(
-                            candidate.enabled and candidate.role == CandidateRole.APPLY
-                            for candidate in self.candidates.get(image_id, [])
-                        ),
-                        "hasEffectiveMask": manual_mask_statuses.get(image_id, (
-                            any(candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])),
-                            -1,
-                        ))[0],
-                        "candidateRevision": self._candidate_revision(image_id),
-                        "hidden": record.hidden,
-                        "reviewed": record.reviewed,
-                    }
-                )
+                item = {
+                    "id": record.image_id,
+                    "relativePath": record.relative_path,
+                    "sourceKind": record.source_kind,
+                    "width": record.width,
+                    "height": record.height,
+                    "mtimeNs": record.mtime_ns,
+                    "sizeBytes": record.size_bytes,
+                    "assetVersion": self.asset_version(record),
+                    "candidateCount": len(self.candidates.get(image_id, [])),
+                    "enabledCandidateCount": sum(
+                        candidate.enabled and candidate.role == CandidateRole.APPLY
+                        for candidate in self.candidates.get(image_id, [])
+                    ),
+                    "hasEffectiveMask": manual_mask_statuses.get(image_id, (
+                        any(candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])),
+                        -1,
+                    ))[0],
+                    "candidateRevision": self._candidate_revision(image_id),
+                    "hidden": record.hidden,
+                    "reviewed": record.reviewed,
+                }
+                if record.source_kind == "filesystem":
+                    item["sourcePath"] = str(record.path)
+                output.append(item)
             return {
                 "root": str(self.root) if self.root else None,
                 "images": output,

@@ -119,8 +119,8 @@ function startFixtureServer() {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
         images: [
-          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
         ],
         root: "G:/fixture",
       }));
@@ -792,6 +792,14 @@ async function main() {
         window.__openDirectoryCalled = true;
         return { async *values() {} };
       };
+      window.__copiedPaths = [];
+      window.__clipboardFail = false;
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async (text) => {
+          if (window.__clipboardFail) throw new DOMException("fixture clipboard failure", "NotAllowedError");
+          window.__copiedPaths.push(text);
+        },
+      } });
     });
     const pageErrors = [];
     const consoleErrors = [];
@@ -1462,6 +1470,55 @@ async function main() {
     }
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("role"), "menu");
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("tabindex"), "-1");
+    await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" });
+    await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
+    assert.equal(await page.locator("#copyImagePathMenuItem").isVisible(), true, "filesystem gallery cards expose Copy path");
+    await page.locator("#copyImagePathMenuItem").click();
+    assert.deepEqual(await page.evaluate(() => window.__copiedPaths), ["G:\\画像 フォルダー\\sample image.png"], "copy path preserves spaces and Unicode characters");
+    assert.equal(await page.locator("#connectionStatus").textContent(), "パスをコピーしました。", "successful copying reports a localized status");
+    assert.equal(await page.evaluate(async () => { await loadTranslations("en"); return t("status.pathCopied"); }), "Path copied.", "copy success has an English status");
+    await page.evaluate(() => loadTranslations("ja"));
+    await page.locator('.gallery-item[data-id="sample-two"]').click({ button: "right" });
+    await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
+    await page.waitForFunction(() => state.contextMenuImageId === "sample-two");
+    assert.equal(await page.locator("#copyImagePathMenuItem").getAttribute("hidden"), "", "session images never expose their temporary path");
+    await page.keyboard.press("Escape");
+    await page.locator('.gallery-item[data-id="sample"]').focus();
+    await page.keyboard.press("Shift+F10");
+    const keyboardMenu = await page.locator("#catalogContextMenu").evaluate((menu) => {
+      const card = document.querySelector('.gallery-item[data-id="sample"]').getBoundingClientRect(); const rect = menu.getBoundingClientRect();
+      return { open: menu.matches(":popover-open"), left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, cardLeft: card.left, cardTop: card.top, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    });
+    assert.equal(keyboardMenu.open, true, "Shift+F10 opens the gallery context menu");
+    assert.ok(keyboardMenu.left >= 0 && keyboardMenu.top >= 0 && keyboardMenu.right <= keyboardMenu.viewportWidth && keyboardMenu.bottom <= keyboardMenu.viewportHeight && keyboardMenu.left >= keyboardMenu.cardLeft && keyboardMenu.top >= keyboardMenu.cardTop, "keyboard menu starts from the card and remains in the viewport");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.locator("#catalogContextMenu").evaluate((menu) => menu.matches(":popover-open")), false, "Tab closes the catalog context menu without trapping focus");
+    await page.locator("#overviewButton").click();
+    await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+    await page.locator("#batchModeButton").click();
+    await page.locator('.overview-item[data-id="sample"]').click();
+    await page.locator('.overview-item[data-id="sample-two"]').click();
+    await page.locator('.overview-item[data-id="sample"]').focus();
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').getAttribute("aria-haspopup"), "menu", "overview cards announce their context menu");
+    await page.keyboard.press("ContextMenu");
+    await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
+    assert.deepEqual(await page.evaluate(() => [...state.selectedImageIds].sort()), ["sample", "sample-two"], "opening a context menu leaves the batch selection unchanged");
+    assert.equal(await page.locator("#copyImagePathMenuItem").isVisible(), true, "filesystem overview cards expose Copy path");
+    await page.locator("#copyImagePathMenuItem").click();
+    assert.deepEqual(await page.evaluate(() => window.__copiedPaths), ["G:\\画像 フォルダー\\sample image.png", "G:\\画像 フォルダー\\sample image.png"], "overview copies only the context-menu image");
+    await page.evaluate(() => { window.__clipboardFail = true; });
+    await page.locator('.overview-item[data-id="sample"]').click({ button: "right" });
+    await page.locator("#copyImagePathMenuItem").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    const clipboardError = await page.locator("#errorDialog").textContent();
+    assert.match(clipboardError, /パスをコピーできません/, "clipboard failure uses a readable error dialog");
+    assert.doesNotMatch(clipboardError, /NotAllowedError|fixture clipboard failure/, "clipboard failure never exposes the raw DOMException");
+    await page.locator("#errorDialogClose").click();
+    await page.waitForFunction(() => !document.querySelector("#errorDialog").open);
+    assert.equal(await page.locator('.overview-item[data-id="sample"]').evaluate((item) => document.activeElement === item), true, "closing a copy failure returns focus to the context-menu card");
+    await page.locator("#selectionClearButton").click();
+    await page.locator("#closeOverviewButton").click();
+    await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
     for (const selector of ["#confirmDialog", "#detectDialog", "#applyDialog", "#processingDialog"]) {
       assert.ok(await page.locator(selector).getAttribute("aria-labelledby"), `${selector} must have an accessible title`);
     }

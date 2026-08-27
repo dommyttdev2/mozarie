@@ -126,13 +126,13 @@ async function clearCatalog() {
   finally { state.catalogMutation = false; updateActionButtons(); }
 }
 
-function closeCatalogContextMenu() {
+function closeCatalogContextMenu({ restoreFocus = true } = {}) {
   const menu = $("#catalogContextMenu");
   if (menu.matches?.(":popover-open")) menu.hidePopover();
   state.contextMenuImageId = null;
   const origin = state.contextMenuOrigin;
   state.contextMenuOrigin = null;
-  focusElement(origin);
+  if (restoreFocus) focusElement(origin);
 }
 
 function positionCatalogContextMenu(menu, clientX, clientY) {
@@ -152,14 +152,32 @@ function openCatalogContextMenu(event, imageId) {
   state.contextMenuImageId = imageId;
   state.contextMenuOrigin = event.currentTarget || document.activeElement;
   $("#toggleReviewMenuItem").textContent = t(isReviewed(image) ? "context.unreview" : "context.review");
+  $("#copyImagePathMenuItem").hidden = !image.sourcePath;
   $("#removeImageMenuItem").textContent = t(isHidden(image) ? "editor.show" : "editor.hide");
   const menu = $("#catalogContextMenu");
-  menu.style.left = `${event.clientX}px`;
-  menu.style.top = `${event.clientY}px`;
+  const cardRect = state.contextMenuOrigin?.getBoundingClientRect?.();
+  const keyboardEvent = event.type === "keydown";
+  const clientX = !keyboardEvent && Number.isFinite(event.clientX) ? event.clientX : (cardRect ? cardRect.left + Math.min(24, cardRect.width / 2) : 8);
+  const clientY = !keyboardEvent && Number.isFinite(event.clientY) ? event.clientY : (cardRect ? cardRect.top + Math.min(24, cardRect.height / 2) : 8);
+  menu.style.left = `${clientX}px`;
+  menu.style.top = `${clientY}px`;
   menu.showPopover?.();
-  positionCatalogContextMenu(menu, event.clientX, event.clientY);
+  positionCatalogContextMenu(menu, clientX, clientY);
   focusElement($("#toggleReviewMenuItem"));
   if (state.currentId !== imageId) void selectImage(imageId);
+}
+
+async function copyContextMenuImagePath() {
+  const image = state.images.find((item) => item.id === state.contextMenuImageId);
+  const origin = state.contextMenuOrigin;
+  closeCatalogContextMenu();
+  if (!image?.sourcePath) return;
+  try {
+    await navigator.clipboard.writeText(image.sourcePath);
+    setStatusKey("status.pathCopied");
+  } catch {
+    showUserError({ code: "clipboard_write_failed" }, origin);
+  }
 }
 
 function clearReviewForRemovedImage(image) {
