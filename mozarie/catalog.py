@@ -1093,7 +1093,7 @@ class CatalogMixin:
                             self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
-            alpha = mask_image.convert("L")
+            alpha = mask_image.convert("L").point(lambda value: 255 if value else 0)
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
             rgba.putalpha(alpha)
             output = io.BytesIO()
