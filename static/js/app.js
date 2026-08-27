@@ -9,6 +9,18 @@ function showModalFromInvoker(dialog, invoker = document.activeElement) {
   dialog.showModal();
 }
 
+function trapModalTab(event) {
+  if (event.key !== "Tab") return;
+  const dialog = event.currentTarget;
+  const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => element.offsetParent !== null);
+  if (!focusable.length) { event.preventDefault(); dialog.focus(); return; }
+  const first = focusable[0]; const last = focusable.at(-1);
+  if (event.shiftKey ? document.activeElement === first : document.activeElement === last || !dialog.contains(document.activeElement)) {
+    event.preventDefault(); focusElement(event.shiftKey ? last : first);
+  }
+}
+
 function modelHelpInfo(key) {
   const source = (label, url) => ({ source: label, url });
   const english = $("#settingsLanguage")?.value === "en";
@@ -20,7 +32,7 @@ function modelHelpInfo(key) {
   };
   const models = {
     target: { model: "01miku/anime-nsfw-segm-yolo26", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26") },
-    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.red", "https://civitai.red/models/1313556"), command: conversionCommand("ntd11") },
+    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.com", "https://civitai.com/api/download/models/2350456?fileId=2240838"), command: conversionCommand("ntd11") },
     sensitive: { model: "sugarknight/sensitive-detect", file: ".pt → .onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect"), command: conversionCommand("sensitive") },
     precision: { model: "Meta Segment Anything (SAM)", file: ".pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
     hand: { model: "deepghs/anime_hand_detection", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection") },
@@ -56,6 +68,7 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("keydown", trapModalTab));
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("close", () => {
     const invoker = modalInvokers.get(dialog);
     modalInvokers.delete(dialog);
@@ -84,9 +97,17 @@ function bindEvents() {
   $("#settingsDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#settingsDialog").close(); });
   lightDismiss($("#settingsDialog"), () => $("#settingsDialog").close());
   $("#settingsDialog").addEventListener("close", () => {
-    if (state.settings?.models && state.settings?.display && state.settings?.detection) {
-      setSettingsForm(state.settings, state.settingsStatus);
-    }
+    const saved = state.settings;
+    if (!saved?.models || !saved?.display || !saved?.detection) return;
+    void (async () => {
+      // Changing the select previews a language immediately.  Closing without
+      // saving must restore both that language and the saved settings UI.
+      await loadTranslations(saved.general.language);
+      const focusBeforeRestore = document.activeElement;
+      setSettingsForm(saved, state.settingsStatus);
+      if (!$("#settingsDialog").open && focusBeforeRestore?.isConnected) focusElement(focusBeforeRestore);
+      void refreshSettingsStatus();
+    })();
   });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#settingsResetButton").addEventListener("click", () => { void resetSettings(); });
@@ -141,7 +162,7 @@ function bindEvents() {
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
-  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
+  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, persistedDetectionTargets()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
@@ -250,7 +271,6 @@ function bindEvents() {
   });
   $("#mosaicHelpCloseButton").addEventListener("click", () => $("#mosaicHelpDialog").close());
   lightDismiss($("#mosaicHelpDialog"), () => $("#mosaicHelpDialog").close());
-  $("#removeAfterSave").addEventListener("change", syncApplyMode);
   $("#applyCloseButton").addEventListener("click", () => $("#applyDialog").close());
   $("#applyPauseButton").addEventListener("click", () => {
     const paused = state.browserSave ? state.browserSave.paused : state.job?.state === "paused";

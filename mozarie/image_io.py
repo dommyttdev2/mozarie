@@ -5,6 +5,7 @@ import io
 import math
 import os
 import tempfile
+import uuid
 import zlib
 from pathlib import Path
 from typing import Any
@@ -443,10 +444,39 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     raise ClientError("この画像形式は保存に対応していません。", "image_format_unsupported")
 
 
-def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> None:
-    """Atomically replace a catalogued source with a staged render."""
+class SourceReplaceStage:
+    def __init__(self, record: ImageRecord, backup_path: Path) -> None:
+        self.record = record
+        self.backup_path = backup_path
+
+    def rollback(self) -> None:
+        if self.backup_path.exists():
+            os.replace(self.backup_path, self.record.path)
+            _sync_directory(self.record.path.parent)
+
+    def finalize(self) -> None:
+        self.backup_path.unlink(missing_ok=True)
+        _sync_directory(self.record.path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> SourceReplaceStage:
+    """Replace a source while retaining a same-directory rollback copy."""
     original_stat = record.path.stat()
     temporary_path: Path | None = None
+    backup_path = record.path.with_name(f".{record.path.name}.mozarie-backup-{uuid.uuid4().hex}")
     try:
         with tempfile.NamedTemporaryFile(dir=record.path.parent, suffix=f"{record.path.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
@@ -456,8 +486,14 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
-        os.replace(temporary_path, record.path)
+        os.replace(record.path, backup_path)
+        try:
+            os.replace(temporary_path, record.path)
+        except Exception:
+            os.replace(backup_path, record.path)
+            raise
         temporary_path = None
+        _sync_directory(record.path.parent)
         if record.source_kind == "filesystem":
             try:
                 os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
@@ -466,9 +502,15 @@ def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Pat
         stat = record.path.stat()
         record.mtime_ns = stat.st_mtime_ns
         record.size_bytes = stat.st_size
+        return SourceReplaceStage(record, backup_path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> None:
+    """Atomically replace a catalogued source and finalize it immediately."""
+    _stage_record_replacement(record, rendered_path, expected_source_fingerprint).finalize()
 
 
 def write_rendered_copy(destination: Path, output: bytes) -> None:
@@ -489,11 +531,15 @@ def write_rendered_copy(destination: Path, output: bytes) -> None:
 
 
 def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> None:
+    _stage_save_with_mask(record, mask, block_size).finalize()
+
+
+def _stage_save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> SourceReplaceStage:
     destination = record.path
     original_stat = record.path.stat()
     output = render_with_mask(record, mask, block_size)
-
     temporary_path: Path | None = None
+    backup_path = destination.with_name(f".{destination.name}.mozarie-backup-{uuid.uuid4().hex}")
     try:
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=f"{destination.suffix}.mozarie.tmp", delete=False) as handle:
             temporary_path = Path(handle.name)
@@ -501,12 +547,22 @@ def save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> No
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record)
-        os.replace(temporary_path, destination)
+        os.replace(destination, backup_path)
+        try:
+            os.replace(temporary_path, destination)
+        except Exception:
+            os.replace(backup_path, destination)
+            raise
         temporary_path = None
+        _sync_directory(destination.parent)
         try:
             os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         except OSError:
             LOGGER.warning("Saved image timestamp could not be restored: %s", destination)
+        stat = destination.stat()
+        record.mtime_ns = stat.st_mtime_ns
+        record.size_bytes = stat.st_size
+        return SourceReplaceStage(record, backup_path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

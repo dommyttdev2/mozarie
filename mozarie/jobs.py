@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import gc
+import sqlite3
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any
@@ -141,7 +143,6 @@ class JobsMixin:
 
 
     def request_cancel(self) -> Job:
-        cancelled = False
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
                 raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
@@ -155,15 +156,8 @@ class JobsMixin:
                     raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
                 control.cancel_requested.set()
                 control.pause_requested.clear()
-                if self.job.state == "paused":
-                    self._resume_job_clock()
-                    self.job.state = "cancelled"
-                    self.job.ended_at = time.time()
-                    self.job.current = ""
-                    cancelled = True
+                self.job.cancel_requested = True
                 job = self.job
-        if cancelled:
-            self._release_gpu_job_memory()
         return job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
@@ -285,6 +279,7 @@ class JobsMixin:
             if self._job_is_current(job_generation, catalog_generation):
                 self._resume_job_clock()
                 self.job.state = "cancelled"
+                self.job.cancel_requested = False
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
@@ -302,20 +297,23 @@ class JobsMixin:
         draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
         removed_candidate_ids: set[str] | None = None,
+        candidate_snapshot: list[Candidate] | None = None,
+        lock_image: bool = True,
     ) -> np.ndarray | None:
         if draft is None:
             add_mask, exclusion_mask, exclusion_erase_mask = None, None, None
         else:
             add_mask, exclusion_mask, *remaining = draft
             exclusion_erase_mask = remaining[0] if remaining else None
-        with self.image_io_lock(image_id):
+        with (self.image_io_lock(image_id) if lock_image else nullcontext()):
             with self.lock:
                 current_record = self.images.get(image_id)
                 if current_record is None:
                     raise ClientError("画像が見つかりません。", "image_not_found")
                 record = replace(current_record)
                 removed_candidate_ids = removed_candidate_ids or set()
-                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
+                source_candidates = candidate_snapshot if candidate_snapshot is not None else self.candidates.get(image_id, [])
+                candidates = [replace(candidate) for candidate in source_candidates if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
                 revision = self._candidate_revision(image_id)
                 catalog_generation = self.catalog_generation
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]
@@ -490,6 +488,7 @@ class JobsMixin:
                 return
             self._resume_job_clock()
             self.job.state = "complete"
+            self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.completed = self.job.total
             self.job.current = ""
@@ -505,7 +504,13 @@ class JobsMixin:
         gpu_oom = self._gpu_oom_client_error(exc)
         if not isinstance(exc, ClientError):
             message = str(exc).lower()
-            if any(marker in message for marker in (
+            if isinstance(exc, sqlite3.DatabaseError):
+                exc = ClientError("作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error")
+            elif self.job.kind == "apply" and isinstance(exc, OSError):
+                exc = ClientError("保存先に書き込めませんでした。保存先と空き容量を確認してください。", "output_unavailable")
+            elif self.job.kind == "detect" and isinstance(exc, (ValueError, IndexError)):
+                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
+            elif any(marker in message for marker in (
                 "no kernel image is available", "does not include kernels for this gpu", "not compatible with the current pytorch installation",
             )):
                 exc = ClientError(
@@ -519,12 +524,17 @@ class JobsMixin:
                     "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
                     "memory_allocation_failed",
                 )
+            elif any(marker in message for marker in ("onnx", "protobuf", "invalid graph", "load model")):
+                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
+            elif self.job.kind == "detect":
+                exc = ClientError("検出を完了できませんでした。もう一度実行してください。", "internal_error")
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
             kind = self.job.kind
             self._resume_job_clock()
             self.job.state = "error"
+            self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
             self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""

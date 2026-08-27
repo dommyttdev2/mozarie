@@ -49,12 +49,23 @@ class DetectionMixin:
         model_path = self._configured_model_path("target_segmentation", "対象セグメンテーション")
         provider = str(self.settings["models"].get("provider", "gpu"))
         gpu_device = int(self.settings["models"].get("gpu_device", 0))
-        target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
+        try:
+            target = TargetSegmenter(model_path, device=provider, gpu_device=gpu_device)
+        except ClientError:
+            raise
+        except Exception as exc:
+            raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
         auxiliaries: list[tuple[str, GenericYoloSegmenter]] = []
         for key, label in (("ntd11", "NTD11補助モデル"), ("sensitive", "Sensitive補助モデル")):
             if not self.settings["models"][f"{key}_enabled"]:
                 continue
-            auxiliaries.append((key, GenericYoloSegmenter(self._configured_model_path(key, label), device=provider, gpu_device=gpu_device)))
+            try:
+                auxiliary = GenericYoloSegmenter(self._configured_model_path(key, label), device=provider, gpu_device=gpu_device)
+            except ClientError:
+                raise
+            except Exception as exc:
+                raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
+            auxiliaries.append((key, auxiliary))
         return DetectionModels(target=target, auxiliaries=auxiliaries)
 
     def _configured_model_path(self, key: str, label: str) -> Path:
@@ -63,7 +74,7 @@ class DetectionMixin:
             raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"{label}モデルが見つかりません: {path}", "model_file_missing")
+            raise ClientError(f"{label}モデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() != ".onnx":
             raise ClientError(f"{label}モデルにはONNXファイルを指定してください。", "model_file_invalid")
         return path
@@ -75,7 +86,7 @@ class DetectionMixin:
             raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"SAMモデルが見つかりません: {path}", "model_file_missing")
+            raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
             raise ClientError("SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください。", "sam_checkpoint_invalid")
         return path
@@ -103,6 +114,10 @@ class DetectionMixin:
                     model_path = self._configured_model_path("hand_detection", "手の検出")
                     provider = str(self.settings["models"].get("provider", "gpu"))
                     hand = HandDetector(model_path, device=provider, gpu_device=int(self.settings["models"].get("gpu_device", 0)))
+                except ClientError:
+                    raise
+                except Exception as exc:
+                    raise ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed") from exc
                 finally:
                     self._set_detection_model_preparation(False)
                 with self.lock:
@@ -183,13 +198,10 @@ class DetectionMixin:
                                     or self.images.get(record.image_id) is not record):
                                 self._discard_candidates(candidates)
                                 return
-                            self.candidates[record.image_id] = [*boundary_candidates, *candidates]
-                            self._touch_candidates(record.image_id)
-                            self._persist_candidates(record.image_id)
+                            self._commit_candidate_snapshot(record.image_id, [*boundary_candidates, *candidates], replace=True)
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)
-                        self._refresh_effective_mask_status(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                 finally:
                     self.invalidate_sam_image(record.image_id)
@@ -299,6 +311,24 @@ class DetectionMixin:
         return detected, hand_mask, fallback_boxes
 
     @staticmethod
+    def _fallback_hand_boxes_mask(
+        shape: tuple[int, int], boxes: list[tuple[int, int, int, int]], detected: list[dict[str, Any]],
+    ) -> np.ndarray:
+        """Use detector boxes only inside the existing APPLY union.
+
+        This is the safe standard-mode fallback when a contour model is off or
+        does not accept its result.  Publishing a whole box would hide nearby
+        content that the target detector did not select.
+        """
+        apply_union = np.zeros(shape, dtype=np.uint8)
+        for segment in detected:
+            apply_union = np.maximum(apply_union, np.asarray(segment["mask"]) > 0)
+        fallback = np.zeros(shape, dtype=np.uint8)
+        for left, top, right, bottom in boxes:
+            fallback[top:bottom, left:right] = 1
+        return np.where(apply_union > 0, fallback * 255, 0).astype(np.uint8)
+
+    @staticmethod
     def _attach_hand_evidence(segments: list[dict[str, Any]], detected: list[dict[str, Any]], hand_mask: np.ndarray) -> list[dict[str, Any]]:
         for segment in detected:
             segment["_detector_mask"] = np.asarray(segment["mask"]).copy()
@@ -313,7 +343,8 @@ class DetectionMixin:
     @staticmethod
     def _apply_sam_hand_fallback(
         predictor: Any, fallback_boxes: list[tuple[int, int, int, int]], shape: tuple[int, int], hand_mask: np.ndarray,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
+        unconfirmed: list[tuple[int, int, int, int]] = []
         for padded_box in fallback_boxes:
             masks, scores, _ = predictor.predict(
                 point_coords=None, point_labels=None, box=np.asarray(padded_box, dtype=np.float32), multimask_output=True,
@@ -321,7 +352,9 @@ class DetectionMixin:
             confirmed = accepted_hand_sam_mask(masks, scores, shape, padded_box)
             if confirmed is not None:
                 hand_mask = np.maximum(hand_mask, confirmed)
-        return hand_mask
+            else:
+                unconfirmed.append(padded_box)
+        return hand_mask, unconfirmed
 
     def _refine_detected_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
@@ -335,7 +368,7 @@ class DetectionMixin:
         if fallback_boxes:
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
-                hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
+                hand_mask, _unconfirmed = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
         return self._attach_hand_evidence(segments, detected, hand_mask)
 
     def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -454,10 +487,19 @@ class DetectionMixin:
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
                 if fallback_boxes:
-                    hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, rgb.shape[:2], hand_mask)
+                    hand_mask, unconfirmed_boxes = self._apply_sam_hand_fallback(
+                        predictor, fallback_boxes, rgb.shape[:2], hand_mask,
+                    )
+                    hand_mask = np.maximum(
+                        hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], unconfirmed_boxes, detected),
+                    )
                 segments = self._attach_hand_evidence(segments, detected, hand_mask)
                 segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
         else:
+            # Standard detection intentionally has no SAM dependency.  A hand
+            # box is still a useful exclusion after it is constrained to the
+            # detector's APPLY union.
+            hand_mask = np.maximum(hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], fallback_boxes, detected))
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
         segments = self._finalize_exclusions(rgb, segments)
         candidates: list[Candidate] = []
@@ -596,15 +638,11 @@ class DetectionMixin:
                             else:
                                 fallback_boxes.append(box)
                     if fallback_boxes:
-                        with self.sam_lock:
-                            hand_mask = self._apply_sam_hand_fallback(
-                                self._sam_predictor_for(record, rgb), fallback_boxes, rgb.shape[:2], hand_mask
-                            )
-                else:
-                    with self.sam_lock:
-                        hand_mask = self._apply_sam_hand_fallback(
-                            self._sam_predictor_for(record, rgb), hand_boxes, rgb.shape[:2], hand_mask
+                        hand_mask = np.maximum(
+                            hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], fallback_boxes, [boundary_segment]),
                         )
+                else:
+                    hand_mask = self._fallback_hand_boxes_mask(rgb.shape[:2], hand_boxes, [boundary_segment])
             if np.any(hand_mask):
                 boundary_segment["image_exclusions"] = {"hand": hand_mask}
             boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
@@ -652,10 +690,9 @@ class DetectionMixin:
                     with self.lock:
                         if self.images.get(image_id) is not record:
                             raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
-                        self.candidates.setdefault(image_id, []).extend(created)
-                        revision = self._touch_candidates(image_id)
-                        self._persist_candidates(image_id)
-                    self._refresh_effective_mask_status(image_id)
+                        revision = self._commit_candidate_snapshot(
+                            image_id, [*self.candidates.get(image_id, []), *created], replace=True,
+                        )
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)

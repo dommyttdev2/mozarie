@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import warnings
 import atexit
 import msvcrt
@@ -26,7 +27,7 @@ from .saving import SavingMixin
 from .detection import DetectionMixin
 from .jobs import JobsMixin
 from .model_downloads import ModelDownloadManager
-from .workspace import WorkspaceStore
+from .workspace import WorkspaceOpenError, WorkspaceStore
 
 
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
@@ -141,15 +142,16 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                 raise ClientError("処理中は設定を変更できません。", "job_running")
             previous_models = dict(self.settings.get("models", {}))
-            previous_output_directory = self.settings["saving"]["default_output_directory"]
             try:
                 settings = self.settings_store.validate_update(update)
-                if settings["saving"]["default_output_directory"] != previous_output_directory:
-                    validate_output_directory_ready(settings["saving"]["default_output_directory"])
-                self._require_supported_gpu(settings["models"])
-                settings = self.settings_store.save(settings)
             except SettingsError as exc:
-                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings") from exc
+            try:
+                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+            except (SettingsError, OSError) as exc:
+                raise ClientError("保存先フォルダを使用できません。", "output_folder_unavailable") from exc
+            self._require_supported_gpu(settings["models"])
+            settings = self.settings_store.save(settings)
             self.settings = settings
             detection_keys = {
                 "target_segmentation", "ntd11", "ntd11_enabled", "sensitive", "sensitive_enabled",
@@ -186,6 +188,22 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if not selected_gpu or not selected_gpu["supported"]:
             raise self._gpu_selection_error()
 
+    def diagnose_gpu_runtime(self) -> tuple[str, ...]:
+        """Exercise a disposable ONNX session without retaining it in model state."""
+        from .inference.onnx import diagnose_runtime
+        with self.inference_lock:
+            with self.lock:
+                if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中はGPU推論を確認できません。", "operation_in_progress")
+                models = dict(self.settings["models"])
+            self._require_supported_gpu(models)
+            try:
+                return diagnose_runtime("gpu", int(models.get("gpu_device", 0)))
+            except ClientError:
+                raise
+            except Exception as exc:
+                raise ClientError("GPU推論を確認できません。CUDA環境とモデルファイルを確認してください。", "gpu_unavailable") from exc
+
     def reset_settings(self) -> dict[str, Any]:
         with self.inference_lock, self.lock:
             if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
@@ -193,10 +211,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             previous_models = dict(self.settings.get("models", {}))
             try:
                 settings = self.settings_store.default_settings()
-                validate_output_directory_ready(settings["saving"]["default_output_directory"])
             except SettingsError as exc:
-                raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
-            self.settings = self.settings_store.reset()
+                raise ClientError("設定の内容が正しくありません。", "invalid_settings") from exc
+            try:
+                validate_output_directory_ready(settings["saving"]["default_output_directory"])
+            except (SettingsError, OSError) as exc:
+                raise ClientError("保存先フォルダを使用できません。", "output_folder_unavailable") from exc
+            self.settings = self.settings_store.reset(settings)
             self.models = None
             self.hand_model = None
             self.sam_predictor = None
@@ -451,5 +472,12 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if session_dir is not None:
             shutil.rmtree(session_dir, ignore_errors=True)
 
-STATE = StudioState()
-atexit.register(STATE.shutdown)
+STATE: StudioState | None
+STATE_STARTUP_ERROR: WorkspaceOpenError | sqlite3.DatabaseError | None = None
+try:
+    STATE = StudioState()
+except (WorkspaceOpenError, sqlite3.DatabaseError) as exc:
+    STATE = None
+    STATE_STARTUP_ERROR = exc
+else:
+    atexit.register(STATE.shutdown)

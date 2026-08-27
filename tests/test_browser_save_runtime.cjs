@@ -50,7 +50,6 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   getElement("#applySuffix");
   getElement("#deleteOriginal");
   getElement("#removeAfterSave");
-  getElement("#removeOnlyMasked");
   getElement('input[name="saveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
@@ -139,9 +138,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureSaveSources, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   state.translations = {
@@ -151,7 +150,33 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { elements, ensureSaveSources, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, state, window: browserWindow };
+  return { elements, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle, state, window: browserWindow };
+}
+
+async function runExclusiveWritableCases() {
+  const runtime = createRuntime({ commit: () => jsonResponse({}) });
+  const response = binaryResponse([4, 5, 6]);
+  const calls = [];
+  const access = { fileHandle: {
+    async createWritable(options) { calls.push(options); if (calls.length === 1) { const error = new TypeError("unsupported"); throw error; } return { async write() {}, async close() {}, async abort() {} }; },
+    async getFile() { return { name: "source.png", size: 3, lastModified: 2 }; },
+  }};
+  await runtime.writeSourceHandle(access, response);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ keepExistingData: false, mode: "exclusive" }, { keepExistingData: false }], "only an unsupported option falls back");
+
+  const locked = { fileHandle: {
+    async createWritable() { const error = new DOMException("locked", "InvalidStateError"); throw error; },
+    async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; },
+  }};
+  await assert.rejects(runtime.writeSourceHandle(locked, response), (error) => error.code === "source_busy", "an exclusive-writer conflict remains visible to the user");
+
+  for (const name of ["NotAllowedError", "QuotaExceededError"]) {
+    const denied = { fileHandle: {
+      async createWritable() { throw new DOMException(name, name); },
+      async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; },
+    }};
+    await assert.rejects(runtime.writeSourceHandle(denied, response), (error) => error.name === name && error.code !== "source_busy", `${name} is not mislabeled as a writer conflict`);
+  }
 }
 
 async function runSuccessCase() {
@@ -402,9 +427,10 @@ async function runRepeatedHandleOverwriteCase() {
 
 async function runHandleDeleteAfterCopyCase() {
     let removed = false;
-  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1 }; }, async remove() { removed = true; } };
+  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } }; } };
+  const parentHandle = { async removeEntry(name) { assert.equal(name, "source.png"); removed = true; }, async getFileHandle() { return sourceHandle; } };
   const runtime = createRuntime({ deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
-  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
+  runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, parentHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
   assert.equal(removed, true, "the source handle is removed only after the copy has been written");
   assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
@@ -426,6 +452,10 @@ async function runQueuedHandleChangeCases() {
       async createWritable() { secondAction = true; return { async write() {}, async close() {}, async abort() {} }; },
       async remove() { secondAction = true; },
     };
+    const parentFor = (handle) => ({
+      async removeEntry() { if (handle === secondHandle) secondAction = true; },
+      async getFileHandle() { return handle; },
+    });
     const runtime = createRuntime({
       initialImages: [first, second],
       entries: [
@@ -440,8 +470,8 @@ async function runQueuedHandleChangeCases() {
         return jsonResponse({ cleared: true, stale: false, images: [] });
       },
     });
-    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, name: "first.png", size: 12, lastModified: 34 });
-    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
+    runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, parentHandle: parentFor(firstHandle), name: "first.png", size: 12, lastModified: 34 });
+    runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, parentHandle: parentFor(secondHandle), name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
     await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
     await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
     assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
@@ -547,6 +577,78 @@ async function runRemoveAfterSaveCases() {
   assert.equal(stale.requests.some((request) => request.path === "/api/catalog/remove"), false, "stale saves remain in the catalog");
 }
 
+async function runNoEffectiveMaskBatchCases() {
+  const first = { id: "image-1", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", relativePath: "second.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
+  const none = createRuntime({
+    initialImages: [second],
+    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    commit: () => { throw new Error("an empty mask is never committed"); },
+  });
+  await none.runBrowserSave([second.id], "_censored", false, "copy", true);
+  assert.equal(none.requests.some((request) => request.path === "/api/save/commit"), false, "an all-empty batch does not save or delete its source");
+  assert.equal(none.requests.some((request) => request.path === "/api/catalog/remove"), false, "an all-empty batch remains in the catalog");
+
+  const noneUnmasked = createRuntime({
+    initialImages: [second],
+    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    commit: () => { throw new Error("an empty mask is never committed"); },
+  });
+  await noneUnmasked.runBrowserSave([second.id], "_censored", false, "copy", true, false);
+  assert.equal(noneUnmasked.requests.some((request) => request.path === "/api/catalog/remove"), false, "an all-empty batch remains even when remove-only-masked is off");
+
+  let renders = 0;
+  const mixed = createRuntime({
+    initialImages: [first, second],
+    entries: [{ imageId: first.id, candidateRevision: 1 }, { imageId: second.id, candidateRevision: 1 }],
+    copy: () => {
+      renders += 1;
+      return renders === 1 ? jsonResponse({ output: "G:/output/first.png" }) : jsonResponse({ error_code: "no_effective_mask" }, 400);
+    },
+    commit: () => jsonResponse({ cleared: true, stale: false, deleted: false }),
+    removeCatalog: ({ options }) => {
+      assert.deepEqual(JSON.parse(options.body), { imageIds: [first.id] });
+      return jsonResponse({ images: [second], removedImageIds: [first.id] });
+    },
+  });
+  await mixed.runBrowserSave([first.id, second.id], "_censored", false, "copy", true);
+  assert.equal(mixed.requests.filter((request) => request.path === "/api/save/commit").length, 1, "only the effective image is committed");
+  assert.equal(mixed.requests.filter((request) => request.path === "/api/catalog/remove").length, 1, "remove-only-masked removes only the saved image");
+
+  const keepAll = createRuntime({
+    initialImages: [first, second],
+    entries: [{ imageId: first.id, candidateRevision: 1 }, { imageId: second.id, candidateRevision: 1 }],
+    copy: () => (++renders % 2 ? jsonResponse({ output: "G:/output/first.png" }) : jsonResponse({ error_code: "no_effective_mask" }, 400)),
+    commit: () => jsonResponse({ cleared: true, stale: false, deleted: false }),
+    removeCatalog: ({ options }) => {
+      assert.deepEqual(JSON.parse(options.body), { imageIds: [first.id] });
+      return jsonResponse({ images: [second], removedImageIds: [first.id] });
+    },
+  });
+  await keepAll.runBrowserSave([first.id, second.id], "_censored", false, "copy", true, false);
+  assert.equal(keepAll.requests.filter((request) => request.path === "/api/catalog/remove").length, 1, "remove-after-save removes only the saved image when remove-only-masked is off");
+}
+
+async function runServerCopyRemovalCases() {
+  const first = { id: "image-1", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", relativePath: "second.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
+  let removalPayload = null;
+  const mixed = createRuntime({
+    initialImages: [first, second],
+    commit: () => jsonResponse({}),
+    removeCatalog: ({ options }) => {
+      removalPayload = JSON.parse(options.body);
+      return jsonResponse({ images: [second], removedImageIds: [first.id] });
+    },
+  });
+  await mixed.finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: [first.id, second.id], completedImageIds: [first.id], removeAfterSave: true });
+  assert.deepEqual(removalPayload, { imageIds: [first.id] }, "server-copy removal keeps an empty-mask image even when remove-only-masked was off");
+
+  const empty = createRuntime({ initialImages: [second], commit: () => jsonResponse({}) });
+  await empty.finishApplyJob({ kind: "apply", state: "complete", completed: 0, imageIds: [second.id], completedImageIds: [], removeAfterSave: true });
+  assert.equal(empty.requests.some((request) => request.path === "/api/catalog/remove"), false, "server-copy all-empty batches stay in the catalog");
+}
+
 (async () => {
   await runSuccessCase();
   await runDraftBarrierBeforeDefaultApplyCase();
@@ -567,5 +669,8 @@ async function runRemoveAfterSaveCases() {
   await runCatalogEpochGuardCase();
   await runPartialCommitFailureReconcileCase();
   await runRemoveAfterSaveCases();
+  await runNoEffectiveMaskBatchCases();
+  await runServerCopyRemovalCases();
+  await runExclusiveWritableCases();
   console.log("test_browser_save_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

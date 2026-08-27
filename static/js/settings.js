@@ -221,6 +221,7 @@ function setSettingsForm(settings, status = null) {
   setDetectionConfidence(settings.detection.threshold);
   $("#detectParallelism").value = String(settings.detection?.parallelism || 2);
   setDetectionTargets(settings.detection.targets);
+  syncDetectionActions();
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
   $("#confirmRemoveImage").checked = settings.confirmations?.removeImage !== false;
@@ -458,7 +459,7 @@ const MODEL_DOWNLOAD_INFO = {
   sam_vit_b: { name: "Meta Segment Anything (SAM) vit_b", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_l: { name: "Meta Segment Anything (SAM) vit_l", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
   sam_vit_h: { name: "Meta Segment Anything (SAM) vit_h", source: "Meta", url: "https://github.com/facebookresearch/segment-anything#model-checkpoints" },
-  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.red", url: "https://civitai.red/api/download/models/2350456?fileId=2240838" },
+  ntd11: { name: "Anime NSFW Detection / ADetailer All-in-One", source: "Civitai.com", url: "https://civitai.com/api/download/models/2350456?fileId=2240838" },
   sensitive: { name: "sugarknight/sensitive-detect", source: "Hugging Face", url: "https://huggingface.co/sugarknight/sensitive-detect/resolve/b7ec7a528841aac3d52411fb4d031d51a8225e40/sensitive_detect_v07.pt?download=true" },
 };
 

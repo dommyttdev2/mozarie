@@ -219,6 +219,7 @@ class Job:
     current: str = ""
     error: str = ""
     error_code: str = ""
+    cancel_requested: bool = False
     params: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
     ended_at: float | None = None
@@ -254,6 +255,7 @@ class Job:
             "parallelism": self.parallelism,
             "phase": "preparing_models" if self.preparing_models else "",
             "removeAfterSave": self.remove_after_save,
+            "cancelRequested": self.cancel_requested,
         }
 
 

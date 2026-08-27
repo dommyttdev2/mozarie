@@ -1,0 +1,82 @@
+import contextlib
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import setup_gpu_check
+
+
+class SetupGpuCheckTests(unittest.TestCase):
+    def run_check(self, *, cuda=True, providers=("CUDAExecutionProvider",), session=None, save_error=None):
+        session = session if session is not None else SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        store = SimpleNamespace(save=Mock(side_effect=save_error), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        tensor = Mock(); tensor.add_.return_value = tensor; tensor.cpu.return_value = tensor
+        runtime = (
+            SimpleNamespace(ones=Mock(return_value=object()), float32=object()),
+            SimpleNamespace(get_available_providers=lambda: providers, InferenceSession=lambda *_args, **_kwargs: session),
+            SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda, device_count=lambda: 1), ones=Mock(return_value=tensor)),
+            SimpleNamespace(get_example=lambda _name: "model.onnx"),
+        )
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "_runtime_modules", return_value=runtime), \
+             patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        return result, store, output.getvalue()
+
+    def test_cuda_unavailable_switches_to_cpu(self):
+        result, store, output = self.run_check(cuda=False)
+        self.assertEqual(result, 0)
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+        self.assertIn("CPU", output)
+
+    def test_missing_execution_provider_switches_to_cpu(self):
+        result, _store, output = self.run_check(providers=("CPUExecutionProvider",))
+        self.assertEqual(result, 0)
+        self.assertIn("CPU", output)
+
+    def test_session_failure_switches_to_cpu(self):
+        result, _store, output = self.run_check(session=SimpleNamespace(
+            disable_fallback=lambda: None, get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
+        ))
+        self.assertEqual(result, 0)
+        self.assertIn("CPU", output)
+
+    def test_cpu_save_failure_fails_setup(self):
+        result, _store, output = self.run_check(cuda=False, save_error=OSError("locked"))
+        self.assertEqual(result, 1)
+        self.assertIn("could not be saved", output)
+
+    def test_gpu_success_keeps_existing_provider(self):
+        result, store, output = self.run_check()
+        self.assertEqual(result, 0)
+        self.assertEqual(output.strip(), "[Mozarie] GPU is ready.")
+        # A successful smoke test does not touch an existing CPU selection.
+        store.save.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
+    def test_fresh_venv_pip_dry_run_keeps_resolver_output_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            created = subprocess.run(["py", "-3.14-64", "-m", "venv", str(root / "venv")], capture_output=True, text=True, check=False, timeout=120)
+            self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+            python = root / "venv" / "Scripts" / "python.exe"
+            result = subprocess.run(
+                [str(python), "-m", "pip", "install", "--progress-bar", "on", "--dry-run", "--no-deps", "humanize==4.15.0"],
+                capture_output=True, text=True, check=False, timeout=120,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"(?m)^(Looking in indexes:|Collecting|Would install) ")

@@ -29,24 +29,25 @@ from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
 
 class CatalogMixin:
-    def _refresh_effective_mask_status(self, image_id: str) -> None:
-        """Persist the one scalar used by gallery filtering without decoding in the browser."""
-        if not self.workspace_store.has_image(image_id):
-            return
+    def _effective_mask_for_draft(self, image_id: str, candidates: list[Candidate], draft: dict[str, Any]) -> bool:
+        """Compute the gallery scalar for an unpublished candidate/manual state."""
         record = self.image_snapshot(image_id)
-        draft = self.workspace_store.manual(image_id, self._encode_workspace_mask) or {}
-        revision = self._candidate_revision(image_id)
         add, exclusion, erase = decode_draft_masks(draft, record.width, record.height)
         if draft.get("manualEnabled") is False: add = None
         if draft.get("manualExclusionEnabled") is False: exclusion = None
         if draft.get("manualExclusionEraseEnabled") is False: erase = None
-        removed = {str(value) for value in draft.get("removedCandidateIds", [])} if int(draft.get("candidateRevision", revision)) == revision else set()
+        valid_ids = {candidate.candidate_id for candidate in candidates}
+        removed = {str(value) for value in draft.get("removedCandidateIds", [])} & valid_ids
         mask = self.combined_candidate_mask(
             image_id, (add, exclusion, erase),
             manual_exclude_forced=draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True)),
-            removed_candidate_ids=removed,
+            removed_candidate_ids=removed, candidate_snapshot=candidates, lock_image=False,
         )
-        self.workspace_store.update_manual_effective_mask(image_id, bool(mask is not None and np.any(mask)), revision)
+        return bool(mask is not None and np.any(mask))
+
+    def _effective_mask_for_candidates(self, image_id: str, candidates: list[Candidate]) -> bool:
+        draft = self.workspace_store.manual(image_id, self._encode_workspace_mask) or {}
+        return self._effective_mask_for_draft(image_id, candidates, draft)
 
     @staticmethod
     def _candidate_from_workspace(row: Any, path: Path) -> Candidate:
@@ -59,24 +60,28 @@ class CatalogMixin:
     def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
         """Materialise only small PNGs for the active catalogue into the disposable cache."""
         restored: list[tuple[str, int, list[Candidate]]] = []
+        hydrated = self.workspace_store.hydrate_candidates_bulk(
+            [record.image_id for record in records], self.cache_dir, self._candidate_from_workspace,
+        )
         for record in records:
-            revision, candidates = self.workspace_store.hydrate_candidates(
-                record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace,
-            )
+            revision, candidates = hydrated.get(record.image_id, (0, []))
             if candidates or revision:
                 restored.append((record.image_id, revision, candidates))
         for image_id, revision, candidates in restored:
             self.candidates[image_id] = candidates
             self.candidate_revisions[image_id] = revision
 
-    def _persist_candidates(self, image_id: str) -> None:
-        """Commit a complete candidate revision before exposing a successful mutation."""
-        record = self.images.get(image_id)
-        if record is None:
-            return
-        if not self.workspace_store.has_image(image_id):
-            return
-        self.workspace_store.replace_candidates(image_id, self._candidate_revision(image_id), self.candidates.get(image_id, []))
+    def _commit_candidate_snapshot(self, image_id: str, candidates: list[Candidate], *, replace: bool) -> int:
+        """Durably commit a candidate revision, then publish it while the caller holds ``self.lock``."""
+        revision = self._candidate_revision(image_id) + 1
+        if self.workspace_store.has_image(image_id):
+            self.workspace_store.commit_candidate_state(
+                image_id, revision, candidates,
+                self._effective_mask_for_candidates(image_id, candidates), replace=replace,
+            )
+        self.candidates[image_id] = candidates
+        self.candidate_revisions[image_id] = revision
+        return revision
 
     def _replace_catalog(self, root: Path, records: list[ImageRecord]) -> list[dict[str, Any]]:
         with self.lock:
@@ -518,11 +523,11 @@ class CatalogMixin:
                     for record in records
                     for candidate in self.candidates.get(record.image_id, [])
                 ]
+                revisions = {record.image_id: self._candidate_revision(record.image_id) + 1 for record in records}
+                self.workspace_store.clear_image_workspaces(revisions)
                 for record in records:
                     self.candidates[record.image_id] = []
                     self._touch_candidates(record.image_id)
-                    self._persist_candidates(record.image_id)
-                self.workspace_store.delete_manual([record.image_id for record in records])
             self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
         return len(records)
 
@@ -903,12 +908,20 @@ class CatalogMixin:
 
     def save_manual_workspace(self, image_id: str, payload: dict[str, Any]) -> None:
         self.image_for_id(image_id)
-        if not self.workspace_store.has_image(image_id): return
-        try:
-            self.workspace_store.save_manual(image_id, payload, self._decode_workspace_mask)
-        except ValueError as exc:
-            raise ClientError("手描き状態を保存できません。", "workspace_write_failed") from exc
-        self._refresh_effective_mask_status(image_id)
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if not self.workspace_store.has_image(image_id):
+                    return
+                committed = dict(payload)
+                committed["hasEffectiveMask"] = self._effective_mask_for_draft(
+                    image_id, self.candidates.get(image_id, []), committed,
+                )
+                try:
+                    # The manual row, its normalized removal IDs, exact candidate
+                    # revision, and gallery scalar are one SQLite transaction.
+                    self.workspace_store.save_manual(image_id, committed, self._decode_workspace_mask)
+                except ValueError as exc:
+                    raise ClientError("手描き状態を保存できません。", "workspace_write_failed") from exc
 
     def manual_workspace(self, image_id: str) -> dict[str, Any] | None:
         record = self.image_for_id(image_id)
@@ -917,8 +930,10 @@ class CatalogMixin:
 
     def delete_manual_workspace(self, image_id: str) -> None:
         self.image_for_id(image_id)
-        if self.workspace_store.has_image(image_id):
-            self.workspace_store.delete_manual([image_id])
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self.workspace_store.has_image(image_id):
+                    self.workspace_store.delete_manual([image_id])
 
     def catalog_snapshot(self) -> dict[str, Any]:
         """Capture the complete catalogue payload in one lock epoch."""
@@ -927,6 +942,11 @@ class CatalogMixin:
             output = []
             for image_id in self.order:
                 record = self.images[image_id]
+                candidate_revision = self._candidate_revision(image_id)
+                stored_effective, stored_revision = manual_mask_statuses.get(image_id, (False, -1))
+                has_effective_mask = stored_effective if stored_revision == candidate_revision else any(
+                    candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])
+                )
                 item = {
                     "id": record.image_id,
                     "relativePath": record.relative_path,
@@ -941,11 +961,8 @@ class CatalogMixin:
                         candidate.enabled and candidate.role == CandidateRole.APPLY
                         for candidate in self.candidates.get(image_id, [])
                     ),
-                    "hasEffectiveMask": manual_mask_statuses.get(image_id, (
-                        any(candidate.enabled and candidate.role == CandidateRole.APPLY for candidate in self.candidates.get(image_id, [])),
-                        -1,
-                    ))[0],
-                    "candidateRevision": self._candidate_revision(image_id),
+                    "hasEffectiveMask": has_effective_mask,
+                    "candidateRevision": candidate_revision,
                     "hidden": record.hidden,
                     "reviewed": record.reviewed,
                 }
@@ -981,9 +998,7 @@ class CatalogMixin:
                     durable_ids = self.workspace_store.valid_candidate_ids(image_id)
                     candidates = [candidate for candidate in stored_candidates if candidate.mask_path.is_file() or candidate.candidate_id in durable_ids]
                     if len(candidates) != len(stored_candidates):
-                        self.candidates[image_id] = candidates
-                        self._touch_candidates(image_id)
-                        self._persist_candidates(image_id)
+                        self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     return {
                         "candidates": [
                             candidate.as_api_dict(
@@ -1008,10 +1023,6 @@ class CatalogMixin:
     def asset_version(record: ImageRecord) -> str:
         """The inexpensive HTTP version based on the catalogued file stat."""
         return f"{record.mtime_ns}-{record.size_bytes}-{record.asset_revision}"
-
-    def _remove_candidate_unchecked(self, image_id: str, candidate_id: str) -> None:
-        candidates = self.candidates.get(image_id, [])
-        self.candidates[image_id] = [candidate for candidate in candidates if candidate.candidate_id != candidate_id]
 
     def read_candidate_mask_png(self, image_id: str, candidate_id: str, *, expected_revision: int | None = None) -> bytes:
         """Read one stable mask, then encode outside its per-image lock."""
@@ -1039,9 +1050,8 @@ class CatalogMixin:
                 else:
                     with self.lock:
                         if self._candidate_revision(image_id) == revision:
-                            self._remove_candidate_unchecked(image_id, candidate_id)
-                            self._touch_candidates(image_id)
-                            self._persist_candidates(image_id)
+                            candidates = [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate_id]
+                            self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
             alpha = mask_image.convert("L")
@@ -1073,32 +1083,28 @@ class CatalogMixin:
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
         self.image_for_id(image_id)
-        with self.lock:
-            if self._has_active_worker():
-                raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
-            candidate = next(
-                (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
-                None,
-            )
-            if candidate is None:
-                raise ClientError("検出候補が見つかりません。", "catalog_changed")
-            if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
-                raise ClientError("除外候補の強制指定が正しくありません。", "input_invalid")
-            if "enabled" in payload:
-                if not isinstance(payload["enabled"], bool):
-                    raise ClientError("候補のON/OFFは真偽値で指定してください。", "input_invalid")
-                candidate.enabled = payload["enabled"]
-            if "color" in payload:
-                color = str(payload["color"])
-                if not _valid_color(color):
-                    raise ClientError("色の形式が正しくありません。", "input_invalid")
-                candidate.color = color
-            if "forced" in payload:
-                candidate.forced = payload["forced"]
-            revision = self._touch_candidates(image_id)
-            self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
-        self._refresh_effective_mask_status(image_id)
-        return self._candidate_revision(image_id)
+        with self.image_io_lock(image_id):
+            with self.lock:
+                if self._has_active_worker():
+                    raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
+                candidates = [replace(item) for item in self.candidates.get(image_id, [])]
+                candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
+                if candidate is None:
+                    raise ClientError("検出候補が見つかりません。", "catalog_changed")
+                if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
+                    raise ClientError("除外候補の強制指定が正しくありません。", "input_invalid")
+                if "enabled" in payload:
+                    if not isinstance(payload["enabled"], bool):
+                        raise ClientError("候補のON/OFFは真偽値で指定してください。", "input_invalid")
+                    candidate.enabled = payload["enabled"]
+                if "color" in payload:
+                    color = str(payload["color"])
+                    if not _valid_color(color):
+                        raise ClientError("色の形式が正しくありません。", "input_invalid")
+                    candidate.color = color
+                if "forced" in payload:
+                    candidate.forced = payload["forced"]
+                return self._commit_candidate_snapshot(image_id, candidates, replace=False)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
         """Apply one simple bulk operation and advance the revision once."""
@@ -1111,22 +1117,21 @@ class CatalogMixin:
             with self.lock:
                 if self._has_active_worker():
                     raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
-                selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
+                current = self.candidates.get(image_id, [])
+                selected = [item for item in current if item.role.value == role]
                 if operation == "delete":
-                    self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
+                    candidates = [replace(item) for item in current if item not in selected]
                     paths = [item.mask_path for item in selected]
                 else:
                     paths = []
-                    for item in selected:
+                    candidates = [replace(item) for item in current]
+                    for item in candidates:
+                        if item.role.value != role:
+                            continue
                         item.enabled = operation == "enable"
-                revision = self._touch_candidates(image_id)
-                if operation == "delete":
-                    self._persist_candidates(image_id)
-                else:
-                    self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
+                revision = self._commit_candidate_snapshot(image_id, candidates, replace=operation == "delete")
             for path in paths:
                 path.unlink(missing_ok=True)
-            self._refresh_effective_mask_status(image_id)
             return revision
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
@@ -1139,9 +1144,7 @@ class CatalogMixin:
                 candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
                 if candidate is None:
                     return False
-                self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
-                self._touch_candidates(image_id)
-                self._persist_candidates(image_id)
+                updated = [replace(item) for item in candidates if item.candidate_id != candidate_id]
+                self._commit_candidate_snapshot(image_id, updated, replace=True)
             candidate.mask_path.unlink(missing_ok=True)
-            self._refresh_effective_mask_status(image_id)
             return True

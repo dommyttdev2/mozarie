@@ -7,11 +7,12 @@ from unittest.mock import ANY, Mock, patch
 import sys
 
 import numpy as np
+from onnxruntime.capi import _pybind_state as ort_state
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter, _class_names
-from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, nms_indices
+from mozarie.inference.onnx import BaseOnnxModel, Letterbox, available_providers, class_aware_nms_indices, create_session, diagnose_runtime, nms_indices
 from mozarie.inference.yolo_detect import HandDetector
 from mozarie.inference.yolo_segment import TargetSegmenter
 
@@ -22,7 +23,7 @@ class OnnxAdapterTests(unittest.TestCase):
         self.assertEqual(nms_indices(boxes, [0.9, 0.8, 0.7], 0.5), [0, 2])
         self.assertEqual(class_aware_nms_indices(boxes[:2], [0.9, 0.8], ["penis", "pussy"], 0.5), [0, 1])
 
-    def test_create_session_prefers_cuda_then_allows_cpu_fallback(self) -> None:
+    def test_create_session_prefers_cuda_without_runtime_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
@@ -46,6 +47,8 @@ class OnnxAdapterTests(unittest.TestCase):
                 },
             ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
+            cuda_session.disable_fallback.assert_called_once_with()
+            cpu_session.disable_fallback.assert_called_once_with()
 
     def test_default_gpu_does_not_pass_a_redundant_device_id(self) -> None:
         with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]):
@@ -60,23 +63,75 @@ class OnnxAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"invalid")
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]), \
-                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=RuntimeError("invalid model")):
-                with self.assertRaisesRegex(RuntimeError, "invalid model"):
+                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("invalid model"), diagnostic]):
+                with self.assertRaisesRegex(Exception, "検出モデル"):
                     create_session(path, "gpu", 0)
+
+    def test_gpu_model_shape_error_is_not_reported_as_a_gpu_outage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"invalid")
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
+            with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("CUDA model input shape is invalid"), diagnostic]):
+                with self.assertRaises(Exception) as raised:
+                    create_session(path, "gpu", 0)
+            self.assertEqual(getattr(raised.exception, "error_code", None), "model_load_failed")
+
+    def test_identity_runtime_failure_is_reported_as_gpu_unavailable(self) -> None:
+        session = Mock(); session.get_providers.return_value = ["CUDAExecutionProvider"]
+        session.run.side_effect = RuntimeError("provider initialization failed")
+        with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+             patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session):
+            with self.assertRaises(Exception) as raised:
+                diagnose_runtime("gpu", 0)
+        self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_unavailable")
+
+    def test_create_session_reports_missing_model_without_its_path(self) -> None:
+        with self.assertRaisesRegex(Exception, "検出モデル") as raised:
+            create_session(Path("C:/private/missing.onnx"), "cpu")
+        self.assertNotIn("private", str(raised.exception))
 
     def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
         cpu = BaseOnnxModel.__new__(BaseOnnxModel)
-        cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()
+        cpu.device = "cpu"; cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()
         cpu.session.run.return_value = [np.asarray([1])]
         self.assertEqual(cpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [1])
         cpu.session.run.assert_called_once_with(None, {"image": ANY})
 
         gpu = BaseOnnxModel.__new__(BaseOnnxModel)
-        gpu.input_name = "image"; gpu.run_options = Mock(); gpu.session = Mock()
+        gpu.device = "gpu"; gpu.input_name = "image"; gpu.run_options = Mock(); gpu.session = Mock()
         gpu.session.run.return_value = [np.asarray([2])]
         self.assertEqual(gpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [2])
         gpu.session.run.assert_called_once_with(None, {"image": ANY}, gpu.run_options)
+
+    def test_gpu_run_maps_execution_provider_failure_to_gpu_unavailable(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "gpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        model.session.run.side_effect = ort_state.EPFail("CUDA provider failed")
+        with self.assertRaises(Exception) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_unavailable")
+
+    def test_cpu_run_propagates_execution_provider_failure(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "cpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        failure = ort_state.EPFail("CPU provider failed")
+        model.session.run.side_effect = failure
+        with self.assertRaises(ort_state.EPFail) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertIs(raised.exception, failure)
+
+    def test_gpu_run_propagates_model_shape_runtime_error(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "gpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        failure = RuntimeError("input shape is invalid")
+        model.session.run.side_effect = failure
+        with self.assertRaises(RuntimeError) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertIs(raised.exception, failure)
 
     def test_target_decoder_identifies_reversed_outputs_and_channel_first_rows(self) -> None:
         prediction = np.zeros((1, 43, 2), dtype=np.float32)

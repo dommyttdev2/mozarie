@@ -23,6 +23,11 @@ def _gpu_unavailable_error() -> Exception:
     return ClientError("GPU推論を初期化できません。CPUへ切り替えるか、Mozarieを再セットアップしてください。", "gpu_unavailable")
 
 
+def _model_load_error() -> Exception:
+    from ..core import ClientError
+    return ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
+
+
 def _register_torch_dll_directory() -> None:
     """Keep PyTorch's CUDA runtime DLLs visible to ONNX Runtime on Windows."""
     if os.name != "nt":
@@ -44,6 +49,7 @@ def _register_torch_dll_directory() -> None:
 _register_torch_dll_directory()
 
 import onnxruntime as ort
+from onnxruntime.capi import _pybind_state as ort_state
 
 preload_dlls = getattr(ort, "preload_dlls", None)
 if preload_dlls is not None and "torch" not in sys.modules:
@@ -81,15 +87,69 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     ), "CPUExecutionProvider"]
 
 
-def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.InferenceSession:
-    if not path.is_file():
-        raise FileNotFoundError(path)
+def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.InferenceSession:
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    session = ort.InferenceSession(str(path), sess_options=options, providers=available_providers(device, gpu_device))
+    try:
+        session = ort.InferenceSession(model, sess_options=options, providers=available_providers(device, gpu_device))
+    except Exception as exc:
+        # A model parser/data failure is not a GPU outage.  The selected
+        # provider becoming unavailable is identified either before creation
+        # or by ORT returning a CPU-only session below.
+        if getattr(exc, "error_code", None):
+            raise
+        raise _model_load_error() from exc
+    # Provider failure must be visible to the user.  ORT otherwise silently
+    # recreates this session with a fallback provider during ``run``.
+    session.disable_fallback()
     if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
         raise _gpu_unavailable_error()
     return session
+
+
+def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.InferenceSession:
+    if not path.is_file():
+        raise _model_load_error()
+    try:
+        return _create_session(str(path), device, gpu_device)
+    except Exception as exc:
+        if getattr(exc, "error_code", None):
+            if device.lower() != "cpu" and getattr(exc, "error_code", None) == "model_load_failed":
+                # A fixed identity model distinguishes a corrupt configured
+                # ONNX file from a CUDA provider that cannot initialize.
+                diagnose_runtime(device, gpu_device)
+            raise
+        raise _model_load_error() from exc
+
+
+def diagnose_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> tuple[str, ...]:
+    """Create and run one disposable session to validate the chosen runtime."""
+    session = create_session(path, device, gpu_device)
+    input_meta = session.get_inputs()[0]
+    shape = [1 if not isinstance(value, int) or value <= 0 else value for value in input_meta.shape]
+    tensor = np.zeros(shape, dtype=np.float32)
+    session.run(None, {input_meta.name: tensor})
+    return tuple(session.get_providers())
+
+
+def diagnose_runtime(device: str = "gpu", gpu_device: int = 0) -> tuple[str, ...]:
+    """Run a disposable identity model on the selected ONNX Runtime provider."""
+    from onnx import TensorProto, helper
+
+    input_value = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 1])
+    output_value = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1])
+    graph = helper.make_graph([helper.make_node("Identity", ["input"], ["output"])], "mozarie-diagnostic", [input_value], [output_value])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    try:
+        session = _create_session(model.SerializeToString(), device, gpu_device)
+        session.run(None, {"input": np.zeros((1, 1), dtype=np.float32)})
+    except Exception as exc:
+        if getattr(exc, "error_code", None) == "gpu_unavailable":
+            raise
+        # The diagnostic model and tensor are fixed and valid. A failure here
+        # is therefore a selected-provider runtime failure, not a user model.
+        raise _gpu_unavailable_error() from exc
+    return tuple(session.get_providers())
 
 
 def letterbox_bgr(rgb: np.ndarray, size: int) -> tuple[np.ndarray, Letterbox]:
@@ -172,7 +232,12 @@ class BaseOnnxModel:
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:
         feeds = {self.input_name: tensor}
-        outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+        try:
+            outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+        except ort_state.EPFail as exc:
+            if self.device.lower() != "cpu":
+                raise _gpu_unavailable_error() from exc
+            raise
         return [np.asarray(value) for value in outputs]
 
     @property

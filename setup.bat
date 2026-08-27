@@ -2,6 +2,18 @@
 chcp 65001 >nul
 setlocal
 set "APP_DIR=%~dp0"
+if /i "%~1"=="--locked" goto :locked
+for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
+  py -%%V -c "import sys; raise SystemExit(0)" >nul 2>nul
+  if not errorlevel 1 (
+    py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
+    exit /b %ERRORLEVEL%
+  )
+)
+echo [Mozarie] Setup could not acquire the maintenance lock. Close Mozarie or another setup/update, then try again.
+exit /b 1
+
+:locked
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
 echo [Mozarie] [1/5] Checking Python environment...
 if not exist "%PYTHON%" call :create_venv
@@ -10,23 +22,20 @@ if not exist "%PYTHON%" goto :missing_python
 call :validate_python
 if errorlevel 1 goto :python_too_old
 
-"%PYTHON%" -X utf8 "%APP_DIR%updater.py" --check-running
-if "%ERRORLEVEL%"=="30" goto :mozarie_running
-if errorlevel 1 goto :failed
-
 echo [Mozarie] [2/5] Preparing the installer...
-"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --quiet --progress-bar on --upgrade pip
+"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip
 if errorlevel 1 goto :failed
 echo [Mozarie] [3/5] Installing required packages. This may download several GB on the first run.
 del /q "%APP_DIR%.venv\.mozarie-ready" >nul 2>nul
-"%PYTHON%" -m pip install --disable-pip-version-check --quiet --progress-bar on -r "%APP_DIR%requirements.txt"
+"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%APP_DIR%requirements.txt"
 if errorlevel 1 goto :failed
 echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking GPU support...
-"%PYTHON%" -c "import onnxruntime as ort, torch; raise SystemExit(0 if torch.version.cuda and 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
+"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"
 if errorlevel 1 goto :failed
+:setup_ready
 >"%APP_DIR%.venv\.mozarie-ready" echo ready
 echo [Mozarie] Setup complete. Run run.bat.
 pause
@@ -49,6 +58,7 @@ exit /b %ERRORLEVEL%
 
 :failed
 echo [Mozarie] Setup failed. Check the message above and run setup.bat again.
+echo [Mozarie] If Windows denied access, close other setup windows and run setup.bat again. Administrator rights are not required. / Windowsにアクセスを拒否された場合は、ほかのsetupを閉じてsetup.batを再実行してください。管理者として実行する必要はありません。
 pause
 exit /b 1
 

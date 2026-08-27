@@ -12,6 +12,13 @@ function setDetectionTargets(targets, prefix = "detectTarget") {
   }
 }
 
+function persistedDetectionTargets() { return state.settings?.detection?.targets || []; }
+function syncDetectionActions() {
+  const enabled = persistedDetectionTargets().length > 0 && !isBusy() && !state.importing;
+  $("#detectAllButton").disabled = !enabled || !state.images.length;
+  $("#detectCurrentButton").disabled = !enabled || !state.currentId;
+}
+
 function syncDetectionTargetSwitch(input) {
   const label = input.closest(".target-chip");
   label?.classList.toggle("is-selected", input.checked);
@@ -46,7 +53,7 @@ function openDetectionDialog(imageIds) {
   showModalFromInvoker($("#detectDialog"));
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets()) {
   if (!imageIds.length || isBusy() || state.importing) return;
   if (!validateDetectionTargets(targetClasses, $("#detectionTargetValidation"))) return;
   state.detectionStarting = true;
@@ -70,13 +77,17 @@ async function startDetectionFromDialog(event) {
   const parallelism = detectionParallelism();
   const targetClasses = detectionTargets("dialogTarget");
   if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation"))) return;
-  setDetectionConfidence(confidence);
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
-    state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
-    try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
-    catch (error) { showUserError(error); return; }
+    const settings = structuredClone(state.settings);
+    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses };
+    try {
+      const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settings) });
+      state.settings = saved.settings;
+      setSettingsForm(saved.settings, state.settingsStatus);
+    }
+    catch (error) { setSettingsForm(state.settings, state.settingsStatus); showUserError(error); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);
 }

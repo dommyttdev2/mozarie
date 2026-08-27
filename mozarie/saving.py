@@ -18,7 +18,7 @@ from .core import (
 )
 from .config import SettingsError, validate_output_directory_ready
 from .image_io import (
-    _replace_record_with_rendered_output, calculate_block_size, render_with_mask,
+    _stage_record_replacement, _stage_save_with_mask, calculate_block_size, render_with_mask,
     decode_draft_masks, draft_manual_exclusion_forced, save_with_mask,
     unique_session_import_destination, write_rendered_copy,
 )
@@ -171,8 +171,11 @@ class SavingMixin:
                     except FileNotFoundError as exc:
                         with self.lock:
                             if self.images.get(image_id) is not None:
-                                self._remove_candidate_unchecked(image_id, candidate.candidate_id)
-                                self._touch_candidates(image_id)
+                                self._commit_candidate_snapshot(
+                                    image_id,
+                                    [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate.candidate_id],
+                                    replace=True,
+                                )
                         raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
                     if candidate_mask.shape != (record.height, record.width):
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
@@ -240,7 +243,16 @@ class SavingMixin:
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
+        source_stage = None
+        quarantine_path: Path | None = None
         expired_token = False
+
+        def token_allows_action(details: BrowserSaveToken) -> bool:
+            # A copy token is issued only after the server has written the copy;
+            # it may keep or remove the source. A streamed render token owns a
+            # temporary replacement and may only overwrite the source.
+            return source_action in ({"keep", "deleted"} if details.rendered_path is None else {"overwrite"})
+
         with self.import_lock:
             with self.lock:
                 receipt = self.browser_save_receipts.get(save_token)
@@ -253,8 +265,8 @@ class SavingMixin:
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
-                if source_action == "overwrite" and token_details.rendered_path is None:
-                    raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
+                if not token_allows_action(token_details):
+                    raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
             image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
@@ -269,8 +281,8 @@ class SavingMixin:
                         raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
-                    if source_action == "overwrite" and token_details.rendered_path is None:
-                        raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
+                    if not token_allows_action(token_details):
+                        raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
                     if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                         expired_token = True
@@ -284,9 +296,9 @@ class SavingMixin:
                     else:
                         record_snapshot = replace(record)
                         catalog_generation = self.catalog_generation
-                        # Claim only after the per-image lock is held. Polling
-                        # cleanup cannot remove the render while source I/O runs.
-                        self.browser_save_tokens.pop(save_token)
+                        # The per-image lock keeps this render alive through
+                        # source I/O; retain its token until the DB commit so a
+                        # failed commit can be retried safely.
 
                 if expired_token:
                     if rendered_path is not None:
@@ -300,7 +312,7 @@ class SavingMixin:
                 try:
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
-                        _replace_record_with_rendered_output(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)
+                        source_stage = _stage_record_replacement(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)
                     else:
                         self._assert_record_stat_matches(record_snapshot)
                     if source_action == "deleted":
@@ -308,37 +320,51 @@ class SavingMixin:
                         # System Access handle before this commit.  The server
                         # owns deletion for filesystem catalogue records.
                         if record_snapshot.source_kind != "session" or record_snapshot.path.exists():
-                            record_snapshot.path.unlink()
+                            quarantine_path = record_snapshot.path.with_name(f".{record_snapshot.path.name}.mozarie-delete-{save_token}")
+                            record_snapshot.path.replace(quarantine_path)
                 except ClientError:
                     rendered_path = token_details.rendered_path
+                    with self.lock:
+                        self.browser_save_tokens.pop(save_token, None)
                     if rendered_path is not None:
                         rendered_path.unlink(missing_ok=True)
                     raise
                 except OSError as exc:
-                    rendered_path = token_details.rendered_path
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
+
+                try:
+                    with self.lock:
+                        record = self.images.get(image_id)
+                        if record is None or self.catalog_generation != catalog_generation:
+                            raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
+                        current_revision = self._candidate_revision(image_id)
+                        deleted = source_action == "deleted"
+                        cleared = revision == current_revision
+                        source_hash = self._sha256_file(record_snapshot.path) if source_action == "overwrite" and record.source_kind == "session" else None
+                        self.workspace_store.commit_save(
+                            image_id,
+                            mtime_ns=record_snapshot.mtime_ns if source_action == "overwrite" else None,
+                            size_bytes=record_snapshot.size_bytes if source_action == "overwrite" else None,
+                            source_hash=source_hash,
+                            candidate_revision=current_revision + 1 if cleared else None,
+                            clear_workspace=deleted or cleared,
+                            delete_image=deleted,
+                        )
+                except Exception:
+                    if source_stage is not None:
+                        source_stage.rollback()
+                    if quarantine_path is not None and quarantine_path.exists():
+                        quarantine_path.replace(record_snapshot.path)
+                    raise
 
                 with self.lock:
                     record = self.images.get(image_id)
-                    if record is None or self.catalog_generation != catalog_generation:
+                    if record is None:
                         raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
-                    current_revision = self._candidate_revision(image_id)
-                    deleted = source_action == "deleted"
-                    cleared = revision == current_revision
                     if source_action == "overwrite":
                         record.mtime_ns = record_snapshot.mtime_ns
                         record.size_bytes = record_snapshot.size_bytes
                         record.asset_revision = record_snapshot.asset_revision + 1
-                    if source_action == "overwrite":
-                        source_hash = self._sha256_file(record_snapshot.path) if record.source_kind == "session" else None
-                        self.workspace_store.commit_saved_image(
-                            image_id, mtime_ns=record_snapshot.mtime_ns, size_bytes=record_snapshot.size_bytes,
-                            source_hash=source_hash, clear_manual=deleted or cleared,
-                        )
-                    elif deleted or cleared:
-                        self.workspace_store.delete_manual([image_id])
                     if deleted:
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
@@ -352,7 +378,7 @@ class SavingMixin:
                         candidate_dirs = [self.cache_dir / image_id]
                         self.candidates[image_id] = []
                         self._touch_candidates(image_id)
-                        self._persist_candidates(image_id)
+                    self.browser_save_tokens.pop(save_token, None)
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
                     rendered_path = token_details.rendered_path
                     if deleted:
@@ -367,6 +393,10 @@ class SavingMixin:
                     thumbnail_path.unlink(missing_ok=True)
                 if rendered_path is not None:
                     rendered_path.unlink(missing_ok=True)
+                if source_stage is not None:
+                    source_stage.finalize()
+                if quarantine_path is not None:
+                    quarantine_path.unlink(missing_ok=True)
                 self.invalidate_sam_image(image_id)
                 return {"cleared": cleared, "stale": not cleared, "deleted": deleted}
 
@@ -415,6 +445,7 @@ class SavingMixin:
                         with self.lock:
                             empty_indices.add(index)
                         return
+                    source_stage = None
                     output_path = self._reserve_output_destination(record, suffix, output_directory) if copy_to_default else record.path
                     if copy_to_default:
                         try:
@@ -423,30 +454,38 @@ class SavingMixin:
                         finally:
                             self._release_output_destination(output_path)
                     else:
-                        save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
+                        source_stage = _stage_save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
                     # Files are fully written before the state mutation. A failed
                     # record therefore keeps its masks, while successful records clear once.
-                    with self.lock:
-                        if not self._job_is_current(job_generation, catalog_generation):
-                            return
-                        if not copy_to_default:
-                            live_record = self.images[record.image_id]
-                            live_record.mtime_ns = output_stat.st_mtime_ns
-                            live_record.size_bytes = output_stat.st_size
-                            live_record.asset_revision += 1
-                        mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
-                        self.candidates[record.image_id] = []
-                        self._touch_candidates(record.image_id)
-                        self._persist_candidates(record.image_id)
-                        if not copy_to_default:
-                            self.workspace_store.commit_saved_image(
-                                record.image_id, mtime_ns=output_stat.st_mtime_ns, size_bytes=output_stat.st_size,
-                                source_hash=None, clear_manual=True,
+                    try:
+                        with self.lock:
+                            if not self._job_is_current(job_generation, catalog_generation):
+                                if source_stage is not None:
+                                    source_stage.rollback()
+                                return
+                            self.workspace_store.commit_save(
+                                record.image_id,
+                                mtime_ns=None if copy_to_default else output_stat.st_mtime_ns,
+                                size_bytes=None if copy_to_default else output_stat.st_size,
+                                candidate_revision=self._candidate_revision(record.image_id) + 1,
+                                clear_workspace=True,
                             )
-                        else:
-                            self.workspace_store.delete_manual([record.image_id])
-                        self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
+                            if not copy_to_default:
+                                live_record = self.images[record.image_id]
+                                live_record.mtime_ns = output_stat.st_mtime_ns
+                                live_record.size_bytes = output_stat.st_size
+                                live_record.asset_revision += 1
+                            mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
+                            self.candidates[record.image_id] = []
+                            self._touch_candidates(record.image_id)
+                            self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
+                    except Exception:
+                        if source_stage is not None:
+                            source_stage.rollback()
+                        raise
+                    if not copy_to_default:
+                        source_stage.finalize()
                     self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
                     self.invalidate_sam_image(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)

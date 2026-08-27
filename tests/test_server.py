@@ -158,6 +158,12 @@ class MozarieTests(unittest.TestCase):
         self._states.append(state)
         return state
 
+    @staticmethod
+    def commit_candidates(state: StudioState, image_id: str) -> int:
+        with state.image_io_lock(image_id):
+            with state.lock:
+                return state._commit_candidate_snapshot(image_id, state.candidates[image_id], replace=True)
+
     def test_workspace_restores_flags_masks_and_manual_edits_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -170,8 +176,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
             buffer = io.BytesIO(); Image.new("L", (16, 16), 255).save(buffer, format="PNG")
             manual = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -201,8 +206,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.new("L", (16, 16), 255).save(mask_path)
                 state.candidates[image_id] = [Candidate(candidate_id, "penis", 0.9, mask_path)]
-                state._touch_candidates(image_id)
-                state._persist_candidates(image_id)
+                self.commit_candidates(state, image_id)
             connection = sqlite3.connect(state.workspace_store.path)
             with connection as db:
                 db.execute("UPDATE candidates SET mask_png=? WHERE image_id=? AND candidate_id=?", (b"not a PNG", image_ids["b-corrupt.png"], "corrupt"))
@@ -223,8 +227,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             connection = sqlite3.connect(state.workspace_store.path)
             with connection as db:
                 db.execute("UPDATE candidates SET role=? WHERE image_id=?", ("not-a-role", image_id))
@@ -248,8 +251,7 @@ class MozarieTests(unittest.TestCase):
                 Image.new("L", (16, 16), value).save(mask_path)
                 candidates.append(Candidate(candidate_id, candidate_id, 0.9, mask_path))
             state.candidates[image_id] = candidates
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
 
             reopened = self.new_state()
             reopened.set_root(str(root))
@@ -271,6 +273,90 @@ class MozarieTests(unittest.TestCase):
             after_delete.set_root(str(root))
             self.assertEqual([candidate["id"] for candidate in after_delete.candidate_snapshot(image_id)["candidates"]], ["second"])
 
+    def test_candidate_mutation_does_not_publish_when_workspace_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            self.commit_candidates(state, image_id)
+            previous_revision = state._candidate_revision(image_id)
+            state.save_manual_workspace(image_id, {
+                "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["candidate", "stale"],
+                "candidateRevision": previous_revision, "hasEffectiveMask": False,
+            })
+            with state.workspace_store._connect() as db:
+                before = tuple(db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone())
+            with patch.object(state.workspace_store, "commit_candidate_state", side_effect=sqlite3.OperationalError("injected")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.set_candidate_state(image_id, "candidate", {"enabled": False})
+            self.assertTrue(state.candidates[image_id][0].enabled)
+            self.assertEqual(state._candidate_revision(image_id), previous_revision)
+            with state.workspace_store._connect() as db:
+                after = tuple(db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone())
+            self.assertEqual(after, before)
+
+    def test_candidate_mutation_updates_manual_revision_removed_ids_and_effective_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = self.commit_candidates(state, image_id)
+            state.save_manual_workspace(image_id, {
+                "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["stale"],
+                "candidateRevision": revision, "hasEffectiveMask": True,
+            })
+            revision = state.set_candidate_state(image_id, "candidate", {"enabled": False})
+            with state.workspace_store._connect() as db:
+                row = db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
+            self.assertEqual(json.loads(row["removed_candidate_ids"]), [])
+            self.assertEqual(row["candidate_revision"], revision)
+            self.assertFalse(row["has_effective_mask"])
+
+    def test_manual_save_failure_leaves_the_existing_workspace_row_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            original = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 0, "hasEffectiveMask": False}
+            state.save_manual_workspace(image_id, original)
+            before = state.manual_workspace(image_id)
+            with patch.object(state.workspace_store, "save_manual", side_effect=sqlite3.OperationalError("injected")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.save_manual_workspace(image_id, {**original, "manualEnabled": False})
+            self.assertEqual(state.manual_workspace(image_id), before)
+
+    def test_manual_save_and_candidate_toggle_serialize_to_one_final_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            self.commit_candidates(state, image_id)
+            entered = threading.Event(); release = threading.Event()
+            original_save = state.workspace_store.save_manual
+
+            def delayed_save(*args, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(2))
+                return original_save(*args, **kwargs)
+
+            draft = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 1, "hasEffectiveMask": False}
+            with patch.object(state.workspace_store, "save_manual", side_effect=delayed_save):
+                manual = threading.Thread(target=lambda: state.save_manual_workspace(image_id, draft))
+                manual.start(); self.assertTrue(entered.wait(2))
+                toggle = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
+                toggle.start(); time.sleep(0.05)
+                self.assertTrue(toggle.is_alive())
+                release.set(); manual.join(2); toggle.join(2)
+            self.assertFalse(manual.is_alive()); self.assertFalse(toggle.is_alive())
+            revision = state._candidate_revision(image_id)
+            self.assertEqual(revision, 2)
+            self.assertEqual(state.workspace_store.manual_mask_statuses([image_id])[image_id], (False, revision))
+
     def test_catalog_snapshot_uses_the_persisted_manual_effective_mask(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -284,8 +370,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(12, 12)).save(mask_path)
                 state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-                state._touch_candidates(image_id)
-                state._persist_candidates(image_id)
+                self.commit_candidates(state, image_id)
             raw = io.BytesIO(); Image.fromarray(self._mask(12, 12)).save(raw, format="PNG")
             mask = "data:image/png;base64," + base64.b64encode(raw.getvalue()).decode("ascii")
             state.save_manual_workspace(ids["auto-manual.png"], {"add": "", "exclusion": mask, "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 1, "hasEffectiveMask": False})
@@ -318,7 +403,7 @@ class MozarieTests(unittest.TestCase):
                 Candidate("apply", "penis", 0.9, apply_path),
                 Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
             ]
-            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             state.set_candidate_state(image_id, "apply", {"enabled": True})
             self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
             state.set_candidate_state(image_id, "exclude", {"enabled": False})
@@ -340,8 +425,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[native_id] = [Candidate("native", "penis", 0.9, mask_path)]
-            state._touch_candidates(native_id)
-            state._persist_candidates(native_id)
+            self.commit_candidates(state, native_id)
 
             upload = io.BytesIO(); Image.new("RGB", (16, 16), "blue").save(upload, format="PNG")
             with tempfile.TemporaryDirectory() as staging_directory:
@@ -1142,6 +1226,14 @@ class MozarieTests(unittest.TestCase):
         exception.assert_not_called()
         shutdown.assert_called_once()
 
+    def test_server_suppresses_normal_client_disconnect_tracebacks(self):
+        server = Mock()
+        with patch("server.sys.exc_info", return_value=(BrokenPipeError, BrokenPipeError(), None)), patch(
+            "server.ThreadingHTTPServer.handle_error",
+        ) as report:
+            server_entry._handle_server_error(server, Mock(), ("127.0.0.1", 1))
+        report.assert_not_called()
+
     def test_http_log_message_silences_success_and_client_errors(self):
         handler = object.__new__(MosaicHandler)
         handler.command = "GET"
@@ -1612,10 +1704,15 @@ class MozarieTests(unittest.TestCase):
         state.request_cancel()
         self.assertTrue(state.job_control.cancel_requested.is_set())
         self.assertFalse(state.job_control.pause_requested.is_set())
+        self.assertTrue(state.job.cancel_requested)
 
         state.job.state = "paused"
         state.request_cancel()
+        self.assertTrue(state.job.cancel_requested)
+        self.assertEqual(state.job.state, "paused")
+        state._cancel_job()
         self.assertEqual(state.job.state, "cancelled")
+        self.assertFalse(state.job.cancel_requested)
 
     def test_cancel_before_claim_never_starts_another_record(self):
         state = self.new_state()
@@ -1930,14 +2027,14 @@ class MozarieTests(unittest.TestCase):
             masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
             control = core_module.JobControl()
             state.job = core_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
-            original_save = saving_module.save_with_mask
+            original_save = saving_module._stage_save_with_mask
 
             def save_then_cancel(*args, **kwargs):
                 result = original_save(*args, **kwargs)
                 control.cancel_requested.set()
                 return result
 
-            with patch.object(saving_module, "save_with_mask", side_effect=save_then_cancel):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -1952,7 +2049,7 @@ class MozarieTests(unittest.TestCase):
                     raise RuntimeError("second image failed")
                 return original_save(*args, **kwargs)
 
-            with patch.object(saving_module, "save_with_mask", side_effect=save_then_fail):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -1973,7 +2070,9 @@ class MozarieTests(unittest.TestCase):
             started: list[str] = []
             started_lock = threading.Lock()
 
-            def delayed_save(record, _mask, _block_size):
+            original_save = saving_module._stage_save_with_mask
+
+            def delayed_save(record, mask, block_size):
                 with started_lock:
                     started.append(record.image_id)
                     if record.image_id == first_id and started.count(first_id) == 1:
@@ -1981,13 +2080,14 @@ class MozarieTests(unittest.TestCase):
                     if record.image_id == second_id:
                         second_entered.set()
                 self.assertTrue(release.wait(2))
+                return original_save(record, mask, block_size)
 
             worker = threading.Thread(
                 target=state._apply_worker,
                 args=([first, first, second], 100, masks),
                 kwargs={"saving_parallelism": 3},
             )
-            with patch.object(saving_module, "save_with_mask", side_effect=delayed_save):
+            with patch.object(saving_module, "_stage_save_with_mask", side_effect=delayed_save):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))
                 self.assertTrue(second_entered.wait(2))
@@ -2766,7 +2866,7 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=unchanged) as save:
             state.update_settings(unchanged)
-        ready.assert_not_called()
+        ready.assert_called_once_with(unchanged["saving"]["default_output_directory"])
         save.assert_called_once_with(unchanged)
 
         changed = copy.deepcopy(state.settings)
@@ -2774,7 +2874,7 @@ class MozarieTests(unittest.TestCase):
         with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
              patch.object(state.settings_store, "save", return_value=changed) as save:
             state.update_settings(changed)
-        ready.assert_not_called()
+        ready.assert_called_once_with(changed["saving"]["default_output_directory"])
         save.assert_called_once_with(changed)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2785,6 +2885,29 @@ class MozarieTests(unittest.TestCase):
                 state.update_settings(changed_output)
         ready.assert_called_once_with(directory)
         save.assert_called_once_with(changed_output)
+
+    def test_output_validation_uses_its_dedicated_user_error_and_does_not_save(self):
+        state = self.new_state()
+        changed = copy.deepcopy(state.settings)
+        changed["saving"]["default_output_directory"] = r"C:\\unavailable"
+        with patch.object(state_module, "validate_output_directory_ready", side_effect=OSError("denied")), \
+             patch.object(state.settings_store, "save") as save:
+            with self.assertRaises(ClientError) as raised:
+                state.update_settings(changed)
+        self.assertEqual(raised.exception.error_code, "output_folder_unavailable")
+        save.assert_not_called()
+
+    def test_failed_reset_output_validation_keeps_the_existing_machine_override(self):
+        state = self.new_state()
+        before = copy.deepcopy(state.settings)
+        with patch.object(state.settings_store, "default_settings", return_value=copy.deepcopy(before)), \
+             patch.object(state_module, "validate_output_directory_ready", side_effect=OSError("denied")), \
+             patch.object(state.settings_store, "reset") as reset:
+            with self.assertRaises(ClientError) as raised:
+                state.reset_settings()
+        self.assertEqual(raised.exception.error_code, "output_folder_unavailable")
+        reset.assert_not_called()
+        self.assertEqual(state.settings, before)
 
     def test_hand_segmentation_setting_keeps_onnx_sessions(self):
         state = self.new_state()
@@ -2854,6 +2977,58 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(status["ntd11"]["enabled"])
         self.assertFalse(status["sensitive"]["enabled"])
         self.assertFalse(status["hand_detection"]["enabled"])
+
+    def test_disabled_optional_onnx_paths_are_never_constructed(self):
+        state = self.new_state()
+        state.settings["models"].update({
+            "ntd11": "bad-ntd11.onnx", "ntd11_enabled": False,
+            "sensitive": "bad-sensitive.onnx", "sensitive_enabled": False,
+            "hand_detection": "bad-hand.onnx", "hand_detection_enabled": False,
+        })
+        with patch.object(state, "_configured_model_path", return_value=Path("target.onnx")), \
+             patch.object(detection_module, "TargetSegmenter", return_value=Mock()), \
+             patch.object(detection_module, "GenericYoloSegmenter") as generic, \
+             patch.object(detection_module, "HandDetector") as hand:
+            state._load_detection_models()
+        generic.assert_not_called()
+        hand.assert_not_called()
+
+    def test_gpu_shape_error_is_not_elevated_to_gpu_unavailable(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = core_module.Job(kind="detect", state="running", total=1)
+        state._fail_job(RuntimeError("CUDA model input shape is invalid"))
+        self.assertNotEqual(state.job.error_code, "gpu_unavailable")
+
+    def test_invalid_active_model_outputs_are_reported_without_decoder_details(self):
+        for model_name in ("target", "ntd11", "sensitive", "hand"):
+            with self.subTest(model_name=model_name):
+                state = self.new_state()
+                state.job = core_module.Job(kind="detect", state="running", total=1)
+                state._fail_job(ValueError(f"{model_name} private decoder shape"))
+                self.assertEqual(state.job.error_code, "model_load_failed")
+                self.assertNotIn("private decoder", state.job.error)
+
+    def test_active_onnx_model_loads_hide_runtime_details_for_each_model(self):
+        cases = (
+            ("target", {"ntd11_enabled": False, "sensitive_enabled": False, "hand_detection_enabled": False}, "_load_detection_models", "TargetSegmenter"),
+            ("ntd11", {"ntd11_enabled": True, "sensitive_enabled": False, "hand_detection_enabled": False}, "_load_detection_models", "GenericYoloSegmenter"),
+            ("sensitive", {"ntd11_enabled": False, "sensitive_enabled": True, "hand_detection_enabled": False}, "_load_detection_models", "GenericYoloSegmenter"),
+            ("hand", {"ntd11_enabled": False, "sensitive_enabled": False, "hand_detection_enabled": True}, "_ensure_hand_model", "HandDetector"),
+        )
+        for model_name, settings, method_name, constructor_name in cases:
+            with self.subTest(model_name=model_name):
+                state = self.new_state(); state.settings["models"].update(settings)
+                constructor = getattr(detection_module, constructor_name)
+                with patch.object(state, "_configured_model_path", return_value=Path("model.onnx")), \
+                     patch.object(detection_module, "TargetSegmenter", return_value=Mock()), \
+                     patch.object(detection_module, "GenericYoloSegmenter", return_value=Mock()), \
+                     patch.object(detection_module, "HandDetector", return_value=Mock()), \
+                     patch.object(detection_module, constructor_name, side_effect=RuntimeError(f"{model_name} private model detail")):
+                    with self.assertRaises(ClientError) as raised:
+                        getattr(state, method_name)()
+                self.assertEqual(raised.exception.error_code, "model_load_failed")
+                self.assertNotIn("private model detail", str(raised.exception))
 
     def test_sam_status_is_required_only_for_high_precision(self):
         state = self.new_state()
@@ -3660,6 +3835,61 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
             self.assertEqual(candidates[1].role, domain_module.CandidateRole.EXCLUDE)
             self.assertTrue(candidates[1].enabled)
+
+    def test_standard_hand_box_fallback_is_an_apply_constrained_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply = np.zeros((12, 12), dtype=np.uint8); apply[4:9, 4:9] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply, "source": "target"}]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [(2, 2, 7, 7)]),
+            ), patch.object(state, "_sam_predictor_for") as sam:
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="standard")
+            sam.assert_not_called()
+            self.assertEqual([candidate.source for candidate in candidates], ["hand_exclusion", "target"])
+            with Image.open(candidates[0].mask_path) as mask_file:
+                mask = np.asarray(mask_file)
+            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
+            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+
+    def test_high_precision_rejected_hand_sam_uses_the_constrained_box(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.png"; Image.new("RGB", (12, 12), "white").save(image_path)
+            record = self._record(image_path, 12, 12)
+            state = self.new_state()
+            state.root = root; state.images = {record.image_id: record}; state.order = [record.image_id]
+            apply = np.zeros((12, 12), dtype=np.uint8); apply[4:9, 4:9] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": apply, "source": "target"}]
+            rejected = np.zeros((1, 12, 12), dtype=bool); rejected[0, 2:7, 2:7] = True
+            predictor = Mock(); predictor.predict.return_value = rejected, np.asarray([0.1]), None
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), patch.object(
+                state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((12, 12), dtype=np.uint8), [(2, 2, 7, 7)]),
+            ), patch.object(state, "_sam_predictor_for", return_value=predictor), patch.object(
+                state, "_high_precision_segments_with_predictor", side_effect=lambda _rgb, values, _predictor: values,
+            ):
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            with Image.open(candidates[0].mask_path) as mask_file:
+                mask = np.asarray(mask_file)
+            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
+            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+
+    def test_gpu_diagnostic_uses_a_disposable_session_without_model_cache_changes(self):
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "target_segmentation": "target.onnx", "gpu_device": 2})
+        state.models = object(); state.hand_model = object()
+        with patch.object(state, "_require_supported_gpu") as require, patch(
+            "mozarie.inference.onnx.diagnose_runtime", return_value=("CUDAExecutionProvider", "CPUExecutionProvider"),
+        ) as diagnose:
+            self.assertEqual(state.diagnose_gpu_runtime(), ("CUDAExecutionProvider", "CPUExecutionProvider"))
+        require.assert_called_once()
+        diagnose.assert_called_once()
+        self.assertIsNotNone(state.models)
+        self.assertIsNotNone(state.hand_model)
 
     def test_detect_image_persists_a_real_broad_fluid_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4569,17 +4799,8 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             catalog_done = threading.Event()
             job_done = threading.Event()
-            revision_changed = threading.Event()
             outcome = {}
             original_open = jobs_module.Image.open
-            original_touch = state._touch_candidates
-
-            def touch_candidates(changed_image_id):
-                revision = original_touch(changed_image_id)
-                if changed_image_id == image_id:
-                    revision_changed.set()
-                return revision
-
             def delayed_open(path, *args, **kwargs):
                 if Path(path) == mask_path:
                     opened.set()
@@ -4592,8 +4813,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(jobs_module.Image, "open", side_effect=delayed_open), \
-                 patch.object(state, "_touch_candidates", side_effect=touch_candidates):
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
                 worker = threading.Thread(target=compose)
                 worker.start()
                 self.assertTrue(opened.wait(2))
@@ -4604,13 +4824,19 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(job_done.wait(2))
                 mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
                 mutation.start()
-                self.assertTrue(revision_changed.wait(2))
+                time.sleep(0.05)
+                # Per-image serialization keeps a manual toggle from racing
+                # an in-flight mask composition.  Other catalogue reads above
+                # remain responsive while this image waits.
+                self.assertTrue(mutation.is_alive())
+                self.assertEqual(state._candidate_revision(image_id), 1)
                 release.set()
                 worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
             self.assertFalse(mutation.is_alive())
-            self.assertIsInstance(outcome.get("error"), ClientError)
-            self.assertIn("候補が変更", str(outcome["error"]))
+            self.assertGreater(state._candidate_revision(image_id), 1)
+            self.assertNotIn("error", outcome)
+            self.assertIsNotNone(outcome.get("mask"))
 
     def test_list_candidates_prunes_missing_masks_and_advances_revision_once(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4964,6 +5190,64 @@ class MozarieTests(unittest.TestCase):
                 connection.close()
             httpd.shutdown()
             httpd.server_close()
+
+    def test_malformed_candidate_api_route_is_a_client_error(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            body = json.dumps({"enabled": True}).encode("utf-8")
+            connection.request("POST", "/api/candidate/missing-part", body, {
+                "Content-Type": "application/json",
+                "X-Mozarie-Token": state_module.STATE.session_token,
+                "Origin": f"http://127.0.0.1:{httpd.server_port}",
+            })
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 400)
+            self.assertEqual(payload["error_code"], "input_invalid")
+            self.assertNotIn("ValueError", payload["error"])
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_unexpected_http_error_does_not_expose_runtime_text(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(RuntimeError("sqlite disk I/O error"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
+        payload, status = handler._json.call_args.args
+        self.assertEqual(status, http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(payload["error_code"], "internal_error")
+        self.assertNotIn("sqlite", payload["error"])
+
+    def test_database_http_error_has_a_stable_general_code(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(sqlite3.DatabaseError("database disk image is malformed"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
+        payload, _status = handler._json.call_args.args
+        self.assertEqual(payload["error_code"], "workspace_database_error")
+        self.assertNotIn("malformed", payload["error"])
+
+    def test_apply_output_error_has_a_stable_general_code(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="apply", state="running")
+        state._fail_job(PermissionError("G:/private/output"))
+        self.assertEqual(state.job.error_code, "output_unavailable")
+        self.assertNotIn("private", state.job.error)
+
+    def test_gpu_runtime_error_has_a_stable_general_code(self):
+        state = self.new_state()
+        state.settings["models"]["provider"] = "gpu"
+        state.job = core_module.Job(kind="detect", state="running")
+        state._fail_job(RuntimeError("CUDAExecutionProvider failed with private details"))
+        self.assertEqual(state.job.error_code, "internal_error")
+        self.assertNotIn("private", state.job.error)
 
     def test_save_render_returns_the_one_time_token_in_a_response_header(self):
         from http.server import ThreadingHTTPServer
@@ -5527,7 +5811,7 @@ class MozarieTests(unittest.TestCase):
             state.import_lock = RecordingLock("import", events)
             try:
                 with patch.object(state, "image_io_lock", return_value=RecordingLock("image", events)):
-                    state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                    state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             finally:
                 state.import_lock = original_import_lock
 
@@ -5549,17 +5833,17 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             clear_done = threading.Event()
             commit_result = {}
-            original_stat_check = state._assert_record_stat_matches
+            original_replace = saving_module._stage_record_replacement
 
-            def delayed_stat_check(record):
+            def delayed_replace(record, rendered_path, fingerprint):
                 fingerprint_started.set()
                 self.assertTrue(release.wait(2))
-                return original_stat_check(record)
+                return original_replace(record, rendered_path, fingerprint)
 
-            with patch.object(state, "_assert_record_stat_matches", side_effect=delayed_stat_check):
+            with patch.object(saving_module, "_stage_record_replacement", side_effect=delayed_replace):
                 commit = threading.Thread(
                     target=lambda: commit_result.setdefault(
-                        "value", state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                        "value", state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
                     )
                 )
                 commit.start()
@@ -5609,7 +5893,31 @@ class MozarieTests(unittest.TestCase):
             stored_hash = db.execute("SELECT source_hash FROM images WHERE image_id=?", (image_id,)).fetchone()["source_hash"]
         self.assertEqual(stored_hash, state._sha256_file(record.path))
 
-    def test_browser_save_session_deleted_removes_the_session_record_and_render(self):
+    def test_browser_save_database_failure_restores_source_and_keeps_token_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            original = source.read_bytes()
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
+            with patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                with self.assertRaises(OSError):
+                    state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(state._candidate_revision(image_id), revision)
+            self.assertEqual(len(state.candidates[image_id]), 1)
+            self.assertIn(token, state.browser_save_tokens)
+            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
+            self.assertEqual(state._candidate_revision(image_id), revision + 1)
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], revision + 1)
+
+    def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG")
         state = self.new_state()
@@ -5626,13 +5934,11 @@ class MozarieTests(unittest.TestCase):
 
         _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
         rendered_path = state.browser_save_tokens[token].rendered_path
-        committed = state.commit_browser_save(image_id, rendered_revision, token, "deleted")
-
-        self.assertTrue(committed["deleted"])
-        self.assertNotIn(image_id, state.images)
-        self.assertNotIn(image_id, state._image_io_locks)
-        self.assertFalse(record.path.exists())
-        self.assertFalse(rendered_path.exists())
+        with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
+            state.commit_browser_save(image_id, rendered_revision, token, "deleted")
+        self.assertIn(image_id, state.images)
+        self.assertTrue(record.path.exists())
+        self.assertTrue(rendered_path.exists())
 
     def test_browser_save_token_render_file_is_removed_when_expired_and_cannot_be_reused(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5654,10 +5960,10 @@ class MozarieTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             self.assertFalse(details.rendered_path.exists())
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
 
     def test_browser_save_uses_1_over_100_block_size_and_keeps_png_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5693,7 +5999,7 @@ class MozarieTests(unittest.TestCase):
             outside = binary_mask == 0
             self.assertTrue(np.array_equal(rendered_pixels[outside], pixels[outside]))
             self.assertFalse(np.array_equal(rendered_pixels[600:616, 400:416], pixels[600:616, 400:416]))
-            state.commit_browser_save(image_id, revision, token, "keep")
+            state.commit_browser_save(image_id, revision, token, "overwrite")
 
     def test_browser_copy_render_writes_configured_unicode_destination_before_commit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5783,7 +6089,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(record.image_id, image_id)
             self.assertEqual(revision, entry["candidateRevision"])
             self.assertEqual(Image.open(io.BytesIO(output)).text["prompt"], '{"seed": 1}')
-            committed = state.commit_browser_save(image_id, revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, revision, save_token, "overwrite")
             self.assertTrue(committed["cleared"])
             self.assertEqual(state.candidates.get(image_id, []), [])
 
@@ -5806,7 +6112,7 @@ class MozarieTests(unittest.TestCase):
             )
             state._touch_candidates(image_id)
 
-            committed = state.commit_browser_save(image_id, revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, revision, save_token, "overwrite")
             self.assertFalse(committed["cleared"])
             self.assertEqual(len(state.candidates[image_id]), 1)
 
@@ -5825,20 +6131,20 @@ class MozarieTests(unittest.TestCase):
 
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
             with self.assertRaisesRegex(ClientError, "保存確認トークン"):
-                state.commit_browser_save(image_id, rendered_revision, "", "keep")
+                state.commit_browser_save(image_id, rendered_revision, "", "overwrite")
             with self.assertRaisesRegex(ClientError, "keep、overwrite、deleted"):
                 state.commit_browser_save(image_id, rendered_revision, save_token, "invalid")
             with self.assertRaisesRegex(ClientError, "保存対象と一致"):
-                state.commit_browser_save(image_id, rendered_revision + 1, save_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision + 1, save_token, "overwrite")
 
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertTrue(committed["cleared"])
-            retried = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            retried = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertEqual(retried["cleared"], committed["cleared"])
             self.assertEqual(retried["stale"], committed["stale"])
             self.assertEqual(retried["deleted"], committed["deleted"])
             with self.assertRaisesRegex(ClientError, "保存対象と一致"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
+                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
 
     def test_browser_save_token_expires_and_catalog_change_discards_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5863,12 +6169,12 @@ class MozarieTests(unittest.TestCase):
                 details.rendered_path,
             )
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, expired_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, expired_token, "overwrite")
 
             _output, _record, rendered_revision, catalog_token = state.render_browser_save(image_id, revision, 100, None)
             state.clear_catalog()
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, catalog_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, catalog_token, "overwrite")
 
     def test_browser_save_claim_keeps_rendered_file_during_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5881,18 +6187,18 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
             rendered_path = state.browser_save_tokens[token].rendered_path
             claimed = threading.Event(); release = threading.Event(); outcome = {}
-            original_stat_check = state._assert_record_stat_matches
+            original_replace = saving_module._stage_record_replacement
 
-            def block_after_claim(record):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_stat_check(record)
+            def block_after_claim(record, rendered_path, fingerprint):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
 
             def commit():
                 try:
-                    outcome["value"] = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                    outcome["value"] = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(state, "_assert_record_stat_matches", side_effect=block_after_claim):
+            with patch.object(saving_module, "_stage_record_replacement", side_effect=block_after_claim):
                 thread = threading.Thread(target=commit); thread.start()
                 self.assertTrue(claimed.wait(2))
                 state.cleanup_expired_browser_save_tokens()
@@ -5919,7 +6225,7 @@ class MozarieTests(unittest.TestCase):
             state.catalog_generation += 1
 
             with self.assertRaisesRegex(ClientError, "画像一覧が変更"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
 
             self.assertFalse(rendered_path.exists())
             self.assertNotIn(token, state.browser_save_tokens)
@@ -5941,7 +6247,7 @@ class MozarieTests(unittest.TestCase):
             state.shutdown()
             self.assertNotIn(save_token, state.browser_save_tokens)
 
-    def test_browser_save_stale_deleted_commit_removes_the_working_copy(self):
+    def test_browser_save_rejects_stale_delete_without_a_completed_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
@@ -5957,14 +6263,10 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
             state._touch_candidates(image_id)
 
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-
-            self.assertTrue(committed["deleted"])
-            self.assertFalse(committed["cleared"])
-            self.assertTrue(committed["stale"])
-            self.assertFalse(source.exists())
-            self.assertNotIn(image_id, state.images)
-            self.assertNotIn(image_id, state.order)
+            with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
+            self.assertTrue(source.exists())
+            self.assertIn(image_id, state.images)
 
     def test_browser_save_stale_overwrite_updates_the_working_copy_and_keeps_candidates(self):
         raw = io.BytesIO()
@@ -6008,7 +6310,7 @@ class MozarieTests(unittest.TestCase):
 
             Image.new("RGB", (16, 16), "black").save(source)
             with self.assertRaisesRegex(ClientError, "元画像が.*変更"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertNotIn(save_token, state.browser_save_tokens)
 
@@ -6032,24 +6334,40 @@ class MozarieTests(unittest.TestCase):
             _output, record, rendered_revision, save_token = rendered
             output_path = rendered.output_path
 
-            original_unlink = Path.unlink
+            original_replace = Path.replace
 
-            def fail_only_for_source(path: Path, *args, **kwargs):
+            def fail_only_for_source(path: Path, target, *args, **kwargs):
                 if path == record.path:
                     raise PermissionError("locked")
-                return original_unlink(path, *args, **kwargs)
+                return original_replace(path, target, *args, **kwargs)
 
-            with patch.object(type(record.path), "unlink", autospec=True, side_effect=fail_only_for_source):
+            with patch.object(type(record.path), "replace", autospec=True, side_effect=fail_only_for_source):
                 with self.assertRaisesRegex(ClientError, "候補は保持"):
                     state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
 
             self.assertTrue(source.is_file())
             self.assertTrue(output_path.is_file())
             self.assertEqual(len(state.candidates[image_id]), 1)
-            self.assertNotIn(save_token, state.browser_save_tokens)
-            with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertTrue(source.exists())
+            self.assertIn(save_token, state.browser_save_tokens)
+            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")["deleted"])
+            self.assertFalse(source.exists())
+
+    def test_browser_copy_delete_removes_the_durable_workspace_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            output = root / "output"; output.mkdir()
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(output)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            committed = state.commit_browser_save(image_id, rendered.candidate_revision, rendered.save_token, "deleted")
+            self.assertTrue(committed["deleted"])
+            self.assertFalse(state.workspace_store.has_image(image_id))
+            self.assertFalse(source.exists())
 
     def test_browser_save_uses_one_candidate_snapshot_when_candidates_change_during_render(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6098,10 +6416,10 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(np.any(observed["mask"]))
             _output, _record, rendered_revision, save_token = outcome["result"]
             self.assertEqual(rendered_revision, revision)
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertTrue(committed["deleted"])
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
+            self.assertFalse(committed["deleted"])
             self.assertTrue(committed["stale"])
-            self.assertFalse(source.exists())
+            self.assertTrue(source.exists())
 
     def test_browser_save_prunes_missing_candidates_and_advances_revision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6179,16 +6497,16 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
-            first = state.commit_browser_save(image_id, rendered_revision, token, "keep")
-            retried = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            first = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            retried = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             self.assertFalse(mask_path.exists())
             self.assertEqual(retried["cleared"], first["cleared"])
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()
             self.assertIn(token, state.browser_save_receipts)
-            self.assertNotIn("images", state.commit_browser_save(image_id, rendered_revision, token, "keep"))
+            self.assertNotIn("images", state.commit_browser_save(image_id, rendered_revision, token, "overwrite"))
             with self.assertRaises(ClientError):
-                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+                state.commit_browser_save(image_id, rendered_revision, token, "keep")
 
     def test_browser_save_skips_disabled_candidate_mask_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6209,12 +6527,19 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(rendered_revision, revision)
             self.assertTrue(output)
 
-    def test_update_stops_server_and_state_before_launching_batch(self):
+    def test_update_request_only_stops_the_http_server(self):
         events = []
         http_server = Mock(); http_server.shutdown.side_effect = lambda: events.append("server")
-        with patch.object(http_module.time, "sleep"), patch.object(state_module.STATE, "shutdown", side_effect=lambda: events.append("state")), patch.object(http_module.subprocess, "Popen", side_effect=lambda *args, **kwargs: events.append("batch")):
+        with patch.object(http_module.time, "sleep"):
             http_module._start_update_after_response(http_server)
-        self.assertEqual(events, ["server", "state", "batch"])
+        self.assertEqual(events, ["server"])
+        self.assertTrue(http_server.mozarie_update_requested)
+
+    def test_update_start_can_only_be_reserved_once(self):
+        http_module._update_start_requested = False
+        self.assertTrue(http_module._reserve_update_start())
+        self.assertFalse(http_module._reserve_update_start())
+        http_module._update_start_requested = False
 
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)
@@ -6394,10 +6719,13 @@ class MozarieTests(unittest.TestCase):
                      patch.object(image_io_module.os, "replace", side_effect=tracked_replace):
                     save()
 
-                expected_events = ["write", "flush", "fsync", "replace"]
+                self.assertLess(events.index("write"), events.index("flush"))
+                self.assertLess(events.index("flush"), events.index("fsync"))
                 if route != "browser copy":
-                    expected_events.insert(-1, "stale check")
-                self.assertEqual(events[-len(expected_events):], expected_events)
+                    self.assertIn("stale check", events)
+                    self.assertGreaterEqual(events.count("replace"), 2, "staged overwrite first quarantines the original")
+                else:
+                    self.assertEqual(events.count("replace"), 1)
                 if route == "browser copy":
                     self.assertEqual(destination.read_bytes(), b"rendered")
 

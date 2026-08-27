@@ -52,6 +52,7 @@ function startFixtureServer() {
   const pendingUpdateStatus = [];
   let deferFullSettings = false;
   let deferUpdateStatus = false;
+  let failNextSettingsSave = false;
   let currentJob = { kind: "idle", state: "idle" };
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
@@ -79,6 +80,12 @@ function startFixtureServer() {
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
         const submittedSettings = JSON.parse(body);
+        if (failNextSettingsSave) {
+          failNextSettingsSave = false;
+          response.writeHead(500, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error_code: "internal_error" }));
+          return;
+        }
         if (submittedSettings.models.target_segmentation === "no-gpu.onnx" && submittedSettings.models.provider === "gpu") {
           response.writeHead(400, { "Content-Type": "application/json" });
           response.end(JSON.stringify({ error_code: "gpu_unsupported" }));
@@ -275,7 +282,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -501,7 +508,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   for (const name of modelActionNames) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 1, `model action has one accessible name: ${name} at ${width}x${height} (${language})`);
   const helpExpectations = {
     target: ["01miku/anime-nsfw-segm-yolo26", ".onnx", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26"],
-    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.red/models/1313556"],
+    ntd11: ["Anime NSFW Detection / ADetailer All-in-One", language === "ja" ? "NTD11のZIP → .pt → .onnx" : "NTD11 ZIP → .pt → .onnx", "https://civitai.com/api/download/models/2350456?fileId=2240838"],
     sensitive: ["sugarknight/sensitive-detect", ".pt → .onnx", "https://huggingface.co/sugarknight/sensitive-detect"],
     precision: ["Meta Segment Anything (SAM)", ".pth", "https://github.com/facebookresearch/segment-anything#model-checkpoints"],
     hand: ["deepghs/anime_hand_detection", ".onnx", "https://huggingface.co/deepghs/anime_hand_detection"],
@@ -593,11 +600,11 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     ? '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu'
     : '& ".\\.venv\\Scripts\\yolo.exe" export model="path\\to\\downloaded\\NTD11.pt" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu';
   assert.equal(await page.locator("#modelDownloadMessage").textContent(), language === "ja"
-    ? "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
-    : "NTD11 is an optional model that supplements areas missed by the primary model. Download and extract NTD11 from Civitai.red, convert the included .pt file to ONNX, then select it with Browse. Login is required to download. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
+    ? "NTD11は成人向けの任意モデルです。Civitai.comへログインして年齢確認を済ませてから、下のリンクでZIPを取得・展開し、含まれる.ptをONNXへ変換して「参照」から指定してください。匿名アクセスで取得できるとは限りません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。"
+    : "NTD11 is an optional adult model. Sign in to Civitai.com and complete its age check before using the link below to download and extract the ZIP. Convert the included .pt file to ONNX, then select it with Browse. Anonymous access may not work. After setup, run the command below in PowerShell from the Mozarie folder.", `NTD11 download explains preparation at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルを準備" : "Prepare model", `NTD11 opens the preparation dialog at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, `NTD11 download has one source item at ${width}x${height} (${language})`);
-  await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", `NTD11 at ${width}x${height} (${language})`);
+  await assertExternalPreparationLink(page, "https://civitai.com/api/download/models/2350456?fileId=2240838", `NTD11 at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#modelDownloadCommand").textContent(), ntdCommand, `NTD11 download shows its conversion command at ${width}x${height} (${language})`);
   assert.doesNotMatch(ntdCommand, /\n|pip install/, `NTD11 conversion is one command at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `NTD11 preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
@@ -742,12 +749,12 @@ async function main() {
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
-  let cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload;
+  let cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     const settingsFailurePage = await browser.newPage();
     await settingsFailurePage.addInitScript(() => {
@@ -895,7 +902,7 @@ async function main() {
     const statusesBeforeSamBrowse = settingsStatusRequests.length;
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(settingsStatusRequests.length, statusesBeforeSamBrowse + 1, "a successful model pick refreshes status once");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
@@ -941,9 +948,9 @@ async function main() {
     await page.locator('[data-model-download="ntd11"]').click();
     assert.equal(await page.locator("#modelDownloadDialog").isVisible(), true, "unsupported model download opens its own modal");
     assert.equal(await page.locator("#modelDownloadTitle").textContent(), "モデルを準備", "unsupported model opens the preparation title");
-    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は基本モデルの見落としを補う任意モデルです。Civitai.redからNTD11をダウンロード・展開し、含まれる.ptをONNXへ変換して、「参照」から指定してください。ダウンロードにはログインが必要です。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
+    assert.equal(await page.locator("#modelDownloadMessage").textContent(), "NTD11は成人向けの任意モデルです。Civitai.comへログインして年齢確認を済ませてから、下のリンクでZIPを取得・展開し、含まれる.ptをONNXへ変換して「参照」から指定してください。匿名アクセスで取得できるとは限りません。セットアップ後、Mozarieフォルダーで下のコマンドをPowerShellから実行してください。", "NTD11 download explains how to prepare its model");
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "unsupported download uses the same one-item layout");
-    await assertExternalPreparationLink(page, "https://civitai.red/api/download/models/2350456?fileId=2240838", "NTD11");
+    await assertExternalPreparationLink(page, "https://civitai.com/api/download/models/2350456?fileId=2240838", "NTD11");
     assert.equal(await page.locator("#modelDownloadCommand").textContent(), '& ".\\.venv\\Scripts\\yolo.exe" export model="ダウンロードしたNTD11の.ptファイルのパス" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu', "NTD11 download shows its conversion command");
     for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `NTD11 hides ${selector}`);
     await page.locator("#modelDownloadClose").click();
@@ -969,14 +976,14 @@ async function main() {
     const statusesBeforeSamDownload = settingsStatusRequests.length;
     await page.locator("#modelDownloadStart").click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value.includes("models\\sam_vit_l_0b3195.pth"));
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(settingsStatusRequests.length, statusesBeforeSamDownload + 1, "a completed download refreshes status once");
     assert.deepEqual(modelDownloadRequests.at(-1), { modelKey: "sam_vit_l", samType: "vit_l" }, "individual model download sends only the allowlisted key and selected SAM type");
     assert.match(await page.locator("#modelDownloadStatus").textContent(), /完了|complete/i, "download success is reported inside the modal");
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="hand_detection"]').click();
     await page.locator("#modelDownloadStart").click();
-    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open, null, { timeout: 3000 });
     assert.equal(await page.locator("#modelDownloadStatus").textContent(), "", "download errors do not remain inside the download modal");
     assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /fixture download failed/, "raw download errors are not shown");
     await page.locator("#errorDialogClose").click();
@@ -1028,7 +1035,7 @@ async function main() {
     assert.equal(await page.locator("#settingsGpuDevice").getAttribute("aria-busy"), "true", "GPU selector reports that its options are loading");
     await page.locator("#settingsTargetModel").fill("changed-while-checking.onnx");
     releaseFullSettings();
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), "changed-while-checking.onnx", "model status refresh keeps unsaved form values");
     assert.equal(await page.locator("#settingsGpuDevice").textContent(), gpuBeforeStaleResponse, "a stale response leaves GPU state unchanged without a message");
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears when a stale response completes");
@@ -1363,6 +1370,18 @@ async function main() {
       input.value = "1.00";
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    const detectionControls = await page.evaluate(() => {
+      const saved = [...state.settings.detection.targets];
+      state.settings.detection.targets = [];
+      setDetectionTargets(["penis"]); // Unsaved form state must not enable detection.
+      updateActionButtons();
+      const empty = { all: document.querySelector("#detectAllButton").disabled, current: document.querySelector("#detectCurrentButton").disabled };
+      state.settings.detection.targets = saved;
+      setDetectionTargets(saved);
+      updateActionButtons();
+      return { empty, restored: { all: document.querySelector("#detectAllButton").disabled, current: document.querySelector("#detectCurrentButton").disabled } };
+    });
+    assert.deepEqual(detectionControls, { empty: { all: true, current: true }, restored: { all: false, current: false } }, "detection actions use persisted targets, not unsaved controls");
     await page.locator("#detectCurrentButton").click();
     await page.waitForTimeout(50);
     assert.equal(await page.locator("#detectDialog").isVisible(), false, "current-image detection must not open settings");
@@ -1370,10 +1389,27 @@ async function main() {
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
     assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
+    assert.deepEqual(detectRequests[0].targetClasses, ["penis", "pussy"], "current-image detection uses the persisted targets");
     assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
 
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
+    const persistedDetection = await page.evaluate(() => structuredClone(state.settings.detection));
+    failNextSettingsSave();
+    await page.locator("#detectAllButton").click();
+    await page.locator("#dialogTargetPussy").evaluate((input) => { input.checked = false; input.dispatchEvent(new Event("change", { bubbles: true })); });
+    await page.locator("#detectConfidenceNumber").fill("0.67");
+    await page.locator("#detectParallelism").fill("4");
+    await page.locator("#detectStartButton").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    const failedDetectionSave = await page.evaluate(() => ({
+      settings: state.settings.detection,
+      dialogOpen: document.querySelector("#detectDialog").open,
+      allDisabled: document.querySelector("#detectAllButton").disabled,
+      currentDisabled: document.querySelector("#detectCurrentButton").disabled,
+    }));
+    assert.deepEqual(failedDetectionSave, { settings: persistedDetection, dialogOpen: false, allDisabled: false, currentDisabled: true }, "a failed detection-settings save leaves persisted targets and main actions untouched");
+    await page.locator("#errorDialogClose").click();
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
     assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
@@ -1417,6 +1453,7 @@ async function main() {
     failCancel(false);
     await page.locator("#processingCancelButton").click();
     await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
+    assert.match(await page.locator("#connectionStatus").textContent(), /現在の画像は完了する場合があります/, "cancellation is shown immediately with the in-flight image notice");
     await page.locator("#processingCancelButton").evaluate((button) => button.click());
     assert.equal(cancelRequests(), 2, "a processing cancel cannot be sent twice");
     holdDetection(false);
@@ -1535,6 +1572,12 @@ async function main() {
     await dismissFromBackdrop("#modelHelpDialog");
     await dismissFromBackdrop("#applyDialog");
     await page.locator("#settingsDialog").evaluate((dialog) => { if (!dialog.open) dialog.showModal(); });
+    await page.locator("#settingsDialog").evaluate((dialog) => {
+      const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]')].filter((element) => element.offsetParent !== null);
+      focusable.at(-1).focus();
+    });
+    await page.keyboard.press("Tab");
+    assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.contains(document.activeElement)), true, "modal focus stays inside the settings dialog");
     const settingsPoints = await dialogPointerPoints(page, "#settingsDialog");
     await pointerGesture(page, settingsPoints.inside, settingsPoints.outside);
     assert.equal(await page.locator("#settingsDialog").evaluate((dialog) => dialog.open), true, "dragging from settings content to its backdrop must not close it");
@@ -1774,9 +1817,11 @@ async function main() {
     assert.deepEqual(candidateDisplaySemantics.exclude.map((button) => button.text), ["Show", "Force ON", "ON", "×"], `exclusion rows keep their one-line action order: ${JSON.stringify(candidateDisplaySemantics.exclude)}`);
     assert.ok(Math.abs(candidateDisplaySemantics.rows[0].height - candidateDisplaySemantics.rows[1].height) <= 1 && candidateDisplaySemantics.rows.every((row) => row.height >= 36 && row.height <= 40), `candidate rows share one compact height: ${JSON.stringify(candidateDisplaySemantics.rows)}`);
     await page.locator('.candidate-row-apply .candidate-effective-toggle').focus(); await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
+    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "true" && state.blinkModes.get("radio-candidate") === "effective");
     const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
     assert.deepEqual(candidateDisplayKeyboard, { display: "false", effective: "true", mode: "effective" }, "Applied replaces normal display with exclusion-aware display");
     await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
+    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "false" && !state.blinkModes.has("radio-candidate"));
     const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
     assert.deepEqual(candidateDisplayStopped, { display: "false", effective: "false", mode: "off" }, "pressing Applied again stops only that candidate highlight");
     await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
@@ -1845,7 +1890,7 @@ async function main() {
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
-    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
+    assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
     await browser?.close();
     if (server) await closeServer(server);

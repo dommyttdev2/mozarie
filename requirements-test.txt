@@ -2,5 +2,6 @@
 numpy>=1.26,<3
 Pillow>=11.3,<12
 opencv-python-headless>=4.8,<5
+onnx>=1.12,<2
 onnxruntime>=1.17,<2
 safetensors>=0.4,<1
