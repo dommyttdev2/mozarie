@@ -121,7 +121,10 @@ function bindEvents() {
       if (toggle.dataset.modelToggle === "hand_detection") setHandSegmentationAvailable(toggle.checked);
     });
   });
-  $("#settingsPrecisionToggle").addEventListener("change", () => setPrecisionDetectionEnabled($("#settingsPrecisionToggle").checked));
+  $("#settingsPrecisionToggle").addEventListener("change", () => {
+    setPrecisionDetectionEnabled($("#settingsPrecisionToggle").checked);
+    void refreshSettingsStatus();
+  });
   $("#settingsFluidToggle").addEventListener("change", () => setFluidExclusionEnabled($("#settingsFluidToggle").checked));
   $("#pickImages").addEventListener("click", () => { void pickImageFiles(); });
   $("#pickFolderFiles").addEventListener("click", () => { void pickImageDirectory(); });

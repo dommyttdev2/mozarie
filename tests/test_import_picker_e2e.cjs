@@ -635,6 +635,8 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   });
   assert.equal(downloadCommandLayout.buttonBelow && downloadCommandLayout.noOverlap && downloadCommandLayout.hit && downloadCommandLayout.actionsFollowPre && downloadCommandLayout.fits, true, `download command and copy control are separate and usable at ${width}x${height} (${language})`);
   await page.locator("#modelDownloadClose").click();
+  if (!await page.locator("#settingsPrecisionToggle").isChecked()) await page.locator("#settingsPrecisionToggle").check();
+  await page.waitForFunction(() => !document.querySelector('[data-model-download="sam"]').disabled);
   await page.locator('[data-model-download="sam"]').click();
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルをダウンロード" : "Download model", `supported model restores the download title at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector} at ${width}x${height} (${language})`);
@@ -865,6 +867,14 @@ async function main() {
     assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
+    for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
+      assert.equal(await page.locator(selector).first().isDisabled(), true, `standard mode disables ${selector}`);
+    }
+    await page.locator("#settingsPrecisionToggle").check();
+    await page.waitForFunction(() => !document.querySelector("#settingsSamModel").disabled);
+    for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
+      assert.equal(await page.locator(selector).first().isDisabled(), false, `high precision enables ${selector}`);
+    }
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#settingsGpuDevice").isDisabled(), true, "CPU disables the GPU selector");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "gpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -874,10 +884,11 @@ async function main() {
     await page.locator('[data-model-help="handSegmentation"]').click();
     assert.equal(await page.locator("#modelHelpFile").textContent(), ".safetensors", "HandSeg help names its format");
     await page.locator("#modelHelpCloseButton").click();
+    const statusesBeforeSamBrowse = settingsStatusRequests.length;
     await page.locator('[data-model-picker="sam_checkpoint"]').click();
     await page.waitForFunction(() => document.querySelector("#settingsSamModel").value === "C:\\models\\sam_vit_l_0b3195.pth");
     await page.waitForTimeout(50);
-    assert.equal(settingsStatusRequests.length, 2, "a successful model pick refreshes status once");
+    assert.equal(settingsStatusRequests.length, statusesBeforeSamBrowse + 1, "a successful model pick refreshes status once");
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
     assert.equal(await page.locator('input[name="settingsSamVariant"]:checked').inputValue(), "vit_l", "the matching accessible SAM radio is selected");
@@ -893,6 +904,12 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('[data-sam-status="vit_l"]').textContent.length > 0);
     assert.match(await page.locator('[data-sam-status="vit_l"]').textContent(), /外部ファイル|External file/, "configured SAM path is identified as external");
     assert.match(await page.locator('[data-sam-status="vit_b"]').textContent(), /未取得|Not acquired/, "unconfigured SAM variants remain selectable and show their status");
+    const retainedSamPath = await page.locator("#settingsSamModel").inputValue();
+    await page.locator("#settingsPrecisionToggle").uncheck();
+    assert.equal(await page.locator("#settingsSamModel").isDisabled(), true, "standard mode disables an existing SAM path without clearing it");
+    assert.equal(await page.locator("#settingsSamModel").inputValue(), retainedSamPath, "standard mode keeps the existing SAM path for a later high precision run");
+    await page.locator("#settingsPrecisionToggle").check();
+    await page.waitForFunction(() => !document.querySelector("#settingsSamModel").disabled);
     await page.locator("#settingsTargetModel").fill("legacy-sam-status.onnx");
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => !document.querySelector('[data-sam-status="vit_b"]').textContent);

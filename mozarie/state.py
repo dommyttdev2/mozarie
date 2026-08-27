@@ -222,6 +222,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def settings_status(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         """Report configured model files without loading model data."""
         models = (settings or self.settings)["models"]
+        sam_enabled = (settings or self.settings)["detection"].get("mode") == "high_precision"
         result: dict[str, dict[str, Any]] = {}
         def add_status(key: str, *, required: bool, enabled: bool, required_suffix: str | None = None, raw_path: str | None = None) -> None:
             raw = str(models.get(key, "") if raw_path is None else raw_path).strip()
@@ -267,7 +268,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             enabled=bool(models.get("hand_detection_enabled")) and bool(models.get("hand_segmentation_enabled")),
             required_suffix=".safetensors",
         )
-        add_status("sam_checkpoint", required=True, enabled=True, raw_path=str(models["sam_checkpoints"].get(models["sam_model_type"], "")))
+        add_status("sam_checkpoint", required=sam_enabled, enabled=sam_enabled, raw_path=str(models["sam_checkpoints"].get(models["sam_model_type"], "")))
         sam_files = {
             "vit_b": "sam_vit_b_01ec64.pth",
             "vit_l": "sam_vit_l_0b3195.pth",

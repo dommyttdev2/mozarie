@@ -203,9 +203,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
                 provider = str(models.get("provider", "cpu"))
-                configured = bool(str(models.get("target_segmentation", "")).strip()) and bool(
-                    str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
-                )
+                configured = bool(str(models.get("target_segmentation", "")).strip())
+                if STATE.settings.get("detection", {}).get("mode") == "high_precision":
+                    configured = configured and bool(str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip())
                 configured = configured and all(
                     not bool(models.get(enabled_key)) or bool(str(models.get(path_key, "")).strip())
                     for enabled_key, path_key in (
