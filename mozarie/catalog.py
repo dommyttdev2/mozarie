@@ -71,19 +71,6 @@ class CatalogMixin:
             self.candidates[image_id] = candidates
             self.candidate_revisions[image_id] = revision
 
-    def _persist_candidates(self, image_id: str) -> None:
-        """Persist an already-published test/bootstrap candidate snapshot."""
-        record = self.images.get(image_id)
-        if record is None:
-            return
-        if not self.workspace_store.has_image(image_id):
-            return
-        candidates = self.candidates.get(image_id, [])
-        self.workspace_store.commit_candidate_state(
-            image_id, self._candidate_revision(image_id), candidates,
-            self._effective_mask_for_candidates(image_id, candidates), replace=True,
-        )
-
     def _commit_candidate_snapshot(self, image_id: str, candidates: list[Candidate], *, replace: bool) -> int:
         """Durably commit a candidate revision, then publish it while the caller holds ``self.lock``."""
         revision = self._candidate_revision(image_id) + 1

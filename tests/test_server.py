@@ -158,6 +158,12 @@ class MozarieTests(unittest.TestCase):
         self._states.append(state)
         return state
 
+    @staticmethod
+    def commit_candidates(state: StudioState, image_id: str) -> int:
+        with state.image_io_lock(image_id):
+            with state.lock:
+                return state._commit_candidate_snapshot(image_id, state.candidates[image_id], replace=True)
+
     def test_workspace_restores_flags_masks_and_manual_edits_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -170,8 +176,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
             buffer = io.BytesIO(); Image.new("L", (16, 16), 255).save(buffer, format="PNG")
             manual = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -201,8 +206,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.new("L", (16, 16), 255).save(mask_path)
                 state.candidates[image_id] = [Candidate(candidate_id, "penis", 0.9, mask_path)]
-                state._touch_candidates(image_id)
-                state._persist_candidates(image_id)
+                self.commit_candidates(state, image_id)
             connection = sqlite3.connect(state.workspace_store.path)
             with connection as db:
                 db.execute("UPDATE candidates SET mask_png=? WHERE image_id=? AND candidate_id=?", (b"not a PNG", image_ids["b-corrupt.png"], "corrupt"))
@@ -223,8 +227,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             connection = sqlite3.connect(state.workspace_store.path)
             with connection as db:
                 db.execute("UPDATE candidates SET role=? WHERE image_id=?", ("not-a-role", image_id))
@@ -248,8 +251,7 @@ class MozarieTests(unittest.TestCase):
                 Image.new("L", (16, 16), value).save(mask_path)
                 candidates.append(Candidate(candidate_id, candidate_id, 0.9, mask_path))
             state.candidates[image_id] = candidates
-            state._touch_candidates(image_id)
-            state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
 
             reopened = self.new_state()
             reopened.set_root(str(root))
@@ -278,7 +280,7 @@ class MozarieTests(unittest.TestCase):
             mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             previous_revision = state._candidate_revision(image_id)
             state.save_manual_workspace(image_id, {
                 "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["candidate", "stale"],
@@ -302,7 +304,7 @@ class MozarieTests(unittest.TestCase):
             mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            revision = state._touch_candidates(image_id); state._persist_candidates(image_id)
+            revision = self.commit_candidates(state, image_id)
             state.save_manual_workspace(image_id, {
                 "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["stale"],
                 "candidateRevision": revision, "hasEffectiveMask": True,
@@ -333,7 +335,7 @@ class MozarieTests(unittest.TestCase):
             mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             entered = threading.Event(); release = threading.Event()
             original_save = state.workspace_store.save_manual
 
@@ -368,8 +370,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(12, 12)).save(mask_path)
                 state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
-                state._touch_candidates(image_id)
-                state._persist_candidates(image_id)
+                self.commit_candidates(state, image_id)
             raw = io.BytesIO(); Image.fromarray(self._mask(12, 12)).save(raw, format="PNG")
             mask = "data:image/png;base64," + base64.b64encode(raw.getvalue()).decode("ascii")
             state.save_manual_workspace(ids["auto-manual.png"], {"add": "", "exclusion": mask, "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 1, "hasEffectiveMask": False})
@@ -402,7 +403,7 @@ class MozarieTests(unittest.TestCase):
                 Candidate("apply", "penis", 0.9, apply_path),
                 Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
             ]
-            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            self.commit_candidates(state, image_id)
             state.set_candidate_state(image_id, "apply", {"enabled": True})
             self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
             state.set_candidate_state(image_id, "exclude", {"enabled": False})
@@ -424,8 +425,7 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[native_id] = [Candidate("native", "penis", 0.9, mask_path)]
-            state._touch_candidates(native_id)
-            state._persist_candidates(native_id)
+            self.commit_candidates(state, native_id)
 
             upload = io.BytesIO(); Image.new("RGB", (16, 16), "blue").save(upload, format="PNG")
             with tempfile.TemporaryDirectory() as staging_directory:
