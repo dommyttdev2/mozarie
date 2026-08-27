@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import contextlib
 import io
 import os
@@ -7,44 +5,66 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import setup_gpu_check
 
 
 class SetupGpuCheckTests(unittest.TestCase):
-    def test_missing_or_unusable_gpu_uses_cpu_without_a_traceback(self) -> None:
-        ort = types.SimpleNamespace(get_available_providers=lambda: [], datasets=types.SimpleNamespace())
-        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
-        output = io.StringIO()
-        with patch.dict(sys.modules, {"numpy": types.SimpleNamespace(), "onnxruntime": ort, "torch": torch}), contextlib.redirect_stdout(output):
-            self.assertEqual(setup_gpu_check.main(), 0)
-        self.assertEqual(output.getvalue().strip(), setup_gpu_check.CPU_MESSAGE)
-        self.assertNotIn("Traceback", output.getvalue())
-
-    def test_cuda_session_is_run_before_gpu_is_reported_ready(self) -> None:
-        calls: list[object] = []
-        session = types.SimpleNamespace(
-            disable_fallback=lambda: calls.append("disable_fallback"),
+    def run_check(self, *, cuda=True, providers=("CUDAExecutionProvider",), session=None, save_error=None):
+        session = session if session is not None else SimpleNamespace(
+            disable_fallback=lambda: None,
             get_providers=lambda: ["CUDAExecutionProvider"],
-            run=lambda _outputs, inputs: calls.append(inputs),
+            run=lambda *_args: None,
         )
-        ort = types.SimpleNamespace(
-            get_available_providers=lambda: ["CUDAExecutionProvider"],
-            InferenceSession=lambda path, providers: calls.append((path, providers)) or session,
-            datasets=types.SimpleNamespace(get_example=lambda name: f"fixture/{name}"),
+        store = SimpleNamespace(save=Mock(side_effect=save_error))
+        runtime = (
+            SimpleNamespace(ones=lambda *_args, **_kwargs: object(), float32=object()),
+            SimpleNamespace(get_available_providers=lambda: providers, InferenceSession=lambda *_args, **_kwargs: session),
+            SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda)),
+            SimpleNamespace(get_example=lambda _name: "model.onnx"),
         )
-        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
-        numpy = types.SimpleNamespace(float32="float32", ones=lambda shape, dtype: (shape, dtype))
         output = io.StringIO()
-        with patch.dict(sys.modules, {"numpy": numpy, "onnxruntime": ort, "torch": torch}), contextlib.redirect_stdout(output):
-            self.assertEqual(setup_gpu_check.main(), 0)
-        self.assertEqual(calls, [("fixture/mul_1.onnx", ["CUDAExecutionProvider"]), "disable_fallback", {"X": ((3, 2), "float32")}])
-        self.assertEqual(output.getvalue().strip(), "[Mozarie] GPU is ready.")
+        with patch.object(setup_gpu_check, "_runtime_modules", return_value=runtime), \
+             patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        return result, store, output.getvalue()
+
+    def test_cuda_unavailable_switches_to_cpu(self):
+        result, store, output = self.run_check(cuda=False)
+        self.assertEqual(result, 0)
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+        self.assertIn("CPU", output)
+
+    def test_missing_execution_provider_switches_to_cpu(self):
+        result, _store, output = self.run_check(providers=("CPUExecutionProvider",))
+        self.assertEqual(result, 0)
+        self.assertIn("CPU", output)
+
+    def test_session_failure_switches_to_cpu(self):
+        result, _store, output = self.run_check(session=SimpleNamespace(
+            disable_fallback=lambda: None, get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
+        ))
+        self.assertEqual(result, 0)
+        self.assertIn("CPU", output)
+
+    def test_cpu_save_failure_fails_setup(self):
+        result, _store, output = self.run_check(cuda=False, save_error=OSError("locked"))
+        self.assertEqual(result, 1)
+        self.assertIn("could not be saved", output)
+
+    def test_gpu_success_keeps_existing_provider(self):
+        result, store, output = self.run_check()
+        self.assertEqual(result, 0)
+        self.assertEqual(output.strip(), "[Mozarie] GPU is ready.")
+        # A successful smoke test does not touch an existing CPU selection.
+        store.save.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_fresh_venv_pip_dry_run_keeps_resolver_output_visible(self) -> None:
@@ -59,7 +79,3 @@ class SetupGpuCheckTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"(?m)^(Looking in indexes:|Collecting|Would install) ")
-
-
-if __name__ == "__main__":
-    unittest.main()

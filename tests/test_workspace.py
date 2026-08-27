@@ -183,6 +183,26 @@ class WorkspaceTests(unittest.TestCase):
             self.assertNotIn("has_effective_mask", {row[1] for row in connection.execute("PRAGMA table_info(manual_edits)")})
             connection.close()
 
+    def test_v3_database_missing_required_constraints_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            path = root / "workspaces.sqlite3"
+            connection = sqlite3.connect(path)
+            with connection as db:
+                db.executescript("""
+                    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO meta VALUES('schema_version', '3');
+                    CREATE TABLE catalogs (catalog_id TEXT PRIMARY KEY, identity_hash TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                    CREATE TABLE images (catalog_id TEXT NOT NULL, relative_path TEXT NOT NULL, image_id TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, source_hash TEXT NOT NULL DEFAULT '', hidden INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0, candidate_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(catalog_id, relative_path));
+                    CREATE TABLE candidates (image_id TEXT NOT NULL, candidate_id TEXT NOT NULL, class_name TEXT NOT NULL, confidence REAL, mask_png BLOB NOT NULL, enabled INTEGER NOT NULL, color TEXT NOT NULL, source TEXT NOT NULL, origin TEXT NOT NULL, refinement TEXT, role TEXT NOT NULL, forced INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(image_id, candidate_id));
+                    CREATE TABLE manual_edits (image_id TEXT PRIMARY KEY, add_png BLOB, exclusion_png BLOB, exclusion_erase_png BLOB, manual_enabled INTEGER NOT NULL DEFAULT 1, exclusion_enabled INTEGER NOT NULL DEFAULT 1, exclusion_erase_enabled INTEGER NOT NULL DEFAULT 1, exclusion_forced INTEGER NOT NULL DEFAULT 1, removed_candidate_ids TEXT NOT NULL DEFAULT '[]', candidate_revision INTEGER NOT NULL DEFAULT 0, has_effective_mask INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+                """)
+            connection.close()
+            before = path.read_bytes()
+            with self.assertRaisesRegex(WorkspaceOpenError, "recreated"):
+                WorkspaceStore(root)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_empty_and_garbage_existing_databases_are_rejected_without_changes(self):
         for content in (b"", b"not sqlite"):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
@@ -205,8 +225,8 @@ class WorkspaceTests(unittest.TestCase):
             database = data / "workspaces.sqlite3"; database.write_bytes(b"not sqlite")
             before = database.read_bytes()
             result = subprocess.run(
-                [sys.executable, "server.py", "--port", "0"], cwd=app,
-                capture_output=True, text=True, timeout=20,
+                [sys.executable, "-X", "utf8", "server.py", "--port", "0"], cwd=app,
+                capture_output=True, text=True, encoding="utf-8", timeout=20,
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("作業データを開けません", result.stderr)

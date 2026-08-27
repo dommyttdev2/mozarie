@@ -133,6 +133,36 @@ class WorkspaceStore:
             present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
             if not columns <= present:
                 raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
+        primary_keys = {
+            "meta": ("key",),
+            "catalogs": ("catalog_id",),
+            "images": ("catalog_id", "relative_path"),
+            "candidates": ("image_id", "candidate_id"),
+            "manual_edits": ("image_id",),
+        }
+        unique_columns = {
+            "catalogs": ("identity_hash",),
+            "images": ("image_id",),
+        }
+        foreign_keys = {
+            "images": ("catalog_id", "catalogs", "catalog_id"),
+            "candidates": ("image_id", "images", "image_id"),
+            "manual_edits": ("image_id", "images", "image_id"),
+        }
+        for table, expected in primary_keys.items():
+            key_columns = tuple(row["name"] for row in sorted(
+                db.execute(f"PRAGMA table_info({table})"), key=lambda row: int(row["pk"])
+            ) if row["pk"])
+            if key_columns != expected:
+                raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
+        for table, expected in unique_columns.items():
+            unique_indexes = [row["name"] for row in db.execute(f"PRAGMA index_list({table})") if row["unique"]]
+            if not any(tuple(row["name"] for row in db.execute(f"PRAGMA index_info({index})")) == expected for index in unique_indexes):
+                raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
+        for table, expected in foreign_keys.items():
+            if not any((row["from"], row["table"], row["to"]) == expected and row["on_delete"].upper() == "CASCADE"
+                       for row in db.execute(f"PRAGMA foreign_key_list({table})")):
+                raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
