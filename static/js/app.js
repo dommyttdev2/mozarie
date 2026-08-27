@@ -9,6 +9,18 @@ function showModalFromInvoker(dialog, invoker = document.activeElement) {
   dialog.showModal();
 }
 
+function trapModalTab(event) {
+  if (event.key !== "Tab") return;
+  const dialog = event.currentTarget;
+  const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => element.offsetParent !== null);
+  if (!focusable.length) { event.preventDefault(); dialog.focus(); return; }
+  const first = focusable[0]; const last = focusable.at(-1);
+  if (event.shiftKey ? document.activeElement === first : document.activeElement === last || !dialog.contains(document.activeElement)) {
+    event.preventDefault(); focusElement(event.shiftKey ? last : first);
+  }
+}
+
 function modelHelpInfo(key) {
   const source = (label, url) => ({ source: label, url });
   const english = $("#settingsLanguage")?.value === "en";
@@ -56,6 +68,7 @@ async function copyCommand(commandId, resultId) {
 }
 
 function bindEvents() {
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("keydown", trapModalTab));
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("close", () => {
     const invoker = modalInvokers.get(dialog);
     modalInvokers.delete(dialog);
@@ -141,7 +154,7 @@ function bindEvents() {
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
-  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1));
+  $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, persistedDetectionTargets()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));

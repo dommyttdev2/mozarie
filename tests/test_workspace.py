@@ -222,5 +222,47 @@ class WorkspaceTests(unittest.TestCase):
             store.delete_images(ids)
             self.assertEqual(store.manual_mask_statuses(ids), {})
 
+    def test_reconcile_images_fetches_existing_rows_once_for_a_large_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            records = [SimpleNamespace(relative_path=f"nested/{index:05}.png", size_bytes=10, mtime_ns=20) for index in range(5000)]
+            store.reconcile_images(catalog, records)
+            statements: list[str] = []
+            original_connect = store._connect
+
+            def counted_connect():
+                connection = original_connect()
+                connection.set_trace_callback(statements.append)
+                return connection
+
+            store._connect = counted_connect  # type: ignore[method-assign]
+            store.reconcile_images(catalog, records)
+            selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+            self.assertEqual(len(selects), 1)
+            self.assertIn("workspace_reconcile_records", selects[0])
+
+    def test_manifest_scoring_joins_the_manifest_once_for_a_large_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            entries = [(f"nested/{index:05}.png", f"hash-{index}") for index in range(5000)]
+            store.reconcile_images(catalog, [SimpleNamespace(relative_path=path, size_bytes=10, mtime_ns=20) for path, _hash in entries], dict(entries))
+            statements: list[str] = []
+            original_connect = store._connect
+
+            def counted_connect():
+                connection = original_connect()
+                connection.set_trace_callback(statements.append)
+                return connection
+
+            store._connect = counted_connect  # type: ignore[method-assign]
+            self.assertEqual(store.best_catalog_for_manifest(entries, "f" * 32), catalog)
+            selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+            self.assertEqual(len(selects), 2)
+            self.assertIn("workspace_manifest_entries", selects[0])
+
 if __name__ == "__main__":
     unittest.main()

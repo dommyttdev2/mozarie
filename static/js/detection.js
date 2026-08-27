@@ -12,6 +12,13 @@ function setDetectionTargets(targets, prefix = "detectTarget") {
   }
 }
 
+function persistedDetectionTargets() { return state.settings?.detection?.targets || []; }
+function syncDetectionActions() {
+  const enabled = persistedDetectionTargets().length > 0 && !isBusy() && !state.importing;
+  $("#detectAllButton").disabled = !enabled || !state.images.length;
+  $("#detectCurrentButton").disabled = !enabled || !state.currentId;
+}
+
 function syncDetectionTargetSwitch(input) {
   const label = input.closest(".target-chip");
   label?.classList.toggle("is-selected", input.checked);
@@ -46,7 +53,7 @@ function openDetectionDialog(imageIds) {
   showModalFromInvoker($("#detectDialog"));
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = detectionTargets()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets()) {
   if (!imageIds.length || isBusy() || state.importing) return;
   if (!validateDetectionTargets(targetClasses, $("#detectionTargetValidation"))) return;
   state.detectionStarting = true;
@@ -75,7 +82,11 @@ async function startDetectionFromDialog(event) {
   state.pendingDetectionTargetIds = [];
   if (state.settings) {
     state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
-    try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
+    try {
+      const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) });
+      state.settings = saved.settings;
+      setSettingsForm(saved.settings, state.settingsStatus);
+    }
     catch (error) { showUserError(error); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);

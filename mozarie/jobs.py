@@ -4,6 +4,7 @@ import gc
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any
@@ -302,20 +303,23 @@ class JobsMixin:
         draft: tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None] | None = None,
         manual_exclude_forced: bool | None = None,
         removed_candidate_ids: set[str] | None = None,
+        candidate_snapshot: list[Candidate] | None = None,
+        lock_image: bool = True,
     ) -> np.ndarray | None:
         if draft is None:
             add_mask, exclusion_mask, exclusion_erase_mask = None, None, None
         else:
             add_mask, exclusion_mask, *remaining = draft
             exclusion_erase_mask = remaining[0] if remaining else None
-        with self.image_io_lock(image_id):
+        with (self.image_io_lock(image_id) if lock_image else nullcontext()):
             with self.lock:
                 current_record = self.images.get(image_id)
                 if current_record is None:
                     raise ClientError("画像が見つかりません。", "image_not_found")
                 record = replace(current_record)
                 removed_candidate_ids = removed_candidate_ids or set()
-                candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
+                source_candidates = candidate_snapshot if candidate_snapshot is not None else self.candidates.get(image_id, [])
+                candidates = [replace(candidate) for candidate in source_candidates if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
                 revision = self._candidate_revision(image_id)
                 catalog_generation = self.catalog_generation
             apply_candidates = [candidate for candidate in candidates if candidate.role == CandidateRole.APPLY]

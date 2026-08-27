@@ -29,6 +29,23 @@ from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
 
 class CatalogMixin:
+    def _effective_mask_for_candidates(self, image_id: str, candidates: list[Candidate]) -> bool:
+        """Compute the persisted gallery scalar for an unpublished candidate set."""
+        record = self.image_snapshot(image_id)
+        draft = self.workspace_store.manual(image_id, self._encode_workspace_mask) or {}
+        add, exclusion, erase = decode_draft_masks(draft, record.width, record.height)
+        if draft.get("manualEnabled") is False: add = None
+        if draft.get("manualExclusionEnabled") is False: exclusion = None
+        if draft.get("manualExclusionEraseEnabled") is False: erase = None
+        valid_ids = {candidate.candidate_id for candidate in candidates}
+        removed = {str(value) for value in draft.get("removedCandidateIds", [])} & valid_ids
+        mask = self.combined_candidate_mask(
+            image_id, (add, exclusion, erase),
+            manual_exclude_forced=draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True)),
+            removed_candidate_ids=removed, candidate_snapshot=candidates, lock_image=False,
+        )
+        return bool(mask is not None and np.any(mask))
+
     def _refresh_effective_mask_status(self, image_id: str) -> None:
         """Persist the one scalar used by gallery filtering without decoding in the browser."""
         if not self.workspace_store.has_image(image_id):
@@ -1095,12 +1112,16 @@ class CatalogMixin:
             if "forced" in payload:
                 candidate.forced = payload["forced"]
             revision = self._candidate_revision(image_id) + 1
+            expected_revision = self._candidate_revision(image_id)
+        effective = self._effective_mask_for_candidates(image_id, candidates)
+        with self.lock:
+            if self._candidate_revision(image_id) != expected_revision:
+                raise ClientError("検出候補が更新されました。もう一度実行してください。", "catalog_changed")
             # Do the durable write before publishing the new cache state.  A
             # failed SQLite write must leave the editor exactly as it was.
-            self.workspace_store.update_candidate_metadata(image_id, revision, candidates)
+            self.workspace_store.update_candidate_metadata(image_id, revision, candidates, effective)
             self.candidates[image_id] = candidates
             self.candidate_revisions[image_id] = revision
-        self._refresh_effective_mask_status(image_id)
         return self._candidate_revision(image_id)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
@@ -1127,15 +1148,19 @@ class CatalogMixin:
                             continue
                         item.enabled = operation == "enable"
                 revision = self._candidate_revision(image_id) + 1
+                expected_revision = self._candidate_revision(image_id)
+            effective = self._effective_mask_for_candidates(image_id, candidates)
+            with self.lock:
+                if self._candidate_revision(image_id) != expected_revision:
+                    raise ClientError("検出候補が更新されました。もう一度実行してください。", "catalog_changed")
                 if operation == "delete":
-                    self.workspace_store.replace_candidates(image_id, revision, candidates)
+                    self.workspace_store.replace_candidates(image_id, revision, candidates, effective)
                 else:
-                    self.workspace_store.update_candidate_metadata(image_id, revision, candidates)
+                    self.workspace_store.update_candidate_metadata(image_id, revision, candidates, effective)
                 self.candidates[image_id] = candidates
                 self.candidate_revisions[image_id] = revision
             for path in paths:
                 path.unlink(missing_ok=True)
-            self._refresh_effective_mask_status(image_id)
             return revision
 
     def delete_candidate(self, image_id: str, candidate_id: str) -> bool:
@@ -1150,9 +1175,13 @@ class CatalogMixin:
                     return False
                 updated = [replace(item) for item in candidates if item.candidate_id != candidate_id]
                 revision = self._candidate_revision(image_id) + 1
-                self.workspace_store.replace_candidates(image_id, revision, updated)
+                expected_revision = self._candidate_revision(image_id)
+            effective = self._effective_mask_for_candidates(image_id, updated)
+            with self.lock:
+                if self._candidate_revision(image_id) != expected_revision:
+                    raise ClientError("検出候補が更新されました。もう一度実行してください。", "catalog_changed")
+                self.workspace_store.replace_candidates(image_id, revision, updated, effective)
                 self.candidates[image_id] = updated
                 self.candidate_revisions[image_id] = revision
             candidate.mask_path.unlink(missing_ok=True)
-            self._refresh_effective_mask_status(image_id)
             return True

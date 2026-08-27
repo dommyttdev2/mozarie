@@ -217,7 +217,19 @@ async function ensureSaveSources(imageIds, mode, deleteOriginal) {
 }
 
 async function writeSourceHandle(access, response) {
-  const stream = await access.fileHandle.createWritable({ keepExistingData: false });
+  let stream;
+  try {
+    stream = await access.fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" });
+  } catch (error) {
+    // Older File System Access implementations reject the new option. A real
+    // exclusive-writer conflict must remain an error; never retry around it.
+    if (!["TypeError", "NotSupportedError"].includes(error?.name)) {
+      const busy = new Error("source_busy");
+      busy.code = "source_busy";
+      throw busy;
+    }
+    stream = await access.fileHandle.createWritable({ keepExistingData: false });
+  }
   try {
     await response.body.pipeTo(stream);
     const file = await access.fileHandle.getFile();

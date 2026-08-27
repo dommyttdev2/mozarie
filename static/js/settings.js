@@ -221,6 +221,7 @@ function setSettingsForm(settings, status = null) {
   setDetectionConfidence(settings.detection.threshold);
   $("#detectParallelism").value = String(settings.detection?.parallelism || 2);
   setDetectionTargets(settings.detection.targets);
+  syncDetectionActions();
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
   $("#confirmRemoveImage").checked = settings.confirmations?.removeImage !== false;

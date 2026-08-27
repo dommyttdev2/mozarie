@@ -280,11 +280,39 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id); state._persist_candidates(image_id)
             previous_revision = state._candidate_revision(image_id)
+            state.save_manual_workspace(image_id, {
+                "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["candidate", "stale"],
+                "candidateRevision": previous_revision, "hasEffectiveMask": False,
+            })
+            with state.workspace_store._connect() as db:
+                before = tuple(db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone())
             with patch.object(state.workspace_store, "update_candidate_metadata", side_effect=sqlite3.OperationalError("injected")):
                 with self.assertRaises(sqlite3.OperationalError):
                     state.set_candidate_state(image_id, "candidate", {"enabled": False})
             self.assertTrue(state.candidates[image_id][0].enabled)
             self.assertEqual(state._candidate_revision(image_id), previous_revision)
+            with state.workspace_store._connect() as db:
+                after = tuple(db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone())
+            self.assertEqual(after, before)
+
+    def test_candidate_mutation_updates_manual_revision_removed_ids_and_effective_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id); state._persist_candidates(image_id)
+            state.save_manual_workspace(image_id, {
+                "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["stale"],
+                "candidateRevision": revision, "hasEffectiveMask": True,
+            })
+            revision = state.set_candidate_state(image_id, "candidate", {"enabled": False})
+            with state.workspace_store._connect() as db:
+                row = db.execute("SELECT removed_candidate_ids,candidate_revision,has_effective_mask FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
+            self.assertEqual(json.loads(row["removed_candidate_ids"]), [])
+            self.assertEqual(row["candidate_revision"], revision)
+            self.assertFalse(row["has_effective_mask"])
 
     def test_catalog_snapshot_uses_the_persisted_manual_effective_mask(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5535,7 +5563,7 @@ class MozarieTests(unittest.TestCase):
             state.import_lock = RecordingLock("import", events)
             try:
                 with patch.object(state, "image_io_lock", return_value=RecordingLock("image", events)):
-                    state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                    state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             finally:
                 state.import_lock = original_import_lock
 
@@ -5557,17 +5585,17 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             clear_done = threading.Event()
             commit_result = {}
-            original_stat_check = state._assert_record_stat_matches
+            original_replace = saving_module._replace_record_with_rendered_output
 
-            def delayed_stat_check(record):
+            def delayed_replace(record, rendered_path, fingerprint):
                 fingerprint_started.set()
                 self.assertTrue(release.wait(2))
-                return original_stat_check(record)
+                return original_replace(record, rendered_path, fingerprint)
 
-            with patch.object(state, "_assert_record_stat_matches", side_effect=delayed_stat_check):
+            with patch.object(saving_module, "_replace_record_with_rendered_output", side_effect=delayed_replace):
                 commit = threading.Thread(
                     target=lambda: commit_result.setdefault(
-                        "value", state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                        "value", state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
                     )
                 )
                 commit.start()
@@ -5660,10 +5688,10 @@ class MozarieTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             self.assertFalse(details.rendered_path.exists())
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
 
     def test_browser_save_uses_1_over_100_block_size_and_keeps_png_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5699,7 +5727,7 @@ class MozarieTests(unittest.TestCase):
             outside = binary_mask == 0
             self.assertTrue(np.array_equal(rendered_pixels[outside], pixels[outside]))
             self.assertFalse(np.array_equal(rendered_pixels[600:616, 400:416], pixels[600:616, 400:416]))
-            state.commit_browser_save(image_id, revision, token, "keep")
+            state.commit_browser_save(image_id, revision, token, "overwrite")
 
     def test_browser_copy_render_writes_configured_unicode_destination_before_commit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5789,7 +5817,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(record.image_id, image_id)
             self.assertEqual(revision, entry["candidateRevision"])
             self.assertEqual(Image.open(io.BytesIO(output)).text["prompt"], '{"seed": 1}')
-            committed = state.commit_browser_save(image_id, revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, revision, save_token, "overwrite")
             self.assertTrue(committed["cleared"])
             self.assertEqual(state.candidates.get(image_id, []), [])
 
@@ -5812,7 +5840,7 @@ class MozarieTests(unittest.TestCase):
             )
             state._touch_candidates(image_id)
 
-            committed = state.commit_browser_save(image_id, revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, revision, save_token, "overwrite")
             self.assertFalse(committed["cleared"])
             self.assertEqual(len(state.candidates[image_id]), 1)
 
@@ -5831,20 +5859,20 @@ class MozarieTests(unittest.TestCase):
 
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
             with self.assertRaisesRegex(ClientError, "保存確認トークン"):
-                state.commit_browser_save(image_id, rendered_revision, "", "keep")
+                state.commit_browser_save(image_id, rendered_revision, "", "overwrite")
             with self.assertRaisesRegex(ClientError, "keep、overwrite、deleted"):
                 state.commit_browser_save(image_id, rendered_revision, save_token, "invalid")
             with self.assertRaisesRegex(ClientError, "保存対象と一致"):
-                state.commit_browser_save(image_id, rendered_revision + 1, save_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision + 1, save_token, "overwrite")
 
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertTrue(committed["cleared"])
-            retried = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            retried = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertEqual(retried["cleared"], committed["cleared"])
             self.assertEqual(retried["stale"], committed["stale"])
             self.assertEqual(retried["deleted"], committed["deleted"])
             with self.assertRaisesRegex(ClientError, "保存対象と一致"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
+                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
 
     def test_browser_save_token_expires_and_catalog_change_discards_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5869,12 +5897,12 @@ class MozarieTests(unittest.TestCase):
                 details.rendered_path,
             )
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, expired_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, expired_token, "overwrite")
 
             _output, _record, rendered_revision, catalog_token = state.render_browser_save(image_id, revision, 100, None)
             state.clear_catalog()
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
-                state.commit_browser_save(image_id, rendered_revision, catalog_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, catalog_token, "overwrite")
 
     def test_browser_save_claim_keeps_rendered_file_during_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5887,18 +5915,18 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
             rendered_path = state.browser_save_tokens[token].rendered_path
             claimed = threading.Event(); release = threading.Event(); outcome = {}
-            original_stat_check = state._assert_record_stat_matches
+            original_replace = saving_module._replace_record_with_rendered_output
 
-            def block_after_claim(record):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_stat_check(record)
+            def block_after_claim(record, rendered_path, fingerprint):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
 
             def commit():
                 try:
-                    outcome["value"] = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                    outcome["value"] = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(state, "_assert_record_stat_matches", side_effect=block_after_claim):
+            with patch.object(saving_module, "_replace_record_with_rendered_output", side_effect=block_after_claim):
                 thread = threading.Thread(target=commit); thread.start()
                 self.assertTrue(claimed.wait(2))
                 state.cleanup_expired_browser_save_tokens()
@@ -5925,7 +5953,7 @@ class MozarieTests(unittest.TestCase):
             state.catalog_generation += 1
 
             with self.assertRaisesRegex(ClientError, "画像一覧が変更"):
-                state.commit_browser_save(image_id, rendered_revision, token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
 
             self.assertFalse(rendered_path.exists())
             self.assertNotIn(token, state.browser_save_tokens)
@@ -6010,7 +6038,7 @@ class MozarieTests(unittest.TestCase):
 
             Image.new("RGB", (16, 16), "black").save(source)
             with self.assertRaisesRegex(ClientError, "元画像が.*変更"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+                state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertNotIn(save_token, state.browser_save_tokens)
 
@@ -6117,7 +6145,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(np.any(observed["mask"]))
             _output, _record, rendered_revision, save_token = outcome["result"]
             self.assertEqual(rendered_revision, revision)
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "overwrite")
             self.assertFalse(committed["deleted"])
             self.assertTrue(committed["stale"])
             self.assertTrue(source.exists())
@@ -6198,16 +6226,16 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             revision = state._touch_candidates(image_id)
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
-            first = state.commit_browser_save(image_id, rendered_revision, token, "keep")
-            retried = state.commit_browser_save(image_id, rendered_revision, token, "keep")
+            first = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            retried = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             self.assertFalse(mask_path.exists())
             self.assertEqual(retried["cleared"], first["cleared"])
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()
             self.assertIn(token, state.browser_save_receipts)
-            self.assertNotIn("images", state.commit_browser_save(image_id, rendered_revision, token, "keep"))
+            self.assertNotIn("images", state.commit_browser_save(image_id, rendered_revision, token, "overwrite"))
             with self.assertRaises(ClientError):
-                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+                state.commit_browser_save(image_id, rendered_revision, token, "keep")
 
     def test_browser_save_skips_disabled_candidate_mask_files(self):
         with tempfile.TemporaryDirectory() as directory:

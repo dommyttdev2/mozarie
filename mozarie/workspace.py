@@ -209,13 +209,18 @@ class WorkspaceStore:
         """Return a browser catalogue only for a unique strict-majority match."""
         scores: dict[str, int] = {}
         counts: dict[str, int] = {}
+        if not entries:
+            return None
         with self._connect() as db:
-            for relative_path, source_hash in entries:
-                for row in db.execute("""SELECT images.catalog_id
-                    FROM images JOIN catalogs ON catalogs.catalog_id=images.catalog_id
-                    WHERE images.relative_path=? AND images.source_hash=? AND images.catalog_id<>?
-                      AND catalogs.identity_hash LIKE 'browser:%'""", (relative_path, source_hash, exclude_catalog)):
-                    scores[str(row["catalog_id"])] = scores.get(str(row["catalog_id"]), 0) + 1
+            db.execute("CREATE TEMP TABLE IF NOT EXISTS workspace_manifest_entries(relative_path TEXT, source_hash TEXT, PRIMARY KEY(relative_path,source_hash))")
+            db.execute("DELETE FROM workspace_manifest_entries")
+            db.executemany("INSERT OR IGNORE INTO workspace_manifest_entries(relative_path,source_hash) VALUES(?,?)", entries)
+            for row in db.execute("""SELECT images.catalog_id,COUNT(*) AS score
+                FROM images JOIN catalogs ON catalogs.catalog_id=images.catalog_id
+                JOIN workspace_manifest_entries AS manifest ON manifest.relative_path=images.relative_path AND manifest.source_hash=images.source_hash
+                WHERE images.catalog_id<>? AND catalogs.identity_hash LIKE 'browser:%'
+                GROUP BY images.catalog_id""", (exclude_catalog,)):
+                scores[str(row["catalog_id"])] = int(row["score"])
             for row in db.execute("""SELECT catalogs.catalog_id, COUNT(images.image_id) AS image_count
                 FROM catalogs JOIN images ON images.catalog_id=catalogs.catalog_id
                 WHERE catalogs.identity_hash LIKE 'browser:%' AND catalogs.catalog_id<>?
@@ -238,11 +243,25 @@ class WorkspaceStore:
         """Return durable state by relative path, clearing pixels on source change."""
         now = time.time_ns()
         result: dict[str, dict[str, Any]] = {}
+        if not records:
+            return result
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                db.execute("""CREATE TEMP TABLE IF NOT EXISTS workspace_reconcile_records(
+                    relative_path TEXT PRIMARY KEY,size_bytes INTEGER NOT NULL,mtime_ns INTEGER NOT NULL,source_hash TEXT NOT NULL)""")
+                db.execute("DELETE FROM workspace_reconcile_records")
+                db.executemany("INSERT INTO workspace_reconcile_records(relative_path,size_bytes,mtime_ns,source_hash) VALUES(?,?,?,?)", (
+                    (record.relative_path, record.size_bytes, record.mtime_ns, (source_hashes or {}).get(record.relative_path, ""))
+                    for record in records
+                ))
+                existing = {
+                    str(row["relative_path"]): row for row in db.execute("""SELECT images.* FROM images
+                        JOIN workspace_reconcile_records AS incoming ON incoming.relative_path=images.relative_path
+                        WHERE images.catalog_id=?""", (catalog_id,))
+                }
                 for record in records:
-                    row = db.execute("SELECT * FROM images WHERE catalog_id=? AND relative_path=?", (catalog_id, record.relative_path)).fetchone()
+                    row = existing.get(record.relative_path)
                     source_hash = (source_hashes or {}).get(record.relative_path, "")
                     if row is None:
                         image_id = uuid.uuid4().hex
@@ -329,7 +348,20 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
-    def update_candidate_metadata(self, image_id: str, revision: int, candidates: list[Any]) -> None:
+    @staticmethod
+    def _update_manual_candidate_state(db: sqlite3.Connection, image_id: str, revision: int, candidate_ids: set[str], effective: bool) -> None:
+        row = db.execute("SELECT removed_candidate_ids FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
+        if row is None:
+            db.execute("""INSERT INTO manual_edits(image_id,removed_candidate_ids,candidate_revision,has_effective_mask,updated_at)
+                VALUES(?,?,?,?,?)""", (image_id, "[]", revision, int(effective), time.time_ns()))
+            return
+        removed = json.loads(row["removed_candidate_ids"])
+        if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+            raise ValueError("workspace removed candidates are invalid")
+        db.execute("""UPDATE manual_edits SET removed_candidate_ids=?,candidate_revision=?,has_effective_mask=?,updated_at=?
+            WHERE image_id=?""", (json.dumps(sorted(set(removed) & candidate_ids)), revision, int(effective), time.time_ns(), image_id))
+
+    def update_candidate_metadata(self, image_id: str, revision: int, candidates: list[Any], effective: bool | None = None) -> None:
         """Update lightweight candidate controls without reading or rewriting PNG blobs."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -337,12 +369,14 @@ class WorkspaceStore:
                 db.execute("UPDATE images SET candidate_revision=?, reviewed=0, updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
                 for candidate in candidates:
                     db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
+                if effective is not None:
+                    self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
 
-    def replace_candidates(self, image_id: str, revision: int, candidates: list[Any]) -> None:
+    def replace_candidates(self, image_id: str, revision: int, candidates: list[Any], effective: bool | None = None) -> None:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -369,6 +403,8 @@ class WorkspaceStore:
                         ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
                         (image_id,candidate.candidate_id,candidate.class_name,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
                 db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
+                if effective is not None:
+                    self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK"); raise

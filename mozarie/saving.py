@@ -244,9 +244,9 @@ class SavingMixin:
 
         def token_allows_action(details: BrowserSaveToken) -> bool:
             # A copy token is issued only after the server has written the copy;
-            # it may remove the source. A streamed render token owns a temporary
-            # replacement and may overwrite it. Both token kinds may keep it.
-            return source_action == "keep" or source_action in ({"deleted"} if details.rendered_path is None else {"overwrite"})
+            # it may keep or remove the source. A streamed render token owns a
+            # temporary replacement and may only overwrite the source.
+            return source_action in ({"keep", "deleted"} if details.rendered_path is None else {"overwrite"})
 
         with self.import_lock:
             with self.lock:
