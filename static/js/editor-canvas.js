@@ -1,6 +1,6 @@
 function canvasSizeForImage(image) {
   releaseMosaicPreview();
-  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) { target.width = image.width; target.height = image.height; }
   blinkCanvas.width = image.width; blinkCanvas.height = image.height;
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
@@ -523,7 +523,10 @@ function rebuildMosaicPreview() {
     worker.onmessage = ({ data }) => {
       if (state.mosaicWorker !== worker) return;
       state.mosaicWorkerBusy = false;
-      if (data.generation === state.mosaicPreviewGeneration && !state.mosaicPending && state.currentImage) {
+      // Always paint the last completed frame.  On large images a new pointer
+      // event arrives before every worker response; requiring an exact newest
+      // generation starved the preview until pointerup.
+      if (state.currentImage) {
         mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0);
         render();
       }

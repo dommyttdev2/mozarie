@@ -59,10 +59,11 @@ class CatalogMixin:
     def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
         """Materialise only small PNGs for the active catalogue into the disposable cache."""
         restored: list[tuple[str, int, list[Candidate]]] = []
+        hydrated = self.workspace_store.hydrate_candidates_bulk(
+            [record.image_id for record in records], self.cache_dir, self._candidate_from_workspace,
+        )
         for record in records:
-            revision, candidates = self.workspace_store.hydrate_candidates(
-                record.image_id, self.cache_dir / record.image_id, self._candidate_from_workspace,
-            )
+            revision, candidates = hydrated.get(record.image_id, (0, []))
             if candidates or revision:
                 restored.append((record.image_id, revision, candidates))
         for image_id, revision, candidates in restored:
@@ -1076,10 +1077,8 @@ class CatalogMixin:
         with self.lock:
             if self._has_active_worker():
                 raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
-            candidate = next(
-                (candidate for candidate in self.candidates.get(image_id, []) if candidate.candidate_id == candidate_id),
-                None,
-            )
+            candidates = [replace(item) for item in self.candidates.get(image_id, [])]
+            candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
             if candidate is None:
                 raise ClientError("検出候補が見つかりません。", "catalog_changed")
             if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
@@ -1095,8 +1094,12 @@ class CatalogMixin:
                 candidate.color = color
             if "forced" in payload:
                 candidate.forced = payload["forced"]
-            revision = self._touch_candidates(image_id)
-            self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
+            revision = self._candidate_revision(image_id) + 1
+            # Do the durable write before publishing the new cache state.  A
+            # failed SQLite write must leave the editor exactly as it was.
+            self.workspace_store.update_candidate_metadata(image_id, revision, candidates)
+            self.candidates[image_id] = candidates
+            self.candidate_revisions[image_id] = revision
         self._refresh_effective_mask_status(image_id)
         return self._candidate_revision(image_id)
 
@@ -1111,19 +1114,25 @@ class CatalogMixin:
             with self.lock:
                 if self._has_active_worker():
                     raise ClientError("バックグラウンド処理中は候補を変更できません。", "operation_in_progress")
-                selected = [item for item in self.candidates.get(image_id, []) if item.role.value == role]
+                current = self.candidates.get(image_id, [])
+                selected = [item for item in current if item.role.value == role]
                 if operation == "delete":
-                    self.candidates[image_id] = [item for item in self.candidates.get(image_id, []) if item not in selected]
+                    candidates = [replace(item) for item in current if item not in selected]
                     paths = [item.mask_path for item in selected]
                 else:
                     paths = []
-                    for item in selected:
+                    candidates = [replace(item) for item in current]
+                    for item in candidates:
+                        if item.role.value != role:
+                            continue
                         item.enabled = operation == "enable"
-                revision = self._touch_candidates(image_id)
+                revision = self._candidate_revision(image_id) + 1
                 if operation == "delete":
-                    self._persist_candidates(image_id)
+                    self.workspace_store.replace_candidates(image_id, revision, candidates)
                 else:
-                    self.workspace_store.update_candidate_metadata(image_id, revision, self.candidates.get(image_id, []))
+                    self.workspace_store.update_candidate_metadata(image_id, revision, candidates)
+                self.candidates[image_id] = candidates
+                self.candidate_revisions[image_id] = revision
             for path in paths:
                 path.unlink(missing_ok=True)
             self._refresh_effective_mask_status(image_id)
@@ -1139,9 +1148,11 @@ class CatalogMixin:
                 candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
                 if candidate is None:
                     return False
-                self.candidates[image_id] = [item for item in candidates if item.candidate_id != candidate_id]
-                self._touch_candidates(image_id)
-                self._persist_candidates(image_id)
+                updated = [replace(item) for item in candidates if item.candidate_id != candidate_id]
+                revision = self._candidate_revision(image_id) + 1
+                self.workspace_store.replace_candidates(image_id, revision, updated)
+                self.candidates[image_id] = updated
+                self.candidate_revisions[image_id] = revision
             candidate.mask_path.unlink(missing_ok=True)
             self._refresh_effective_mask_status(image_id)
             return True

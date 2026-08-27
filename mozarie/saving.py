@@ -241,6 +241,13 @@ class SavingMixin:
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
         expired_token = False
+
+        def token_allows_action(details: BrowserSaveToken) -> bool:
+            # A copy token is issued only after the server has written the copy;
+            # it may remove the source. A streamed render token owns a temporary
+            # replacement and may overwrite it. Both token kinds may keep it.
+            return source_action == "keep" or source_action in ({"deleted"} if details.rendered_path is None else {"overwrite"})
+
         with self.import_lock:
             with self.lock:
                 receipt = self.browser_save_receipts.get(save_token)
@@ -253,8 +260,8 @@ class SavingMixin:
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
-                if source_action == "overwrite" and token_details.rendered_path is None:
-                    raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
+                if not token_allows_action(token_details):
+                    raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
             image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
@@ -269,8 +276,8 @@ class SavingMixin:
                         raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
-                    if source_action == "overwrite" and token_details.rendered_path is None:
-                        raise ClientError("コピー保存の確認トークンでは上書き保存できません。", "save_state_changed")
+                    if not token_allows_action(token_details):
+                        raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
                     if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
                         rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
                         expired_token = True
@@ -340,6 +347,10 @@ class SavingMixin:
                     elif deleted or cleared:
                         self.workspace_store.delete_manual([image_id])
                     if deleted:
+                        # Browser deletion must remove the durable image row as
+                        # well as the in-memory catalogue, otherwise a later
+                        # import can attach to a ghost workspace record.
+                        self.workspace_store.delete_images([image_id])
                         mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
                         candidate_dirs = [self.cache_dir / image_id]
                         self.images.pop(image_id, None)

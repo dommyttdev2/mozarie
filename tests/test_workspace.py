@@ -190,5 +190,37 @@ class WorkspaceTests(unittest.TestCase):
             restored = reopened.reconcile_images(catalog, [self._image(Path(directory))])
             self.assertEqual(restored["001.png"]["revision"], 7)
 
+    def test_manual_save_normalizes_removed_ids_to_current_candidates_and_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
+            connection = sqlite3.connect(store.path)
+            with connection as db:
+                db.execute("UPDATE images SET candidate_revision=9 WHERE image_id=?", (image_id,))
+                db.execute("""INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    image_id, "current", "penis", 0.9, self._png(), 1, "#123456", "detector",
+                    "automatic", None, "apply", 0, 0,
+                ))
+            connection.close()
+            store.save_manual(image_id, {
+                "add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["stale", "current", "current"],
+                "candidateRevision": 2, "hasEffectiveMask": False,
+            }, lambda value: self._png() if value else None)
+            manual = store.manual(image_id, lambda value: value)
+            self.assertEqual(manual["removedCandidateIds"], ["current"])
+            self.assertEqual(manual["candidateRevision"], 9)
+
+    def test_bulk_workspace_queries_accept_more_than_sqlite_variable_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = store.ensure_catalog()
+            records = [SimpleNamespace(relative_path=f"{index}.png", size_bytes=10, mtime_ns=20) for index in range(1100)]
+            ids = [item["image_id"] for item in store.reconcile_images(catalog, records).values()]
+            store.delete_images(ids)
+            self.assertEqual(store.manual_mask_statuses(ids), {})
+
 if __name__ == "__main__":
     unittest.main()

@@ -271,6 +271,21 @@ class MozarieTests(unittest.TestCase):
             after_delete.set_root(str(root))
             self.assertEqual([candidate["id"] for candidate in after_delete.candidate_snapshot(image_id)["candidates"]], ["second"])
 
+    def test_candidate_mutation_does_not_publish_when_workspace_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id); state._persist_candidates(image_id)
+            previous_revision = state._candidate_revision(image_id)
+            with patch.object(state.workspace_store, "update_candidate_metadata", side_effect=sqlite3.OperationalError("injected")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.set_candidate_state(image_id, "candidate", {"enabled": False})
+            self.assertTrue(state.candidates[image_id][0].enabled)
+            self.assertEqual(state._candidate_revision(image_id), previous_revision)
+
     def test_catalog_snapshot_uses_the_persisted_manual_effective_mask(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4569,17 +4584,8 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             catalog_done = threading.Event()
             job_done = threading.Event()
-            revision_changed = threading.Event()
             outcome = {}
             original_open = jobs_module.Image.open
-            original_touch = state._touch_candidates
-
-            def touch_candidates(changed_image_id):
-                revision = original_touch(changed_image_id)
-                if changed_image_id == image_id:
-                    revision_changed.set()
-                return revision
-
             def delayed_open(path, *args, **kwargs):
                 if Path(path) == mask_path:
                     opened.set()
@@ -4592,8 +4598,7 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(jobs_module.Image, "open", side_effect=delayed_open), \
-                 patch.object(state, "_touch_candidates", side_effect=touch_candidates):
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
                 worker = threading.Thread(target=compose)
                 worker.start()
                 self.assertTrue(opened.wait(2))
@@ -4604,7 +4609,10 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(job_done.wait(2))
                 mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
                 mutation.start()
-                self.assertTrue(revision_changed.wait(2))
+                deadline = time.monotonic() + 2
+                while state._candidate_revision(image_id) == 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertGreater(state._candidate_revision(image_id), 1)
                 release.set()
                 worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
 
@@ -5609,7 +5617,7 @@ class MozarieTests(unittest.TestCase):
             stored_hash = db.execute("SELECT source_hash FROM images WHERE image_id=?", (image_id,)).fetchone()["source_hash"]
         self.assertEqual(stored_hash, state._sha256_file(record.path))
 
-    def test_browser_save_session_deleted_removes_the_session_record_and_render(self):
+    def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG")
         state = self.new_state()
@@ -5626,13 +5634,11 @@ class MozarieTests(unittest.TestCase):
 
         _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
         rendered_path = state.browser_save_tokens[token].rendered_path
-        committed = state.commit_browser_save(image_id, rendered_revision, token, "deleted")
-
-        self.assertTrue(committed["deleted"])
-        self.assertNotIn(image_id, state.images)
-        self.assertNotIn(image_id, state._image_io_locks)
-        self.assertFalse(record.path.exists())
-        self.assertFalse(rendered_path.exists())
+        with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
+            state.commit_browser_save(image_id, rendered_revision, token, "deleted")
+        self.assertIn(image_id, state.images)
+        self.assertTrue(record.path.exists())
+        self.assertTrue(rendered_path.exists())
 
     def test_browser_save_token_render_file_is_removed_when_expired_and_cannot_be_reused(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5941,7 +5947,7 @@ class MozarieTests(unittest.TestCase):
             state.shutdown()
             self.assertNotIn(save_token, state.browser_save_tokens)
 
-    def test_browser_save_stale_deleted_commit_removes_the_working_copy(self):
+    def test_browser_save_rejects_stale_delete_without_a_completed_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
@@ -5957,14 +5963,10 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, save_token = state.render_browser_save(image_id, revision, 100, None)
             state._touch_candidates(image_id)
 
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-
-            self.assertTrue(committed["deleted"])
-            self.assertFalse(committed["cleared"])
-            self.assertTrue(committed["stale"])
-            self.assertFalse(source.exists())
-            self.assertNotIn(image_id, state.images)
-            self.assertNotIn(image_id, state.order)
+            with self.assertRaisesRegex(ClientError, "トークンと元画像の処理"):
+                state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
+            self.assertTrue(source.exists())
+            self.assertIn(image_id, state.images)
 
     def test_browser_save_stale_overwrite_updates_the_working_copy_and_keeps_candidates(self):
         raw = io.BytesIO()
@@ -6051,6 +6053,23 @@ class MozarieTests(unittest.TestCase):
                 state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
             self.assertTrue(source.exists())
 
+    def test_browser_copy_delete_removes_the_durable_workspace_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            output = root / "output"; output.mkdir()
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(output)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            committed = state.commit_browser_save(image_id, rendered.candidate_revision, rendered.save_token, "deleted")
+            self.assertTrue(committed["deleted"])
+            self.assertFalse(state.workspace_store.has_image(image_id))
+            self.assertFalse(source.exists())
+
     def test_browser_save_uses_one_candidate_snapshot_when_candidates_change_during_render(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -6098,10 +6117,10 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(np.any(observed["mask"]))
             _output, _record, rendered_revision, save_token = outcome["result"]
             self.assertEqual(rendered_revision, revision)
-            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
-            self.assertTrue(committed["deleted"])
+            committed = state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            self.assertFalse(committed["deleted"])
             self.assertTrue(committed["stale"])
-            self.assertFalse(source.exists())
+            self.assertTrue(source.exists())
 
     def test_browser_save_prunes_missing_candidates_and_advances_revision(self):
         with tempfile.TemporaryDirectory() as directory:

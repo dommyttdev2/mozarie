@@ -19,6 +19,14 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 
+# Keep every IN clause comfortably below SQLite's smallest common bind limit.
+_BULK_CHUNK_SIZE = 900
+
+
+def _chunks(values: list[str]) -> list[list[str]]:
+    return [values[index:index + _BULK_CHUNK_SIZE] for index in range(0, len(values), _BULK_CHUNK_SIZE)]
+
+
 class _ClosingConnection(sqlite3.Connection):
     """sqlite's context manager commits but does not close on Windows."""
     def __exit__(self, *args: Any) -> None:
@@ -259,21 +267,33 @@ class WorkspaceStore:
         """Permanently remove explicitly discarded image workspaces."""
         if not image_ids:
             return
-        placeholders = ",".join("?" for _ in image_ids)
         with self._lock, self._connect() as db:
-            db.execute(f"DELETE FROM images WHERE image_id IN ({placeholders})", image_ids)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for chunk in _chunks(image_ids):
+                    db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def prune_catalog_images(self, catalog_id: str, relative_paths: set[str]) -> None:
         """Drop rows for files absent from a complete folder scan only."""
         with self._lock, self._connect() as db:
-            if relative_paths:
-                placeholders = ",".join("?" for _ in relative_paths)
-                db.execute(
-                    f"DELETE FROM images WHERE catalog_id=? AND relative_path NOT IN ({placeholders})",
-                    [catalog_id, *relative_paths],
-                )
-            else:
-                db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if relative_paths:
+                    db.execute("CREATE TEMP TABLE IF NOT EXISTS workspace_paths(relative_path TEXT PRIMARY KEY)")
+                    db.execute("DELETE FROM workspace_paths")
+                    db.executemany("INSERT INTO workspace_paths(relative_path) VALUES(?)", ((path,) for path in relative_paths))
+                    db.execute("""DELETE FROM images WHERE catalog_id=? AND NOT EXISTS
+                        (SELECT 1 FROM workspace_paths WHERE workspace_paths.relative_path=images.relative_path)""", (catalog_id,))
+                else:
+                    db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def image_state(self, image_id: str) -> tuple[bool, bool]:
         with self._connect() as db:
@@ -368,6 +388,27 @@ class WorkspaceStore:
         candidates = [candidate_factory(row, directory / f"{row['candidate_id']}.png") for row in rows]
         return int(image["candidate_revision"]), candidates
 
+    def hydrate_candidates_bulk(self, image_ids: list[str], cache_dir: Path, candidate_factory: Any) -> dict[str, tuple[int, list[Any]]]:
+        """Load a catalogue in a few queries instead of one query per image."""
+        if not image_ids:
+            return {}
+        images: dict[str, int] = {}
+        candidates: dict[str, list[Any]] = {}
+        with self._connect() as db:
+            for chunk in _chunks(image_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in db.execute(f"SELECT image_id,candidate_revision FROM images WHERE image_id IN ({placeholders})", chunk):
+                    images[str(row["image_id"])] = int(row["candidate_revision"])
+                for row in db.execute(f"""SELECT image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
+                    FROM candidates WHERE image_id IN ({placeholders}) AND deleted=0""", chunk):
+                    mask = row["mask_png"]
+                    if not isinstance(mask, bytes):
+                        raise ValueError("workspace candidate mask is not a PNG")
+                    self._require_png_mask(mask)
+                    image_id = str(row["image_id"])
+                    candidates.setdefault(image_id, []).append(candidate_factory(row, cache_dir / image_id / f"{row['candidate_id']}.png"))
+        return {image_id: (revision, candidates.get(image_id, [])) for image_id, revision in images.items()}
+
     def valid_candidate_ids(self, image_id: str) -> set[str]:
         with self._connect() as db:
             rows = db.execute("""SELECT candidate_id FROM candidates
@@ -390,7 +431,19 @@ class WorkspaceStore:
         for mask in (add, exclusion, erase):
             self._require_png_mask(mask)
         with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO manual_edits(
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
+                if image is None:
+                    raise ValueError("workspace image is missing")
+                revision = int(image["candidate_revision"])
+                valid_ids = {str(row["candidate_id"]) for row in db.execute(
+                    "SELECT candidate_id FROM candidates WHERE image_id=? AND deleted=0", (image_id,)
+                )}
+                # Candidate IDs are revision-local.  Persisting only current IDs
+                # prevents an old editor tab from suppressing a newly detected mask.
+                removed = sorted(set(removed) & valid_ids)
+                db.execute("""INSERT INTO manual_edits(
                 image_id,add_png,exclusion_png,exclusion_erase_png,manual_enabled,exclusion_enabled,
                 exclusion_erase_enabled,exclusion_forced,removed_candidate_ids,candidate_revision,
                 has_effective_mask,updated_at
@@ -398,27 +451,35 @@ class WorkspaceStore:
                 add_png=excluded.add_png,exclusion_png=excluded.exclusion_png,exclusion_erase_png=excluded.exclusion_erase_png,
                 manual_enabled=excluded.manual_enabled,exclusion_enabled=excluded.exclusion_enabled,exclusion_erase_enabled=excluded.exclusion_erase_enabled,
                 exclusion_forced=excluded.exclusion_forced,removed_candidate_ids=excluded.removed_candidate_ids,candidate_revision=excluded.candidate_revision,has_effective_mask=excluded.has_effective_mask,updated_at=excluded.updated_at""",
-                (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),__import__('json').dumps(removed),int(payload.get("candidateRevision", 0)),int(has_effective_mask),time.time_ns()))
+                    (image_id,add,exclusion,erase,int(payload.get("manualEnabled", True)),int(payload.get("manualExclusionEnabled", True)),int(payload.get("manualExclusionEraseEnabled", True)),int(payload.get("manualExclusionForced", True)),json.dumps(removed),revision,int(has_effective_mask),time.time_ns()))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def manual_effective_masks(self, image_ids: list[str]) -> dict[str, bool]:
         """Return the persisted manual-mask state; omitted IDs have no manual row."""
         if not image_ids:
             return {}
-        placeholders = ",".join("?" for _ in image_ids)
         with self._connect() as db:
-            rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({placeholders})", image_ids).fetchall()
-        return {str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows}
+            result: dict[str, bool] = {}
+            for chunk in _chunks(image_ids):
+                rows = db.execute(f"SELECT image_id,has_effective_mask FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk).fetchall()
+                result.update({str(row["image_id"]): bool(row["has_effective_mask"]) for row in rows})
+        return result
 
     def manual_mask_statuses(self, image_ids: list[str]) -> dict[str, tuple[bool, int]]:
         if not image_ids:
             return {}
-        placeholders = ",".join("?" for _ in image_ids)
         with self._connect() as db:
-            rows = db.execute(
-                f"SELECT image_id,has_effective_mask,candidate_revision FROM manual_edits WHERE image_id IN ({placeholders})",
-                image_ids,
-            ).fetchall()
-        return {str(row["image_id"]): (bool(row["has_effective_mask"]), int(row["candidate_revision"])) for row in rows}
+            result: dict[str, tuple[bool, int]] = {}
+            for chunk in _chunks(image_ids):
+                rows = db.execute(
+                    f"SELECT image_id,has_effective_mask,candidate_revision FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})",
+                    chunk,
+                ).fetchall()
+                result.update({str(row["image_id"]): (bool(row["has_effective_mask"]), int(row["candidate_revision"])) for row in rows})
+        return result
 
     def update_manual_effective_mask(self, image_id: str, effective: bool, revision: int) -> None:
         with self._lock, self._connect() as db:
@@ -430,12 +491,17 @@ class WorkspaceStore:
     def delete_manual(self, image_ids: list[str]) -> None:
         if not image_ids:
             return
-        placeholders = ",".join("?" for _ in image_ids)
         with self._lock, self._connect() as db:
-            db.execute(f"DELETE FROM manual_edits WHERE image_id IN ({placeholders})", image_ids)
+            for chunk in _chunks(image_ids):
+                db.execute(f"DELETE FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
 
     def manual(self, image_id: str, encoder: Any) -> dict[str, Any] | None:
-        with self._connect() as db: row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
+            image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
+            valid_ids = {str(item["candidate_id"]) for item in db.execute(
+                "SELECT candidate_id FROM candidates WHERE image_id=? AND deleted=0", (image_id,)
+            )}
         if not row: return None
         masks = (row["add_png"], row["exclusion_png"], row["exclusion_erase_png"])
         for mask in masks:
@@ -443,4 +509,8 @@ class WorkspaceStore:
         removed = json.loads(row["removed_candidate_ids"])
         if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
             raise ValueError("workspace removed candidates are invalid")
-        return {"add": encoder(masks[0]), "exclusion": encoder(masks[1]), "exclusionErase": encoder(masks[2]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": removed, "candidateRevision": int(row["candidate_revision"]), "hasEffectiveMask": bool(row["has_effective_mask"])}
+        current_revision = int(image["candidate_revision"]) if image else int(row["candidate_revision"])
+        # Old rows from interrupted/browser tabs are read safely too.  The next
+        # save writes this normalized representation back in one transaction.
+        removed = sorted(set(removed) & valid_ids)
+        return {"add": encoder(masks[0]), "exclusion": encoder(masks[1]), "exclusionErase": encoder(masks[2]), "manualEnabled": bool(row["manual_enabled"]), "manualExclusionEnabled": bool(row["exclusion_enabled"]), "manualExclusionEraseEnabled": bool(row["exclusion_erase_enabled"]), "manualExclusionForced": bool(row["exclusion_forced"]), "removedCandidateIds": removed, "candidateRevision": current_revision, "hasEffectiveMask": bool(row["has_effective_mask"])}
