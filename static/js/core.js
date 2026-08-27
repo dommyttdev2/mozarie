@@ -75,6 +75,42 @@ function errorCodeTranslationKey(code, params = {}) {
   return `errorCode.${code}`;
 }
 
+const USER_ERROR_CODES = {
+  gpu_unsupported: "gpu_not_available", gpu_unavailable: "gpu_runtime_unavailable",
+  gpu_out_of_memory: "gpu_memory_low", memory_allocation_failed: "system_memory_low",
+  no_effective_mask: "no_mosaic_area", stale_asset: "image_changed",
+  model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
+  sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
+  model_picker_busy: "operation_in_progress", model_picker_failed: "model_file_invalid", model_picker_invalid: "model_file_invalid",
+  model_download_invalid: "model_download_failed", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
+  mask_not_found: "no_mosaic_area", invalid_settings: "input_invalid", invalid_request: "input_invalid",
+  api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", request_failed: "internal_error",
+  image_not_found: "image_not_found", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
+  save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
+  workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", model_not_configured: "model_not_configured",
+  model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed",
+  gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
+  input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
+  model_download_write_failed: "model_download_write_failed", model_download_integrity: "model_download_integrity",
+  internal_error: "internal_error",
+};
+
+function userErrorCode(error) {
+  const code = typeof error === "string" ? error : error?.code;
+  return USER_ERROR_CODES[code] || "internal_error";
+}
+
+function showUserError(error, invoker = document.activeElement) {
+  const code = userErrorCode(error);
+  const dialog = $("#errorDialog");
+  if (!dialog) return;
+  $("#errorDialogTitle").textContent = t(`errorDialog.${code}.title`);
+  $("#errorDialogCause").textContent = t(`errorDialog.${code}.cause`);
+  $("#errorDialogAction").textContent = t(`errorDialog.${code}.action`);
+  if (dialog.open) { focusElement($("#errorDialogClose")); return; }
+  showModalFromInvoker(dialog, invoker);
+}
+
 async function loadTranslations(languageOverride = null) {
   const generation = ++translationGeneration;
   const language = languageOverride === "en" || (!languageOverride && state.settings?.general?.language === "en") ? "en" : "ja";
@@ -122,25 +158,32 @@ function api(path, options = {}) {
     .then(async (response) => {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const localized = data.error_code ? t(errorCodeTranslationKey(data.error_code, data.params || {}), data.params || {}) : "";
-        const message = data.error_code
-          ? (localized && localized !== errorCodeTranslationKey(data.error_code, data.params || {}) ? localized : t("error.requestFailed"))
-          : (data.error || t("error.requestFailed"));
+        const code = data.error_code || (response.status === 404 ? "api_not_found" : "internal_error");
+        const localized = t(errorCodeTranslationKey(code, data.params || {}), data.params || {});
+        const message = localized !== errorCodeTranslationKey(code, data.params || {}) ? localized : t("error.requestFailed");
         const error = new Error(message);
         error.status = response.status;
-        error.code = data.error_code || "";
+        error.code = code;
         throw error;
       }
       return data;
+    })
+    .catch((error) => {
+      if (error?.code) throw error;
+      const safeError = new Error(t("error.connectionLost"));
+      safeError.code = "connection_lost";
+      throw safeError;
     });
 }
 
 function setStatus(message, kind = "") {
+  if (kind === "error") { state.status = { message: "", kind: "" }; renderStatus(); showUserError(message); return; }
   state.status = { message, kind };
   renderStatus();
 }
 
 function setStatusKey(key, params = {}, kind = "") {
+  if (kind === "error") { state.status = { message: "", kind: "" }; renderStatus(); showUserError(key === "error.connectionLost" ? "connection_lost" : "internal_error"); return; }
   state.status = { key, params, kind };
   renderStatus();
 }
@@ -389,7 +432,7 @@ async function persistNavigationShortcuts(enabled) {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(payload) });
     setSettingsForm(data.settings, state.settingsStatus);
     setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { showUserError(error); }
 }
 function updateActionButtons() {
   const running = isBusy();
@@ -433,6 +476,7 @@ function updateActionButtons() {
   updateCandidateBatchButtons(hasImage, locked);
   updateHistoryButtons();
   if (locked) for (const control of controls) {
+    if (control.id === "errorDialogClose") continue;
     if (["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning) continue;
     if (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing) continue;
     if (control.id === "selectionClearButton" && state.batchMode) continue;
@@ -539,7 +583,7 @@ function updateProgress(job) {
 async function loadFolder() {
   if (isBusy() || state.importing) return;
   const path = $("#folderPath").value.trim();
-  if (!path) return setStatusKey("status.enterFolder", {}, "error");
+  if (!path) return setStatusKey("status.enterFolder");
   const picker = $("#pickerMenu");
   if (picker?.matches?.(":popover-open")) picker.hidePopover();
   const catalogEpoch = beginCatalogEpoch();
@@ -551,5 +595,5 @@ async function loadFolder() {
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;
     resetCatalog(data.images, path);
     setStatusKey("status.imagesLoaded", { count: state.images.length });
-  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
+  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
 }

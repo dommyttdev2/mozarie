@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 import unittest
@@ -113,3 +114,40 @@ class TranslationContractTests(unittest.TestCase):
         for language in ("ja", "en"):
             dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
             self.assertTrue(dictionary["errorCode.gpu_unavailable"])
+
+    def test_user_error_dialog_has_a_complete_translation_for_every_presentation_code(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        codes = set(re.findall(r':\s*"([a-z_]+)"', source.split("const USER_ERROR_CODES", 1)[1].split("};", 1)[0]))
+        codes.add("internal_error")
+        for language in ("ja", "en"):
+            dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for code in codes:
+                for part in ("title", "cause", "action"):
+                    self.assertTrue(dictionary[f"errorDialog.{code}.{part}"], f"{language}: {code}.{part}")
+
+    def test_every_emitted_error_code_has_a_user_error_presentation(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        aliases = set(re.findall(r'([a-z_]+):\s*"[a-z_]+"', source.split("const USER_ERROR_CODES", 1)[1].split("};", 1)[0]))
+        emitted: set[str] = set()
+        for path in (root / "mozarie").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name) and node.func.id in {"ClientError", "ForbiddenClientError"}:
+                    self.assertGreaterEqual(len(node.args), 2, f"{path}:{node.lineno} must provide an error code")
+                    self.assertIsInstance(node.args[1], ast.Constant, f"{path}:{node.lineno} must use a literal error code")
+                    self.assertIsInstance(node.args[1].value, str, f"{path}:{node.lineno} must use a string error code")
+                    emitted.add(node.args[1].value)
+                for keyword in node.keywords:
+                    if keyword.arg == "errorCode" and isinstance(keyword.value, ast.Constant) and keyword.value.value:
+                        self.assertIsInstance(keyword.value.value, str, f"{path}:{node.lineno} errorCode must be a string")
+                        emitted.add(keyword.value.value)
+        self.assertEqual(emitted - aliases, set())
+
+    def test_api_does_not_use_server_error_text_as_user_interface_copy(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        self.assertNotIn("data.error ||", source)

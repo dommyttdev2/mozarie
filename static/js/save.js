@@ -1,5 +1,11 @@
 function setApplyResult(message, error = false) {
-  const result = $("#applyResult"); result.textContent = message; result.classList.toggle("error", error);
+  if (error) { showUserError(message, $("#applyStartButton")); return; }
+  const result = $("#applyResult"); result.textContent = message; result.classList.toggle("error", false);
+}
+
+function showApplyError(error, invoker = $("#applyStartButton")) {
+  setApplyResult("");
+  showUserError(error, invoker);
 }
 
 function isTerminalApply(job) {
@@ -69,7 +75,7 @@ async function openApplyDialog(options = {}) {
   const initialMode = Array.isArray(options) ? "current" : (options.initialMode || "masked");
   if (isBusy() || state.importing) return;
   try { await flushDraftSaves(); }
-  catch (error) { setStatus(error.message, "error"); return; }
+  catch (error) { showUserError(error); return; }
   $("#applyTargetMode").value = initialMode;
   refreshApplyTargets();
   if (!state.applyTargetIds.length) return;
@@ -138,7 +144,7 @@ async function chooseOutputDirectory() {
       method: "POST", body: JSON.stringify({ saving: { ...state.settings.saving, default_output_directory: directory } }),
     });
     setSettingsForm(settings.settings); setApplyResult("");
-  } catch (error) { setApplyResult(error.message, true); }
+  } catch (error) { showApplyError("output_folder_unavailable", $("#chooseOutputDirectoryButton")); }
 }
 
 async function waitForBrowserSave(save) {
@@ -329,7 +335,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(body.error || t("error.requestFailed")); error.code = body.error_code || ""; throw error; }
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           await ensureHandlePermission(access, true);
           await writeSourceHandle(access, binary);
@@ -341,7 +347,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(body.error || t("error.requestFailed")); error.code = body.error_code || ""; throw error; }
+          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
@@ -403,7 +409,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
         if (catalogCurrent) state.images = latest.images;
       } catch (error) {
-        setApplyResult(error.message, true);
+        showApplyError(error);
       }
       if (catalogCurrent) {
         if (save.removeAfterSave && !save.removeOnlyMasked && !save.cancelled && !save.failed && !save.stale && save.completed === save.entries.length) {
@@ -412,7 +418,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         try {
           await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
         } catch (error) {
-          setApplyResult(error.message, true);
+          showApplyError(error);
         }
         reconcileBrowserSaveState();
         if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
@@ -452,7 +458,7 @@ async function startApplyFromDialog(event) {
   const mode = selectedSaveMode();
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value.trim();
-  if (copy && !suffix) return setApplyResult(t("error.requestFailed"), true);
+  if (copy && !suffix) return showApplyError("input_invalid");
   if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
   if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
   // This lock is intentionally set before the first await. A second submit must never create
@@ -467,13 +473,13 @@ async function startApplyFromDialog(event) {
       await flushDraftSaves(imageIds);
       await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, removeOnlyMasked: $("#removeOnlyMasked").checked, copyToDefault: true }) });
       state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
-    } catch (error) { setApplyResult(error.message, true); return finishSaveStart(); }
+    } catch (error) { showApplyError(error); return finishSaveStart(); }
   }
   try {
     // Permission requests must begin while this submit is still a user action.
     await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
   } catch (error) {
-    setApplyResult(error.message, true);
+    showApplyError(error);
     return finishSaveStart();
   }
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
@@ -483,7 +489,7 @@ async function startApplyFromDialog(event) {
     state.saveStarting = false;
     await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked, $("#removeOnlyMasked").checked);
   } catch (error) {
-    setApplyResult(error.message, true);
+    showApplyError(error);
     state.saving = false;
     state.applyRunning = false;
     state.applyCatalogSnapshot = null;
@@ -512,7 +518,7 @@ async function controlApply(action) {
     return;
   }
   try { await api(`/api/job/${action}`, { method: "POST", body: JSON.stringify({}) }); }
-  catch (error) { setApplyResult(error.message, true); }
+  catch (error) { showApplyError(error, $("#applyCancelButton")); }
 }
 
 function showRunningApply(job) {
@@ -592,7 +598,7 @@ async function finishApplyJob(job) {
     $("#applyCloseButton").hidden = false;
     if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));
     else if (job.state === "cancelled") setApplyResult(t("apply.cancelled", { completed: job.completed }));
-    else setApplyResult(t("apply.error", { error: jobErrorMessage(job) }), true);
+    else showApplyError({ code: job.errorCode || "internal_error" });
     updateActionButtons();
     reconciled = true;
   } finally {
@@ -607,13 +613,6 @@ function isTerminalDetection(job, previous) {
   const observedRunning = previous?.kind === "detect" && previous?.startedAt === job.startedAt && ["running", "pausing", "paused"].includes(previous.state);
   const reconciliationPending = state.processing?.kind === "detect" && state.processing?.startedAt === job.startedAt;
   return observedRunning || Number(job.startedAt) >= state.pageLoadedAt || reconciliationPending;
-}
-
-function jobErrorMessage(job) {
-  if (!job.errorCode) return job.error || t("error.background");
-  const key = errorCodeTranslationKey(job.errorCode, job.params || {});
-  const localized = t(key, job.params || {});
-  return localized === key ? (job.error || t("error.background")) : localized;
 }
 
 async function finishDetectionJob(job) {
@@ -646,14 +645,12 @@ async function pollJob() {
   state.pollInFlight = (async () => {
   try {
     const job = await api("/api/job"); const previous = state.job; state.job = job; state.pollFailures = 0; updateProgress(job);
-    const jobError = jobErrorMessage(job);
     const terminalApply = isTerminalApply(job);
     if (terminalApply) {
       await finishApplyJob(job);
       if (job.state === "complete") setStatusKey("status.applyDone");
       else if (job.state === "cancelled") setStatusKey("status.applyCancelled");
-      else if (jobError) setStatus(jobError, "error");
-      else setStatusKey("error.background", {}, "error");
+      else showUserError({ code: job.errorCode || "internal_error" });
     } else if (job.kind === "apply" && ["running", "pausing", "paused"].includes(job.state)) {
       if (!state.applyRunning) showRunningApply(job);
       $("#applyProgress").max = Math.max(1, Number(job.total) || 1);
@@ -665,7 +662,7 @@ async function pollJob() {
       if (job.state === "running") setStatusKey("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }, "running");
     } else if (isTerminalDetection(job, previous)) {
     await finishDetectionJob(job);
-      if (job.state === "error") setStatus(jobError, "error");
+      if (job.state === "error") showUserError({ code: job.errorCode || "internal_error" });
       else if (job.state === "cancelled") setStatusKey("status.detectCancelled", { completed: job.completed });
       else setStatusKey("status.detectDone");
     }

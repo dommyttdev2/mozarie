@@ -58,7 +58,7 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
     showProcessing(state.job);
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
-  } catch (error) { updateProgress({ state: "idle" }); setStatus(error.message, "error"); }
+  } catch (error) { updateProgress({ state: "idle" }); showUserError(error); }
   finally { state.detectionStarting = false; updateActionButtons(); }
 }
 
@@ -76,7 +76,7 @@ async function startDetectionFromDialog(event) {
   if (state.settings) {
     state.settings.detection = { ...state.settings.detection, threshold: confidence, parallelism, targets: targetClasses };
     try { await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(state.settings) }); }
-    catch (error) { setStatus(error.message, "error"); return; }
+    catch (error) { showUserError(error); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);
 }
@@ -91,7 +91,7 @@ async function cancelDetection() {
     const job = await api("/api/job/cancel", { method: "POST", body: JSON.stringify({}) });
     state.job = job; updateProgress(job); scheduleJobPoll(true);
   }
-  catch (error) { state.detectCancelRequested = false; if (state.processing) showProcessing(state.processing); updateActionButtons(); setStatus(error.message, "error"); }
+  catch (error) { state.detectCancelRequested = false; if (state.processing) showProcessing(state.processing); updateActionButtons(); showUserError(error, $("#processingCancelButton")); }
 }
 
 async function saveCurrent() {

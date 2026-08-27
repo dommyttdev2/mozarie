@@ -2875,7 +2875,7 @@ class MozarieTests(unittest.TestCase):
             ):
                 with self.assertRaises(ClientError) as raised:
                     state._hand_segmentation_predictor_for(self._record(image_path, 8, 8), np.zeros((8, 8, 3), dtype=np.uint8))
-            self.assertEqual(raised.exception.error_code, "hand_segmentation_invalid")
+            self.assertEqual(raised.exception.error_code, "model_load_failed")
 
     def test_hand_segmentation_gpu_oom_is_not_misclassified_as_a_bad_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4839,7 +4839,7 @@ class MozarieTests(unittest.TestCase):
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
             self.assertEqual(payload["error"], "Windowsフォルダを入力してください。")
-            self.assertEqual(payload["error_code"], "invalid_request")
+            self.assertEqual(payload["error_code"], "input_invalid")
         finally:
             if connection is not None:
                 connection.close()
@@ -5207,7 +5207,7 @@ class MozarieTests(unittest.TestCase):
                     payload = json.loads(response.read().decode("utf-8"))
                     self.assertTrue(validated.is_set())
                     self.assertEqual(response.status, 400)
-                    self.assertEqual(payload["error_code"], "invalid_request")
+                    self.assertEqual(payload["error_code"], "image_not_found")
                     self.assertEqual(response_statuses, [400])
                 finally:
                     connection.close()

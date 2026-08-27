@@ -211,7 +211,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         """Block conflicting mutations from the first upload byte onward."""
         with self.lock:
             if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                raise ClientError("処理中は画像を追加できません。")
+                raise ClientError("処理中は画像を追加できません。", "operation_in_progress")
             self.active_import_count += 1
 
     def end_import_transfer(self) -> None:

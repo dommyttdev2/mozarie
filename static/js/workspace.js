@@ -18,7 +18,7 @@ function queueWorkspaceFlags(imageId, payload) {
   if (!imageId) return Promise.resolve();
   return queueWorkspaceMutation(imageId, () => api(`/api/workspace/image/${encodeURIComponent(imageId)}`, {
     method: "POST", body: JSON.stringify(payload),
-  })).catch((error) => { setStatus(error.message, "error"); });
+  })).catch((error) => { showUserError(error); });
 }
 
 const DIRECTORY_DB = "mozarie-directory-catalogs";
@@ -93,7 +93,7 @@ function queueWorkspaceDraft(imageId, immediate = false) {
     return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
   };
   if (immediate) return write();
-  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { setStatus(error.message, "error"); })), 250)));
+  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { showUserError(error); })), 250)));
   return promise;
 }
 

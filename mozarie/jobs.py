@@ -113,7 +113,7 @@ class JobsMixin:
         with self.lock:
             if (self.job.kind not in {"apply", "detect"} or self.job.state != "running"
                     or self.job.completed >= self.job.total):
-                raise ClientError("一時停止できる処理はありません。")
+                raise ClientError("一時停止できる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             control = self.job_control
         # Serialising this with record claims means no new image starts after a
@@ -121,7 +121,7 @@ class JobsMixin:
         with control.claim_lock:
             with self.lock:
                 if self.job_control is not control or self.job.state != "running":
-                    raise ClientError("一時停止できる処理はありません。")
+                    raise ClientError("一時停止できる処理はありません。", "operation_in_progress")
                 control.pause_requested.set()
                 self.job.state = "paused" if self.job.active_count == 0 else "pausing"
                 if self.job.state == "paused":
@@ -132,7 +132,7 @@ class JobsMixin:
     def resume_job(self) -> Job:
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state != "paused":
-                raise ClientError("再開できる処理はありません。")
+                raise ClientError("再開できる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             self.job_control.pause_requested.clear()
             self._resume_job_clock()
@@ -144,7 +144,7 @@ class JobsMixin:
         cancelled = False
         with self.lock:
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
-                raise ClientError("キャンセルできる処理はありません。")
+                raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             control = self.job_control
         # Use the same lock order as claim(), so a successful cancel cannot be
@@ -152,7 +152,7 @@ class JobsMixin:
         with control.claim_lock:
             with self.lock:
                 if self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}:
-                    raise ClientError("キャンセルできる処理はありません。")
+                    raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
                 control.cancel_requested.set()
                 control.pause_requested.clear()
                 if self.job.state == "paused":
@@ -168,28 +168,28 @@ class JobsMixin:
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
         if not isinstance(image_ids, list):
-            raise ClientError("画像の選択が正しくありません。")
+            raise ClientError("画像の選択が正しくありません。", "input_invalid")
         source_ids = image_ids or self.order
         if len({str(image_id) for image_id in source_ids}) != len(source_ids):
-            raise ClientError("同じ画像を複数回指定できません。")
+            raise ClientError("同じ画像を複数回指定できません。", "input_invalid")
         records = [self.image_for_id(str(image_id)) for image_id in source_ids]
         if not records:
-            raise ClientError("処理する画像がありません。")
+            raise ClientError("処理する画像がありません。", "image_not_found")
         return records
 
     def _records_for_ids_with_catalog(self, image_ids: list[str]) -> tuple[list[ImageRecord], int]:
         if not isinstance(image_ids, list):
-            raise ClientError("画像の選択が正しくありません。")
+            raise ClientError("画像の選択が正しくありません。", "input_invalid")
         with self.lock:
             source_ids = image_ids or list(self.order)
             if len({str(image_id) for image_id in source_ids}) != len(source_ids):
-                raise ClientError("同じ画像を複数回指定できません。")
+                raise ClientError("同じ画像を複数回指定できません。", "input_invalid")
             records = [self.images.get(str(image_id)) for image_id in source_ids]
             root = self.root
             session_imports_dir = self.session_imports_dir
             catalog_generation = self.catalog_generation
         if not records or any(record is None for record in records):
-            raise ClientError("処理する画像がありません。")
+            raise ClientError("処理する画像がありません。", "image_not_found")
         verified_records = [record for record in records if record is not None]
         for record in verified_records:
             try:
@@ -198,9 +198,9 @@ class JobsMixin:
                     raise ValueError
                 record.path.resolve().relative_to(allowed_root.resolve())
             except ValueError as exc:
-                raise ClientError("許可されていない画像パスです。") from exc
+                raise ClientError("許可されていない画像パスです。", "input_invalid") from exc
             if not record.path.is_file():
-                raise ClientError("画像ファイルが見つかりません。")
+                raise ClientError("画像ファイルが見つかりません。", "image_not_found")
         for record in verified_records:
             self._assert_record_stat_matches(record)
         return verified_records, catalog_generation
@@ -215,7 +215,7 @@ class JobsMixin:
         remove_after_save: bool = False,
     ) -> None:
         if not self.import_lock.acquire(blocking=False):
-            raise ClientError("画像の追加中です。完了後にもう一度実行してください。")
+            raise ClientError("画像の追加中です。完了後にもう一度実行してください。", "operation_in_progress")
         try:
             self._start_job_unlocked(
                 kind,
@@ -239,9 +239,9 @@ class JobsMixin:
     ) -> None:
         with self.lock:
             if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
-                raise ClientError("別の処理が進行中です。")
+                raise ClientError("別の処理が進行中です。", "operation_in_progress")
             if expected_catalog_generation is not None and self.catalog_generation != expected_catalog_generation:
-                raise ClientError("画像一覧が更新されたため、もう一度実行してください。")
+                raise ClientError("画像一覧が更新されたため、もう一度実行してください。", "catalog_changed")
             self.job_generation += 1
             job_generation = self.job_generation
             catalog_generation = self.catalog_generation
@@ -312,7 +312,7 @@ class JobsMixin:
             with self.lock:
                 current_record = self.images.get(image_id)
                 if current_record is None:
-                    raise ClientError("画像が見つかりません。")
+                    raise ClientError("画像が見つかりません。", "image_not_found")
                 record = replace(current_record)
                 removed_candidate_ids = removed_candidate_ids or set()
                 candidates = [replace(candidate) for candidate in self.candidates.get(image_id, []) if candidate.enabled and candidate.candidate_id not in removed_candidate_ids]
@@ -330,7 +330,7 @@ class JobsMixin:
                     with Image.open(candidate.mask_path) as mask_image:
                         mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
                 except FileNotFoundError as exc:
-                    raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。") from exc
+                    raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。", "catalog_changed") from exc
                 if mask.shape != (record.height, record.width):
                     raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                 if candidate.role == CandidateRole.APPLY:
@@ -347,7 +347,7 @@ class JobsMixin:
                 current_record = self.images.get(image_id)
                 if (current_record is None or current_record.path != record.path
                         or self.catalog_generation != catalog_generation or self._candidate_revision(image_id) != revision):
-                    raise ClientError("候補が変更されました。もう一度実行してください。")
+                    raise ClientError("候補が変更されました。もう一度実行してください。", "catalog_changed")
             return result
 
     def _set_job_current(

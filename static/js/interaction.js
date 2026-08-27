@@ -104,7 +104,7 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     imageIds.forEach((imageId) => state.maskStatus.delete(imageId));
     markImagesUnreviewed(imageIds, false);
     renderCatalogViews(); updateNavigationControls(); clearStatus();
-  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
+  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
   finally { state.masksClearing = false; updateActionButtons(); }
 }
 
@@ -122,7 +122,7 @@ async function clearCatalog() {
     clearStoredCatalogState();
     resetCatalog([], "");
     clearStatus();
-  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
+  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
   finally { state.catalogMutation = false; updateActionButtons(); }
 }
 
@@ -203,7 +203,7 @@ async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
       updateNavigationControls(); updateActionButtons();
       clearStatus();
     }
-  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) setStatus(error.message, "error"); }
+  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
   finally { state.catalogMutation = false; updateActionButtons(); }
 }
 
@@ -332,7 +332,7 @@ async function importFiles(files) {
       const latest = await api("/api/images");
       if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) { state.images = latest.images; loadReviewedPaths(); renderCatalogViews(); }
     } catch { /* Keep the import failure visible. */ }
-    if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) setStatus(error.message, "error");
+    if (isCurrentCatalogEpoch(session.epoch) && state.importSession === session) showUserError(error);
   }
   finally { finishImportSession(session); }
 }
@@ -424,14 +424,14 @@ async function pickImageFiles() {
   $("#pickerMenu").hidePopover();
   const session = beginImportSession(); if (!session) return;
   try { await importFileHandles(await window.showOpenFilePicker({ multiple: true, types: [{ description: "Images", accept: { "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"] } }] }), session); }
-  catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); finishImportSession(session); }
+  catch (error) { if (error?.name !== "AbortError") showUserError(error); finishImportSession(session); }
 }
 
 async function pickImageDirectory() {
   $("#pickerMenu").hidePopover();
   const session = beginImportSession(); if (!session) return;
   try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-source" }), session); }
-  catch (error) { if (error?.name !== "AbortError") setStatus(error.message, "error"); finishImportSession(session); }
+  catch (error) { if (error?.name !== "AbortError") showUserError(error); finishImportSession(session); }
 }
 
 async function importDroppedFiles(event) {
@@ -444,7 +444,7 @@ async function importDroppedFiles(event) {
     const dropped = await directFilesFromDrop(event.dataTransfer);
     if (dropped?.handleEntries) await importHandleEntries(dropped.handleEntries, session);
     else await importFiles(dropped, session);
-  } catch (error) { setStatus(error.message, "error"); }
+  } catch (error) { showUserError(error); }
   finally { finishImportSession(session); setGalleryDropOverlay(false); }
 }
 

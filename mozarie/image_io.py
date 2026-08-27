@@ -35,21 +35,21 @@ def inference_device_name() -> str | None:
 
 def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     if not raw.startswith(PNG_SIGNATURE):
-        raise ClientError("PNGファイルではありません。")
+        raise ClientError("PNGファイルではありません。", "image_format_unsupported")
     chunks: list[tuple[bytes, bytes]] = []
     position = len(PNG_SIGNATURE)
     while position < len(raw):
         if position + 12 > len(raw):
-            raise ClientError("PNGチャンクが壊れています。")
+            raise ClientError("PNGチャンクが壊れています。", "image_format_unsupported")
         length = int.from_bytes(raw[position:position + 4], "big")
         end = position + 12 + length
         if end > len(raw):
-            raise ClientError("PNGチャンクが壊れています。")
+            raise ClientError("PNGチャンクが壊れています。", "image_format_unsupported")
         chunk_type = raw[position + 4:position + 8]
         chunks.append((chunk_type, raw[position:end]))
         position = end
     if not chunks or chunks[-1][0] != b"IEND":
-        raise ClientError("PNG終端チャンクがありません。")
+        raise ClientError("PNG終端チャンクがありません。", "image_format_unsupported")
     return chunks
 
 
@@ -72,7 +72,7 @@ def _png_exif_payload(exif: bytes) -> bytes:
 def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
     source_chunks = parse_png_chunks(source)
     if any(chunk_type == b"acTL" for chunk_type, _chunk in source_chunks):
-        raise ClientError("アニメーションPNGは保存対象外です。")
+        raise ClientError("アニメーションPNGは保存対象外です。", "image_format_unsupported")
     source_ihdr = next(chunk for chunk_type, chunk in source_chunks if chunk_type == b"IHDR")
 
     encoded = io.BytesIO()
@@ -83,9 +83,9 @@ def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_or
     encoded_ihdr_data = encoded_ihdr[8:-4]
     if normalize_orientation:
         if source_ihdr_data[8:] != encoded_ihdr_data[8:]:
-            raise ClientError("PNGの色形式またはビット深度が変化したため保存を中止しました。")
+            raise ClientError("PNGの色形式またはビット深度が変化したため保存を中止しました。", "image_format_unsupported")
     elif source_ihdr_data != encoded_ihdr_data:
-        raise ClientError("このPNGのカラーモードはメタデータを安全に保持して保存できません。")
+        raise ClientError("このPNGのカラーモードはメタデータを安全に保持して保存できません。", "image_format_unsupported")
     encoded_idat = [chunk for chunk_type, chunk in encoded_chunks if chunk_type == b"IDAT"]
 
     result = bytearray(PNG_SIGNATURE)
@@ -109,37 +109,37 @@ def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_or
 
 def _parse_jpeg_header(raw: bytes) -> tuple[list[tuple[int, bytes]], bytes]:
     if not raw.startswith(b"\xff\xd8"):
-        raise ClientError("JPEGファイルではありません。")
+        raise ClientError("JPEGファイルではありません。", "image_format_unsupported")
     position = 2
     segments: list[tuple[int, bytes]] = []
     while position < len(raw):
         marker_start = position
         if raw[position] != 0xFF:
-            raise ClientError("JPEGヘッダ構造を安全に解析できません。")
+            raise ClientError("JPEGヘッダ構造を安全に解析できません。", "image_format_unsupported")
         while position < len(raw) and raw[position] == 0xFF:
             position += 1
         if position >= len(raw):
-            raise ClientError("JPEGヘッダが壊れています。")
+            raise ClientError("JPEGヘッダが壊れています。", "image_format_unsupported")
         marker = raw[position]
         position += 1
         if marker == 0xDA:  # Start of Scan: the remaining bytes are compressed image data.
             if position + 2 > len(raw):
-                raise ClientError("JPEGスキャンヘッダが壊れています。")
+                raise ClientError("JPEGスキャンヘッダが壊れています。", "image_format_unsupported")
             length = int.from_bytes(raw[position:position + 2], "big")
             if length < 2 or position + length > len(raw):
-                raise ClientError("JPEGスキャンヘッダが壊れています。")
+                raise ClientError("JPEGスキャンヘッダが壊れています。", "image_format_unsupported")
             return segments, raw[marker_start:]
         if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7 or marker == 0x01:
-            raise ClientError("対応外のJPEGヘッダ構造です。")
+            raise ClientError("対応外のJPEGヘッダ構造です。", "image_format_unsupported")
         if position + 2 > len(raw):
-            raise ClientError("JPEGヘッダが壊れています。")
+            raise ClientError("JPEGヘッダが壊れています。", "image_format_unsupported")
         length = int.from_bytes(raw[position:position + 2], "big")
         end = position + length
         if length < 2 or end > len(raw):
-            raise ClientError("JPEGヘッダが壊れています。")
+            raise ClientError("JPEGヘッダが壊れています。", "image_format_unsupported")
         segments.append((marker, raw[marker_start:end]))
         position = end
-    raise ClientError("JPEG画像データが見つかりません。")
+    raise ClientError("JPEG画像データが見つかりません。", "image_format_unsupported")
 
 
 def _is_jpeg_metadata_marker(marker: int) -> bool:
@@ -166,12 +166,12 @@ def _expected_image_format(suffix: str) -> str:
     try:
         return expected_formats[suffix.lower()]
     except KeyError as exc:
-        raise ClientError("Unsupported image format.") from exc
+        raise ClientError("Unsupported image format.", "image_format_unsupported") from exc
 
 
 def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -> None:
     if image_format != _expected_image_format(suffix):
-        raise ClientError("The image content does not match its file extension.")
+        raise ClientError("The image content does not match its file extension.", "image_format_unsupported")
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
@@ -191,7 +191,7 @@ def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
                     raise OSError("truncated JPEG")
         return size
     except (OSError, RuntimeError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise ClientError("追加画像を読み込めません。") from exc
+        raise ClientError("追加画像を読み込めません。", "image_read_failed") from exc
 
 
 def _jpeg_with_original_metadata(source: bytes, image: Image.Image, *, normalize_orientation: bool = False) -> bytes:
@@ -226,20 +226,20 @@ WEBP_SUPPORTED_CHUNKS = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", *WEBP_METADATA_CHUN
 
 def _parse_webp_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
     if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
-        raise ClientError("WebPファイルではありません。")
+        raise ClientError("WebPファイルではありません。", "image_format_unsupported")
     if int.from_bytes(raw[4:8], "little") + 8 != len(raw):
-        raise ClientError("WebPコンテナサイズを安全に検証できません。")
+        raise ClientError("WebPコンテナサイズを安全に検証できません。", "image_format_unsupported")
     chunks: list[tuple[bytes, bytes]] = []
     position = 12
     while position < len(raw):
         if position + 8 > len(raw):
-            raise ClientError("WebPチャンクが壊れています。")
+            raise ClientError("WebPチャンクが壊れています。", "image_format_unsupported")
         chunk_type = raw[position:position + 4]
         size = int.from_bytes(raw[position + 4:position + 8], "little")
         end = position + 8 + size
         padded_end = end + (size % 2)
         if padded_end > len(raw):
-            raise ClientError("WebPチャンクが壊れています。")
+            raise ClientError("WebPチャンクが壊れています。", "image_format_unsupported")
         chunks.append((chunk_type, raw[position:padded_end]))
         position = padded_end
     return chunks
@@ -249,11 +249,11 @@ def _validate_safe_webp_structure(raw: bytes) -> None:
     chunks = _parse_webp_chunks(raw)
     chunk_types = [chunk_type for chunk_type, _chunk in chunks]
     if any(chunk_type in {b"ANIM", b"ANMF"} for chunk_type in chunk_types):
-        raise ClientError("アニメーションWebPは安全保証できないため保存対象外です。")
+        raise ClientError("アニメーションWebPは安全保証できないため保存対象外です。", "image_format_unsupported")
     if any(chunk_type not in WEBP_SUPPORTED_CHUNKS for chunk_type in chunk_types):
-        raise ClientError("対応外のWebPチャンクがあるため保存を中止しました。")
+        raise ClientError("対応外のWebPチャンクがあるため保存を中止しました。", "image_format_unsupported")
     if sum(chunk_type in {b"VP8 ", b"VP8L"} for chunk_type in chunk_types) != 1:
-        raise ClientError("WebP画像データを安全に検証できません。")
+        raise ClientError("WebP画像データを安全に検証できません。", "image_format_unsupported")
 
 
 def _webp_with_original_metadata(
@@ -275,13 +275,13 @@ def _webp_with_original_metadata(
 
 def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int) -> Image.Image:
     if block_size < 1:
-        raise ClientError("モザイク粗さが正しくありません。")
+        raise ClientError("モザイク粗さが正しくありません。", "input_invalid")
     original_mode = image.mode
     if original_mode not in {"RGB", "RGBA", "L"}:
-        raise ClientError("この画像モードは安全保存に対応していません。")
+        raise ClientError("この画像モードは安全保存に対応していません。", "image_format_unsupported")
     image_array = np.asarray(image)
     if mask.shape != image_array.shape[:2]:
-        raise ClientError("マスクと画像サイズが一致しません。")
+        raise ClientError("マスクと画像サイズが一致しません。", "input_invalid")
     width, height = image.size
 
     # Calculate each block from pixels that will actually receive mosaic.  This
@@ -350,33 +350,33 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
 
 def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
     if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
-        raise ClientError("PNG形式の編集マスクが必要です。")
+        raise ClientError("PNG形式の編集マスクが必要です。", "input_invalid")
     try:
         raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
     except (IndexError, binascii.Error) as exc:
-        raise ClientError("編集マスクを読み込めません。") from exc
+        raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
     if len(raw) > MAX_BODY_BYTES:
-        raise ClientError("編集マスクが大きすぎます。")
+        raise ClientError("編集マスクが大きすぎます。", "input_invalid")
     try:
         with Image.open(io.BytesIO(raw)) as image:
             if image.format != "PNG":
-                raise ClientError("The mask must be a PNG image.")
+                raise ClientError("The mask must be a PNG image.", "input_invalid")
             if image.size != (width, height):
-                raise ClientError("編集マスクのサイズが元画像と一致しません。")
+                raise ClientError("編集マスクのサイズが元画像と一致しません。", "input_invalid")
             if image.mode in {"RGBA", "LA"}:
                 return np.asarray(image.getchannel("A"), dtype=np.uint8)
             if image.mode in {"L", "1"}:
                 return np.asarray(image.convert("L"), dtype=np.uint8)
-            raise ClientError("The mask must include an alpha channel or be grayscale.")
+            raise ClientError("The mask must include an alpha channel or be grayscale.", "input_invalid")
     except (OSError, UnidentifiedImageError) as exc:
-        raise ClientError("編集マスクは有効なPNGではありません。") from exc
+        raise ClientError("編集マスクは有効なPNGではありません。", "input_invalid") from exc
 
 
 def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     if raw_draft is None:
         return None, None, None
     if not isinstance(raw_draft, dict):
-        raise ClientError("手描きマスクの形式が正しくありません。")
+        raise ClientError("手描きマスクの形式が正しくありません。", "input_invalid")
     add = raw_draft.get("add") if raw_draft.get("manualEnabled", True) is not False else None
     exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
     exclusion_erase = raw_draft.get("exclusionErase") if raw_draft.get("manualExclusionEraseEnabled", True) is not False else None
@@ -402,7 +402,7 @@ def unique_session_import_destination(path: Path, reserved: set[Path] | None = N
         candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
         if not candidate.exists() and candidate not in reserved:
             return candidate
-    raise ClientError("同名ファイルが多すぎるため保存先を決められません。")
+    raise ClientError("同名ファイルが多すぎるため保存先を決められません。", "save_write_failed")
 
 
 def _default_output_destination(record: ImageRecord, suffix: str = "_censored", reserved: set[Path] | None = None) -> Path:
@@ -440,7 +440,7 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
             return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
         if suffix == ".webp":
             return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation)
-    raise ClientError("この画像形式は保存に対応していません。")
+    raise ClientError("この画像形式は保存に対応していません。", "image_format_unsupported")
 
 
 def _replace_record_with_rendered_output(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> None:

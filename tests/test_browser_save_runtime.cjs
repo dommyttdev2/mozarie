@@ -247,7 +247,7 @@ async function runRemoveAfterSavePartialAndStaleCase() {
       return jsonResponse({ images: [second], removedImageIds: [first.id] });
     },
   });
-  await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", false, "copy", true), /second commit failed/);
+  await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", false, "copy", true), (error) => error.code === "internal_error");
   assert.equal(runtime.requests.at(-1).path, "/api/catalog/remove");
   assert.deepEqual(runtime.state.images, [second]);
 
@@ -272,7 +272,7 @@ async function runCopyFailureCase() {
     size: 1,
     lastModified: 1,
   });
-  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", true), /disk full/);
+  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", true), (error) => error.code === "internal_error");
   assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
   assert.equal(removed, false, "a failed durable copy does not delete the source handle");
 }
@@ -280,7 +280,7 @@ async function runCopyFailureCase() {
 async function runCommitFailureCase() {
   for (const status of [500, 400]) {
     const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, status) });
-    await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), /commit failed/);
+    await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), (error) => error.code === "internal_error");
     assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `${status} is not retried`);
     assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
   }
@@ -500,7 +500,7 @@ async function runPartialCommitFailureReconcileCase() {
   runtime.state.maskStatus.set(second.id, false);
   runtime.state.maskStatus.set(exclusionOnly.id, true);
 
-  await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", true), /second commit failed/);
+  await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", true), (error) => error.code === "internal_error");
 
   assert.deepEqual(Array.from(runtime.state.images, (image) => image.id), [second.id, exclusionOnly.id]);
   assert.equal(runtime.state.drafts.has(first.id), false);

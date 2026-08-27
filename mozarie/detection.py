@@ -60,22 +60,22 @@ class DetectionMixin:
     def _configured_model_path(self, key: str, label: str) -> Path:
         raw_path = str(self.settings.get("models", {}).get(key, "")).strip()
         if not raw_path:
-            raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。")
+            raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"{label}モデルが見つかりません: {path}")
+            raise ClientError(f"{label}モデルが見つかりません: {path}", "model_file_missing")
         if path.suffix.lower() != ".onnx":
-            raise ClientError(f"{label}モデルにはONNXファイルを指定してください。")
+            raise ClientError(f"{label}モデルにはONNXファイルを指定してください。", "model_file_invalid")
         return path
 
     def _configured_sam_path(self) -> Path:
         models = self.settings.get("models", {})
         raw_path = str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
         if not raw_path:
-            raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。")
+            raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
         if not path.is_file():
-            raise ClientError(f"SAMモデルが見つかりません: {path}")
+            raise ClientError(f"SAMモデルが見つかりません: {path}", "model_file_missing")
         if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
             raise ClientError("SAMチェックポイントは .pth、.pt、.ckpt のいずれかを指定してください。", "sam_checkpoint_invalid")
         return path
@@ -548,7 +548,7 @@ class DetectionMixin:
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
-                    raise ClientError("既存の処理が完了してから境界を検出してください。")
+                    raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
                 masks, scores, _logits = predictor.predict(
@@ -562,7 +562,7 @@ class DetectionMixin:
         if polygon_mask is not None:
             clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
         if not np.any(clipped):
-            raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。")
+            raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
 
         with self.lock:
             if self.images.get(image_id) is not record:
@@ -579,7 +579,7 @@ class DetectionMixin:
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
-                    raise ClientError("既存の処理が完了してから境界を検出してください。")
+                    raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
             hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
             hand_boxes = self._hand_boxes_over_apply(
                 [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
@@ -649,13 +649,13 @@ class DetectionMixin:
                     self._assert_record_stat_matches(record)
                     with self.lock:
                         if self.images.get(image_id) is not record:
-                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
                     for temporary, candidate in zip(temporary_paths, created):
                         os.replace(temporary, candidate.mask_path)
                     temporary_paths.clear()
                     with self.lock:
                         if self.images.get(image_id) is not record:
-                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。")
+                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
                         self.candidates.setdefault(image_id, []).extend(created)
                         revision = self._touch_candidates(image_id)
                         self._persist_candidates(image_id)

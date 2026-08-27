@@ -81,7 +81,7 @@ def _pick_output_directory(state: StudioState = STATE) -> str | None:
     with state.lock:
         default_output_directory = state.settings["saving"]["default_output_directory"]
         if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
-            raise ClientError("処理中は保存先を変更できません。")
+            raise ClientError("処理中は保存先を変更できません。", "operation_in_progress")
     script = """
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -107,7 +107,7 @@ try {
         return None
     path = Path(selected)
     if not path.is_absolute() or not path.is_dir():
-        raise ClientError("保存先は存在する絶対パスで選択してください。")
+        raise ClientError("保存先は存在する絶対パスで選択してください。", "output_folder_unavailable")
     return str(path.resolve())
 
 
@@ -169,31 +169,31 @@ class MosaicHandler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         expected_host = f"127.0.0.1:{self.server.server_port}"
         if host != expected_host:
-            self._reject_unread_request(ForbiddenClientError("許可されていない接続先です。"))
+            self._reject_unread_request(ForbiddenClientError("許可されていない接続先です。", "session_expired"))
         return expected_host
 
     def _require_mutation_request(self) -> None:
         expected_host = self._require_local_host()
         origin = self.headers.get("Origin", "")
         if origin != f"http://{expected_host}":
-            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
+            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。", "session_expired"))
         fetch_site = self.headers.get("Sec-Fetch-Site", "")
         if fetch_site and fetch_site not in {"same-origin", "none"}:
-            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。"))
+            self._reject_unread_request(ForbiddenClientError("許可されていない送信元です。", "session_expired"))
         if self.headers.get("X-Mozarie-Token", "") != STATE.session_token:
-            self._reject_unread_request(ForbiddenClientError("この画面の操作ではありません。再読み込みしてください。"))
+            self._reject_unread_request(ForbiddenClientError("この画面の操作ではありません。再読み込みしてください。", "session_expired"))
 
     def _require_json_request(self) -> None:
         self._require_mutation_request()
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
-            self._reject_unread_request(ClientError("JSON形式のリクエストだけを受け付けます。"))
+            self._reject_unread_request(ClientError("JSON形式のリクエストだけを受け付けます。", "session_expired"))
 
     def _require_binary_import_request(self) -> None:
         self._require_mutation_request()
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/octet-stream":
-            self._reject_unread_request(ClientError("画像バイナリのリクエストだけを受け付けます。"))
+            self._reject_unread_request(ClientError("画像バイナリのリクエストだけを受け付けます。", "session_expired"))
 
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -296,7 +296,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             with STATE.import_lock:
                                 if requested_catalog and STATE.catalog_id != requested_catalog:
                                     if STATE.catalog_id is not None:
-                                        raise ClientError("画像追加中にフォルダを切り替えることはできません。")
+                                        raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
                                     STATE.activate_browser_catalog(requested_catalog)
                                 elif not STATE.catalog_id:
                                     # Never bind a fallback import based on its
@@ -321,7 +321,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/workspace/catalog":
                 if payload.get("provisional") is True:
                     if payload.get("catalogId"):
-                        raise ClientError("仮カタログにIDは指定できません。")
+                        raise ClientError("仮カタログにIDは指定できません。", "input_invalid")
                     STATE.detach_catalog()
                     catalog_id = STATE.workspace_store.ensure_provisional_catalog()
                     STATE.catalog_id = catalog_id
@@ -493,25 +493,25 @@ class MosaicHandler(BaseHTTPRequestHandler):
     def _read_json_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None or not raw_length.isdigit():
-            raise ClientError("リクエストサイズが不正です。")
+            raise ClientError("リクエストサイズが不正です。", "input_invalid")
         content_length = int(raw_length)
         if content_length <= 0 or content_length > MAX_BODY_BYTES:
-            raise ClientError("リクエストサイズが正しくありません。")
+            raise ClientError("リクエストサイズが正しくありません。", "input_invalid")
         try:
             payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ClientError("JSONを読み込めません。") from exc
+            raise ClientError("JSONを読み込めません。", "input_invalid") from exc
         if not isinstance(payload, dict):
-            raise ClientError("JSONオブジェクトが必要です。")
+            raise ClientError("JSONオブジェクトが必要です。", "input_invalid")
         return payload
 
     def _read_binary_body_to_file(self) -> Path:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None or not raw_length.isdigit():
-            raise ClientError("リクエストサイズが不正です。")
+            raise ClientError("リクエストサイズが不正です。", "input_invalid")
         content_length = int(raw_length)
         if content_length <= 0 or content_length > MAX_BODY_BYTES:
-            raise ClientError("リクエストサイズが正しくありません。")
+            raise ClientError("リクエストサイズが正しくありません。", "input_invalid")
         staging_dir = STATE.cache_dir / "import-staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
@@ -523,7 +523,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 while remaining:
                     chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
                     if not chunk:
-                        raise ClientError("画像データを最後まで読み込めません。")
+                        raise ClientError("画像データを最後まで読み込めません。", "image_read_failed")
                     handle.write(chunk)
                     digest.update(chunk)
                     remaining -= len(chunk)
@@ -549,7 +549,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     with record.path.open("rb") as handle:
                         self._stream_file(handle, record, mimetypes.guess_type(record.path.name)[0] or "application/octet-stream", cache_control)
                 except FileNotFoundError as exc:
-                    raise ClientError("画像ファイルが見つかりません。") from exc
+                    raise ClientError("画像ファイルが見つかりません。", "image_not_found") from exc
                 return
 
             thumbnail_dir = STATE.cache_dir / "thumbnails"
@@ -588,7 +588,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 with thumbnail_path.open("rb") as handle:
                     self._stream_file(handle, None, "image/jpeg", cache_control)
             except FileNotFoundError as exc:
-                raise ClientError("サムネイルを作成できませんでした。") from exc
+                raise ClientError("サムネイルを作成できませんでした。", "image_read_failed") from exc
 
     def _send_candidate_mask(self, image_id: str, candidate_id: str, version: str | None) -> None:
         with STATE.lock:
@@ -704,16 +704,16 @@ def _request_version(query: str) -> str | None:
 
 def _read_candidate_revision(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ClientError("候補の版番号が不正です。")
+        raise ClientError("候補の版番号が不正です。", "input_invalid")
     revision = value
     if revision < 0:
-        raise ClientError("候補の版番号が不正です。")
+        raise ClientError("候補の版番号が不正です。", "input_invalid")
     return revision
 
 
 def _read_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
-        raise ClientError(f"{field_name}はONまたはOFFで指定してください。")
+        raise ClientError(f"{field_name}はONまたはOFFで指定してください。", "input_invalid")
     return value
 
 
