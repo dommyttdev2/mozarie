@@ -17,7 +17,7 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import numpy as np
 import cv2
@@ -2833,6 +2833,85 @@ class MozarieTests(unittest.TestCase):
         self.assertFalse(status["sensitive"]["enabled"])
         self.assertFalse(status["hand_detection"]["enabled"])
 
+    def test_sam_status_is_required_only_for_high_precision(self):
+        state = self.new_state()
+        state.settings["models"]["sam_checkpoints"] = {"vit_b": "missing.pth", "vit_l": "", "vit_h": ""}
+        standard = state.settings_status()["models"]["sam_checkpoint"]
+        self.assertEqual((standard["required"], standard["enabled"], standard["valid"]), (False, False, False))
+        state.settings["detection"]["mode"] = "high_precision"
+        precise = state.settings_status()["models"]["sam_checkpoint"]
+        self.assertEqual((precise["required"], precise["enabled"], precise["reasonCode"]), (True, True, "missing"))
+
+    def test_health_allows_standard_mode_without_sam(self):
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
+        status = {
+            "models": {
+                "target_segmentation": {"required": True, "enabled": True, "valid": True},
+                "sam_checkpoint": {"required": False, "enabled": False, "valid": False},
+                "hand_segmentation": {"required": False, "enabled": False, "valid": False},
+            },
+            "gpus": [{"id": 0, "name": "Test GPU", "supported": True}],
+        }
+
+        def health(status_value):
+            with patch.object(http_module, "STATE", state), patch.object(state, "settings_status", return_value=status_value):
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                connection.request("GET", "/api/health")
+                response = connection.getresponse(); payload = json.loads(response.read())
+                connection.close()
+            return payload["modelsConfigured"]
+
+        try:
+            for provider in ("cpu", "gpu"):
+                state.settings["models"]["provider"] = provider
+                self.assertTrue(health(status))
+                handseg_missing = copy.deepcopy(status); handseg_missing["models"]["hand_segmentation"] = {"required": False, "enabled": True, "valid": False}
+                self.assertFalse(health(handseg_missing))
+                high_precision_missing_sam = copy.deepcopy(status); high_precision_missing_sam["models"]["sam_checkpoint"] = {"required": True, "enabled": True, "valid": False}
+                self.assertFalse(health(high_precision_missing_sam))
+        finally:
+            httpd.shutdown(); httpd.server_close()
+
+    def test_standard_detection_never_loads_sam_and_keeps_handseg_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (16, 16), "white").save(image_path)
+            record = self._record(image_path, 16, 16)
+            state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
+            target_mask = np.zeros((16, 16), dtype=np.uint8); target_mask[2:14, 2:14] = 255
+            hand_mask = np.zeros((16, 16), dtype=np.uint8); hand_mask[5:8, 5:8] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": target_mask, "source": "target"}]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_refinement_context", return_value=([segments[0]], hand_mask, [(4, 4, 10, 10)])), \
+                 patch.object(state, "_sam_predictor_for") as sam:
+                candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="standard")
+            sam.assert_not_called()
+            self.assertEqual([candidate.source for candidate in candidates], ["hand_exclusion", "target"])
+
+    def test_high_precision_loads_sam_once_only_when_targets_exist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"; Image.new("RGB", (16, 16), "white").save(image_path)
+            record = self._record(image_path, 16, 16)
+            state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
+            target_mask = np.zeros((16, 16), dtype=np.uint8); target_mask[2:14, 2:14] = 255
+            segments = [{"class_name": "penis", "confidence": 0.8, "mask": target_mask, "source": "target"}]
+            predictor = Mock()
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_refinement_context", return_value=([segments[0]], np.zeros((16, 16), dtype=np.uint8), [])), \
+                 patch.object(state, "_sam_predictor_for", return_value=predictor) as sam, \
+                 patch.object(state, "_high_precision_segments_with_predictor", return_value=segments):
+                state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            sam.assert_called_once_with(record, ANY)
+
+            with patch.object(state, "_detect_arbitrated_segments", return_value=[]), \
+                 patch.object(state, "_hand_refinement_context", return_value=([], np.zeros((16, 16), dtype=np.uint8), [(1, 1, 4, 4)])), \
+                 patch.object(state, "_sam_predictor_for") as sam:
+                self.assertEqual(state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision"), [])
+            sam.assert_not_called()
+
     def test_hand_segmentation_predictor_strictly_loads_vit_b_once_per_image(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2912,13 +2991,31 @@ class MozarieTests(unittest.TestCase):
         mask = np.zeros((10, 10), dtype=np.uint8); mask[2:8, 2:8] = 255
         target = Mock(); target.detect.return_value = [{"class_name": "penis", "confidence": 0.6, "mask": mask, "source": "target"}]
         auxiliary = Mock()
-        auxiliary.detect.side_effect = lambda tile, _confidence, source: [{
+        auxiliary.detect.side_effect = lambda tile, _confidence, source, _targets: [{
             "class_name": "penis", "confidence": 0.9, "mask": np.full(tile.shape[:2], 255, dtype=np.uint8), "source": source,
         }]
         models = DetectionModels(target=target, auxiliaries=[("ntd11", auxiliary)])
         segments = state._detect_arbitrated_segments(models, np.zeros((10, 10, 3), dtype=np.uint8), 0.5)
         self.assertEqual([segment["source"] for segment in segments], ["target"])
         self.assertEqual(auxiliary.detect.call_count, len(detection_tiles(10, 10)))
+
+    def test_auxiliaries_receive_default_and_selected_target_sets(self):
+        state = self.new_state()
+        target = Mock(); target.detect.return_value = []
+        seen: list[tuple[str, set[str]]] = []
+
+        def detect(tile, _confidence, source, targets):
+            seen.append((source, set(targets)))
+            return []
+
+        models = DetectionModels(target=target, auxiliaries=[("ntd11", Mock(detect=detect)), ("sensitive", Mock(detect=detect))])
+        image = np.zeros((10, 10, 3), dtype=np.uint8)
+        for selected, expected in ((TARGET_CLASSES, {"penis", "pussy", "testicles"}), ({"penis"}, {"penis", "testicles"}), ({"pussy"}, {"pussy"})):
+            seen.clear()
+            state._detect_arbitrated_segments(models, image, 0.5, selected)
+            self.assertTrue(seen)
+            self.assertEqual({source for source, _targets in seen}, {"ntd11", "sensitive"})
+            self.assertTrue(all(targets == expected for _source, targets in seen))
 
     def test_hand_model_verification_occurs_once_after_first_load(self):
         state = self.new_state()

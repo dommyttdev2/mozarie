@@ -101,6 +101,13 @@ function setPrecisionDetectionEnabled(enabled) {
   toggle.closest?.(".model-card")?.classList.toggle("active", Boolean(enabled));
   const stateLabel = toggle.parentElement?.querySelector?.("[data-switch-state]");
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
+  setSamAvailable(enabled);
+}
+
+function setSamAvailable(enabled) {
+  document.querySelectorAll('#settingsSamVariants input, #settingsSamModel, [data-model-picker="sam_checkpoint"], [data-model-download="sam"]').forEach((control) => {
+    control.disabled = !enabled;
+  });
 }
 
 function setFluidExclusionEnabled(enabled) {

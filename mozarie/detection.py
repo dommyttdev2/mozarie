@@ -228,10 +228,7 @@ class DetectionMixin:
             tiled_segments: list[dict[str, Any]] = []
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
                 tile = rgb[y_offset:y_offset + tile_height, x_offset:x_offset + tile_width]
-                if targets == TARGET_CLASSES:
-                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source)
-                else:
-                    detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, model_targets)
+                detected_segments = model.detect(tile, confidence_for_source(source, confidence), source, model_targets)
                 for segment in detected_segments:
                     if segment["class_name"] not in model_targets:
                         continue
@@ -453,14 +450,13 @@ class DetectionMixin:
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
         detected, hand_mask, fallback_boxes = self._hand_refinement_context(models, record, rgb, segments)
         needs_high_precision = mode == "high_precision" and bool(detected)
-        if fallback_boxes or needs_high_precision:
+        if needs_high_precision:
             with self.sam_lock:
                 predictor = self._sam_predictor_for(record, rgb)
                 if fallback_boxes:
                     hand_mask = self._apply_sam_hand_fallback(predictor, fallback_boxes, rgb.shape[:2], hand_mask)
                 segments = self._attach_hand_evidence(segments, detected, hand_mask)
-                if needs_high_precision:
-                    segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
+                segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
         else:
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
         segments = self._finalize_exclusions(rgb, segments)

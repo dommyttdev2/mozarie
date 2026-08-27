@@ -203,23 +203,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 models = STATE.settings.get("models", {})
                 provider = str(models.get("provider", "cpu"))
-                configured = bool(str(models.get("target_segmentation", "")).strip()) and bool(
-                    str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
-                )
-                configured = configured and all(
-                    not bool(models.get(enabled_key)) or bool(str(models.get(path_key, "")).strip())
-                    for enabled_key, path_key in (
-                        ("ntd11_enabled", "ntd11"),
-                        ("sensitive_enabled", "sensitive"),
-                        ("hand_detection_enabled", "hand_detection"),
-                    )
-                )
+                status = STATE.settings_status()
+                configured = all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
                 payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
                 }
                 if provider == "gpu":
-                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), STATE.settings_status()["gpus"]))
+                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), status["gpus"]))
                 else:
                     payload.update(health_device(provider, 0, []))
                 self._json(payload)
