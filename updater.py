@@ -317,24 +317,26 @@ def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
     return False
 
 
-def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> None:
+def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     incoming = source_root / "requirements.txt"
     current = app_dir / "requirements.txt"
     if not incoming.is_file():
-        return
+        return False
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
-        return
+        return False
     print(tr("requirements_updating"))
     python = app_dir / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         raise UpdateError(tr("requirements_failed"))
+    (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "--quiet", "-r", str(incoming)],
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--progress-bar", "on", "-r", str(incoming)],
         cwd=str(app_dir),
         check=False,
     )
     if result.returncode != 0:
         raise UpdateError(tr("requirements_failed"))
+    return True
 
 
 def _remove_path(path: Path) -> None:
@@ -458,12 +460,13 @@ def perform_update(
         archive_version = read_local_version(source_root)
         if parse_version(archive_version) != parse_version(latest_raw):
             raise UpdateError(tr("archive_version_mismatch"))
-        install_requirements(source_root, app_dir)
+        requirements_updated = install_requirements(source_root, app_dir)
         print(tr("updating"))
         apply_update(source_root, app_dir)
-        ready_marker = app_dir / ".venv" / ".mozarie-ready"
-        if ready_marker.parent.is_dir():
-            ready_marker.write_text("ready\n", encoding="utf-8")
+        if requirements_updated:
+            ready_marker = app_dir / ".venv" / ".mozarie-ready"
+            if ready_marker.parent.is_dir():
+                ready_marker.write_text("ready\n", encoding="utf-8")
 
     print(tr("version_change", current=current, latest=latest))
     print(tr("updated", current=current, latest=latest))
@@ -472,6 +475,8 @@ def perform_update(
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--check-running"]:
+        return 30 if is_mozarie_running(APP_DIR) else 0
     try:
         return perform_update()
     except KeyboardInterrupt:
