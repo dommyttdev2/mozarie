@@ -49,6 +49,7 @@ def _register_torch_dll_directory() -> None:
 _register_torch_dll_directory()
 
 import onnxruntime as ort
+from onnxruntime.capi import _pybind_state as ort_state
 
 preload_dlls = getattr(ort, "preload_dlls", None)
 if preload_dlls is not None and "torch" not in sys.modules:
@@ -231,7 +232,12 @@ class BaseOnnxModel:
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:
         feeds = {self.input_name: tensor}
-        outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+        try:
+            outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+        except ort_state.EPFail as exc:
+            if self.device.lower() != "cpu":
+                raise _gpu_unavailable_error() from exc
+            raise
         return [np.asarray(value) for value in outputs]
 
     @property

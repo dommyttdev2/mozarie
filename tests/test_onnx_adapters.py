@@ -7,6 +7,7 @@ from unittest.mock import ANY, Mock, patch
 import sys
 
 import numpy as np
+from onnxruntime.capi import _pybind_state as ort_state
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -95,16 +96,42 @@ class OnnxAdapterTests(unittest.TestCase):
 
     def test_run_uses_cpu_and_gpu_onnx_runtime_call_shapes(self) -> None:
         cpu = BaseOnnxModel.__new__(BaseOnnxModel)
-        cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()
+        cpu.device = "cpu"; cpu.input_name = "image"; cpu.run_options = None; cpu.session = Mock()
         cpu.session.run.return_value = [np.asarray([1])]
         self.assertEqual(cpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [1])
         cpu.session.run.assert_called_once_with(None, {"image": ANY})
 
         gpu = BaseOnnxModel.__new__(BaseOnnxModel)
-        gpu.input_name = "image"; gpu.run_options = Mock(); gpu.session = Mock()
+        gpu.device = "gpu"; gpu.input_name = "image"; gpu.run_options = Mock(); gpu.session = Mock()
         gpu.session.run.return_value = [np.asarray([2])]
         self.assertEqual(gpu.run(np.zeros((1,), dtype=np.float32))[0].tolist(), [2])
         gpu.session.run.assert_called_once_with(None, {"image": ANY}, gpu.run_options)
+
+    def test_gpu_run_maps_execution_provider_failure_to_gpu_unavailable(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "gpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        model.session.run.side_effect = ort_state.EPFail("CUDA provider failed")
+        with self.assertRaises(Exception) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_unavailable")
+
+    def test_cpu_run_propagates_execution_provider_failure(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "cpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        failure = ort_state.EPFail("CPU provider failed")
+        model.session.run.side_effect = failure
+        with self.assertRaises(ort_state.EPFail) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertIs(raised.exception, failure)
+
+    def test_gpu_run_propagates_model_shape_runtime_error(self) -> None:
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "gpu"; model.input_name = "image"; model.run_options = None; model.session = Mock()
+        failure = RuntimeError("input shape is invalid")
+        model.session.run.side_effect = failure
+        with self.assertRaises(RuntimeError) as raised:
+            model.run(np.zeros((1,), dtype=np.float32))
+        self.assertIs(raised.exception, failure)
 
     def test_target_decoder_identifies_reversed_outputs_and_channel_first_rows(self) -> None:
         prediction = np.zeros((1, 43, 2), dtype=np.float32)
