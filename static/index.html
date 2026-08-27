@@ -268,6 +268,7 @@
       </section>
       <section id="settingsPanelModels" class="settings-panel" role="tabpanel" aria-labelledby="settingsTabModels" data-settings-panel="models" hidden>
         <span id="modelDownloadActionLabel" class="sr-only" data-i18n="modelDownload.download">ダウンロード</span><span id="modelBrowseActionLabel" class="sr-only" data-i18n="settings.browseModel">参照</span><span id="modelHelpActionLabel" class="sr-only" data-i18n="settings.helpInfo">この設定の説明</span>
+        <div class="form-row"><span data-i18n="settings.runtimeBackend">実行バックエンド</span><output id="settingsRuntimeBackend">—</output></div>
         <label class="form-row"><span data-i18n="settings.provider">推論プロバイダー</span><select id="settingsProvider"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
         <label class="form-row"><span class="settings-gpu-label"><span data-i18n="settings.gpu">GPU</span><span id="settingsGpuLoading" class="settings-gpu-loading" role="status" aria-live="polite" aria-atomic="true" data-i18n="settings.gpuLoading" hidden>読み込み中…</span></span><select id="settingsGpuDevice"></select></label>
         <section class="settings-model-section" aria-labelledby="settingsGenitalDetectionHeading">

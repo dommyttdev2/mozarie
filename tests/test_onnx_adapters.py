@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 import sys
@@ -58,6 +59,23 @@ class OnnxAdapterTests(unittest.TestCase):
                 "cudnn_conv_use_max_workspace": "0",
                 "do_copy_in_default_stream": "1",
             }), "CPUExecutionProvider"])
+
+    def test_directml_session_uses_required_sequential_options(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.onnx"
+            path.write_bytes(b"model")
+            session = Mock()
+            session.get_providers.return_value = ["DmlExecutionProvider", "CPUExecutionProvider"]
+            with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), \
+                 patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session) as create:
+                self.assertIs(create_session(path, "gpu", 1), session)
+            options = create.call_args.kwargs["sess_options"]
+            self.assertFalse(options.enable_mem_pattern)
+            self.assertEqual(options.execution_mode, 0)
+            self.assertEqual(create.call_args.kwargs["providers"], [
+                ("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider",
+            ])
 
     def test_gpu_session_keeps_model_loading_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

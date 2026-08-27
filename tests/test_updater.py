@@ -253,6 +253,26 @@ class UpdaterTests(unittest.TestCase):
             run.assert_not_called()
             self.assertTrue(ready_marker.exists())
 
+    def test_requirements_install_preserves_the_directml_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (app / ".venv" / ".mozarie-runtime.json").write_text(
+                json.dumps({"schema": 1, "profile": "directml"}), encoding="utf-8"
+            )
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 0
+                updater.install_requirements(source, app)
+            command = run.call_args_list[0].args[0]
+            self.assertEqual(command[:3], [str(python), "-m", "pip"])
+            self.assertEqual(Path(command[-1]), source / "requirements-directml.txt")
+            self.assertEqual(run.call_args_list[1].args[0], [str(python), "-m", "pip", "check"])
+            self.assertEqual(run.call_args_list[2].args[0][1:4], [str(source / "runtime_profile.py"), "validate", "directml"])
+
     def test_fetch_latest_release_validates_payload(self):
         payload = json.dumps(make_release()).encode()
         self.assertEqual(updater.fetch_latest_release(lambda *_args, **_kwargs: Response(payload))["tag_name"], "v1.2.0")
@@ -808,15 +828,25 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("ultralytics==8.4.75", requirements)
         self.assertFalse(any(requirement.startswith(("onnxslim", "openvino", "export-base")) for requirement in requirements))
 
+        directml = (Path(__file__).parents[1] / "requirements-directml.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("onnxruntime-directml==1.24.4", directml)
+        self.assertIn("torch-directml==0.2.5.dev240914", directml)
+        self.assertNotIn("onnxruntime-gpu==1.27.0", directml)
+
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
         setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         run = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
         self.assertIn(expected_loop, setup)
-        self.assertEqual(setup.count("py -%%V -m venv"), 1)
+        self.assertEqual(setup.count("py -%%V -m venv"), 2)
+        self.assertIn("for %%V in (3.12-64 3.11-64) do (", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', setup)
         self.assertNotIn("python -m venv", setup)
-        self.assertNotIn("MOZARIE_PYTHON", setup)
+        self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)
+        self.assertIn("VEN_10DE", setup)
+        self.assertIn("VEN_1002", setup)
+        self.assertIn("runtime_profile.py\" preflight", setup)
+        self.assertIn("requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
         self.assertNotIn("pip install", run)

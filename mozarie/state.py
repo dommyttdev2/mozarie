@@ -22,6 +22,7 @@ from .core import (
 )
 from .config import SettingsError, SettingsStore, validate_output_directory_ready
 from .runtime_types import DetectionModels
+from .runtime import directml_devices, runtime_backend
 from .catalog import CatalogMixin
 from .saving import SavingMixin
 from .detection import DetectionMixin
@@ -69,6 +70,16 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
                 "supported": not arch_list or major in supported_majors,
             })
     return devices
+
+
+def gpu_device_statuses(torch: Any) -> list[dict[str, object]]:
+    backend = runtime_backend(torch_module=torch)
+    if backend == "directml":
+        try:
+            return directml_devices()
+        except (ImportError, OSError, RuntimeError):
+            return []
+    return cuda_device_statuses(torch) if backend == "cuda" else []
 
 
 class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
@@ -182,7 +193,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         if models["provider"] != "gpu":
             return
         selected_gpu = next(
-            (gpu for gpu in cuda_device_statuses(torch_module()) if gpu["id"] == models["gpu_device"]),
+            (gpu for gpu in gpu_device_statuses(torch_module()) if gpu["id"] == models["gpu_device"]),
             None,
         )
         if not selected_gpu or not selected_gpu["supported"]:
@@ -326,7 +337,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "reasonCode": reason_code,
             }
         torch = torch_module()
-        gpus = cuda_device_statuses(torch)
+        backend = runtime_backend(torch_module=torch)
+        gpus = gpu_device_statuses(torch)
         selected_gpu = next((gpu for gpu in gpus if gpu["id"] == models.get("gpu_device", 0)), None)
         gpu_device_valid = models["provider"] != "gpu" or bool(selected_gpu and selected_gpu["supported"])
         return {
@@ -335,6 +347,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             "samModelType": models["sam_model_type"],
             "samVariants": sam_variants,
             "gpus": gpus,
+            "runtimeBackend": backend,
             "gpuDevice": models.get("gpu_device", 0),
             "gpuDeviceValid": gpu_device_valid,
             "gpuDeviceReasonCode": None if gpu_device_valid else "gpu_unsupported",

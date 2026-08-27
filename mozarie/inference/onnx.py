@@ -8,10 +8,13 @@ import importlib.util
 import os
 from pathlib import Path
 import sys
+import threading
 from typing import Any
 
 import cv2
 import numpy as np
+
+from ..runtime import runtime_backend
 
 
 _dll_directory_handles: list[object] = []
@@ -71,7 +74,12 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
         return ["CPUExecutionProvider"]
-    if "CUDAExecutionProvider" not in available:
+    backend = runtime_backend(ort_module=ort)
+    if backend == "directml":
+        if "DmlExecutionProvider" not in available:
+            raise _gpu_unavailable_error()
+        return [("DmlExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+    if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {
         "arena_extend_strategy": "kSameAsRequested",
@@ -90,6 +98,10 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
 def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.InferenceSession:
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    backend = "cpu" if device.lower() == "cpu" else runtime_backend(ort_module=ort)
+    if backend == "directml":
+        options.enable_mem_pattern = False
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     try:
         session = ort.InferenceSession(model, sess_options=options, providers=available_providers(device, gpu_device))
     except Exception as exc:
@@ -102,7 +114,8 @@ def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.Inf
     # Provider failure must be visible to the user.  ORT otherwise silently
     # recreates this session with a fallback provider during ``run``.
     session.disable_fallback()
-    if device.lower() != "cpu" and session.get_providers()[0] != "CUDAExecutionProvider":
+    expected = {"cuda": "CUDAExecutionProvider", "directml": "DmlExecutionProvider"}.get(backend)
+    if expected is not None and session.get_providers()[0] != expected:
         raise _gpu_unavailable_error()
     return session
 
@@ -226,14 +239,20 @@ class BaseOnnxModel:
         self.session = create_session(path, device, gpu_device)
         self.input_name = self.session.get_inputs()[0].name
         self.run_options = None
-        if device.lower() != "cpu":
+        self.run_lock = threading.RLock() if self.session.get_providers()[0] == "DmlExecutionProvider" else None
+        if self.session.get_providers()[0] == "CUDAExecutionProvider":
             self.run_options = ort.RunOptions()
             self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{int(gpu_device)}")
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:
         feeds = {self.input_name: tensor}
         try:
-            outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
+            run_lock = getattr(self, "run_lock", None)
+            if run_lock is not None:
+                with run_lock:
+                    outputs = self.session.run(None, feeds)
+            else:
+                outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
         except ort_state.EPFail as exc:
             if self.device.lower() != "cpu":
                 raise _gpu_unavailable_error() from exc

@@ -17,12 +17,12 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("output/", (root / ".gitignore").read_text(encoding="utf-8"))
 
     def test_health_cpu_does_not_expose_or_need_a_gpu(self):
-        self.assertEqual(health_device("cpu", 7, []), {"provider": "cpu", "gpuDevice": None, "device": "CPU"})
+        self.assertEqual(health_device("cpu", 7, []), {"provider": "cpu", "runtimeBackend": "cpu", "gpuDevice": None, "device": "CPU"})
 
     def test_health_uses_the_selected_gpu_index(self):
         self.assertEqual(
             health_device("gpu", 1, [{"id": 0, "name": "first"}, {"id": 1, "name": "second"}]),
-            {"provider": "gpu", "gpuDevice": 1, "gpuName": "second", "device": "GPU 1: second"},
+            {"provider": "gpu", "runtimeBackend": "cuda", "gpuDevice": 1, "gpuName": "second", "device": "GPU 1: second"},
         )
 
 

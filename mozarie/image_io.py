@@ -18,6 +18,7 @@ from .core import (
     ClientError, ImageRecord, oriented_image_size,
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
+from .runtime import directml_devices, runtime_backend
 
 
 def _valid_color(value: str) -> bool:
@@ -29,9 +30,14 @@ def calculate_block_size(width: int, height: int, divisor: int = 100) -> int:
 
 
 def inference_device_name() -> str | None:
-    if not torch_module().cuda.is_available():
+    torch = torch_module()
+    backend = runtime_backend(torch_module=torch)
+    if backend == "directml":
+        devices = directml_devices()
+        return str(devices[0]["name"]) if devices else None
+    if backend != "cuda" or not torch.cuda.is_available():
         return None
-    return torch_module().cuda.get_device_name(0)
+    return torch.cuda.get_device_name(0)
 
 
 def parse_png_chunks(raw: bytes) -> list[tuple[bytes, bytes]]:
