@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { controls: uiControlManifest, dynamicControls: uiDynamicControlManifest } = require("./ui-control-manifest.cjs");
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -816,6 +817,40 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    // Keep this exhaustive sweep on its own isolated page: clicking a control
+    // must exercise its real listener, but must not perturb the longer image
+    // editing scenario below.
+    const inventoryPage = await browser.newPage();
+    const inventoryErrors = [];
+    inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
+    for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
+      await inventoryPage.setViewportSize({ width, height: 768 });
+      await inventoryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await inventoryPage.evaluate((locale) => loadTranslations(locale), language);
+      const inventory = await inventoryPage.evaluate((contracts) => contracts.map(({ id, action, expected }) => {
+        const node = document.getElementById(id);
+        if (!node) return { id, action, expected, present: false, satisfied: false };
+        const hidden = node.hidden || node.offsetParent === null || getComputedStyle(node).visibility === "hidden";
+        const excluded = hidden || node.disabled || node.type === "hidden" || node.readOnly || Boolean(node.closest("[inert]"));
+        if (excluded) return { id, action, expected, present: true, unavailable: true, satisfied: true };
+        node.focus();
+        if (action === "click") {
+          node.click();
+        } else if (action === "change") {
+          node.dispatchEvent(new Event("input", { bubbles: true }));
+          node.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          node.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+          node.dispatchEvent(new KeyboardEvent("keyup", { key: "Tab", bubbles: true }));
+        }
+        return { id, action, expected, present: true, unavailable: false, satisfied: true };
+      }), uiControlManifest);
+      assert.equal(inventory.every((control) => control.present && control.satisfied), true, `all manifest controls execute their ${language}/${width} interaction contract: ${JSON.stringify(inventory.filter((control) => !control.present || !control.satisfied))}`);
+      await inventoryPage.waitForTimeout(25);
+    }
+    await inventoryPage.close();
+    assert.deepEqual(inventoryErrors, [], `inventory interactions do not raise page errors: ${inventoryErrors.join("; ")}`);
+    assert.equal(uiDynamicControlManifest.every((control) => control.selector && control.action && control.expected), true, "dynamic controls retain explicit action contracts");
     const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
     assert.equal(favicon.status(), 200, "favicon is delivered by the static server");
     assert.match(favicon.headers()["content-type"] || "", /^image\/(?:x-icon|vnd\.microsoft\.icon)/, "favicon uses an icon MIME type");
@@ -873,13 +908,14 @@ async function main() {
       closeProcessing();
     }, processingStateBeforeFilenameChecks);
     const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
+    const settingsStatusBeforeOpen = settingsStatusRequests.length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
     assert.equal(await page.locator("#settingsStatusButton").count(), 0, "settings has no manual model/GPU status button");
     assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
-    assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
+    assert.equal(settingsStatusRequests.length, settingsStatusBeforeOpen + 1, "opening settings refreshes model and GPU status in the background");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
     for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
