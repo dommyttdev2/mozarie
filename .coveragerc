@@ -1,0 +1,12 @@
+[run]
+branch = True
+source = mozarie
+omit =
+    tests/*
+
+[report]
+fail_under = 80
+show_missing = True
+
+[xml]
+output = coverage.xml
