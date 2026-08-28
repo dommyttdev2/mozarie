@@ -24,6 +24,8 @@ if str(APP_DIR) not in sys.path:
 from mozarie.core import LOGGER, LOG_DATE_FORMAT, LOG_FORMAT
 from updater import MaintenanceLock, UpdateError
 
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
 
 def _handle_server_error(server: ThreadingHTTPServer, request, client_address) -> None:  # type: ignore[no-untyped-def]
     """Avoid a terminal traceback when a browser closes a normal request."""
@@ -67,9 +69,8 @@ def main() -> None:
     args = parser.parse_args()
     try:
         with MaintenanceLock(APP_DIR):
-            global CLIENT_DISCONNECT_ERRORS
             import mozarie.state as state_module
-            from mozarie.http import CLIENT_DISCONNECT_ERRORS, MosaicHandler
+            from mozarie.http import MosaicHandler
             state = _startup_state(state_module)
             port = args.port if args.port is not None else int(state.settings["general"]["port"])
             LOGGER.info("Mozarieを準備しています…")

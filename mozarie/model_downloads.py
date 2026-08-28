@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 import re
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,7 +112,7 @@ class ModelDownloadManager:
             self._cancel = threading.Event()
             self._job = {
                 "state": "running", "key": key, "total": len(keys), "completed": 0,
-                "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size,
+                "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size, "phase": "checking",
                 "paths": {}, "error": "", "errorCode": "",
             }
             threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download").start()
@@ -135,7 +136,7 @@ class ModelDownloadManager:
                 if self._cancel.is_set():
                     raise ModelDownloadCancelled()
                 entry = MODEL_DOWNLOADS[key]
-                self._set(current=key, completed=index, received=0, expected=entry.size)
+                self._set(current=key, completed=index, received=0, expected=entry.size, phase="checking")
                 destination = self._download(entry)
                 paths[entry.setting_key] = str(destination)
                 self._set(paths=dict(paths), completed=index + 1, received=entry.size)
@@ -159,11 +160,19 @@ class ModelDownloadManager:
         if received > entry.size:
             temporary.unlink()
             received = 0
+        # A retained partial file has already consumed its bytes on disk.  Only
+        # require enough free space for the remainder, otherwise a resumable
+        # multi-GB download can be rejected despite having exactly enough room.
+        if shutil.disk_usage(destination.parent).free < entry.size - received:
+            raise OSError("not enough disk space")
         digest = hashlib.sha256()
         if received:
             with temporary.open("rb") as existing:
                 while chunk := existing.read(1024 * 1024):
+                    if self._cancel.is_set():
+                        raise ModelDownloadCancelled()
                     digest.update(chunk)
+                    self._set(phase="checking", received=existing.tell(), expected=entry.size)
         if received == entry.size:
             if hmac.compare_digest(digest.hexdigest(), entry.sha256):
                 os.replace(temporary, destination)
@@ -194,6 +203,7 @@ class ModelDownloadManager:
                 if content_length and int(content_length) != expected_length:
                     raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
                 mode = "ab" if received else "wb"
+                self._set(phase="downloading", received=received, expected=entry.size)
                 with temporary.open(mode) as handle:
                     while chunk := response.read(1024 * 1024):
                         if self._cancel.is_set():
@@ -206,6 +216,7 @@ class ModelDownloadManager:
                         self._set(received=received, expected=entry.size)
             if received != entry.size:
                 raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
+            self._set(phase="verifying", received=received, expected=entry.size)
             if not hmac.compare_digest(digest.hexdigest(), entry.sha256):
                 raise ModelDownloadError("ダウンロードしたモデルを確認できませんでした。")
             os.replace(temporary, destination)

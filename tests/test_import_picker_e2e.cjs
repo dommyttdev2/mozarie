@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { controls: uiControlManifest, dynamicControls: uiDynamicControlManifest } = require("./ui-control-manifest.cjs");
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -14,6 +15,19 @@ const contentTypes = {
   ".json": "application/json; charset=utf-8",
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
+
+// Kept outside the browser fixture so the negative case is a real unit test:
+// a no-op/failed catalog-clear handler cannot satisfy the same predicate that
+// the ledger uses after a confirmed clear.
+function assertCatalogClearResult(before, after) {
+  assert.ok(before.api.some((request) => request.url.includes("/api/catalog/clear")), "catalog clear must send its API request");
+  assert.deepEqual(after.imageIds, [], "catalog clear must remove every catalog image");
+}
+assert.throws(
+  () => assertCatalogClearResult({ api: [{ url: "/api/catalog/clear" }] }, { imageIds: ["sample"] }),
+  /remove every catalog image/,
+  "mutation guard: a no-op catalog-clear handler must fail the ledger predicate",
+);
 
 async function dialogPointerPoints(page, selector) {
   return page.locator(selector).evaluate((dialog) => {
@@ -53,6 +67,7 @@ function startFixtureServer() {
   let deferFullSettings = false;
   let deferUpdateStatus = false;
   let failNextSettingsSave = false;
+  let updateAvailable = false;
   let currentJob = { kind: "idle", state: "idle" };
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
@@ -133,6 +148,16 @@ function startFixtureServer() {
       }));
       return;
     }
+    if (requestPath === "/api/catalog/clear" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (requestPath === "/api/masks/clear" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (requestPath === "/api/workspace/catalog" && request.method === "POST") {
       for await (const _chunk of request) { /* consume request */ }
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -158,7 +183,7 @@ function startFixtureServer() {
       updateRequests.push(requestUrl.search);
       const reply = () => {
         response.writeHead(200, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({ current: "v1.0.0", latest: "v1.0.0", available: false }));
+        response.end(JSON.stringify({ current: "v1.0.0", latest: updateAvailable ? "v1.0.1" : "v1.0.0", available: updateAvailable }));
       };
       if (deferUpdateStatus) {
         await new Promise((resolve) => { pendingUpdateStatus.push(() => { reply(); resolve(); }); });
@@ -210,6 +235,13 @@ function startFixtureServer() {
     if (requestPath === "/api/job/cancel" && request.method === "POST") {
       cancelRequests += 1;
       if (cancelShouldFail) { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "cancel failed" })); return; }
+      currentJob = { ...currentJob, state: "cancelled", current: "" };
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(currentJob));
+      return;
+    }
+    if ((requestPath === "/api/job/pause" || requestPath === "/api/job/resume") && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      currentJob = { ...currentJob, state: requestPath.endsWith("pause") ? "paused" : "running" };
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(currentJob));
       return;
     }
@@ -282,7 +314,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -733,18 +765,452 @@ async function assertToolRailLayout(page, position) {
 
 async function selectFixtureImage(page, pageErrors, consoleErrors) {
   await page.locator('.gallery-item[data-id="sample"]').click();
-  try { await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
+  try { await page.waitForFunction(() => state.currentId === "sample" && !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
   catch (error) {
     const status = await page.locator("#connectionStatus").textContent();
     throw new Error(`image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
   }
 }
 
+// This is intentionally a separate, fresh-page sweep.  The long regression
+// scenario below is allowed to concentrate on pixel-accurate editing; this
+// ledger proves the public controls can be operated through a real browser
+// input path.  It uses only Playwright browser actions (never .click() or
+// dispatched events).  Operation and assertion coverage are recorded by this
+// Node test immediately after the Playwright action and its result assertion,
+// not by page-side events that production code could synthesize.  Every
+// manifest assertion id must be present at the
+// end of the sweep.
+async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
+  page.setDefaultTimeout(3000);
+  const operated = new Set();
+  const assertionPassed = new Set();
+  const staticContracts = new Map(contracts.map((control) => [control.id, control]));
+  const dynamicContractsBySelector = new Map(dynamicContracts.map((control) => [control.selector, control]));
+  const markDynamic = async (selector, before, predicate) => {
+    const contract = dynamicContractsBySelector.get(selector);
+    assert.ok(contract, `${selector} has a dynamic ledger contract`);
+    const after = await snapshot();
+    await predicate(before, after);
+    operated.add(selector); assertionPassed.add(contract.assertionId);
+  };
+  const setupFixture = async () => {
+    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.waitForFunction(() => state.currentId === "sample");
+    // The catalog thumbnail is intentionally 2px.  Give the editor fixture a
+    // normal-sized in-memory image before exercising pointer-only tools.
+    await page.evaluate(async () => {
+      const source = document.createElement("canvas"); source.width = source.height = 240;
+      source.getContext("2d").fillRect(0, 0, source.width, source.height);
+      state.currentImage = await createImageBitmap(source);
+      const record = currentRecord(); record.width = source.width; record.height = source.height;
+      canvasSizeForImage(record); prepareOriginalImage(); resetCurrentDraft(); fitImage(); render();
+    });
+  };
+  await setupFixture();
+
+  // This snapshot intentionally contains only product results that a control
+  // is allowed to prove: a particular dialog, value, state transition, canvas
+  // hash, or actual request.  Do not replace these predicates with a generic
+  // "the page is still alive/currentId/focus exists" check: that lets a
+  // no-op handler satisfy the ledger.
+  const snapshot = () => page.evaluate(() => {
+    const read = (node) => ({
+      value: node.value ?? "", checked: Boolean(node.checked), disabled: Boolean(node.disabled), hidden: Boolean(node.hidden),
+      pressed: node.getAttribute("aria-pressed"), expanded: node.getAttribute("aria-expanded"), selected: node.getAttribute("aria-selected"),
+      active: node.classList.contains("active"), text: node.textContent?.trim() || "",
+    });
+    const controls = Object.fromEntries([...document.querySelectorAll("button[id], input[id], select[id], textarea[id]")].map((node) => [node.id, read(node)]));
+    const canvas = document.querySelector("#editorCanvas");
+    let canvasHash = 0;
+    if (canvas?.width && canvas?.height) {
+      const data = canvas.getContext("2d").getImageData(0, 0, Math.min(canvas.width, 32), Math.min(canvas.height, 32)).data;
+      for (let index = 0; index < data.length; index += 17) canvasHash = (canvasHash * 31 + data[index]) >>> 0;
+    }
+    return {
+      controls,
+      dialogs: Object.fromEntries([...document.querySelectorAll("dialog")].map((dialog) => [dialog.id, dialog.open])),
+      popovers: Object.fromEntries([...document.querySelectorAll("[popover]")].map((node) => [node.id, node.matches(":popover-open")])),
+      flags: {
+        boundaryActionsHidden: document.querySelector("#boundaryActions")?.hidden,
+        modelDownloadCancelHidden: document.querySelector("#modelDownloadCancel")?.hidden,
+        applyPauseHidden: document.querySelector("#applyPauseButton")?.hidden,
+      },
+      state: {
+        tool: state.tool, view: state.viewMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
+        galleryCollapsed: state.galleryCollapsed, inspectorCollapsed: state.inspectorCollapsed, mosaicPreview: state.mosaicPreviewEnabled,
+        current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
+        galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenPaths.size,
+        candidateDisplay: [...state.blinkCandidateIds || []].sort(), candidateDisplayModes: [...state.blinkModes || []].sort(),
+      },
+      canvasHash,
+      candidateControls: [...document.querySelectorAll("[data-candidate-batch], [data-candidate-display-toggle], [data-candidate-effective-toggle]")]
+        .map((node) => `${node.dataset.candidateBatch || node.dataset.candidateDisplayToggle || node.dataset.candidateEffectiveToggle}:${node.getAttribute("aria-pressed")}:${node.className}`).join("|"),
+      overviewControls: [...document.querySelectorAll("[data-overview-filter]")].map((node) => `${node.dataset.overviewFilter}:${node.getAttribute("aria-pressed")}:${node.className}`).join("|"),
+      api: window.__ledgerApi?.slice() || [], pickers: { ...window.__ledgerPickers }, clipboardWrites: window.__ledgerClipboardWrites || 0,
+    };
+  });
+  const changed = (before, after, path, control) => assert.notDeepEqual(path(before), path(after), `${control} must change its explicit ${path.name || "product result"}`);
+  const apiChanged = (before, after, control, endpoint = null) => {
+    const requests = after.api.slice(before.api.length);
+    assert.ok(requests.length > 0, `${control} must issue a product API request`);
+    if (endpoint) assert.ok(requests.some((request) => request.url.includes(endpoint)), `${control} must request ${endpoint}; got ${requests.map((request) => request.url).join(", ")}`);
+  };
+  const dialog = (id, expected, control) => async (before, after) => {
+    if (after.dialogs[id] !== expected) await page.waitForFunction(([dialogId, open]) => document.querySelector(`#${dialogId}`)?.open === open, [id, expected]);
+    const settled = await snapshot();
+    assert.equal(settled.dialogs[id], expected, `${control} must ${expected ? "open" : "close"} #${id}`);
+  };
+  const assertFitPostcondition = async () => {
+    const layout = await page.evaluate(() => {
+      const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
+      const available = { width: Math.max(1, stage.clientWidth - inset.left - inset.right), height: Math.max(1, stage.clientHeight - inset.top - inset.bottom) };
+      const expectedScale = Math.min(available.width / state.currentImage.width, available.height / state.currentImage.height);
+      const expected = {
+        scale: expectedScale,
+        x: inset.left + (available.width - state.currentImage.width * expectedScale) / 2,
+        y: inset.top + (available.height - state.currentImage.height * expectedScale) / 2,
+      };
+      const rendered = {
+        left: state.view.x, right: state.view.x + state.currentImage.width * state.view.scale,
+        top: state.view.y, bottom: state.view.y + state.currentImage.height * state.view.scale,
+      };
+      return { inset, stage: { width: stage.clientWidth, height: stage.clientHeight }, expected, actual: { ...state.view }, rendered };
+    });
+    const epsilon = 0.01;
+    for (const key of ["scale", "x", "y"]) assert.ok(Math.abs(layout.actual[key] - layout.expected[key]) <= epsilon, `fitButton must restore ${key}: expected=${layout.expected[key]}, actual=${layout.actual[key]}`);
+    assert.ok(layout.rendered.left >= layout.inset.left - epsilon, "fitButton keeps the rendered image inside the left inset");
+    assert.ok(layout.rendered.right <= layout.stage.width - layout.inset.right + epsilon, "fitButton keeps the rendered image inside the right inset");
+    assert.ok(layout.rendered.top >= layout.inset.top - epsilon, "fitButton keeps the rendered image inside the top inset");
+    assert.ok(layout.rendered.bottom <= layout.stage.height - layout.inset.bottom + epsilon, "fitButton keeps the rendered image inside the bottom inset");
+  };
+  const toolFor = {
+    brushTool: "brush", mosaicEraserTool: "mosaic_eraser", eraserTool: "eraser", excludeEraserTool: "exclude_eraser",
+    rectangleTool: "boundary", polygonTool: "polygon", boundaryBrushTool: "boundary_brush", bucketTool: "bucket", excludeBucketTool: "exclude_bucket",
+  };
+  const clickPredicates = {
+    pickFolder: (before, after) => assert.equal(after.popovers.pickerMenu, true, "pickFolder must open the image-import menu"),
+    pickImages: (before, after) => assert.ok(after.pickers.files > before.pickers.files, "pickImages must invoke the file picker"),
+    pickFolderFiles: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "pickFolderFiles must invoke the directory picker"),
+    loadFolderButton: (before, after) => apiChanged(before, after, "loadFolderButton", "/api/folder"),
+    settingsButton: dialog("settingsDialog", true, "settingsButton"), updateToast: dialog("settingsDialog", true, "updateToast"),
+    batchMoreButton: (before, after) => assert.equal(after.popovers.batchMoreMenu, true, "batchMoreButton must open the batch menu"),
+    clearAllMasksButton: dialog("confirmDialog", true, "clearAllMasksButton"), clearCatalogButton: dialog("confirmDialog", true, "clearCatalogButton"),
+    overviewButton: (before, after) => assert.equal(after.state.view, "overview", "overviewButton must enter overview"),
+    closeOverviewButton: (before, after) => assert.equal(after.state.view, "edit", "closeOverviewButton must return to editor"),
+    collapseGalleryButton: (before, after) => changed(before, after, (item) => item.state.galleryCollapsed, "collapseGalleryButton"),
+    collapseInspectorButton: (before, after) => changed(before, after, (item) => item.state.inspectorCollapsed, "collapseInspectorButton"),
+    boundaryTool: (before, after) => changed(before, after, (item) => item.controls.boundaryTool.expanded, "boundaryTool"),
+    fitButton: () => assertFitPostcondition(),
+    undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
+    redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
+    mosaicPreviewButton: (before, after) => changed(before, after, (item) => item.state.mosaicPreview, "mosaicPreviewButton"),
+    mosaicHelpButton: dialog("mosaicHelpDialog", true, "mosaicHelpButton"), mosaicHelpCloseButton: dialog("mosaicHelpDialog", false, "mosaicHelpCloseButton"),
+    previousImageButton: async (before, after) => { await page.waitForFunction((current) => state.currentId !== current, before.state.current); assert.notEqual((await snapshot()).state.current, before.state.current, "previousImageButton must navigate"); },
+    nextImageButton: async (before, after) => { await page.waitForFunction((current) => state.currentId !== current, before.state.current); assert.notEqual((await snapshot()).state.current, before.state.current, "nextImageButton must navigate"); },
+    reviewAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id === id && currentRecord()?.reviewed === true, before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "reviewAndNextButton must mark the image reviewed"); },
+    hideAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id !== id || Boolean(currentRecord()?.hidden), before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "hideAndNextButton must hide the image"); },
+    removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: (before, after) => changed(before, after, (item) => item.state.hiddenCount, "removeCurrentImageButton"),
+    boundaryDetectButton: (before, after) => apiChanged(before, after, "boundaryDetectButton", "/api/boundary"),
+    boundaryCancelButton: (before, after) => assert.equal(after.flags.boundaryActionsHidden, true, "boundaryCancelButton must hide boundary actions"),
+    detectCurrentButton: dialog("processingDialog", true, "detectCurrentButton"), saveButton: dialog("applyDialog", true, "saveButton"), saveAllButton: dialog("applyDialog", true, "saveAllButton"),
+    clearCurrentMasksButton: dialog("confirmDialog", true, "clearCurrentMasksButton"),
+    batchModeButton: (before, after) => assert.equal(after.state.batchMode, true, "batchModeButton must enable batch mode"),
+    selectionActionsButton: (before, after) => assert.equal(after.popovers.selectionActionsMenu, true, "selectionActionsButton must open selection actions"),
+    selectionClearButton: (before, after) => assert.equal(after.state.batchMode, false, "selectionClearButton must clear batch mode"),
+    toggleReviewMenuItem: (before, after) => assert.equal(after.popovers.catalogContextMenu, false, "toggleReviewMenuItem must complete and close the catalog context menu"),
+    copyImagePathMenuItem: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "copyImagePathMenuItem must write the clipboard"),
+    removeImageMenuItem: (before, after) => { assert.notEqual(after.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(after.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
+    detectAllButton: dialog("detectDialog", true, "detectAllButton"), detectCancelButton: dialog("detectDialog", false, "detectCancelButton"),
+    detectStartButton: dialog("processingDialog", true, "detectStartButton"),
+    settingsCloseButton: dialog("settingsDialog", false, "settingsCloseButton"),
+    settingsChooseOutputDirectory: (before, after) => apiChanged(before, after, "settingsChooseOutputDirectory", "/api/output-directory/pick"),
+    checkUpdateButton: dialog("confirmDialog", true, "checkUpdateButton"),
+    settingsResetButton: async (before, after) => { await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.url.includes("/api/settings/reset")), before.api.length); apiChanged(before, await snapshot(), "settingsResetButton", "/api/settings/reset"); },
+    settingsSaveButton: (before, after) => apiChanged(before, after, "settingsSaveButton", "/api/settings"),
+    modelDownloadClose: dialog("modelDownloadDialog", false, "modelDownloadClose"),
+    modelDownloadCopy: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "modelDownloadCopy must write the clipboard"),
+    modelDownloadStart: (before, after) => apiChanged(before, after, "modelDownloadStart", "/api/model-download/start"),
+    modelDownloadCancel: (before, after) => apiChanged(before, after, "modelDownloadCancel", "/api/model-download/cancel"),
+    chooseOutputDirectoryButton: (before, after) => apiChanged(before, after, "chooseOutputDirectoryButton", "/api/output-directory/pick"),
+    applyCloseButton: dialog("applyDialog", false, "applyCloseButton"),
+    applyPauseButton: (before, after) => apiChanged(before, after, "applyPauseButton", "/api/job/"),
+    applyCancelButton: (before, after) => apiChanged(before, after, "applyCancelButton", "/api/job/cancel"),
+    applyStartButton: (before, after) => apiChanged(before, after, "applyStartButton", "/api/apply"),
+    processingPauseButton: (before, after) => apiChanged(before, after, "processingPauseButton", "/api/job/"),
+    processingCancelButton: (before, after) => apiChanged(before, after, "processingCancelButton", "/api/job/cancel"),
+    modelHelpCloseButton: dialog("modelHelpDialog", false, "modelHelpCloseButton"),
+    modelHelpCopy: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "modelHelpCopy must write the clipboard"),
+    confirmAccept: dialog("confirmDialog", false, "confirmAccept"), errorDialogClose: dialog("errorDialog", false, "errorDialogClose"),
+  };
+  for (const [id, tool] of Object.entries(toolFor)) clickPredicates[id] = (before, after) => assert.equal(after.state.tool, tool, `${id} must select ${tool}`);
+  for (const id of ["settingsTabGeneral", "settingsTabModels", "settingsTabDisplay", "settingsTabShortcuts", "settingsTabConfirm", "settingsTabInfo"]) {
+    clickPredicates[id] = (before, after) => assert.equal(after.controls[id].selected, "true", `${id} must select its settings tab`);
+  }
+  const inputPredicate = (id, before, after, expected) => {
+    const beforeValue = before.controls[id]; const afterValue = after.controls[id];
+    assert.notDeepEqual(afterValue, beforeValue, `${id} must produce an observable value/checked transition`);
+    if (expected.check !== undefined) assert.equal(afterValue.checked, expected.check, `${id} must apply the requested checked value`);
+    else assert.equal(afterValue.value, expected.value, `${id} must apply the requested value`);
+  };
+  const predicateRegistry = new Map(contracts.filter((contract) => !contract.exemptReason).map((contract) => [
+    contract.predicateId,
+    contract.action === "change" || contract.action === "keyboard"
+      ? (before, after, expected) => inputPredicate(contract.id, before, after, expected)
+      : clickPredicates[contract.id],
+  ]));
+  assert.equal(predicateRegistry.size, contracts.filter((contract) => !contract.exemptReason).length, "every active static manifest assertion must resolve to exactly one predicate");
+  const missingPredicates = contracts.filter((contract) => !contract.exemptReason && !predicateRegistry.get(contract.predicateId)).map((contract) => `${contract.predicateId} (${contract.id})`);
+  assert.equal(missingPredicates.join("\n"), "", `every active static manifest assertion must have a concrete predicate\n${missingPredicates.join("\n")}`);
+  const assertResult = async (id, before, expected = {}) => {
+    const after = await snapshot();
+    const contract = staticContracts.get(id);
+    assert.ok(contract, `${id} has a static ledger contract`);
+    const predicate = predicateRegistry.get(contract.predicateId);
+    assert.ok(predicate, `${id} needs an explicit browser-ledger predicate for ${contract.predicateId}`);
+    await predicate(before, after, expected);
+    operated.add(id); assertionPassed.add(contract.assertionId);
+    return after;
+  };
+  const closeDialogs = async () => page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close()));
+  const click = async (id) => {
+    if (id !== "errorDialogClose" && await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+    const before = await snapshot();
+    await page.locator(`#${id}`).click();
+    await assertResult(id, before);
+  };
+  const input = async (id, value) => {
+    const locator = page.locator(`#${id}`);
+    const kind = await locator.evaluate((node) => `${node.tagName}:${node.type || ""}`);
+    // Establish the opposite value first when a fixture default happens to
+    // match the requested one.  The recorded action below then always proves a
+    // real form transition instead of passing because the initial DOM did.
+    if (kind.startsWith("SELECT:")) {
+      const current = await locator.inputValue();
+      const requested = value === "__first__" ? await locator.locator("option").first().getAttribute("value") : String(value);
+      if (current === requested) {
+        const alternative = await locator.locator("option").evaluateAll((options, currentValue) => options.find((option) => !option.disabled && option.value !== currentValue)?.value, current);
+        if (alternative !== undefined) await locator.selectOption(alternative);
+      }
+      const before = await snapshot(); await locator.selectOption(value === "__first__" ? { index: 0 } : value);
+      await assertResult(id, before, { kind: "input", value: requested }); return;
+    }
+    if (kind === "INPUT:checkbox" || kind === "INPUT:radio") {
+      const requested = Boolean(value);
+      if (kind === "INPUT:checkbox" && await locator.isChecked() === requested) { await locator.focus(); await locator.press("Space"); }
+      if (kind === "INPUT:radio" && requested && await locator.isChecked()) {
+        const radioName = await locator.getAttribute("name");
+        const alternativeId = await page.locator(`input[type="radio"][name="${radioName}"]`).evaluateAll((radios, ownId) => radios.find((radio) => radio.id !== ownId)?.id, await locator.getAttribute("id"));
+        if (alternativeId) await page.locator(`#${alternativeId}`).check();
+      }
+      const before = await snapshot();
+      if (kind === "INPUT:checkbox") { await locator.focus(); await locator.press("Space"); }
+      else if (requested) await locator.check(); else await locator.uncheck();
+      await assertResult(id, before, { kind: "input", check: requested }); return;
+    }
+    const current = await locator.inputValue();
+    if (current === String(value)) await locator.fill(`${value}_precondition`);
+    const before = await snapshot();
+    await locator.fill(String(value)); await locator.press("Tab");
+    await assertResult(id, before, { kind: "input", value: String(value) });
+  };
+  await page.waitForFunction(() => !document.querySelector("#updateToast").hidden);
+  await click("updateToast"); await click("settingsCloseButton");
+
+  // Import/workspace: all three file pickers are exercised with the browser
+  // File System Access fixture, and the explicit path uses a real key press.
+  await click("pickFolder");
+  await input("folderPath", "G:\\fixture");
+  await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
+  await click("pickFolder"); await click("loadFolderButton"); await page.waitForTimeout(100); await closeDialogs();
+
+  // Gallery/editor controls operate after a genuine gallery selection.
+  for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
+  for (const id of ["polygonTool", "boundaryBrushTool", "bucketTool", "excludeBucketTool"]) { await click("boundaryTool"); await click(id); }
+  for (const id of ["fitButton", "mosaicPreviewButton"]) await click(id);
+  await click("collapseGalleryButton"); await click("collapseGalleryButton");
+  await click("collapseInspectorButton"); await click("collapseInspectorButton");
+  await input("brushSize", "50"); await input("divisor", "101"); await input("bucketTolerance", "21");
+  await click("mosaicHelpButton"); await click("mosaicHelpCloseButton");
+  await page.evaluate(() => { state.manualMaskPresent = true; renderCandidates(); });
+  for (const selector of ["[data-candidate-batch]", "[data-candidate-display-toggle]", "[data-candidate-effective-toggle]"]) {
+    const before = await snapshot(); await page.locator(selector).first().click();
+    await markDynamic(selector, before, (prior, after) => {
+      if (selector === "[data-candidate-batch]") apiChanged(prior, after, "candidate batch", "/api/candidates/batch");
+      else assert.notDeepEqual(after.state.candidateDisplayModes, prior.state.candidateDisplayModes, `${selector} must change candidate display mode`);
+    });
+  }
+  await click("brushTool");
+  const ledgerCanvas = await page.locator("#editorCanvas").boundingBox();
+  await page.mouse.move(ledgerCanvas.x + ledgerCanvas.width / 2, ledgerCanvas.y + ledgerCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(ledgerCanvas.x + ledgerCanvas.width / 2 + 8, ledgerCanvas.y + ledgerCanvas.height / 2 + 8); await page.mouse.up();
+  await page.waitForFunction(() => state.history.length > 0);
+  await click("undoButton"); await click("redoButton");
+  for (const id of ["detectTargetPenis", "detectTargetPussy", "confidence"]) await input(id, id === "confidence" ? "0.51" : true);
+
+  // Detection includes the disabled boundary action before a boundary is
+  // created by the main pixel scenario.  The disabled state is asserted here;
+  // all start/cancel/pause controls are then enabled by a real detection run.
+  assert.equal(await page.locator("#boundaryDetectButton").isDisabled(), true, "boundary detection is disabled until a boundary is drawn");
+  await click("boundaryTool"); await click("rectangleTool");
+  const boundaryCanvas = await page.locator("#editorCanvas").boundingBox();
+  await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 - 6, boundaryCanvas.y + boundaryCanvas.height / 2 - 6);
+  await page.mouse.down(); await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 + 6, boundaryCanvas.y + boundaryCanvas.height / 2 + 6); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
+  await click("boundaryDetectButton");
+  await page.waitForTimeout(50);
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+  await click("boundaryTool"); await click("rectangleTool");
+  await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 - 6, boundaryCanvas.y + boundaryCanvas.height / 2 - 6);
+  await page.mouse.down(); await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 + 6, boundaryCanvas.y + boundaryCanvas.height / 2 + 6); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
+  await click("boundaryCancelButton");
+  await click("detectCurrentButton");
+  await click("processingCancelButton");
+  await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
+  await closeDialogs();
+  await setupFixture();
+  await click("detectAllButton");
+  await input("detectParallelism", "1"); await input("dialogTargetPenis", true); await input("dialogTargetPussy", true); await input("detectConfidenceRange", "0.52"); await input("detectConfidenceNumber", "0.53");
+  await click("detectCancelButton"); await click("detectAllButton"); await click("detectStartButton");
+  await click("processingPauseButton");
+  await page.waitForFunction(() => state.processing?.state === "paused");
+  await click("processingPauseButton");
+  await page.waitForFunction(() => state.processing?.state === "running");
+  await click("processingCancelButton");
+  await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
+  await closeDialogs(); await setupFixture();
+
+  // Navigation and context menu use their actual selected-image handlers.
+  const galleryBefore = await snapshot(); await page.locator('.gallery-item[data-id="sample-two"]').click();
+  await page.waitForFunction(() => state.currentId === "sample-two");
+  await markDynamic(".gallery-item", galleryBefore, (prior, after) => assert.equal(after.state.current, "sample-two", "gallery item must select sample-two"));
+  await click("previousImageButton"); await click("nextImageButton");
+  for (const id of ["reviewAndNextButton", "hideAndNextButton", "removeCurrentImageButton"]) await click(id);
+  await page.locator('.gallery-item[data-id="sample"]').click();
+  for (const id of ["toggleReviewMenuItem", "copyImagePathMenuItem", "removeImageMenuItem"]) {
+    await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" }); await click(id);
+  }
+  await closeDialogs();
+  await setupFixture(); await click("removeAndNextButton");
+  if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await click("confirmAccept");
+  await setupFixture();
+
+  // Overview and its dynamic controls.  Batch mode is asserted disabled in
+  // edit view then enabled by the actual overview transition.
+  await input("galleryFilter", "all"); await click("overviewButton");
+  assert.equal(await page.locator("#batchModeButton").isDisabled(), false, "overview enables batch mode when images exist");
+  await click("batchModeButton"); await input("overviewQuery", "sample");
+  await page.evaluate(() => { state.images.forEach((image) => { image.relativePath = `ledger-folder/${image.id}.png`; }); renderOverview(); });
+  await input("overviewFolder", "ledger-folder");
+  await page.locator('[data-overview-filter="reviewed"]').click();
+  const overviewFilterBefore = await snapshot(); await page.locator('[data-overview-filter="all"]').click();
+  await markDynamic("[data-overview-filter]", overviewFilterBefore, (prior, after) => assert.equal(after.state.overviewFilter, "all", "overview filter must set all"));
+  const overviewItemBefore = await snapshot(); await page.locator(".overview-item").last().click();
+  await markDynamic(".overview-item", overviewItemBefore, (prior, after) => assert.notDeepEqual(after.state.selectedImageIds, prior.state.selectedImageIds, "overview item must change the selected image set in batch mode"));
+  await click("selectionActionsButton"); const selectionBefore = await snapshot(); await page.locator('[data-selection-action="reviewed"]').click();
+  await markDynamic("[data-selection-action]", selectionBefore, (prior, after) => apiChanged(prior, after, "selection action", "/api/")); await click("selectionClearButton"); await click("closeOverviewButton");
+
+  // Saving exposes every option on the actual dialog.  The fixture accepts a
+  // submission so pause/cancel are reached through a running save job.
+  await setupFixture(); await click("brushTool");
+  const clearCanvas = await page.locator("#editorCanvas").boundingBox();
+  await page.mouse.move(clearCanvas.x + clearCanvas.width / 2, clearCanvas.y + clearCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(clearCanvas.x + clearCanvas.width / 2 + 8, clearCanvas.y + clearCanvas.height / 2 + 8); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#clearCurrentMasksButton").disabled); await click("clearCurrentMasksButton");
+  if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await click("confirmAccept");
+  await setupFixture(); await click("brushTool");
+  const saveCanvas = await page.locator("#editorCanvas").boundingBox();
+  await page.mouse.move(saveCanvas.x + saveCanvas.width / 2, saveCanvas.y + saveCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(saveCanvas.x + saveCanvas.width / 2 + 8, saveCanvas.y + saveCanvas.height / 2 + 8); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#saveButton").disabled);
+  await click("saveButton");
+  for (const [id, value] of [["applyTargetMode", "current"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["removeAfterSave", true], ["applyDivisor", "102"]]) await input(id, value);
+  await click("chooseOutputDirectoryButton"); await page.waitForTimeout(50);
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+  await input("applyOverwriteMode", true); await input("applyCopyMode", true); await click("applyCloseButton");
+  await setupFixture(); await click("brushTool");
+  const runningSaveCanvas = await page.locator("#editorCanvas").boundingBox();
+  await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2, runningSaveCanvas.y + runningSaveCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2 + 8, runningSaveCanvas.y + runningSaveCanvas.height / 2 + 8); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#saveButton").disabled); await click("saveButton"); await click("applyStartButton");
+  await page.waitForFunction(() => !document.querySelector("#applyPauseButton").hidden);
+  await click("applyPauseButton"); await click("applyCancelButton"); await click("applyCloseButton");
+  await click("saveAllButton"); await click("applyCloseButton");
+  await page.waitForTimeout(100);
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+
+  // Confirmation/error dialogs are opened from their public controls.
+  await setupFixture();
+  await click("batchMoreButton"); await click("clearAllMasksButton"); await input("confirmNeverShow", true); await click("confirmAccept"); await page.waitForTimeout(50);
+  await page.waitForFunction(() => !state.masksClearing && !state.catalogMutation);
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+  await setupFixture();
+  const catalogBefore = await snapshot(); await click("batchMoreButton"); await click("clearCatalogButton"); await click("confirmAccept");
+  await page.waitForFunction(() => state.images.length === 0);
+  const catalogAfter = await snapshot();
+  assertCatalogClearResult({ api: catalogAfter.api.slice(catalogBefore.api.length) }, { imageIds: catalogAfter.state.imageIds });
+  await page.evaluate(() => showUserError(new Error("ledger fixture error")));
+  await click("errorDialogClose");
+
+  // Settings covers all tabs and every model toggle/file field.  The values
+  // are changed through the form and saved, so the result is a POST payload,
+  // not merely a visual state change.
+  await click("settingsButton");
+  for (const id of ["settingsTabGeneral", "settingsTabModels", "settingsTabDisplay", "settingsTabShortcuts", "settingsTabConfirm", "settingsTabInfo"]) await click(id);
+  await click("settingsTabGeneral");
+  for (const [id, value] of [["settingsLanguage", "en"], ["settingsPort", "8767"], ["settingsDefaultOutputDirectory", "G:\\output"], ["settingsImportParallelism", "2"], ["settingsSaveParallelism", "1"], ["settingsOpenBrowser", true]]) await input(id, value);
+  await click("settingsChooseOutputDirectory"); await page.waitForTimeout(50);
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
+  await click("settingsTabModels");
+  await input("settingsTargetModel", "gpu-options.onnx"); await input("settingsProvider", "gpu");
+  await page.waitForFunction(() => document.querySelectorAll("#settingsGpuDevice option").length > 1);
+  await input("settingsGpuDevice", "4"); await input("settingsProvider", "cpu");
+  for (const [id, value] of [["settingsTargetModel", "target.onnx"], ["settingsNtd11Toggle", true], ["settingsNtd11Model", "ntd.onnx"], ["settingsSensitiveToggle", true], ["settingsSensitiveModel", "sensitive.onnx"], ["settingsPrecisionToggle", true]]) await input(id, value);
+  if (await page.locator("#settingsSamModel").isDisabled()) { await page.locator("#settingsPrecisionToggle").focus(); await page.locator("#settingsPrecisionToggle").press("Space"); }
+  await input("settingsSamModel", "sam.pth");
+  for (const [id, value] of [["settingsHandToggle", true], ["settingsHandModel", "hand.onnx"], ["settingsHandSegmentationToggle", true], ["settingsHandSegmentationModel", "hand.safetensors"], ["settingsFluidToggle", true]]) await input(id, value);
+  await page.locator('input[name="settingsSamVariant"][value="vit_b"]').check();
+  const samVariantBefore = await snapshot(); await page.locator('input[name="settingsSamVariant"][value="vit_l"]').check();
+  await markDynamic('input[name=settingsSamVariant]', samVariantBefore, (prior, after) => assert.notEqual(after.controls.settingsSamType.value, prior.controls.settingsSamType.value, "SAM variant must change the selected variant"));
+  const pickerBefore = await snapshot(); await page.locator("[data-model-picker]").first().click();
+  await markDynamic("[data-model-picker]", pickerBefore, (prior, after) => apiChanged(prior, after, "model picker", "/api/model-file/pick"));
+  const modelDownloadBefore = await snapshot(); await page.locator('[data-model-download="sam"]').click();
+  await markDynamic("[data-model-download]", modelDownloadBefore, (prior, after) => assert.equal(after.dialogs.modelDownloadDialog, true, "model download link must open its dialog"));
+  await click("modelDownloadStart"); await page.waitForFunction(() => !document.querySelector("#modelDownloadCancel").hidden); await click("modelDownloadCancel"); await click("modelDownloadClose");
+  const modelHelpBefore = await snapshot(); await page.locator('[data-model-help="ntd11"]').click();
+  await markDynamic("[data-model-help]", modelHelpBefore, (prior, after) => assert.equal(after.dialogs.modelHelpDialog, true, "model help link must open its dialog")); await click("modelHelpCopy"); await click("modelHelpCloseButton");
+  await click("settingsTabDisplay");
+  for (const [id, value] of [["settingsApplyColor", "#113355"], ["settingsExcludeColor", "#335511"], ["settingsOpacity", "0.7"], ["settingsMosaicPreview", true], ["settingsExcludeForcedDefault", true]]) await input(id, value);
+  await click("settingsTabShortcuts"); await input("settingsShortcutsEnabled", true);
+  await click("settingsTabConfirm"); for (const id of ["confirmClearMasks", "confirmClearCatalog", "confirmRemoveImage", "confirmCandidateDelete", "confirmCandidateRoleDelete", "confirmOverwriteSource", "confirmDeleteSourceAfterCopy"]) await input(id, true);
+  await click("settingsTabInfo"); await click("checkUpdateButton");
+  if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await page.locator("#confirmDialog").press("Escape");
+  await click("settingsResetButton"); await click("settingsSaveButton"); await click("settingsCloseButton");
+
+  // Static controls that are only visible in a model dialog are explicitly
+  // opened last.  This also gives the copy controls a clipboard result.
+  await click("settingsButton"); await click("settingsTabModels"); await page.locator('[data-model-download="ntd11"]').click(); await click("modelDownloadCopy"); await click("modelDownloadClose"); await page.locator('[data-model-help="ntd11"]').click(); await click("modelHelpCopy"); await click("modelHelpCloseButton"); await click("settingsCloseButton");
+
+  const activeContracts = contracts.filter((control) => !control.exemptReason);
+  const missing = activeContracts.filter((control) => !operated.has(control.id)).map((control) => `${control.assertionId} (${control.id})`);
+  const failedAssertions = activeContracts.filter((control) => !assertionPassed.has(control.assertionId)).map((control) => control.assertionId);
+  assert.equal(missing.join("\n"), "", `all ${activeContracts.length} operable static controls are operated through Playwright\n${missing.join("\n")}`);
+  assert.equal(failedAssertions.join("\n"), "", `all ${activeContracts.length} operable static controls have a concrete passing assertion\n${failedAssertions.join("\n")}`);
+  // Dynamic entries have explicit fixture coverage above; query their public
+  // selectors after the scenario as a guard against selector drift.
+  const missingDynamic = dynamicContracts.filter((control) => !operated.has(control.selector)).map((control) => `${control.assertionId} (${control.selector})`);
+  const failedDynamicAssertions = dynamicContracts.filter((control) => !assertionPassed.has(control.assertionId)).map((control) => control.assertionId);
+  assert.deepEqual(missingDynamic, [], `all ${dynamicContracts.length} dynamic controls are operated through Playwright`);
+  assert.deepEqual(failedDynamicAssertions, [], `all ${dynamicContracts.length} dynamic controls have a concrete passing assertion`);
+}
+
 async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishApply;
+  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishApply, setUpdateAvailable;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -754,7 +1220,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     const settingsFailurePage = await browser.newPage();
     await settingsFailurePage.addInitScript(() => {
@@ -816,6 +1282,28 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    // Keep the manifest presence check on an isolated page.  Do not use
+    // HTMLElement.click() or synthetic input/change events here: those do not
+    // prove that a user can operate a control, and (worse) used to count hidden
+    // or disabled controls as tested.  The behavioural assertions below use
+    // Playwright pointer/keyboard actions with their required application state.
+    const inventoryPage = await browser.newPage();
+    const inventoryErrors = [];
+    inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
+    for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
+      await inventoryPage.setViewportSize({ width, height: 768 });
+      await inventoryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await inventoryPage.evaluate((locale) => loadTranslations(locale), language);
+      const inventory = await inventoryPage.evaluate((contracts) => contracts.map(({ id }) => {
+        const node = document.getElementById(id);
+        return { id, present: Boolean(node) };
+      }), uiControlManifest);
+      assert.equal(inventory.every((control) => control.present), true, `all manifest controls remain in the ${language}/${width} DOM: ${JSON.stringify(inventory.filter((control) => !control.present))}`);
+      await inventoryPage.waitForTimeout(25);
+    }
+    await inventoryPage.close();
+    assert.deepEqual(inventoryErrors, [], `inventory loading does not raise page errors: ${inventoryErrors.join("; ")}`);
+    assert.equal(uiDynamicControlManifest.every((control) => control.selector && control.action && control.expected), true, "dynamic controls retain explicit action contracts");
     const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
     assert.equal(favicon.status(), 200, "favicon is delivered by the static server");
     assert.match(favicon.headers()["content-type"] || "", /^image\/(?:x-icon|vnd\.microsoft\.icon)/, "favicon uses an icon MIME type");
@@ -873,13 +1361,14 @@ async function main() {
       closeProcessing();
     }, processingStateBeforeFilenameChecks);
     const fullSettingsBeforeOpen = settingsRequests.filter((search) => search === "").length;
+    const settingsStatusBeforeOpen = settingsStatusRequests.length;
     await page.locator("#settingsButton").click();
     assert.equal(await page.locator("#settingsDialog").isVisible(), true, "settings opens immediately from the cached lightweight response");
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
     assert.equal(await page.locator("#settingsStatusButton").count(), 0, "settings has no manual model/GPU status button");
     assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
-    assert.equal(settingsStatusRequests.length, 1, "opening settings refreshes model and GPU status in the background");
+    assert.equal(settingsStatusRequests.length, settingsStatusBeforeOpen + 1, "opening settings refreshes model and GPU status in the background");
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
     for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
@@ -1820,6 +2309,10 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "true" && state.blinkModes.get("radio-candidate") === "effective");
     const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
     assert.deepEqual(candidateDisplayKeyboard, { display: "false", effective: "true", mode: "effective" }, "Applied replaces normal display with exclusion-aware display");
+    // The blink timer repaints the canvas while the control remains visible.
+    // Re-focus its current DOM node before the second keyboard activation so
+    // this assertion measures the toggle, rather than a stale focus target.
+    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus();
     await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
     await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "false" && !state.blinkModes.has("radio-candidate"));
     const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
@@ -1888,6 +2381,107 @@ async function main() {
       return { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
+
+    // This deliberately uses real pointer events rather than the canvas helpers.  A
+    // preview must be painted while the button is still held: waiting until
+    // pointerup would miss the regression where long strokes only mosaicked at the
+    // end.  Test both a normal editor image and a 4K image because the latter used
+    // to starve the preview worker with every pointer move.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    for (const [width, height] of [[1024, 768], [3840, 2160]]) {
+      await page.locator("#brushTool").click();
+      await page.locator("#editorCanvas").scrollIntoViewIfNeeded();
+      const geometry = await page.evaluate(async ({ width, height }) => {
+        // The previous bitmap remains owned by the fixture cache.  Releasing
+        // the preview is sufficient here; closing it races a queued render.
+        releaseMosaicPreview();
+        const source = document.createElement("canvas"); source.width = width; source.height = height;
+        const sourceContext = source.getContext("2d");
+        sourceContext.fillStyle = "#ffffff"; sourceContext.fillRect(0, 0, width, height);
+        // Fine black/white stripes guarantee that a block mosaic changes pixels in
+        // the painted region, including when the 4K image is fitted to the stage.
+        sourceContext.fillStyle = "#000000";
+        for (let x = 0; x < width; x += 4) sourceContext.fillRect(x, 0, 2, height);
+        state.currentImage = await createImageBitmap(source);
+        const record = state.images.find((image) => image.id === "sample");
+        record.width = width; record.height = height;
+        canvasSizeForImage(record); prepareOriginalImage(); resetCurrentDraft();
+        state.candidates = []; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+        state.mosaicPreviewEnabled = true; fitImage(); requestMosaicPreview();
+        const rect = canvas.getBoundingClientRect();
+        const logical = { x: Math.round(width * 0.48), y: Math.round(height * 0.5) };
+        return {
+          beforeGeneration: state.mosaicPreviewGeneration,
+          x: rect.left + state.view.x + logical.x * state.view.scale,
+          y: rect.top + state.view.y + logical.y * state.view.scale,
+          endX: rect.left + state.view.x + (logical.x + Math.max(24, Math.round(width * 0.08))) * state.view.scale,
+          endY: rect.top + state.view.y + logical.y * state.view.scale,
+          logical,
+        };
+      }, { width, height });
+      await page.mouse.move(geometry.x, geometry.y);
+      await page.mouse.down();
+      await page.mouse.move(geometry.endX, geometry.endY, { steps: 8 });
+      await page.waitForTimeout(250);
+      const duringBrush = await page.evaluate(({ logical }) => ({
+        active: state.activeStroke?.points.length >= 2,
+        mask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
+        preview: [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
+          .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]),
+      }), geometry);
+      assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mask and mosaic before pointerup`);
+      await page.mouse.up();
+      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0);
+
+      await page.locator("#eraserTool").click();
+      const exclusionGeometry = await page.evaluate(({ logical }) => {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: rect.left + state.view.x + logical.x * state.view.scale,
+          y: rect.top + state.view.y + logical.y * state.view.scale,
+          endX: rect.left + state.view.x + (logical.x + Math.max(24, Math.round(state.currentImage.width * 0.08))) * state.view.scale,
+          endY: rect.top + state.view.y + logical.y * state.view.scale,
+          logical,
+        };
+      }, geometry);
+      await page.mouse.move(exclusionGeometry.x, exclusionGeometry.y);
+      await page.mouse.down();
+      await page.mouse.move(exclusionGeometry.endX, exclusionGeometry.endY, { steps: 8 });
+      await page.waitForFunction(({ logical }) => state.activeStroke?.points.length >= 2
+        && exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0
+        && combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] === 0, exclusionGeometry);
+      const duringExclusion = await page.evaluate(({ logical }) => ({
+        active: state.activeStroke?.points.length >= 2,
+        exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
+        removedFromEffectiveMask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] === 0,
+      }), exclusionGeometry);
+      assert.deepEqual(duringExclusion, { active: true, exclusion: true, removedFromEffectiveMask: true }, `${width}x${height} exclusion immediately removes the effective mosaic area`);
+      await page.mouse.up();
+    }
+
+    const ledgerPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    setUpdateAvailable(true);
+    await ledgerPage.addInitScript(() => {
+      window.__ledgerApi = [];
+      window.__ledgerPickers = { files: 0, directory: 0 };
+      window.__ledgerClipboardWrites = 0;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (...args) => {
+        const input = args[0]; const init = args[1] || {};
+        window.__ledgerApi.push({ url: String(input?.url || input), method: init.method || input?.method || "GET", body: init.body || "" });
+        return originalFetch(...args);
+      };
+      window.showOpenFilePicker = async () => { window.__ledgerPickers.files += 1; return []; };
+      window.showDirectoryPicker = async () => { window.__ledgerPickers.directory += 1; return { async *values() {} }; };
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { window.__ledgerClipboardWrites += 1; } } });
+    });
+    holdDetection(true);
+    try {
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest);
+    } finally {
+      holdDetection(false);
+      await ledgerPage.close();
+    }
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);

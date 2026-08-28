@@ -1,0 +1,16 @@
+[run]
+branch = True
+source =
+    mozarie
+    server
+    updater
+    setup_gpu_check
+omit =
+    tests/*
+
+[report]
+fail_under = 80
+show_missing = True
+
+[xml]
+output = coverage.xml

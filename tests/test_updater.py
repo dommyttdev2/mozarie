@@ -178,6 +178,50 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.1.0")
 
+    def test_gpu_smoke_uses_the_updated_app_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_install(Path(directory) / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True); python.touch()
+            (app / "setup_gpu_check.py").write_text("# smoke", encoding="utf-8")
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 0
+                updater.run_gpu_smoke(app)
+            self.assertEqual(run.call_args.args[0], [str(python), "-X", "utf8", str(app / "setup_gpu_check.py")])
+            self.assertEqual(run.call_args.kwargs["cwd"], str(app))
+
+    def test_dependency_update_runs_gpu_smoke_before_marking_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = make_install(root / "install")
+            (app / ".venv").mkdir()
+            source = make_source(root / "source")
+            with patch("updater.fetch_latest_release", return_value=make_release()), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.install_requirements", return_value=True), \
+                    patch("updater.apply_update"), \
+                    patch("updater.run_gpu_smoke") as smoke:
+                self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
+            smoke.assert_called_once_with(app)
+            self.assertEqual((app / ".venv" / ".mozarie-ready").read_text(encoding="utf-8"), "ready\n")
+
+    def test_gpu_smoke_failure_does_not_mark_runtime_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = make_install(root / "install")
+            (app / ".venv").mkdir()
+            source = make_source(root / "source")
+            with patch("updater.fetch_latest_release", return_value=make_release()), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.install_requirements", return_value=True), \
+                    patch("updater.apply_update"), \
+                    patch("updater.run_gpu_smoke", side_effect=updater.UpdateError(updater.tr("gpu_check_failed"))):
+                with self.assertRaisesRegex(updater.UpdateError, "GPU"):
+                    updater.perform_update(app, input_fn=lambda _prompt: "y")
+            self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
+
     def test_maintenance_lock_rejects_another_process(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory)
@@ -648,8 +692,9 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.fetch_latest_release", return_value=make_release()), \
                     patch("updater.download_archive"), \
                     patch("updater.extract_archive", return_value=source), \
-                    patch("updater.install_requirements"), \
+                    patch("updater.install_requirements", return_value=True), \
                     patch("updater.apply_update") as apply, \
+                    patch("updater.run_gpu_smoke"), \
                     patch("builtins.print") as output:
                 result = updater.perform_update(app, input_fn=lambda _prompt: "y")
             self.assertEqual(result, updater.EXIT_UPDATED)
@@ -789,7 +834,7 @@ class UpdaterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             environment = os.environ | {"MOZARIE_PYTHON": sys.executable}
-            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True)
+            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
             self.assertFalse((app / ".venv").exists())
@@ -798,6 +843,7 @@ class UpdaterTests(unittest.TestCase):
         batch = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
         self.assertIn('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required', batch)
+        self.assertIn("Preparing Mozarie... / Mozarieを準備しています...", batch)
         self.assertLess(
             batch.index('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required'),
             batch.index("\n:start\n"),

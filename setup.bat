@@ -10,7 +10,7 @@ for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
     exit /b %ERRORLEVEL%
   )
 )
-echo [Mozarie] Setup could not acquire the maintenance lock. Close Mozarie or another setup/update, then try again.
+echo [Mozarie] 64-bit Python 3.11 to 3.14 was not found. Install it, then run setup.bat again. / 64-bit Python 3.11〜3.14 をインストールしてから setup.bat を実行してください。
 exit /b 1
 
 :locked

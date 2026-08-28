@@ -198,7 +198,14 @@ class DetectionMixin:
                                     or self.images.get(record.image_id) is not record):
                                 self._discard_candidates(candidates)
                                 return
-                            self._commit_candidate_snapshot(record.image_id, [*boundary_candidates, *candidates], replace=True)
+                            try:
+                                self._commit_candidate_snapshot(record.image_id, [*boundary_candidates, *candidates], replace=True)
+                            except Exception:
+                                # The durable transaction did not publish this
+                                # run: remove every new final-path mask.  The
+                                # previously committed candidates remain intact.
+                                self._discard_candidates(candidates)
+                                raise
                             self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
                         for path in stale_paths:
                             path.unlink(missing_ok=True)

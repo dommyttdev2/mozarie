@@ -121,18 +121,25 @@ class WorkspaceStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection, tables: set[str]) -> None:
-        required = {
-            "catalogs": {"catalog_id", "identity_hash", "created_at", "updated_at"},
-            "images": {"catalog_id", "relative_path", "image_id", "size_bytes", "mtime_ns", "source_hash", "hidden", "reviewed", "candidate_revision", "updated_at"},
-            "candidates": {"image_id", "candidate_id", "class_name", "confidence", "mask_png", "enabled", "color", "source", "origin", "refinement", "role", "forced", "deleted"},
-            "manual_edits": {"image_id", "add_png", "exclusion_png", "exclusion_erase_png", "manual_enabled", "exclusion_enabled", "exclusion_erase_enabled", "exclusion_forced", "removed_candidate_ids", "candidate_revision", "has_effective_mask", "updated_at"},
+        # This is intentionally a strict current-schema contract.  Do not
+        # "repair" old or hand-edited databases: opening them must be read-only.
+        expected_columns = {
+            "meta": (("key", "TEXT", 0, None, 1), ("value", "TEXT", 1, None, 0)),
+            "catalogs": (("catalog_id", "TEXT", 0, None, 1), ("identity_hash", "TEXT", 1, None, 0), ("created_at", "INTEGER", 1, None, 0), ("updated_at", "INTEGER", 1, None, 0)),
+            "images": (("catalog_id", "TEXT", 1, None, 1), ("relative_path", "TEXT", 1, None, 2), ("image_id", "TEXT", 1, None, 0), ("size_bytes", "INTEGER", 1, None, 0), ("mtime_ns", "INTEGER", 1, None, 0), ("source_hash", "TEXT", 1, "''", 0), ("hidden", "INTEGER", 1, "0", 0), ("reviewed", "INTEGER", 1, "0", 0), ("candidate_revision", "INTEGER", 1, "0", 0), ("updated_at", "INTEGER", 1, None, 0)),
+            "candidates": (("image_id", "TEXT", 1, None, 1), ("candidate_id", "TEXT", 1, None, 2), ("class_name", "TEXT", 1, None, 0), ("confidence", "REAL", 0, None, 0), ("mask_png", "BLOB", 1, None, 0), ("enabled", "INTEGER", 1, None, 0), ("color", "TEXT", 1, None, 0), ("source", "TEXT", 1, None, 0), ("origin", "TEXT", 1, None, 0), ("refinement", "TEXT", 0, None, 0), ("role", "TEXT", 1, None, 0), ("forced", "INTEGER", 1, None, 0), ("deleted", "INTEGER", 1, "0", 0)),
+            "manual_edits": (("image_id", "TEXT", 0, None, 1), ("add_png", "BLOB", 0, None, 0), ("exclusion_png", "BLOB", 0, None, 0), ("exclusion_erase_png", "BLOB", 0, None, 0), ("manual_enabled", "INTEGER", 1, "1", 0), ("exclusion_enabled", "INTEGER", 1, "1", 0), ("exclusion_erase_enabled", "INTEGER", 1, "1", 0), ("exclusion_forced", "INTEGER", 1, "1", 0), ("removed_candidate_ids", "TEXT", 1, "'[]'", 0), ("candidate_revision", "INTEGER", 1, "0", 0), ("has_effective_mask", "INTEGER", 1, "0", 0), ("updated_at", "INTEGER", 1, None, 0)),
         }
-        if not set(required) <= tables:
+        if tables != set(expected_columns):
             raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
-        for table, columns in required.items():
-            present = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
-            if not columns <= present:
+        for table, expected in expected_columns.items():
+            actual = tuple((str(row["name"]), str(row["type"]).upper(), int(row["notnull"]), row["dflt_value"], int(row["pk"])) for row in db.execute(f"PRAGMA table_info({table})"))
+            if actual != expected:
                 raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
+        if tuple(row[0] for row in db.execute("PRAGMA quick_check(1)")) != ("ok",):
+            raise WorkspaceOpenError("workspace database cannot be opened")
+        if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise WorkspaceOpenError("workspace database must be recreated for Mozarie v0.4")
         primary_keys = {
             "meta": ("key",),
             "catalogs": ("catalog_id",),

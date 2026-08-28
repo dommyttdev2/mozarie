@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 
 from mozarie.config import SettingsStore
 
@@ -21,9 +22,15 @@ def _runtime_modules():
 
 
 def _gpu_is_ready(np, ort, torch, datasets, device: int) -> bool:
-    if not torch.cuda.is_available() or "CUDAExecutionProvider" not in ort.get_available_providers():
+    # Some builds warn while merely enumerating an unsupported secondary GPU.
+    # Do not hide warnings outside this one capability probe.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, message=r".*CUDA.*")
+        cuda_available = torch.cuda.is_available()
+        count = torch.cuda.device_count() if cuda_available else 0
+    if not cuda_available or "CUDAExecutionProvider" not in ort.get_available_providers():
         return False
-    if device < 0 or device >= torch.cuda.device_count():
+    if device < 0 or device >= count:
         return False
     torch.ones((1,), device=f"cuda:{device}").add_(1).cpu()
     session = ort.InferenceSession(

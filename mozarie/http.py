@@ -217,7 +217,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 models = STATE.settings.get("models", {})
                 provider = str(models.get("provider", "cpu"))
                 status = STATE.settings_status()
-                configured = all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
+                # The state contract always includes gpuDeviceValid.  Keeping
+                # absent values neutral also lets a narrow test/status adapter
+                # report model readiness without pretending its GPU is invalid.
+                configured = bool(status.get("gpuDeviceValid", True)) and all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
                 payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
@@ -436,6 +439,16 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     _read_candidate_revision(payload.get("candidateRevision")),
                     payload.get("saveToken"),
                     payload.get("sourceAction"),
+                ))
+            elif path == "/api/save/status":
+                self._json(STATE.browser_save_status(
+                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
+                    str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
+                ))
+            elif path == "/api/save/cancel":
+                self._json(STATE.cancel_browser_save(
+                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
+                    str(payload.get("saveToken", "")),
                 ))
             elif path == "/api/apply":
                 divisor = _read_mosaic_divisor(payload.get("divisor"))

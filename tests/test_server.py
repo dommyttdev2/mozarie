@@ -2,6 +2,8 @@ import http.client
 import hashlib
 import base64
 import copy
+from dataclasses import replace
+from contextlib import nullcontext
 import io
 import json
 import logging
@@ -17,6 +19,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import numpy as np
@@ -827,6 +830,23 @@ class MozarieTests(unittest.TestCase):
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
+    def test_health_reports_missing_gpu_but_keeps_cpu_configuration_valid(self):
+        state = self.new_state()
+        no_cuda = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "torch_module", return_value=no_cuda):
+            missing = state.settings_status()
+        self.assertEqual(missing["gpus"], [])
+        self.assertFalse(missing["gpuDeviceValid"])
+        self.assertEqual(missing["gpuDeviceReasonCode"], "gpu_unsupported")
+
+        state.settings["models"]["provider"] = "cpu"
+        with patch.object(state_module, "torch_module", return_value=no_cuda):
+            cpu = state.settings_status()
+        self.assertEqual(cpu["gpus"], [])
+        self.assertTrue(cpu["gpuDeviceValid"])
+        self.assertIsNone(cpu["gpuDeviceReasonCode"])
+
     def test_settings_rejects_an_unknown_or_unsupported_gpu_selection(self):
         cuda = types.SimpleNamespace(
             is_available=lambda: True,
@@ -1183,9 +1203,12 @@ class MozarieTests(unittest.TestCase):
     def test_main_configures_logging_and_schedules_one_browser_open(self):
         fake_server = Mock()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = False
         with patch("server.logging.basicConfig") as basic_config, \
+               patch("server.MaintenanceLock", return_value=nullcontext()), \
                patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
                patch("server._schedule_browser_open") as schedule_browser, \
+               patch("subprocess.Popen") as popen, \
                patch.object(state_module.STATE, "shutdown") as shutdown, \
                patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
@@ -1196,22 +1219,44 @@ class MozarieTests(unittest.TestCase):
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
         shutdown.assert_called_once_with()
+        popen.assert_not_called()
 
     def test_main_uses_saved_port_and_respects_open_browser_setting(self):
         fake_server = Mock(); fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = False
         original_settings = state_module.STATE.settings
         state_module.STATE.settings = {**original_settings, "general": {**original_settings["general"], "port": 9123, "open_browser": False}}
         try:
             with patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
+                   patch("server.MaintenanceLock", return_value=nullcontext()), \
                    patch("server._schedule_browser_open") as schedule_browser, \
+                   patch("subprocess.Popen") as popen, \
                    patch.object(state_module.STATE, "shutdown"), \
                    patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
                    patch.object(sys, "argv", ["server.py"]):
                 server_entry.main()
             server_class.assert_called_once_with(("127.0.0.1", 9123), MosaicHandler)
             schedule_browser.assert_not_called()
+            popen.assert_not_called()
         finally:
             state_module.STATE.settings = original_settings
+
+    def test_main_launches_update_only_after_the_server_requests_it(self):
+        fake_server = Mock()
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = True
+        with patch("server.ThreadingHTTPServer", return_value=fake_server), \
+                patch("server.MaintenanceLock", return_value=nullcontext()), \
+                patch("server._schedule_browser_open"), \
+                patch("subprocess.Popen") as popen, \
+                patch.object(state_module.STATE, "shutdown"), \
+                patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            server_entry.main()
+        popen.assert_called_once_with(
+            [str(server_entry.APP_DIR / "update.bat")], cwd=str(server_entry.APP_DIR),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
 
     def test_main_reports_bind_error_without_traceback(self):
         with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
@@ -1820,6 +1865,41 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.candidates[image_id], [old_candidate])
             self.assertTrue(old_mask_path.is_file())
             self.assertFalse(new_mask_path.exists())
+
+    def test_detect_persistence_failure_removes_final_new_masks(self):
+        """A failed candidate transaction must not leave a visible orphan mask."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = core_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+
+            old_mask_path = state.cache_dir / image_id / "old.png"
+            old_mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(old_mask_path)
+            old_candidate = Candidate("old", "penis", 0.8, old_mask_path)
+            state.candidates[image_id] = [old_candidate]
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-new.png"
+            final_path = state.cache_dir / image_id / "new.png"
+
+            def detect_image(*_args):
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("new", "penis", 0.9, pending_path)]
+
+            with (
+                patch.object(state, "_ensure_models", return_value=[]),
+                patch.object(state, "_detect_image", side_effect=detect_image),
+                patch.object(state, "_commit_candidate_snapshot", side_effect=OSError("database write failed")),
+            ):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.candidates[image_id], [old_candidate])
+            self.assertTrue(old_mask_path.is_file())
+            self.assertFalse(pending_path.exists())
+            self.assertFalse(final_path.exists())
 
     def test_detect_job_can_be_cancelled_with_the_shared_control(self):
         state = self.new_state()
@@ -2965,6 +3045,52 @@ class MozarieTests(unittest.TestCase):
         ):
             models = state._load_detection_models()
         self.assertEqual([source for source, _model in models.auxiliaries], ["ntd11", "sensitive"])
+
+    def test_model_logic_matrix_uses_only_enabled_models(self):
+        """48 configuration rows cover runtime, mode and optional-model switches."""
+        hand_modes = {
+            "off": (False, False),
+            "boxes": (True, False),
+            "segmentation": (True, True),
+        }
+        rows = [
+            (provider, mode, ntd11, sensitive, hand_mode)
+            for provider in ("cpu", "gpu")
+            for mode in ("standard", "high_precision")
+            for ntd11 in (False, True)
+            for sensitive in (False, True)
+            for hand_mode in hand_modes
+        ]
+        self.assertEqual(len(rows), 48)
+        for index, (provider, mode, ntd11, sensitive, hand_mode) in enumerate(rows):
+            for fluid_enabled in (False, True):
+                with self.subTest(provider=provider, mode=mode, ntd11=ntd11, sensitive=sensitive, hand=hand_mode, fluid=fluid_enabled):
+                    hand_enabled, handseg_enabled = hand_modes[hand_mode]
+                    state = self.new_state()
+                    state.settings["models"].update({
+                        "provider": provider, "gpu_device": 0,
+                        "ntd11_enabled": ntd11, "sensitive_enabled": sensitive,
+                        "hand_detection_enabled": hand_enabled, "hand_segmentation_enabled": handseg_enabled,
+                    })
+                    state.settings["detection"].update({"mode": mode, "fluid_exclusion_enabled": fluid_enabled})
+                    target = Mock(name=f"target-{index}")
+                    auxiliaries = [Mock(name=f"aux-{index}-0"), Mock(name=f"aux-{index}-1")]
+                    hand = Mock(name=f"hand-{index}")
+                    with patch.object(state, "_configured_model_path", side_effect=lambda key, _label: Path(f"{key}.onnx")), \
+                            patch.object(detection_module, "TargetSegmenter", return_value=target) as target_constructor, \
+                            patch.object(detection_module, "GenericYoloSegmenter", side_effect=auxiliaries) as auxiliary_constructor, \
+                            patch.object(detection_module, "HandDetector", return_value=hand) as hand_constructor:
+                        models = state._load_detection_models()
+                        if hand_enabled:
+                            self.assertIs(state._ensure_hand_model(models), hand)
+                    self.assertIs(models.target, target)
+                    self.assertEqual([source for source, _model in models.auxiliaries], [
+                        source for source, enabled in (("ntd11", ntd11), ("sensitive", sensitive)) if enabled
+                    ])
+                    target_constructor.assert_called_once_with(Path("target_segmentation.onnx"), device=provider, gpu_device=0)
+                    self.assertEqual(auxiliary_constructor.call_count, int(ntd11) + int(sensitive))
+                    self.assertEqual(hand_constructor.call_count, int(hand_enabled))
+                    self.assertIsNone(state.hand_segmentation_predictor)
 
     def test_disabled_optional_models_skip_status_validation(self):
         state = self.new_state()
@@ -5307,6 +5433,40 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_save_status_and_cancel_forward_the_same_pending_token(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            headers = {
+                "Content-Type": "application/json", "X-Mozarie-Token": state_module.STATE.session_token,
+                "Origin": f"http://127.0.0.1:{httpd.server_port}",
+            }
+            with patch.object(state_module.STATE, "browser_save_status", return_value={"state": "pending"}) as status, \
+                    patch.object(state_module.STATE, "cancel_browser_save", return_value={"state": "pending"}) as cancel:
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                status_payload = {"imageId": "image", "candidateRevision": 3, "saveToken": "one-time-token", "sourceAction": "keep"}
+                connection.request("POST", "/api/save/status", json.dumps(status_payload).encode("utf-8"), headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read()), {"state": "pending"})
+                status.assert_called_once_with("image", 3, "one-time-token", "keep")
+
+                cancel_payload = {key: value for key, value in status_payload.items() if key != "sourceAction"}
+                connection.request("POST", "/api/save/cancel", json.dumps(cancel_payload).encode("utf-8"), headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read()), {"state": "pending"})
+                cancel.assert_called_once_with("image", 3, "one-time-token")
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_staged_file_import_can_skip_the_full_catalog_response(self):
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory) / "first.upload"
@@ -5916,6 +6076,75 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state._candidate_revision(image_id), revision + 1)
             with state.workspace_store._connect() as db:
                 self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], revision + 1)
+
+    def test_pending_browser_copy_token_can_be_checked_and_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            self.assertTrue(rendered.output_path.is_file())
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "pending"})
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "pending"})
+            self.assertFalse(rendered.output_path.exists())
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "unknown"})
+
+    def test_browser_copy_token_cleanup_handles_expiry_catalog_shutdown_and_replaced_outputs(self):
+        def pending_copy() -> tuple[Any, str, int, Any]:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name); source = root / "source.png"; destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            return state, image_id, revision, state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+
+        state, image_id, revision, expired = pending_copy()
+        details = state.browser_save_tokens[expired.save_token]
+        state.browser_save_tokens[expired.save_token] = replace(details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1)
+        state.cleanup_expired_browser_save_tokens()
+        self.assertFalse(expired.output_path.exists(), "expiry removes the token-owned copy")
+
+        state, _image_id, _revision, catalog = pending_copy()
+        state.clear_catalog()
+        self.assertFalse(catalog.output_path.exists(), "catalog replacement removes a pending token-owned copy")
+
+        state, _image_id, _revision, shutdown = pending_copy()
+        state.shutdown()
+        self.assertFalse(shutdown.output_path.exists(), "shutdown removes a pending token-owned copy")
+
+        state, image_id, revision, replaced = pending_copy()
+        replaced.output_path.write_bytes(b"external replacement with another size")
+        self.assertEqual(state.cancel_browser_save(image_id, revision, replaced.save_token), {"state": "pending"})
+        self.assertTrue(replaced.output_path.exists(), "cancel does not delete a path replaced after Mozarie created its copy")
+
+    def test_committed_browser_copy_is_not_removed_by_a_late_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "unknown"})
+            self.assertTrue(rendered.output_path.exists(), "a committed copy remains available")
 
     def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()
@@ -6798,6 +7027,30 @@ class MozarieTests(unittest.TestCase):
             write_copy.assert_called_once()
             self.assertEqual(render.call_count, 1)
             self.assertEqual(source.read_bytes(), source_bytes)
+
+    def test_background_copy_database_failure_removes_output_and_keeps_masks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            candidate = Candidate("candidate", "penis", 0.9, mask_path)
+            state.candidates[image_id] = [candidate]
+            revision = state._touch_candidates(image_id)
+
+            with patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.candidates[image_id], [candidate])
+            self.assertTrue(mask_path.is_file())
+            self.assertEqual(list(output.rglob("*.png")), [])
+            self.assertEqual(state._candidate_revision(image_id), revision)
 
 
 if __name__ == "__main__":

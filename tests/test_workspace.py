@@ -7,10 +7,12 @@ import unittest
 import io
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
 from mozarie.catalog import CatalogMixin
+import mozarie.workspace as workspace_module
 from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
 
@@ -327,6 +329,88 @@ class WorkspaceTests(unittest.TestCase):
             selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
             self.assertEqual(len(selects), 2)
             self.assertIn("workspace_manifest_entries", selects[0])
+
+    def test_schema_type_or_default_tampering_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            # Rebuild a current-named table with a subtly incompatible default.
+            with sqlite3.connect(store.path) as db:
+                db.execute("ALTER TABLE images RENAME TO images_old")
+                db.execute("CREATE TABLE images (catalog_id TEXT NOT NULL, relative_path TEXT NOT NULL, image_id TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, source_hash TEXT NOT NULL DEFAULT 'changed', hidden INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0, candidate_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(catalog_id, relative_path))")
+                db.execute("DROP TABLE images_old")
+            before = store.path.read_bytes()
+            with self.assertRaises(WorkspaceOpenError):
+                WorkspaceStore(root)
+            self.assertEqual(store.path.read_bytes(), before)
+
+    def test_schema_type_and_notnull_tampering_are_rejected_without_mutation(self):
+        for definition in ("key BLOB PRIMARY KEY, value TEXT NOT NULL", "key TEXT PRIMARY KEY, value TEXT"):
+            with self.subTest(definition=definition), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+                root = Path(directory)
+                store = WorkspaceStore(root)
+                with sqlite3.connect(store.path) as db:
+                    db.execute("ALTER TABLE meta RENAME TO meta_old")
+                    db.execute(f"CREATE TABLE meta ({definition})")
+                    db.execute("INSERT INTO meta SELECT * FROM meta_old")
+                    db.execute("DROP TABLE meta_old")
+                before = store.path.read_bytes()
+                with self.assertRaises(WorkspaceOpenError):
+                    WorkspaceStore(root)
+                self.assertEqual(store.path.read_bytes(), before)
+
+    def test_schema_quick_check_failure_is_rejected_without_mutation(self):
+        class QuickCheckFailure:
+            def __init__(self, connection):
+                object.__setattr__(self, "connection", connection)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return self.connection.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def __setattr__(self, name, value):
+                if name == "connection":
+                    object.__setattr__(self, name, value)
+                else:
+                    setattr(self.connection, name, value)
+
+            def execute(self, statement, *args):
+                if statement == "PRAGMA quick_check(1)":
+                    return [("not ok",)]
+                return self.connection.execute(statement, *args)
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            before = store.path.read_bytes()
+            original_connect = workspace_module.sqlite3.connect
+
+            def failing_connect(*args, **kwargs):
+                return QuickCheckFailure(original_connect(*args, **kwargs))
+
+            with patch.object(workspace_module.sqlite3, "connect", side_effect=failing_connect):
+                with self.assertRaisesRegex(WorkspaceOpenError, "cannot be opened"):
+                    WorkspaceStore(root)
+            self.assertEqual(store.path.read_bytes(), before)
+
+    def test_schema_foreign_key_violation_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            with sqlite3.connect(store.path) as db:
+                db.execute("""INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    "missing-image", "orphan", "penis", 0.9, self._png(), 1, "#123456", "detector",
+                    "automatic", None, "apply", 0, 0,
+                ))
+            before = store.path.read_bytes()
+            with self.assertRaises(WorkspaceOpenError):
+                WorkspaceStore(root)
+            self.assertEqual(store.path.read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,7 @@ MESSAGES = {
         "archive_missing_app": "更新ZIPにMozarie本体が見つかりません。",
         "requirements_updating": "依存関係を更新しています...",
         "requirements_failed": "依存関係の更新に失敗しました。Mozarie本体は更新していません。setup.bat を実行して復旧してください。",
+        "gpu_check_failed": "GPUの動作確認に失敗しました。setup.bat を実行して復旧してください。",
         "update_deps_changed": "更新は元に戻しましたが、依存関係は変更されています。setup.bat を実行してください。",
         "update_in_progress": "別の更新処理が実行中です。完了してからもう一度実行してください。",
         "update_missing_version": "更新ZIPにVERSIONファイルがありません。",
@@ -114,6 +115,7 @@ MESSAGES = {
         "archive_missing_app": "The update archive does not contain Mozarie.",
         "requirements_updating": "Updating dependencies...",
         "requirements_failed": "Could not update dependencies. Mozarie was not changed. Run setup.bat to repair the installation.",
+        "gpu_check_failed": "The GPU check failed. Run setup.bat to repair the installation.",
         "update_deps_changed": "The app was restored, but dependencies changed. Run setup.bat to repair the installation.",
         "update_in_progress": "Another update is already running. Wait for it to finish, then try again.",
         "update_missing_version": "The update archive does not contain a VERSION file.",
@@ -390,6 +392,21 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     return True
 
 
+def run_gpu_smoke(app_dir: Path = APP_DIR) -> None:
+    """Verify the just-installed runtime before marking an updated venv ready."""
+    python = app_dir / ".venv" / "Scripts" / "python.exe"
+    check = app_dir / "setup_gpu_check.py"
+    if not python.is_file() or not check.is_file():
+        raise UpdateError(tr("gpu_check_failed"))
+    result = subprocess.run(
+        [str(python), "-X", "utf8", str(check)],
+        cwd=str(app_dir),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise UpdateError(tr("gpu_check_failed"))
+
+
 def _remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
@@ -519,7 +536,8 @@ def _perform_update(
             if requirements_updated:
                 raise UpdateError(tr("update_deps_changed")) from exc
             raise
-        if requirements_updated:
+        if requirements_updated is True:
+            run_gpu_smoke(app_dir)
             ready_marker = app_dir / ".venv" / ".mozarie-ready"
             if ready_marker.parent.is_dir():
                 ready_marker.write_text("ready\n", encoding="utf-8")
