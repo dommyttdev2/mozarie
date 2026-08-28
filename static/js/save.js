@@ -490,7 +490,10 @@ async function commitBrowserSaveWithRetry(payload) {
     try {
       return await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
     } catch (error) {
-      const retryable = !error?.status || [408, 429, 502, 503, 504].includes(error.status);
+      // A database write may have completed after the server started returning
+      // an error. Retry the identical token once, then ask the server which
+      // state won; 400-class validation errors remain definitive.
+      const retryable = !error?.status || [408, 429, 500, 502, 503, 504].includes(error.status);
       if (!retryable || attempt) {
         if (!retryable) throw error;
         const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload) }).catch(() => ({ state: "unknown" }));

@@ -38,7 +38,7 @@ function binaryResponse(bytes, saveToken = "runtime-render-token", beforePipe = 
   };
 }
 
-function createRuntime({ commit, copy = null, deleteOriginal = false, renderBinary = null, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null }) {
+function createRuntime({ commit, copy = null, deleteOriginal = false, renderBinary = null, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null, saveStatus = null, saveCancel = null }) {
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   let catalogImages = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   const elements = new Map();
@@ -132,6 +132,8 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
         if (Array.isArray(body.images)) catalogImages = body.images;
         return response;
       }
+      if (requestPath === "/api/save/status") return (saveStatus || (() => jsonResponse({ state: "unknown" })))({ options, requests });
+      if (requestPath === "/api/save/cancel") return (saveCancel || (() => jsonResponse({ state: "cancelled" })))({ options, requests });
       if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
       throw new Error(`Unexpected request: ${requestPath}`);
     },
@@ -303,12 +305,81 @@ async function runCopyFailureCase() {
 }
 
 async function runCommitFailureCase() {
-  for (const status of [500, 400]) {
-    const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, status) });
-    await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), (error) => error.code === "internal_error");
-    assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `${status} is not retried`);
-    assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
-  }
+  const runtime = createRuntime({ commit: () => jsonResponse({ error: "commit failed" }, 400) });
+  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), (error) => error.code === "internal_error");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "400 is not retried");
+  assert.equal(runtime.imageFetches(), 1, "a failed batch still performs one final reconciliation");
+}
+
+function attachDeletableSource(runtime) {
+  const result = { deleted: false, restored: false };
+  let file = {
+    name: "source.png", size: 3, lastModified: 1,
+    async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; },
+  };
+  const fileHandle = {
+    name: file.name,
+    async getFile() { return file; },
+    async createWritable() {
+      return {
+        async write(bytes) { result.restored = true; file = { ...file, size: bytes.byteLength, lastModified: 2, async arrayBuffer() { return bytes.buffer; } }; },
+        async close() {}, async abort() {},
+      };
+    },
+  };
+  runtime.state.sourceAccess.set("image-1", {
+    fileHandle,
+    parentHandle: {
+      async removeEntry() { result.deleted = true; },
+      async getFileHandle() { return fileHandle; },
+    },
+    name: file.name, size: file.size, lastModified: file.lastModified,
+  });
+  return result;
+}
+
+async function runRecoverableCommitFailureCases() {
+  let commits = 0; let cancels = 0;
+  const pending = createRuntime({
+    deleteOriginal: true,
+    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    saveStatus: () => jsonResponse({ state: "pending" }),
+    saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
+  });
+  const pendingSource = attachDeletableSource(pending);
+  await assert.rejects(pending.runBrowserSave(["image-1"], "_censored", true), (error) => error.saveState === "pending");
+  const pendingCommits = pending.requests.filter((request) => request.path === "/api/save/commit");
+  assert.equal(pendingCommits.length, 2, "500 is retried exactly once");
+  assert.equal(pendingCommits[0].options.body, pendingCommits[1].options.body, "500 retry keeps the same save token");
+  assert.equal(pending.requests.filter((request) => request.path === "/api/save/status").length, 1, "a failed retry queries the token state");
+  assert.equal(cancels, 1, "a pending token is cancelled once");
+  assert.deepEqual(pendingSource, { deleted: true, restored: true }, "a pending failed copy restores its source after cancellation");
+
+  commits = 0; cancels = 0;
+  const committed = createRuntime({
+    deleteOriginal: true,
+    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    saveStatus: () => jsonResponse({ state: "committed", cleared: true, stale: false, images: [] }),
+    saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
+  });
+  const committedSource = attachDeletableSource(committed);
+  await committed.runBrowserSave(["image-1"], "_censored", true);
+  assert.equal(committed.requests.filter((request) => request.path === "/api/save/commit").length, 2, "a committed state is checked after the one retry");
+  assert.equal(cancels, 0, "a committed token is never cancelled");
+  assert.deepEqual(committedSource, { deleted: true, restored: false }, "a committed save keeps its deliberate source deletion");
+
+  commits = 0; cancels = 0;
+  const unknown = createRuntime({
+    deleteOriginal: true,
+    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    saveStatus: () => jsonResponse({ state: "unknown" }),
+    saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
+  });
+  const unknownSource = attachDeletableSource(unknown);
+  await assert.rejects(unknown.runBrowserSave(["image-1"], "_censored", true), (error) => error.saveState === "unknown");
+  assert.equal(unknown.requests.filter((request) => request.path === "/api/save/commit").length, 2, "unknown also follows exactly one retry");
+  assert.equal(cancels, 0, "an unknown token is not compensated blindly");
+  assert.deepEqual(unknownSource, { deleted: true, restored: false }, "unknown state leaves the source untouched for manual recovery");
 }
 
 async function runRetryableCommitCase() {
@@ -658,6 +729,7 @@ async function runServerCopyRemovalCases() {
   await runRemoveAfterSavePartialAndStaleCase();
   await runCopyFailureCase();
   await runCommitFailureCase();
+  await runRecoverableCommitFailureCases();
   await runRetryableCommitCase();
   await runCancelCase();
   await runDeleteOriginalCase();
