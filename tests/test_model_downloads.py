@@ -123,6 +123,26 @@ class ModelDownloadTests(unittest.TestCase):
         self.assertFalse(entry.destination(root).exists())
         self.assertFalse(entry.destination(root).with_name(".file.onnx.part").exists())
 
+    def test_resumed_download_needs_space_only_for_the_remaining_bytes(self) -> None:
+        payload = b"model-data"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        part = entry.destination(root).with_name(".file.onnx.part"); part.parent.mkdir(parents=True); part.write_bytes(payload[:4])
+        opener = _Opener(_Response(payload[4:], content_length=str(len(payload) - 4), status=206, content_range=f"bytes 4-{len(payload) - 1}/{len(payload)}"))
+        with patch("mozarie.model_downloads.shutil.disk_usage", return_value=type("Disk", (), {"free": len(payload) - 4})()), \
+                patch("mozarie.model_downloads.build_opener", return_value=opener):
+            destination = manager._download(entry)
+        self.assertEqual(destination.read_bytes(), payload)
+
+    def test_resumed_download_rejects_when_remaining_space_is_short(self) -> None:
+        payload = b"model-data"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        part = entry.destination(root).with_name(".file.onnx.part"); part.parent.mkdir(parents=True); part.write_bytes(payload[:4])
+        with patch("mozarie.model_downloads.shutil.disk_usage", return_value=type("Disk", (), {"free": len(payload) - 5})()), \
+                patch("mozarie.model_downloads.build_opener") as opener:
+            with self.assertRaises(OSError): manager._download(entry)
+        opener.assert_not_called()
+        self.assertEqual(part.read_bytes(), payload[:4])
+
     def test_download_resumes_a_partial_file_after_a_valid_range_response(self) -> None:
         payload = b"model-data"; entry = self.entry(payload)
         root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)

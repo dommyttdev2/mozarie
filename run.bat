@@ -13,7 +13,7 @@ if errorlevel 1 goto :setup_required
 if defined MOZARIE_PYTHON goto :start
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
 :start
-echo [Mozarie] Preparing Mozarie...
+echo [Mozarie] Preparing Mozarie... / Mozarieを準備しています...
 "%PYTHON%" "%APP_DIR%server.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 if "%EXIT_CODE%"=="0" exit /b 0
@@ -26,6 +26,6 @@ exit /b %EXIT_CODE%
 exit /b %ERRORLEVEL%
 
 :setup_required
-echo [Mozarie] Initial setup is required. Run setup.bat once, then start with run.bat.
+echo [Mozarie] Initial setup is required. Run setup.bat once, then start with run.bat. / 初回セットアップが必要です。setup.batを一度実行してから、run.batを起動してください。
 pause
 exit /b 1

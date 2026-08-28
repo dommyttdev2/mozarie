@@ -834,7 +834,7 @@ class UpdaterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             environment = os.environ | {"MOZARIE_PYTHON": sys.executable}
-            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True)
+            result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
             self.assertFalse((app / ".venv").exists())
@@ -843,6 +843,7 @@ class UpdaterTests(unittest.TestCase):
         batch = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', batch)
         self.assertIn('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required', batch)
+        self.assertIn("Preparing Mozarie... / Mozarieを準備しています...", batch)
         self.assertLess(
             batch.index('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :setup_required'),
             batch.index("\n:start\n"),

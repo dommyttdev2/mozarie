@@ -155,13 +155,16 @@ class ModelDownloadManager:
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if shutil.disk_usage(destination.parent).free < entry.size:
-            raise OSError("not enough disk space")
         temporary = destination.with_name(f".{destination.name}.part")
         received = temporary.stat().st_size if temporary.exists() else 0
         if received > entry.size:
             temporary.unlink()
             received = 0
+        # A retained partial file has already consumed its bytes on disk.  Only
+        # require enough free space for the remainder, otherwise a resumable
+        # multi-GB download can be rejected despite having exactly enough room.
+        if shutil.disk_usage(destination.parent).free < entry.size - received:
+            raise OSError("not enough disk space")
         digest = hashlib.sha256()
         if received:
             with temporary.open("rb") as existing:
