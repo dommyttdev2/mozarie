@@ -33,7 +33,7 @@ jobs:
         run: python -m coverage xml
       - if: always()
         run: >-
-          python -c "import xml.etree.ElementTree as e; n={x.get('filename').replace('\\','/') for x in e.parse('coverage.xml').iter('class')}; m={'server.py','updater.py','setup_gpu_check.py'}-n; assert not m, f'missing root coverage: {sorted(m)}'"
+          python -c "import xml.etree.ElementTree as e; r=e.parse('coverage.xml').getroot(); assert float(r.get('branch-rate','0')) >= .80, 'branch coverage below 80%: {}'.format(r.get('branch-rate')); c={x.get('filename').replace('\\','/'): float(x.get('branch-rate','0')) for x in r.iter('class')}; t={'server.py','updater.py','setup_gpu_check.py'}; m=t-c.keys(); assert not m, f'missing root coverage: {sorted(m)}'; low={n:c[n] for n in t if c[n] < .80}; assert not low, f'root branch coverage below 80%: {low}'"
       - if: always()
         uses: actions/upload-artifact@v6
         with:
