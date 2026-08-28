@@ -22,6 +22,26 @@ const changeIds = new Set(`
 galleryFilter brushSize divisor bucketTolerance confidence detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber settingsLanguage settingsPort settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsNtd11Toggle settingsSensitiveToggle settingsPrecisionToggle settingsSamType settingsHandToggle settingsHandSegmentationToggle settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy applyTargetMode applyCopyMode applyOverwriteMode deleteOriginal removeAfterSave applyDivisor
 `.trim().split(/\s+/));
 
+const fixtureForScenario = {
+  import: "import",
+  detection: "detect",
+  editor: "editor",
+  overview: "overview",
+  settings: "settings",
+  save: "save",
+  processing: "processing",
+  confirmation: "confirmation",
+  gallery: "workspace",
+  candidate: "editor",
+  workspace: "workspace",
+};
+const exemptReasons = {
+  // A readonly status field has no product handler.  Its adjacent button is
+  // the user operation that changes it and is covered by the save fixture.
+  applyOutputDirectoryStatus: "readonly output-directory status; chooseOutputDirectoryButton is the operable control",
+  settingsSamType: "hidden selected-SAM value; input[name=settingsSamVariant] is the operable control",
+};
+
 function interactionFor(id) {
   const action = keyboardIds.has(id) ? "keyboard" : changeIds.has(id) ? "change" : "click";
   let resultKind = "dom";
@@ -47,22 +67,25 @@ function interactionFor(id) {
     resultKind = "dom"; scenario = "gallery";
   }
   const expected = `${resultKind} result is asserted by the ${scenario} fixture scenario`;
-  return { action, resultKind, scenario, expected };
+  // `assertionId` is deliberately a stable, inspectable link to the browser
+  // ledger.  The ledger is allowed to use a fresh page for the same fixture,
+  // but it may not silently treat a merely-present control as covered.
+  return { action, resultKind, scenario, fixture: fixtureForScenario[scenario], assertionId: `${scenario}:${id}`, exemptReason: exemptReasons[id], expected };
 }
 
 const controls = ids.map((id) => ({ id, ...interactionFor(id) }));
 const dynamicControls = [
-  { selector: "[data-candidate-batch]", action: "click", resultKind: "dom", scenario: "candidate", expected: "selects the candidate batch" },
-  { selector: "[data-candidate-display-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes candidate display visibility" },
-  { selector: "[data-candidate-effective-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes effective candidate visibility" },
-  { selector: "[data-overview-filter]", action: "change", resultKind: "navigation", scenario: "overview", expected: "filters the overview fixture" },
-  { selector: "[data-selection-action]", action: "click", resultKind: "api", scenario: "overview", expected: "applies an isolated selection action" },
-  { selector: ".gallery-item", action: "click", resultKind: "navigation", scenario: "gallery", expected: "selects the isolated gallery image" },
-  { selector: ".overview-item", action: "click", resultKind: "navigation", scenario: "overview", expected: "selects the isolated overview image" },
-  { selector: "[data-model-download]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens the model download dialog" },
-  { selector: "[data-model-help]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens model help" },
-  { selector: "[data-model-picker]", action: "click", resultKind: "dialog", scenario: "settings", expected: "uses the picker fixture" },
-  { selector: "input[name=settingsSamVariant]", action: "change", resultKind: "value", scenario: "settings", expected: "selects the SAM variant" },
+  { selector: "[data-candidate-batch]", action: "click", resultKind: "dom", scenario: "candidate", fixture: "editor", assertionId: "candidate:data-candidate-batch", expected: "selects the candidate batch" },
+  { selector: "[data-candidate-display-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", fixture: "editor", assertionId: "candidate:data-candidate-display-toggle", expected: "changes candidate display visibility" },
+  { selector: "[data-candidate-effective-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", fixture: "editor", assertionId: "candidate:data-candidate-effective-toggle", expected: "changes effective candidate visibility" },
+  { selector: "[data-overview-filter]", action: "change", resultKind: "navigation", scenario: "overview", fixture: "overview", assertionId: "overview:data-overview-filter", expected: "filters the overview fixture" },
+  { selector: "[data-selection-action]", action: "click", resultKind: "api", scenario: "overview", fixture: "overview", assertionId: "overview:data-selection-action", expected: "applies an isolated selection action" },
+  { selector: ".gallery-item", action: "click", resultKind: "navigation", scenario: "gallery", fixture: "workspace", assertionId: "gallery:gallery-item", expected: "selects the isolated gallery image" },
+  { selector: ".overview-item", action: "click", resultKind: "navigation", scenario: "overview", fixture: "overview", assertionId: "overview:overview-item", expected: "selects the isolated overview image" },
+  { selector: "[data-model-download]", action: "click", resultKind: "dialog", scenario: "settings", fixture: "settings", assertionId: "settings:data-model-download", expected: "opens the model download dialog" },
+  { selector: "[data-model-help]", action: "click", resultKind: "dialog", scenario: "settings", fixture: "settings", assertionId: "settings:data-model-help", expected: "opens model help" },
+  { selector: "[data-model-picker]", action: "click", resultKind: "dialog", scenario: "settings", fixture: "settings", assertionId: "settings:data-model-picker", expected: "uses the picker fixture" },
+  { selector: "input[name=settingsSamVariant]", action: "change", resultKind: "value", scenario: "settings", fixture: "settings", assertionId: "settings:settingsSamVariant", expected: "selects the SAM variant" },
 ];
 
 const scenarioContracts = Object.fromEntries([...new Set([...controls, ...dynamicControls].map((control) => control.scenario))].map((scenario) => {
