@@ -828,6 +828,23 @@ class MozarieTests(unittest.TestCase):
         )
         self.assertTrue(state_module.cuda_device_statuses(types.SimpleNamespace(cuda=cuda))[0]["supported"])
 
+    def test_health_reports_missing_gpu_but_keeps_cpu_configuration_valid(self):
+        state = self.new_state()
+        no_cuda = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "torch_module", return_value=no_cuda):
+            missing = state.settings_status()
+        self.assertEqual(missing["gpus"], [])
+        self.assertFalse(missing["gpuDeviceValid"])
+        self.assertEqual(missing["gpuDeviceReasonCode"], "gpu_unsupported")
+
+        state.settings["models"]["provider"] = "cpu"
+        with patch.object(state_module, "torch_module", return_value=no_cuda):
+            cpu = state.settings_status()
+        self.assertEqual(cpu["gpus"], [])
+        self.assertTrue(cpu["gpuDeviceValid"])
+        self.assertIsNone(cpu["gpuDeviceReasonCode"])
+
     def test_settings_rejects_an_unknown_or_unsupported_gpu_selection(self):
         cuda = types.SimpleNamespace(
             is_available=lambda: True,
