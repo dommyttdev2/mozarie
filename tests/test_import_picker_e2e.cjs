@@ -734,7 +734,7 @@ async function assertToolRailLayout(page, position) {
 
 async function selectFixtureImage(page, pageErrors, consoleErrors) {
   await page.locator('.gallery-item[data-id="sample"]').click();
-  try { await page.waitForFunction(() => !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
+  try { await page.waitForFunction(() => state.currentId === "sample" && !document.querySelector("#detectCurrentButton").disabled, null, { timeout: 3000 }); }
   catch (error) {
     const status = await page.locator("#connectionStatus").textContent();
     throw new Error(`image selection failed; status=${status}; pageErrors=${pageErrors.join(" | ")}; consoleErrors=${consoleErrors.join(" | ")}; cause=${error.message}`);
