@@ -342,7 +342,7 @@ async function runRecoverableCommitFailureCases() {
   let commits = 0; let cancels = 0;
   const pending = createRuntime({
     deleteOriginal: true,
-    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    commit: () => { commits += 1; return jsonResponse({ error_code: "workspace_database_error" }, 500); },
     saveStatus: () => jsonResponse({ state: "pending" }),
     saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
   });
@@ -358,7 +358,7 @@ async function runRecoverableCommitFailureCases() {
   commits = 0; cancels = 0;
   const committed = createRuntime({
     deleteOriginal: true,
-    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    commit: () => { commits += 1; return jsonResponse({ error_code: "workspace_database_error" }, 500); },
     saveStatus: () => jsonResponse({ state: "committed", cleared: true, stale: false, images: [] }),
     saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
   });
@@ -371,7 +371,7 @@ async function runRecoverableCommitFailureCases() {
   commits = 0; cancels = 0;
   const unknown = createRuntime({
     deleteOriginal: true,
-    commit: () => { commits += 1; return jsonResponse({ error: "workspace write failed" }, 500); },
+    commit: () => { commits += 1; return jsonResponse({ error_code: "workspace_database_error" }, 500); },
     saveStatus: () => jsonResponse({ state: "unknown" }),
     saveCancel: () => { cancels += 1; return jsonResponse({ state: "cancelled" }); },
   });
