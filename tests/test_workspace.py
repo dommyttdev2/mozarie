@@ -328,5 +328,18 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(len(selects), 2)
             self.assertIn("workspace_manifest_entries", selects[0])
 
+    def test_schema_type_or_default_tampering_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            # Rebuild a current-named table with a subtly incompatible default.
+            with sqlite3.connect(store.path) as db:
+                db.execute("ALTER TABLE images RENAME TO images_old")
+                db.execute("CREATE TABLE images (catalog_id TEXT NOT NULL, relative_path TEXT NOT NULL, image_id TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, source_hash TEXT NOT NULL DEFAULT 'changed', hidden INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0, candidate_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(catalog_id, relative_path))")
+            before = store.path.read_bytes()
+            with self.assertRaises(WorkspaceOpenError):
+                WorkspaceStore(root)
+            self.assertEqual(store.path.read_bytes(), before)
+
 if __name__ == "__main__":
     unittest.main()
