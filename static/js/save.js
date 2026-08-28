@@ -669,6 +669,7 @@ function isTerminalDetection(job, previous) {
 }
 
 async function finishDetectionJob(job) {
+  const invoker = modalInvokers.get($("#processingDialog"));
   const generation = ++state.imageGeneration;
   const catalogEpoch = state.catalogEpoch;
   const keepCurrent = state.currentId;
@@ -690,6 +691,7 @@ async function finishDetectionJob(job) {
     await selectImage(keepCurrent, true);
   }
   renderCatalogViews();
+  return invoker;
 }
 
 async function pollJob() {
@@ -714,8 +716,8 @@ async function pollJob() {
       $("#applyPauseButton").disabled = job.state === "pausing";
       if (job.state === "running") setStatusKey("status.applyProgress", { completed: job.completed, total: job.total, current: job.current }, "running");
     } else if (isTerminalDetection(job, previous)) {
-    await finishDetectionJob(job);
-      if (job.state === "error") showUserError({ code: job.errorCode || "internal_error" });
+    const invoker = await finishDetectionJob(job);
+      if (job.state === "error") showUserError({ code: job.errorCode || "internal_error" }, invoker);
       else if (job.state === "cancelled") setStatusKey("status.detectCancelled", { completed: job.completed });
       else setStatusKey("status.detectDone");
     }

@@ -58,7 +58,7 @@ function renderGallery(force = false) {
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-haspopup", "menu");
-    item.setAttribute("aria-label", `${image.relativePath}、${isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")}`);
+    item.setAttribute("aria-label", [image.relativePath, isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
     item.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id); }
       else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
@@ -186,7 +186,7 @@ function renderOverview(force = false) {
     const states = [image.relativePath];
     if (isReviewed(image)) states.push(t("overview.stateReviewed"));
     if (imageHasMask(image)) states.push(t("overview.stateMasked"));
-    item.setAttribute("aria-label", states.join("、"));
+    item.setAttribute("aria-label", states.join(t("a11y.separator")));
     item.onclick = (event) => selectOverviewImage(image.id, event);
     item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
     grid.append(item);

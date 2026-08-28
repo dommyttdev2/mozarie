@@ -12,11 +12,11 @@ function showModalFromInvoker(dialog, invoker = document.activeElement) {
 function trapModalTab(event) {
   if (event.key !== "Tab") return;
   const dialog = event.currentTarget;
-  const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
-    .filter((element) => element.offsetParent !== null);
+  const focusable = [...dialog.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')]
+    .filter((element) => !element.matches(':disabled') && !element.closest('[inert]') && !element.hidden && element.offsetParent !== null);
   if (!focusable.length) { event.preventDefault(); dialog.focus(); return; }
   const first = focusable[0]; const last = focusable.at(-1);
-  if (event.shiftKey ? document.activeElement === first : document.activeElement === last || !dialog.contains(document.activeElement)) {
+  if (!dialog.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
     event.preventDefault(); focusElement(event.shiftKey ? last : first);
   }
 }

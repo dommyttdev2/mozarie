@@ -285,6 +285,7 @@
   "settings.browseModel": "参照",
   "settings.modelPathPlaceholder": "パスを指定してください",
   "modelDownload.title": "モデルをダウンロード",
+  "a11y.separator": "、",
   "modelDownload.prepareTitle": "モデルを準備",
   "modelDownload.download": "ダウンロード",
   "modelDownload.all": "SAM・手モデルをダウンロード",

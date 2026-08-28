@@ -293,6 +293,7 @@
   "settings.browseModel": "Browse",
   "settings.modelPathPlaceholder": "Specify a path",
   "modelDownload.title": "Download model",
+  "a11y.separator": ", ",
   "modelDownload.prepareTitle": "Prepare model",
   "modelDownload.download": "Download",
   "modelDownload.all": "Download SAM & hand models",
