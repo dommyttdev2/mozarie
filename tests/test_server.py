@@ -19,6 +19,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import numpy as np

@@ -862,6 +862,29 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
     const settled = await snapshot();
     assert.equal(settled.dialogs[id], expected, `${control} must ${expected ? "open" : "close"} #${id}`);
   };
+  const assertFitPostcondition = async () => {
+    const layout = await page.evaluate(() => {
+      const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
+      const available = { width: Math.max(1, stage.clientWidth - inset.left - inset.right), height: Math.max(1, stage.clientHeight - inset.top - inset.bottom) };
+      const expectedScale = Math.min(available.width / state.currentImage.width, available.height / state.currentImage.height);
+      const expected = {
+        scale: expectedScale,
+        x: inset.left + (available.width - state.currentImage.width * expectedScale) / 2,
+        y: inset.top + (available.height - state.currentImage.height * expectedScale) / 2,
+      };
+      const rendered = {
+        left: state.view.x, right: state.view.x + state.currentImage.width * state.view.scale,
+        top: state.view.y, bottom: state.view.y + state.currentImage.height * state.view.scale,
+      };
+      return { inset, stage: { width: stage.clientWidth, height: stage.clientHeight }, expected, actual: { ...state.view }, rendered };
+    });
+    const epsilon = 0.01;
+    for (const key of ["scale", "x", "y"]) assert.ok(Math.abs(layout.actual[key] - layout.expected[key]) <= epsilon, `fitButton must restore ${key}: expected=${layout.expected[key]}, actual=${layout.actual[key]}`);
+    assert.ok(layout.rendered.left >= layout.inset.left - epsilon, "fitButton keeps the rendered image inside the left inset");
+    assert.ok(layout.rendered.right <= layout.stage.width - layout.inset.right + epsilon, "fitButton keeps the rendered image inside the right inset");
+    assert.ok(layout.rendered.top >= layout.inset.top - epsilon, "fitButton keeps the rendered image inside the top inset");
+    assert.ok(layout.rendered.bottom <= layout.stage.height - layout.inset.bottom + epsilon, "fitButton keeps the rendered image inside the bottom inset");
+  };
   const toolFor = {
     brushTool: "brush", mosaicEraserTool: "mosaic_eraser", eraserTool: "eraser", excludeEraserTool: "exclude_eraser",
     rectangleTool: "boundary", polygonTool: "polygon", boundaryBrushTool: "boundary_brush", bucketTool: "bucket", excludeBucketTool: "exclude_bucket",
@@ -879,7 +902,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
     collapseGalleryButton: (before, after) => changed(before, after, (item) => item.state.galleryCollapsed, "collapseGalleryButton"),
     collapseInspectorButton: (before, after) => changed(before, after, (item) => item.state.inspectorCollapsed, "collapseInspectorButton"),
     boundaryTool: (before, after) => changed(before, after, (item) => item.controls.boundaryTool.expanded, "boundaryTool"),
-    fitButton: (before, after) => changed(before, after, (item) => item.state.scale, "fitButton"),
+    fitButton: () => assertFitPostcondition(),
     undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
     redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
     mosaicPreviewButton: (before, after) => changed(before, after, (item) => item.state.mosaicPreview, "mosaicPreviewButton"),
