@@ -1821,6 +1821,41 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(old_mask_path.is_file())
             self.assertFalse(new_mask_path.exists())
 
+    def test_detect_persistence_failure_removes_final_new_masks(self):
+        """A failed candidate transaction must not leave a visible orphan mask."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = core_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
+
+            old_mask_path = state.cache_dir / image_id / "old.png"
+            old_mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(old_mask_path)
+            old_candidate = Candidate("old", "penis", 0.8, old_mask_path)
+            state.candidates[image_id] = [old_candidate]
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-new.png"
+            final_path = state.cache_dir / image_id / "new.png"
+
+            def detect_image(*_args):
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("new", "penis", 0.9, pending_path)]
+
+            with (
+                patch.object(state, "_ensure_models", return_value=[]),
+                patch.object(state, "_detect_image", side_effect=detect_image),
+                patch.object(state, "_commit_candidate_snapshot", side_effect=OSError("database write failed")),
+            ):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.candidates[image_id], [old_candidate])
+            self.assertTrue(old_mask_path.is_file())
+            self.assertFalse(pending_path.exists())
+            self.assertFalse(final_path.exists())
+
     def test_detect_job_can_be_cancelled_with_the_shared_control(self):
         state = self.new_state()
         state.job = core_module.Job(kind="detect", state="running", total=1)
