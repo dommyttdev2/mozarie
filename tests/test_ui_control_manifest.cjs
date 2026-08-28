@@ -17,6 +17,7 @@ for (const control of controls) {
   assert.ok(scenarios.has(control.scenario), `unknown scenario for ${control.id}`);
   assert.ok(fixtures.has(control.fixture), `unknown fixture for ${control.id}`);
   assert.match(control.assertionId, new RegExp(`^${control.scenario}:`), `${control.id} needs a stable browser-ledger assertion id`);
+  assert.equal(control.predicateId, control.assertionId, `${control.id} must bind its manifest assertion to one predicate registry id`);
   assert.ok(control.expected);
   if (control.exemptReason !== undefined) assert.match(control.exemptReason, /\S/, `${control.id} exemption needs a concrete reason`);
 }
@@ -28,6 +29,7 @@ for (const control of dynamicControls) {
   assert.ok(scenarios.has(control.scenario), `unknown scenario for ${control.selector}`);
   assert.ok(fixtures.has(control.fixture), `unknown fixture for ${control.selector}`);
   assert.match(control.assertionId, new RegExp(`^${control.scenario}:`), `${control.selector} needs a stable browser-ledger assertion id`);
+  assert.equal(control.predicateId, control.assertionId, `${control.selector} must bind its manifest assertion to one predicate registry id`);
   assert.ok(control.expected, "dynamic controls need an expected result");
 }
 for (const [scenario, contract] of Object.entries(scenarioContracts)) {
