@@ -1889,6 +1889,81 @@ async function main() {
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
+    // This deliberately uses real pointer events rather than the canvas helpers.  A
+    // preview must be painted while the button is still held: waiting until
+    // pointerup would miss the regression where long strokes only mosaicked at the
+    // end.  Test both a normal editor image and a 4K image because the latter used
+    // to starve the preview worker with every pointer move.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    for (const [width, height] of [[1024, 768], [3840, 2160]]) {
+      await page.locator("#brushTool").click();
+      await page.locator("#editorCanvas").scrollIntoViewIfNeeded();
+      const geometry = await page.evaluate(async ({ width, height }) => {
+        state.currentImage?.close?.();
+        const source = document.createElement("canvas"); source.width = width; source.height = height;
+        const sourceContext = source.getContext("2d");
+        sourceContext.fillStyle = "#ffffff"; sourceContext.fillRect(0, 0, width, height);
+        // Fine black/white stripes guarantee that a block mosaic changes pixels in
+        // the painted region, including when the 4K image is fitted to the stage.
+        sourceContext.fillStyle = "#000000";
+        for (let x = 0; x < width; x += 4) sourceContext.fillRect(x, 0, 2, height);
+        state.currentImage = await createImageBitmap(source);
+        const record = state.images.find((image) => image.id === "sample");
+        record.width = width; record.height = height;
+        canvasSizeForImage(record); prepareOriginalImage(); resetCurrentDraft();
+        state.candidates = []; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+        state.mosaicPreviewEnabled = true; fitImage(); requestMosaicPreview();
+        const rect = canvas.getBoundingClientRect();
+        const logical = { x: Math.round(width * 0.48), y: Math.round(height * 0.5) };
+        return {
+          beforeGeneration: state.mosaicPreviewGeneration,
+          x: rect.left + state.view.x + logical.x * state.view.scale,
+          y: rect.top + state.view.y + logical.y * state.view.scale,
+          endX: rect.left + state.view.x + (logical.x + Math.max(24, Math.round(width * 0.08))) * state.view.scale,
+          endY: rect.top + state.view.y + logical.y * state.view.scale,
+          logical,
+        };
+      }, { width, height });
+      await page.mouse.move(geometry.x, geometry.y);
+      await page.mouse.down();
+      await page.mouse.move(geometry.endX, geometry.endY, { steps: 8 });
+      await page.waitForTimeout(250);
+      const duringBrush = await page.evaluate(({ logical }) => ({
+        active: state.activeStroke?.points.length >= 2,
+        mask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
+        preview: [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
+          .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]),
+      }), geometry);
+      assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mask and mosaic before pointerup`);
+      await page.mouse.up();
+      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0);
+
+      await page.locator("#eraserTool").click();
+      const exclusionGeometry = await page.evaluate(({ logical }) => {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: rect.left + state.view.x + logical.x * state.view.scale,
+          y: rect.top + state.view.y + logical.y * state.view.scale,
+          endX: rect.left + state.view.x + (logical.x + Math.max(24, Math.round(state.currentImage.width * 0.08))) * state.view.scale,
+          endY: rect.top + state.view.y + logical.y * state.view.scale,
+          logical,
+        };
+      }, geometry);
+      await page.mouse.move(exclusionGeometry.x, exclusionGeometry.y);
+      await page.mouse.down();
+      await page.mouse.move(exclusionGeometry.endX, exclusionGeometry.endY, { steps: 8 });
+      await page.waitForFunction(({ logical }) => state.activeStroke?.points.length >= 2
+        && exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0
+        && combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] === 0, exclusionGeometry);
+      const duringExclusion = await page.evaluate(({ logical }) => ({
+        active: state.activeStroke?.points.length >= 2,
+        exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
+        removedFromEffectiveMask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] === 0,
+      }), exclusionGeometry);
+      assert.deepEqual(duringExclusion, { active: true, exclusion: true, removedFromEffectiveMask: true }, `${width}x${height} exclusion immediately removes the effective mosaic area`);
+      await page.mouse.up();
+    }
+
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
