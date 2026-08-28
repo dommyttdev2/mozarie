@@ -5368,6 +5368,40 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_save_status_and_cancel_forward_the_same_pending_token(self):
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            headers = {
+                "Content-Type": "application/json", "X-Mozarie-Token": state_module.STATE.session_token,
+                "Origin": f"http://127.0.0.1:{httpd.server_port}",
+            }
+            with patch.object(state_module.STATE, "browser_save_status", return_value={"state": "pending"}) as status, \
+                    patch.object(state_module.STATE, "cancel_browser_save", return_value={"state": "pending"}) as cancel:
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                status_payload = {"imageId": "image", "candidateRevision": 3, "saveToken": "one-time-token", "sourceAction": "keep"}
+                connection.request("POST", "/api/save/status", json.dumps(status_payload).encode("utf-8"), headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read()), {"state": "pending"})
+                status.assert_called_once_with("image", 3, "one-time-token", "keep")
+
+                cancel_payload = {key: value for key, value in status_payload.items() if key != "sourceAction"}
+                connection.request("POST", "/api/save/cancel", json.dumps(cancel_payload).encode("utf-8"), headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read()), {"state": "pending"})
+                cancel.assert_called_once_with("image", 3, "one-time-token")
+        finally:
+            if connection is not None:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_staged_file_import_can_skip_the_full_catalog_response(self):
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory) / "first.upload"
@@ -5977,6 +6011,27 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state._candidate_revision(image_id), revision + 1)
             with state.workspace_store._connect() as db:
                 self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], revision + 1)
+
+    def test_pending_browser_copy_token_can_be_checked_and_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            self.assertTrue(rendered.output_path.is_file())
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "pending"})
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "pending"})
+            self.assertFalse(rendered.output_path.exists())
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "unknown"})
 
     def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()
@@ -6859,6 +6914,30 @@ class MozarieTests(unittest.TestCase):
             write_copy.assert_called_once()
             self.assertEqual(render.call_count, 1)
             self.assertEqual(source.read_bytes(), source_bytes)
+
+    def test_background_copy_database_failure_removes_output_and_keeps_masks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            candidate = Candidate("candidate", "penis", 0.9, mask_path)
+            state.candidates[image_id] = [candidate]
+            revision = state._touch_candidates(image_id)
+
+            with patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.candidates[image_id], [candidate])
+            self.assertTrue(mask_path.is_file())
+            self.assertEqual(list(output.rglob("*.png")), [])
+            self.assertEqual(state._candidate_revision(image_id), revision)
 
 
 if __name__ == "__main__":
