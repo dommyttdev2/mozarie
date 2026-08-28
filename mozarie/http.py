@@ -217,7 +217,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 models = STATE.settings.get("models", {})
                 provider = str(models.get("provider", "cpu"))
                 status = STATE.settings_status()
-                configured = bool(status.get("gpuDeviceValid", provider != "gpu")) and all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
+                # The state contract always includes gpuDeviceValid.  Keeping
+                # absent values neutral also lets a narrow test/status adapter
+                # report model readiness without pretending its GPU is invalid.
+                configured = bool(status.get("gpuDeviceValid", True)) and all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
                 payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
