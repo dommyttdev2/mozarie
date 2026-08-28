@@ -817,9 +817,11 @@ async function main() {
     });
 
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
-    // Keep this exhaustive sweep on its own isolated page: clicking a control
-    // must exercise its real listener, but must not perturb the longer image
-    // editing scenario below.
+    // Keep the manifest presence check on an isolated page.  Do not use
+    // HTMLElement.click() or synthetic input/change events here: those do not
+    // prove that a user can operate a control, and (worse) used to count hidden
+    // or disabled controls as tested.  The behavioural assertions below use
+    // Playwright pointer/keyboard actions with their required application state.
     const inventoryPage = await browser.newPage();
     const inventoryErrors = [];
     inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
@@ -827,29 +829,15 @@ async function main() {
       await inventoryPage.setViewportSize({ width, height: 768 });
       await inventoryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
       await inventoryPage.evaluate((locale) => loadTranslations(locale), language);
-      const inventory = await inventoryPage.evaluate((contracts) => contracts.map(({ id, action, expected }) => {
+      const inventory = await inventoryPage.evaluate((contracts) => contracts.map(({ id }) => {
         const node = document.getElementById(id);
-        if (!node) return { id, action, expected, present: false, satisfied: false };
-        const hidden = node.hidden || node.offsetParent === null || getComputedStyle(node).visibility === "hidden";
-        const excluded = hidden || node.disabled || node.type === "hidden" || node.readOnly || Boolean(node.closest("[inert]"));
-        if (excluded) return { id, action, expected, present: true, unavailable: true, satisfied: true };
-        node.focus();
-        if (action === "click") {
-          node.click();
-        } else if (action === "change") {
-          node.dispatchEvent(new Event("input", { bubbles: true }));
-          node.dispatchEvent(new Event("change", { bubbles: true }));
-        } else {
-          node.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
-          node.dispatchEvent(new KeyboardEvent("keyup", { key: "Tab", bubbles: true }));
-        }
-        return { id, action, expected, present: true, unavailable: false, satisfied: true };
+        return { id, present: Boolean(node) };
       }), uiControlManifest);
-      assert.equal(inventory.every((control) => control.present && control.satisfied), true, `all manifest controls execute their ${language}/${width} interaction contract: ${JSON.stringify(inventory.filter((control) => !control.present || !control.satisfied))}`);
+      assert.equal(inventory.every((control) => control.present), true, `all manifest controls remain in the ${language}/${width} DOM: ${JSON.stringify(inventory.filter((control) => !control.present))}`);
       await inventoryPage.waitForTimeout(25);
     }
     await inventoryPage.close();
-    assert.deepEqual(inventoryErrors, [], `inventory interactions do not raise page errors: ${inventoryErrors.join("; ")}`);
+    assert.deepEqual(inventoryErrors, [], `inventory loading does not raise page errors: ${inventoryErrors.join("; ")}`);
     assert.equal(uiDynamicControlManifest.every((control) => control.selector && control.action && control.expected), true, "dynamic controls retain explicit action contracts");
     const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
     assert.equal(favicon.status(), 200, "favicon is delivered by the static server");
