@@ -126,6 +126,7 @@ class SavingMixin:
         divisor = _read_mosaic_divisor(divisor)
         rendered_path: Path | None = None
         output_path: Path | None = None
+        output_fingerprint: tuple[int, int] | None = None
         configured_output_directory: Path | None = None
         image_lock = self.image_io_lock(image_id)
         try:
@@ -201,6 +202,8 @@ class SavingMixin:
                     )
                     try:
                         write_rendered_copy(output_path, output)
+                        output_stat = output_path.stat()
+                        output_fingerprint = (output_stat.st_mtime_ns, output_stat.st_size)
                     except OSError as exc:
                         raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。", "save_write_failed") from exc
                     finally:
@@ -224,7 +227,7 @@ class SavingMixin:
                     if self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     save_token = self._issue_browser_save_token_unchecked(
-                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path,
+                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path, output_fingerprint,
                     )
                     rendered_path = None
             return BrowserSaveRender(output, record, current_revision, save_token, output_path)
@@ -240,6 +243,7 @@ class SavingMixin:
         if source_action not in {"keep", "overwrite", "deleted"}:
             raise ClientError("元画像の処理は keep、overwrite、deleted のいずれかで指定してください。", "input_invalid")
         rendered_path: Path | None = None
+        cleanup_paths: list[tuple[Path, tuple[int, int] | None]] = []
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
@@ -284,13 +288,15 @@ class SavingMixin:
                     if not token_allows_action(token_details):
                         raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
                     if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
-                        rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+                        self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
                         expired_token = True
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
                     if expired_token:
                         pass
                     elif catalog_invalid:
-                        rendered_path = self.browser_save_tokens.pop(save_token).rendered_path
+                        self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
@@ -301,12 +307,10 @@ class SavingMixin:
                         # failed commit can be retried safely.
 
                 if expired_token:
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
+                    self._unlink_browser_save_cleanup(cleanup_paths)
                     raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if catalog_invalid:
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
+                    self._unlink_browser_save_cleanup(cleanup_paths)
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
 
                 try:
@@ -323,11 +327,10 @@ class SavingMixin:
                             quarantine_path = record_snapshot.path.with_name(f".{record_snapshot.path.name}.mozarie-delete-{save_token}")
                             record_snapshot.path.replace(quarantine_path)
                 except ClientError:
-                    rendered_path = token_details.rendered_path
                     with self.lock:
-                        self.browser_save_tokens.pop(save_token, None)
-                    if rendered_path is not None:
-                        rendered_path.unlink(missing_ok=True)
+                        self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
+                    self._unlink_browser_save_cleanup(cleanup_paths)
                     raise
                 except OSError as exc:
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
@@ -415,15 +418,16 @@ class SavingMixin:
 
     def cancel_browser_save(self, image_id: str, revision: int, save_token: str) -> dict[str, Any]:
         """Cancel a still-pending token and remove only its own new copy."""
-        with self.lock:
-            details = self.browser_save_tokens.get(save_token)
-            if details is None or details.image_id != image_id or details.candidate_revision != revision:
-                return {"state": "unknown"}
-            self.browser_save_tokens.pop(save_token)
-        if details.rendered_path is not None:
-            details.rendered_path.unlink(missing_ok=True)
-        if details.output_path is not None:
-            details.output_path.unlink(missing_ok=True)
+        # Serialise claiming and cancellation with commit; once commit has
+        # detached a token, cancellation must never remove its successful copy.
+        with self.import_lock:
+            with self.lock:
+                details = self.browser_save_tokens.get(save_token)
+                if details is None or details.image_id != image_id or details.candidate_revision != revision:
+                    return {"state": "unknown"}
+                self._discard_browser_save_token_unchecked(save_token)
+                cleanup_paths = self._take_browser_save_cleanup_unchecked()
+        self._unlink_browser_save_cleanup(cleanup_paths)
         return {"state": "pending"}
 
 

@@ -2,6 +2,7 @@ import http.client
 import hashlib
 import base64
 import copy
+from dataclasses import replace
 from contextlib import nullcontext
 import io
 import json
@@ -6095,6 +6096,54 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "pending"})
             self.assertFalse(rendered.output_path.exists())
             self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "unknown"})
+
+    def test_browser_copy_token_cleanup_handles_expiry_catalog_shutdown_and_replaced_outputs(self):
+        def pending_copy() -> tuple[Any, str, int, Any]:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name); source = root / "source.png"; destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            return state, image_id, revision, state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+
+        state, image_id, revision, expired = pending_copy()
+        details = state.browser_save_tokens[expired.save_token]
+        state.browser_save_tokens[expired.save_token] = replace(details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1)
+        state.cleanup_expired_browser_save_tokens()
+        self.assertFalse(expired.output_path.exists(), "expiry removes the token-owned copy")
+
+        state, _image_id, _revision, catalog = pending_copy()
+        state.clear_catalog()
+        self.assertFalse(catalog.output_path.exists(), "catalog replacement removes a pending token-owned copy")
+
+        state, _image_id, _revision, shutdown = pending_copy()
+        state.shutdown()
+        self.assertFalse(shutdown.output_path.exists(), "shutdown removes a pending token-owned copy")
+
+        state, image_id, revision, replaced = pending_copy()
+        replaced.output_path.write_bytes(b"external replacement with another size")
+        self.assertEqual(state.cancel_browser_save(image_id, revision, replaced.save_token), {"state": "pending"})
+        self.assertTrue(replaced.output_path.exists(), "cancel does not delete a path replaced after Mozarie created its copy")
+
+    def test_committed_browser_copy_is_not_removed_by_a_late_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; destination = root / "copies"; destination.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(destination)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "unknown"})
+            self.assertTrue(rendered.output_path.exists(), "a committed copy remains available")
 
     def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
         raw = io.BytesIO()

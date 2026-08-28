@@ -181,6 +181,7 @@ class BrowserSaveToken:
     # Only a newly-created Mozarie copy is cancellable.  Existing source files
     # are never represented here.
     output_path: Path | None = None
+    output_fingerprint: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)

@@ -438,10 +438,29 @@ class CatalogMixin:
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
         if details is not None:
-            for path in (details.rendered_path, details.output_path):
-                if path is not None:
-                    self._pending_browser_save_cleanup.append(path)
+            if details.rendered_path is not None:
+                self._pending_browser_save_cleanup.append((details.rendered_path, None))
+            if details.output_path is not None:
+                self._pending_browser_save_cleanup.append((details.output_path, details.output_fingerprint))
         return details
+
+    @staticmethod
+    def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None]]) -> None:
+        """Remove detached token files without touching a replacement at its path."""
+        for path, fingerprint in paths:
+            if fingerprint is not None:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if (stat.st_mtime_ns, stat.st_size) != fingerprint:
+                    continue
+            path.unlink(missing_ok=True)
+
+    def _take_browser_save_cleanup_unchecked(self) -> list[tuple[Path, tuple[int, int] | None]]:
+        paths = self._pending_browser_save_cleanup
+        self._pending_browser_save_cleanup = []
+        return paths
 
     def _clear_browser_save_tokens_unchecked(self) -> None:
         for token in tuple(self.browser_save_tokens):
@@ -465,19 +484,14 @@ class CatalogMixin:
         """Cheap polling-path expiry: detach under lock, unlink afterwards."""
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
         with self.lock:
-            expired_paths = self._pending_browser_save_cleanup
-            self._pending_browser_save_cleanup = []
             for token, details in tuple(self.browser_save_tokens.items()):
                 if details.issued_at < cutoff:
-                    self.browser_save_tokens.pop(token)
-                    for path in (details.rendered_path, details.output_path):
-                        if path is not None:
-                            expired_paths.append(path)
+                    self._discard_browser_save_token_unchecked(token)
             for token, receipt in tuple(self.browser_save_receipts.items()):
                 if receipt.completed_at < cutoff:
                     self.browser_save_receipts.pop(token, None)
-        for path in expired_paths:
-            path.unlink(missing_ok=True)
+            expired_paths = self._take_browser_save_cleanup_unchecked()
+        self._unlink_browser_save_cleanup(expired_paths)
 
     def _issue_browser_save_token_unchecked(
         self,
@@ -487,6 +501,7 @@ class CatalogMixin:
         catalog_generation: int,
         rendered_path: Path | None,
         output_path: Path | None = None,
+        output_fingerprint: tuple[int, int] | None = None,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
@@ -498,6 +513,7 @@ class CatalogMixin:
             issued_at=time.monotonic(),
             rendered_path=rendered_path,
             output_path=output_path,
+            output_fingerprint=output_fingerprint,
         )
         return token
 

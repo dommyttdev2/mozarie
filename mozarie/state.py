@@ -108,7 +108,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
-        self._pending_browser_save_cleanup: list[Path] = []
+        self._pending_browser_save_cleanup: list[tuple[Path, tuple[int, int] | None]] = []
         self.output_destination_lock = threading.Lock()
         # Windows native dialogs are process-modal. Keep folder and model
         # pickers mutually exclusive without blocking unrelated work.
