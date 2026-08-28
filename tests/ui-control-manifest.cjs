@@ -23,24 +23,46 @@ galleryFilter brushSize divisor bucketTolerance confidence detectParallelism dia
 `.trim().split(/\s+/));
 
 function interactionFor(id) {
-  if (keyboardIds.has(id)) return { action: "keyboard", expected: "accepts a keyboard interaction when its fixture state makes it available" };
-  if (changeIds.has(id)) return { action: "change", expected: "accepts input/change when its fixture state makes it available" };
-  return { action: "click", expected: "accepts activation when its fixture state makes it available" };
+  const action = keyboardIds.has(id) ? "keyboard" : changeIds.has(id) ? "change" : "click";
+  let resultKind = "dom";
+  let scenario = "workspace";
+  if (/^(pickFolder|folderPath|loadFolderButton|pickImages|pickFolderFiles)/.test(id)) {
+    resultKind = "dialog"; scenario = "import";
+  } else if (/^(detect|confidence|boundaryDetectButton|boundaryCancelButton)/.test(id)) {
+    resultKind = "api"; scenario = "detection";
+  } else if (/^(save|apply|deleteOriginal|removeAfterSave|chooseOutputDirectoryButton)/.test(id)) {
+    resultKind = "api"; scenario = "save";
+  } else if (/^(settings|modelDownload|modelHelp)/.test(id)) {
+    resultKind = /^settings(?:Language|Port|DefaultOutputDirectory|ImportParallelism|SaveParallelism|OpenBrowser|Provider|GpuDevice|TargetModel|Ntd11|Sensitive|Precision|Sam|Hand|Fluid|ApplyColor|ExcludeColor|Opacity|MosaicPreview|ExcludeForcedDefault|ShortcutsEnabled)/.test(id) ? "value" : "dialog";
+    scenario = "settings";
+  } else if (/^(brush|mosaicEraser|eraser|excludeEraser|boundaryTool|rectangleTool|polygonTool|boundaryBrushTool|bucketTool|excludeBucketTool|fitButton|undoButton|redoButton|mosaicPreviewButton|brushSize|divisor|bucketTolerance)/.test(id)) {
+    resultKind = "canvas"; scenario = "editor";
+  } else if (/^(overview|closeOverview|batchMode|overviewQuery|overviewFolder|selection)/.test(id)) {
+    resultKind = "navigation"; scenario = "overview";
+  } else if (/^(confirm|errorDialog)/.test(id)) {
+    resultKind = "dialog"; scenario = "confirmation";
+  } else if (/^(processing)/.test(id)) {
+    resultKind = "api"; scenario = "processing";
+  } else if (/^(previousImage|nextImage|removeAndNext|hideAndNext|reviewAndNext|clearAllMasks|clearCatalog|galleryFilter|batchMore|collapseGallery)/.test(id)) {
+    resultKind = "dom"; scenario = "gallery";
+  }
+  const expected = `${resultKind} result is asserted by the ${scenario} fixture scenario`;
+  return { action, resultKind, scenario, expected };
 }
 
 module.exports = {
   controls: ids.map((id) => ({ id, ...interactionFor(id) })),
   dynamicControls: [
-    { selector: "[data-candidate-batch]", action: "click", expected: "selects the candidate batch" },
-    { selector: "[data-candidate-display-toggle]", action: "click", expected: "changes candidate display visibility" },
-    { selector: "[data-candidate-effective-toggle]", action: "click", expected: "changes effective candidate visibility" },
-    { selector: "[data-overview-filter]", action: "change", expected: "filters the overview fixture" },
-    { selector: "[data-selection-action]", action: "click", expected: "applies an isolated selection action" },
-    { selector: ".gallery-item", action: "click", expected: "selects the isolated gallery image" },
-    { selector: ".overview-item", action: "click", expected: "selects the isolated overview image" },
-    { selector: "[data-model-download]", action: "click", expected: "opens the model download dialog" },
-    { selector: "[data-model-help]", action: "click", expected: "opens model help" },
-    { selector: "[data-model-picker]", action: "click", expected: "uses the picker fixture" },
-    { selector: "input[name=settingsSamVariant]", action: "change", expected: "selects the SAM variant" },
+    { selector: "[data-candidate-batch]", action: "click", resultKind: "dom", scenario: "candidate", expected: "selects the candidate batch" },
+    { selector: "[data-candidate-display-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes candidate display visibility" },
+    { selector: "[data-candidate-effective-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes effective candidate visibility" },
+    { selector: "[data-overview-filter]", action: "change", resultKind: "navigation", scenario: "overview", expected: "filters the overview fixture" },
+    { selector: "[data-selection-action]", action: "click", resultKind: "api", scenario: "overview", expected: "applies an isolated selection action" },
+    { selector: ".gallery-item", action: "click", resultKind: "navigation", scenario: "gallery", expected: "selects the isolated gallery image" },
+    { selector: ".overview-item", action: "click", resultKind: "navigation", scenario: "overview", expected: "selects the isolated overview image" },
+    { selector: "[data-model-download]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens the model download dialog" },
+    { selector: "[data-model-help]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens model help" },
+    { selector: "[data-model-picker]", action: "click", resultKind: "dialog", scenario: "settings", expected: "uses the picker fixture" },
+    { selector: "input[name=settingsSamVariant]", action: "change", resultKind: "value", scenario: "settings", expected: "selects the SAM variant" },
   ],
 };
