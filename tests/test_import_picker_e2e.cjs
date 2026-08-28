@@ -1067,15 +1067,20 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
   await click("boundaryCancelButton");
   await click("detectCurrentButton");
-  await page.waitForFunction(() => document.querySelector("#processingDialog").open);
-  await click("processingCancelButton"); await page.waitForTimeout(50); await closeDialogs();
+  await click("processingCancelButton");
+  await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
+  await closeDialogs();
   await setupFixture();
   await click("detectAllButton");
   await input("detectParallelism", "1"); await input("dialogTargetPenis", true); await input("dialogTargetPussy", true); await input("detectConfidenceRange", "0.52"); await input("detectConfidenceNumber", "0.53");
   await click("detectCancelButton"); await click("detectAllButton"); await click("detectStartButton");
-  await page.waitForFunction(() => document.querySelector("#processingDialog").open);
-  await click("processingPauseButton"); await click("processingPauseButton"); await click("processingCancelButton");
-  await page.waitForTimeout(50); await closeDialogs(); await setupFixture();
+  await click("processingPauseButton");
+  await page.waitForFunction(() => state.processing?.state === "paused");
+  await click("processingPauseButton");
+  await page.waitForFunction(() => state.processing?.state === "running");
+  await click("processingCancelButton");
+  await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
+  await closeDialogs(); await setupFixture();
 
   // Navigation and context menu use their actual selected-image handlers.
   const galleryBefore = await snapshot(); await page.locator('.gallery-item[data-id="sample-two"]').click();
@@ -2470,9 +2475,11 @@ async function main() {
       window.showDirectoryPicker = async () => { window.__ledgerPickers.directory += 1; return { async *values() {} }; };
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { window.__ledgerClipboardWrites += 1; } } });
     });
+    holdDetection(true);
     try {
       await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest);
     } finally {
+      holdDetection(false);
       await ledgerPage.close();
     }
 
