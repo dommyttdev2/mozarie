@@ -75,6 +75,54 @@ class ModelDownloadTests(unittest.TestCase):
             with self.assertRaises(ModelDownloadCancelled): manager._download(entry)
         self.assertFalse(entry.destination(root).exists())
 
+    def test_partial_hash_check_reports_checking_and_verifying_progress(self) -> None:
+        payload = b"a" * (2 * 1024 * 1024 + 3)
+        entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        temporary = entry.destination(root).with_name(".file.onnx.part")
+        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:1024 * 1024])
+        updates: list[dict] = []
+        original_set = manager._set
+
+        def observe(**changes):
+            updates.append(changes); original_set(**changes)
+
+        with patch.object(manager, "_set", side_effect=observe), \
+                patch("mozarie.model_downloads.build_opener", return_value=_Opener(_Response(payload[1024 * 1024:], content_length=str(len(payload) - 1024 * 1024), status=206, content_range=f"bytes {1024 * 1024}-{len(payload) - 1}/{len(payload)}"))):
+            manager._download(entry)
+        self.assertTrue(any(update.get("phase") == "checking" and update.get("received") == 1024 * 1024 for update in updates))
+        self.assertTrue(any(update.get("phase") == "verifying" and update.get("received") == len(payload) for update in updates))
+
+    def test_cancelling_during_partial_hash_check_keeps_the_resume_file(self) -> None:
+        payload = b"a" * (2 * 1024 * 1024 + 3)
+        entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        temporary = entry.destination(root).with_name(".file.onnx.part")
+        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:2 * 1024 * 1024])
+        original_set = manager._set
+
+        def cancel_after_first_hash_chunk(**changes):
+            original_set(**changes)
+            if changes.get("phase") == "checking" and changes.get("received") == 1024 * 1024:
+                manager._cancel.set()
+
+        with patch.object(manager, "_set", side_effect=cancel_after_first_hash_chunk):
+            with self.assertRaises(ModelDownloadCancelled):
+                manager._download(entry)
+        self.assertTrue(temporary.is_file())
+        self.assertFalse(entry.destination(root).exists())
+
+    def test_insufficient_disk_space_stops_before_network_or_temp_write(self) -> None:
+        payload = b"model"; entry = self.entry(payload)
+        root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
+        with patch("mozarie.model_downloads.shutil.disk_usage", return_value=type("Disk", (), {"free": len(payload) - 1})()), \
+                patch("mozarie.model_downloads.build_opener") as opener:
+            with self.assertRaises(OSError):
+                manager._download(entry)
+        opener.assert_not_called()
+        self.assertFalse(entry.destination(root).exists())
+        self.assertFalse(entry.destination(root).with_name(".file.onnx.part").exists())
+
     def test_download_resumes_a_partial_file_after_a_valid_range_response(self) -> None:
         payload = b"model-data"; entry = self.entry(payload)
         root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
