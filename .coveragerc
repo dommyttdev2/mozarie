@@ -1,6 +1,10 @@
 [run]
 branch = True
-source = mozarie
+source =
+    mozarie
+    server
+    updater
+    setup_gpu_check
 omit =
     tests/*
 

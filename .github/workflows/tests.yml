@@ -32,6 +32,9 @@ jobs:
       - if: always()
         run: python -m coverage xml
       - if: always()
+        run: >-
+          python -c "import xml.etree.ElementTree as e; n={x.get('filename').replace('\\','/') for x in e.parse('coverage.xml').iter('class')}; m={'server.py','updater.py','setup_gpu_check.py'}-n; assert not m, f'missing root coverage: {sorted(m)}'"
+      - if: always()
         uses: actions/upload-artifact@v6
         with:
           name: backend-coverage
