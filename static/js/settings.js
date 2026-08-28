@@ -420,7 +420,8 @@ function renderModelDownload(job) {
     sam_vit_b: "SAM vit_b", sam_vit_l: "SAM vit_l", sam_vit_h: "SAM vit_h",
     hand_detection: t("settings.handModel"), hand_segmentation: t("settings.handSegmentationModel"),
   };
-  $("#modelDownloadMessage").textContent = job.current ? t("modelDownload.current", { model: labels[job.current] || job.current, completed: job.completed || 0, total: job.total || 1 }) : "";
+  const phase = job.phase ? t(`modelDownload.phase_${job.phase}`) : "";
+  $("#modelDownloadMessage").textContent = job.current ? `${phase}${phase ? " — " : ""}${t("modelDownload.current", { model: labels[job.current] || job.current, completed: job.completed || 0, total: job.total || 1 })}` : "";
   if (job.state === "failed") { status.textContent = ""; status.classList.remove("error"); showUserError({ code: job.errorCode || "internal_error" }, $("#modelDownloadClose")); }
   else if (job.state === "cancelled") { status.textContent = t("modelDownload.cancelled"); status.classList.remove("error"); }
   else if (job.state === "complete") { status.textContent = t("modelDownload.complete"); status.classList.remove("error"); }

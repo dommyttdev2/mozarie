@@ -13,6 +13,7 @@ if errorlevel 1 goto :setup_required
 if defined MOZARIE_PYTHON goto :start
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
 :start
+echo [Mozarie] Preparing Mozarie...
 "%PYTHON%" "%APP_DIR%server.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 if "%EXIT_CODE%"=="0" exit /b 0
