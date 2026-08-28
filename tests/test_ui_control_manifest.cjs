@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { controls, dynamicControls } = require("./ui-control-manifest.cjs");
+const { controls, dynamicControls, scenarioContracts } = require("./ui-control-manifest.cjs");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
 const resultKinds = new Set(["api", "canvas", "dialog", "disabled", "dom", "download", "history", "navigation", "value"]);
@@ -23,5 +23,14 @@ for (const control of dynamicControls) {
   assert.ok(resultKinds.has(control.resultKind), `unknown result kind for ${control.selector}`);
   assert.ok(scenarios.has(control.scenario), `unknown scenario for ${control.selector}`);
   assert.ok(control.expected, "dynamic controls need an expected result");
+}
+for (const [scenario, contract] of Object.entries(scenarioContracts)) {
+  assert.ok(scenarios.has(scenario), `unknown scenario contract ${scenario}`);
+  assert.ok(contract.controls.length, `${scenario} needs controls`);
+  assert.ok(contract.assertions.length, `${scenario} needs concrete assertions`);
+}
+for (const control of [...controls, ...dynamicControls]) {
+  const key = control.id || control.selector;
+  assert.ok(scenarioContracts[control.scenario]?.controls.includes(key), `${key} must be registered in its scenario`);
 }
 console.log(`test_ui_control_manifest: ${controls.length} id controls and ${dynamicControls.length} dynamic contracts`);

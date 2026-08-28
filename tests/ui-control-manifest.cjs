@@ -50,19 +50,31 @@ function interactionFor(id) {
   return { action, resultKind, scenario, expected };
 }
 
+const controls = ids.map((id) => ({ id, ...interactionFor(id) }));
+const dynamicControls = [
+  { selector: "[data-candidate-batch]", action: "click", resultKind: "dom", scenario: "candidate", expected: "selects the candidate batch" },
+  { selector: "[data-candidate-display-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes candidate display visibility" },
+  { selector: "[data-candidate-effective-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes effective candidate visibility" },
+  { selector: "[data-overview-filter]", action: "change", resultKind: "navigation", scenario: "overview", expected: "filters the overview fixture" },
+  { selector: "[data-selection-action]", action: "click", resultKind: "api", scenario: "overview", expected: "applies an isolated selection action" },
+  { selector: ".gallery-item", action: "click", resultKind: "navigation", scenario: "gallery", expected: "selects the isolated gallery image" },
+  { selector: ".overview-item", action: "click", resultKind: "navigation", scenario: "overview", expected: "selects the isolated overview image" },
+  { selector: "[data-model-download]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens the model download dialog" },
+  { selector: "[data-model-help]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens model help" },
+  { selector: "[data-model-picker]", action: "click", resultKind: "dialog", scenario: "settings", expected: "uses the picker fixture" },
+  { selector: "input[name=settingsSamVariant]", action: "change", resultKind: "value", scenario: "settings", expected: "selects the SAM variant" },
+];
+
+const scenarioContracts = Object.fromEntries([...new Set([...controls, ...dynamicControls].map((control) => control.scenario))].map((scenario) => {
+  const scenarioControls = [...controls, ...dynamicControls].filter((control) => control.scenario === scenario);
+  return [scenario, {
+    controls: scenarioControls.map((control) => control.id || control.selector),
+    assertions: [...new Set(scenarioControls.map((control) => `${control.resultKind}:${control.expected}`))],
+  }];
+}));
+
 module.exports = {
-  controls: ids.map((id) => ({ id, ...interactionFor(id) })),
-  dynamicControls: [
-    { selector: "[data-candidate-batch]", action: "click", resultKind: "dom", scenario: "candidate", expected: "selects the candidate batch" },
-    { selector: "[data-candidate-display-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes candidate display visibility" },
-    { selector: "[data-candidate-effective-toggle]", action: "click", resultKind: "canvas", scenario: "candidate", expected: "changes effective candidate visibility" },
-    { selector: "[data-overview-filter]", action: "change", resultKind: "navigation", scenario: "overview", expected: "filters the overview fixture" },
-    { selector: "[data-selection-action]", action: "click", resultKind: "api", scenario: "overview", expected: "applies an isolated selection action" },
-    { selector: ".gallery-item", action: "click", resultKind: "navigation", scenario: "gallery", expected: "selects the isolated gallery image" },
-    { selector: ".overview-item", action: "click", resultKind: "navigation", scenario: "overview", expected: "selects the isolated overview image" },
-    { selector: "[data-model-download]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens the model download dialog" },
-    { selector: "[data-model-help]", action: "click", resultKind: "dialog", scenario: "settings", expected: "opens model help" },
-    { selector: "[data-model-picker]", action: "click", resultKind: "dialog", scenario: "settings", expected: "uses the picker fixture" },
-    { selector: "input[name=settingsSamVariant]", action: "change", resultKind: "value", scenario: "settings", expected: "selects the SAM variant" },
-  ],
+  controls,
+  dynamicControls,
+  scenarioContracts,
 };
