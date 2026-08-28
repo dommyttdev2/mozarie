@@ -2,6 +2,7 @@ import http.client
 import hashlib
 import base64
 import copy
+from contextlib import nullcontext
 import io
 import json
 import logging
@@ -1183,9 +1184,12 @@ class MozarieTests(unittest.TestCase):
     def test_main_configures_logging_and_schedules_one_browser_open(self):
         fake_server = Mock()
         fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = False
         with patch("server.logging.basicConfig") as basic_config, \
+               patch("server.MaintenanceLock", return_value=nullcontext()), \
                patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
                patch("server._schedule_browser_open") as schedule_browser, \
+               patch("subprocess.Popen") as popen, \
                patch.object(state_module.STATE, "shutdown") as shutdown, \
                patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
@@ -1196,22 +1200,44 @@ class MozarieTests(unittest.TestCase):
         schedule_browser.assert_called_once_with("http://127.0.0.1:9876")
         fake_server.server_close.assert_called_once_with()
         shutdown.assert_called_once_with()
+        popen.assert_not_called()
 
     def test_main_uses_saved_port_and_respects_open_browser_setting(self):
         fake_server = Mock(); fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = False
         original_settings = state_module.STATE.settings
         state_module.STATE.settings = {**original_settings, "general": {**original_settings["general"], "port": 9123, "open_browser": False}}
         try:
             with patch("server.ThreadingHTTPServer", return_value=fake_server) as server_class, \
+                   patch("server.MaintenanceLock", return_value=nullcontext()), \
                    patch("server._schedule_browser_open") as schedule_browser, \
+                   patch("subprocess.Popen") as popen, \
                    patch.object(state_module.STATE, "shutdown"), \
                    patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
                    patch.object(sys, "argv", ["server.py"]):
                 server_entry.main()
             server_class.assert_called_once_with(("127.0.0.1", 9123), MosaicHandler)
             schedule_browser.assert_not_called()
+            popen.assert_not_called()
         finally:
             state_module.STATE.settings = original_settings
+
+    def test_main_launches_update_only_after_the_server_requests_it(self):
+        fake_server = Mock()
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        fake_server.mozarie_update_requested = True
+        with patch("server.ThreadingHTTPServer", return_value=fake_server), \
+                patch("server.MaintenanceLock", return_value=nullcontext()), \
+                patch("server._schedule_browser_open"), \
+                patch("subprocess.Popen") as popen, \
+                patch.object(state_module.STATE, "shutdown"), \
+                patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            server_entry.main()
+        popen.assert_called_once_with(
+            [str(server_entry.APP_DIR / "update.bat")], cwd=str(server_entry.APP_DIR),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
 
     def test_main_reports_bind_error_without_traceback(self):
         with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
