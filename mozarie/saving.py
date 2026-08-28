@@ -224,7 +224,7 @@ class SavingMixin:
                     if self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     save_token = self._issue_browser_save_token_unchecked(
-                        record, current_revision, source_fingerprint, catalog_generation, rendered_path,
+                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path,
                     )
                     rendered_path = None
             return BrowserSaveRender(output, record, current_revision, save_token, output_path)
@@ -400,6 +400,32 @@ class SavingMixin:
                 self.invalidate_sam_image(image_id)
                 return {"cleared": cleared, "stale": not cleared, "deleted": deleted}
 
+    def browser_save_status(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
+        """Report only the finite state of one opaque save token."""
+        with self.lock:
+            receipt = self.browser_save_receipts.get(save_token)
+            if receipt is not None:
+                if receipt.image_id == image_id and receipt.candidate_revision == revision and receipt.source_action == source_action:
+                    return {"state": "committed", "cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted}
+                return {"state": "unknown"}
+            details = self.browser_save_tokens.get(save_token)
+            if details is not None and details.image_id == image_id and details.candidate_revision == revision:
+                return {"state": "pending"}
+        return {"state": "unknown"}
+
+    def cancel_browser_save(self, image_id: str, revision: int, save_token: str) -> dict[str, Any]:
+        """Cancel a still-pending token and remove only its own new copy."""
+        with self.lock:
+            details = self.browser_save_tokens.get(save_token)
+            if details is None or details.image_id != image_id or details.candidate_revision != revision:
+                return {"state": "unknown"}
+            self.browser_save_tokens.pop(save_token)
+        if details.rendered_path is not None:
+            details.rendered_path.unlink(missing_ok=True)
+        if details.output_path is not None:
+            details.output_path.unlink(missing_ok=True)
+        return {"state": "pending"}
+
 
     def _apply_worker(
         self,
@@ -483,6 +509,10 @@ class SavingMixin:
                     except Exception:
                         if source_stage is not None:
                             source_stage.rollback()
+                        # A copy is not committed until its workspace update
+                        # succeeds.  Remove it so retry keeps the same name.
+                        if copy_to_default:
+                            output_path.unlink(missing_ok=True)
                         raise
                     if not copy_to_default:
                         source_stage.finalize()

@@ -365,7 +365,8 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken: response.saveToken,
           }); }
           catch (error) {
-            if (sourceChanged && isDefinitiveCommitRejection(error)) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (error.saveState === "pending") await cancelBrowserSave(entry, response.saveToken);
+            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -384,7 +385,8 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           let committed;
           try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
           catch (error) {
-            if (isDefinitiveCommitRejection(error)) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
+            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -489,9 +491,21 @@ async function commitBrowserSaveWithRetry(payload) {
       return await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
     } catch (error) {
       const retryable = !error?.status || [408, 429, 502, 503, 504].includes(error.status);
-      if (!retryable || attempt) throw error;
+      if (!retryable || attempt) {
+        if (!retryable) throw error;
+        const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload) }).catch(() => ({ state: "unknown" }));
+        if (status.state === "committed") return status;
+        error.saveState = status.state || "unknown";
+        throw error;
+      }
     }
   }
+}
+
+async function cancelBrowserSave(entry, saveToken) {
+  await api("/api/save/cancel", { method: "POST", body: JSON.stringify({
+    imageId: entry.imageId, candidateRevision: entry.candidateRevision, saveToken,
+  }) }).catch(() => {});
 }
 
 function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.status) && error.status >= 400 && error.status < 500; }

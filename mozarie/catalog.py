@@ -437,8 +437,10 @@ class CatalogMixin:
 
     def _discard_browser_save_token_unchecked(self, token: str) -> BrowserSaveToken | None:
         details = self.browser_save_tokens.pop(token, None)
-        if details is not None and details.rendered_path is not None:
-            self._pending_browser_save_cleanup.append(details.rendered_path)
+        if details is not None:
+            for path in (details.rendered_path, details.output_path):
+                if path is not None:
+                    self._pending_browser_save_cleanup.append(path)
         return details
 
     def _clear_browser_save_tokens_unchecked(self) -> None:
@@ -468,8 +470,9 @@ class CatalogMixin:
             for token, details in tuple(self.browser_save_tokens.items()):
                 if details.issued_at < cutoff:
                     self.browser_save_tokens.pop(token)
-                    if details.rendered_path is not None:
-                        expired_paths.append(details.rendered_path)
+                    for path in (details.rendered_path, details.output_path):
+                        if path is not None:
+                            expired_paths.append(path)
             for token, receipt in tuple(self.browser_save_receipts.items()):
                 if receipt.completed_at < cutoff:
                     self.browser_save_receipts.pop(token, None)
@@ -483,6 +486,7 @@ class CatalogMixin:
         source_fingerprint: tuple[int, int],
         catalog_generation: int,
         rendered_path: Path | None,
+        output_path: Path | None = None,
     ) -> str:
         self._discard_expired_browser_save_tokens_unchecked()
         token = secrets.token_urlsafe(32)
@@ -493,6 +497,7 @@ class CatalogMixin:
             catalog_generation=catalog_generation,
             issued_at=time.monotonic(),
             rendered_path=rendered_path,
+            output_path=output_path,
         )
         return token
 
