@@ -3044,6 +3044,52 @@ class MozarieTests(unittest.TestCase):
             models = state._load_detection_models()
         self.assertEqual([source for source, _model in models.auxiliaries], ["ntd11", "sensitive"])
 
+    def test_model_logic_matrix_uses_only_enabled_models(self):
+        """48 configuration rows cover runtime, mode and optional-model switches."""
+        hand_modes = {
+            "off": (False, False),
+            "boxes": (True, False),
+            "segmentation": (True, True),
+        }
+        rows = [
+            (provider, mode, ntd11, sensitive, hand_mode)
+            for provider in ("cpu", "gpu")
+            for mode in ("standard", "high_precision")
+            for ntd11 in (False, True)
+            for sensitive in (False, True)
+            for hand_mode in hand_modes
+        ]
+        self.assertEqual(len(rows), 48)
+        for index, (provider, mode, ntd11, sensitive, hand_mode) in enumerate(rows):
+            for fluid_enabled in (False, True):
+                with self.subTest(provider=provider, mode=mode, ntd11=ntd11, sensitive=sensitive, hand=hand_mode, fluid=fluid_enabled):
+                    hand_enabled, handseg_enabled = hand_modes[hand_mode]
+                    state = self.new_state()
+                    state.settings["models"].update({
+                        "provider": provider, "gpu_device": 0,
+                        "ntd11_enabled": ntd11, "sensitive_enabled": sensitive,
+                        "hand_detection_enabled": hand_enabled, "hand_segmentation_enabled": handseg_enabled,
+                    })
+                    state.settings["detection"].update({"mode": mode, "fluid_exclusion_enabled": fluid_enabled})
+                    target = Mock(name=f"target-{index}")
+                    auxiliaries = [Mock(name=f"aux-{index}-0"), Mock(name=f"aux-{index}-1")]
+                    hand = Mock(name=f"hand-{index}")
+                    with patch.object(state, "_configured_model_path", side_effect=lambda key, _label: Path(f"{key}.onnx")), \
+                            patch.object(detection_module, "TargetSegmenter", return_value=target) as target_constructor, \
+                            patch.object(detection_module, "GenericYoloSegmenter", side_effect=auxiliaries) as auxiliary_constructor, \
+                            patch.object(detection_module, "HandDetector", return_value=hand) as hand_constructor:
+                        models = state._load_detection_models()
+                        if hand_enabled:
+                            self.assertIs(state._ensure_hand_model(models), hand)
+                    self.assertIs(models.target, target)
+                    self.assertEqual([source for source, _model in models.auxiliaries], [
+                        source for source, enabled in (("ntd11", ntd11), ("sensitive", sensitive)) if enabled
+                    ])
+                    target_constructor.assert_called_once_with(Path("target_segmentation.onnx"), device=provider, gpu_device=0)
+                    self.assertEqual(auxiliary_constructor.call_count, int(ntd11) + int(sensitive))
+                    self.assertEqual(hand_constructor.call_count, int(hand_enabled))
+                    self.assertIsNone(state.hand_segmentation_predictor)
+
     def test_disabled_optional_models_skip_status_validation(self):
         state = self.new_state()
         state.settings["models"].update({
