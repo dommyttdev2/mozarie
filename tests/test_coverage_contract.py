@@ -12,4 +12,3 @@ class CoverageContractTests(unittest.TestCase):
         sources = {line.strip() for line in config["run"]["source"].splitlines() if line.strip()}
         self.assertTrue(config.getboolean("run", "branch"))
         self.assertTrue({"mozarie", "server", "updater", "setup_gpu_check"}.issubset(sources))
-
