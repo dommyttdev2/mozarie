@@ -1881,8 +1881,13 @@ async function main() {
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
     assert.deepEqual(detectRequests[0].targetClasses, ["penis"], "current-image detection uses the right-pane targets");
     assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
-
     resetJob();
+    await page.locator("#detectTargetPenis").click();
+    await page.locator("#detectCurrentButton").click();
+    await page.waitForTimeout(50);
+    assert.equal(detectRequests.length, 1, "current-image detection must not start without a selected target");
+    assert.match(await page.locator("#detectionTargetValidation").textContent(), /penis|pussy/, "current-image detection explains which target to select");
+
     await page.reload({ waitUntil: "networkidle" });
     const persistedDetection = await page.evaluate(() => structuredClone(state.settings.detection));
     failNextSettingsSave();

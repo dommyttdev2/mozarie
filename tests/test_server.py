@@ -6083,6 +6083,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state._candidate_revision(image_id), revision)
             self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertIn(token, state.browser_save_tokens)
+            self.assertNotIn(token, state.browser_save_claims)
             self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
             self.assertEqual(state._candidate_revision(image_id), revision + 1)
             with state.workspace_store._connect() as db:
