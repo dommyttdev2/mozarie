@@ -12,6 +12,7 @@ CPU_MESSAGE = "[Mozarie] GPU unavailable. Switched the detection runtime to CPU;
 CPU_SAVE_FAILED_MESSAGE = "[Mozarie] GPU unavailable, but switching to CPU could not be saved. Setup stopped; check config/local.json and run setup again. / GPUは利用できず、CPUへの切替も保存できませんでした。config/local.jsonを確認して、setupをもう一度実行してください。"
 RUNTIME_IMPORT_FAILED_MESSAGE = "[Mozarie] Required packages could not be loaded. Setup stopped; run setup.bat again. / 必要なパッケージを読み込めませんでした。setup.bat をもう一度実行してください。"
 CPU_RUNTIME_FAILED_MESSAGE = "[Mozarie] The CPU detection runtime could not start. Setup stopped; run setup.bat again. / CPUで検出処理を開始できませんでした。setup.bat をもう一度実行してください。"
+SETTINGS_READ_FAILED_MESSAGE = "[Mozarie] Settings could not be read. Setup stopped; check config/local.json and run setup.bat again. / 設定を読み込めませんでした。config/local.json を確認してから setup.bat を実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -72,7 +73,7 @@ def main() -> int:
         settings = SettingsStore(APP_DIR).load()
         device = int(settings["models"].get("gpu_device", 0))
     except Exception:
-        print(RUNTIME_IMPORT_FAILED_MESSAGE)
+        print(SETTINGS_READ_FAILED_MESSAGE)
         return 1
     try:
         runtime = _runtime_modules()

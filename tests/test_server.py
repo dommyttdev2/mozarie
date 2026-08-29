@@ -6493,6 +6493,42 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertTrue(rendered.output_path.exists())
 
+    def test_shutdown_waits_for_a_claimed_copy_delete_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; copies = root / "copies"; copies.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(copies)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            claimed = threading.Event(); release = threading.Event(); shutdown_done = threading.Event(); outcome = {}
+            original_assert = state._assert_record_stat_matches
+
+            def block_assert(*args, **kwargs):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+
+            def commit():
+                try:
+                    outcome["value"] = state.commit_browser_save(image_id, revision, rendered.save_token, "deleted")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
+                commit_thread = threading.Thread(target=commit); commit_thread.start()
+                self.assertTrue(claimed.wait(2))
+                shutdown_thread = threading.Thread(target=lambda: (state.shutdown(), shutdown_done.set())); shutdown_thread.start()
+                self.assertFalse(shutdown_done.wait(.1))
+                self.assertTrue(rendered.output_path.exists())
+                release.set(); commit_thread.join(2); shutdown_thread.join(2)
+
+            self.assertNotIn("error", outcome)
+            self.assertTrue(outcome["value"]["deleted"])
+            self.assertTrue(shutdown_done.is_set())
+            self.assertTrue(rendered.output_path.exists())
+
     def test_browser_save_catalog_mismatch_removes_rendered_file(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"

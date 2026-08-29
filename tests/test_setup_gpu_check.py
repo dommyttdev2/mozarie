@@ -79,6 +79,15 @@ class SetupGpuCheckTests(unittest.TestCase):
         store.save.assert_not_called()
         self.assertIn("Required packages could not be loaded", output.getvalue())
 
+    def test_settings_failure_has_its_own_recovery_message(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(side_effect=ValueError("bad settings")))
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("Settings could not be read", output.getvalue())
+
     def test_cpu_smoke_failure_stops_without_changing_the_provider(self):
         failed_cpu = SimpleNamespace(
             disable_fallback=lambda: None,

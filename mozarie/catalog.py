@@ -377,6 +377,12 @@ class CatalogMixin:
 
     def shutdown(self) -> None:
         """Stop background work before releasing the session import directory."""
+        # Browser-save commits retain this lock from token claim through their
+        # durable commit.  Do not discard a claimed copy while one is running.
+        with self.import_lock:
+            self._shutdown_locked()
+
+    def _shutdown_locked(self) -> None:
         with self.lock:
             worker = self.worker_thread
             control = self.job_control
