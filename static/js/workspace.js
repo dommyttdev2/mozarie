@@ -3,6 +3,7 @@
 state.workspaceDraftChains = new Map();
 state.workspaceDraftTimers = new Map();
 state.workspaceMutationErrors = new Map();
+state.workspaceFlagPending = new Map();
 
 function queueWorkspaceMutation(imageId, send, rememberFailure = true) {
   const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();

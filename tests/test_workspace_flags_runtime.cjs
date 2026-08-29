@@ -29,6 +29,19 @@ vm.runInNewContext(`${workspaceSource}\n${coreFlags}\nglobalThis.flagsTest = { s
 (async () => {
   const settleQueue = () => new Promise((resolve) => setTimeout(resolve, 0));
   const image = state.images[0];
+  assert.equal(await context.flagsTest.setReviewed(image, false), true, "an already-unreviewed image is accepted without a write");
+  assert.equal(requests.length, 0, "an unchanged review flag sends no request");
+
+  image.reviewed = true; state.reviewedPaths.add("one.png");
+  const repeatedClear = Array.from({ length: 20 }, () => context.flagsTest.setReviewed(image, false));
+  await settleQueue();
+  assert.equal(requests.length, 1, "repeated same flag changes share one pending write");
+  assert.equal(new Set(repeatedClear).size, 1, "repeated same flag changes share one promise");
+  pending.shift().resolve({ reviewed: false, hidden: false });
+  await Promise.all(repeatedClear);
+  assert.equal(context.flagsTest.isReviewed(image), false, "the shared pending write updates the committed review state");
+
+  requests.length = 0;
   const first = context.flagsTest.setReviewed(image, true);
   const second = context.flagsTest.setReviewed(image, false);
   await settleQueue();

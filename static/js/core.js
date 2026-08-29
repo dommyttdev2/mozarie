@@ -349,17 +349,31 @@ function publishWorkspaceFlags(imageId, flags) {
   }
   return true;
 }
-async function setHidden(image, hidden) {
-  if (!image) return false;
-  try {
-    const flags = await queueWorkspaceFlags(image.id, { hidden });
+function saveWorkspaceFlag(image, field, desired, onSaved) {
+  if (!image) return Promise.resolve(false);
+  const key = `${image.id}:${field}`;
+  const pending = state.workspaceFlagPending.get(key);
+  if (pending?.desired === desired) return pending.promise;
+  if (!pending && image[field] === desired) return Promise.resolve(true);
+  let promise;
+  promise = queueWorkspaceFlags(image.id, { [field]: desired }).then((flags) => {
     if (!publishWorkspaceFlags(image.id, flags)) return false;
-    renderCatalogViews(); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+    onSaved?.();
     return true;
-  } catch (error) {
+  }).catch((error) => {
     showUserError(error);
     return false;
-  }
+  }).finally(() => {
+    if (state.workspaceFlagPending.get(key)?.promise === promise) state.workspaceFlagPending.delete(key);
+  });
+  state.workspaceFlagPending.set(key, { desired, promise });
+  return promise;
+}
+function setHidden(image, hidden) {
+  return saveWorkspaceFlag(image, "hidden", hidden, () => {
+    if (!state.images.some((item) => item.id === image.id)) return;
+    renderCatalogViews(); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+  });
 }
 function clearStoredCatalogState() { state.reviewedPaths.clear(); state.hiddenPaths.clear(); }
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
@@ -383,17 +397,10 @@ function refreshReviewViews() {
   updateNavigationControls();
   updateActionButtons();
 }
-async function setReviewed(image, reviewed) {
-  if (!image) return false;
-  try {
-    const flags = await queueWorkspaceFlags(image.id, { reviewed });
-    if (!publishWorkspaceFlags(image.id, flags)) return false;
-    refreshReviewViews();
-    return true;
-  } catch (error) {
-    showUserError(error);
-    return false;
-  }
+function setReviewed(image, reviewed) {
+  return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
+    if (state.images.some((item) => item.id === image.id)) refreshReviewViews();
+  });
 }
 async function moveReviewedPathAfterApply(previousImage, reloadedImage) {
   const previousPath = reviewPath(previousImage);
@@ -401,16 +408,10 @@ async function moveReviewedPathAfterApply(previousImage, reloadedImage) {
   if (!previousPath || !reloadedPath || previousPath === reloadedPath) return false;
 
   const wasReviewed = state.reviewedPaths.has(previousPath) || state.reviewedPaths.has(reloadedPath);
-  try {
-    const flags = await queueWorkspaceFlags(reloadedImage.id, { reviewed: wasReviewed });
-    if (!publishWorkspaceFlags(reloadedImage.id, flags)) return false;
-    state.reviewedPaths.delete(previousPath);
-    refreshReviewViews();
-    return true;
-  } catch (error) {
-    showUserError(error);
-    return false;
-  }
+  if (!await setReviewed(reloadedImage, wasReviewed)) return false;
+  state.reviewedPaths.delete(previousPath);
+  refreshReviewViews();
+  return true;
 }
 function markImagesUnreviewed(imageIds, renderAfter = true) {
   let changed = false;
