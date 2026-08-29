@@ -73,23 +73,24 @@ def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
         device = int(settings["models"].get("gpu_device", 0))
+        profile = selected_profile(APP_DIR / ".venv") or "cuda"
     except Exception:
         print(SETTINGS_READ_FAILED_MESSAGE)
         return 1
-    try:
-        runtime = _runtime_modules()
-    except Exception:
-        print(RUNTIME_IMPORT_FAILED_MESSAGE)
-        return 1
-    profile = selected_profile(APP_DIR / ".venv") or "cuda"
     if profile == "directml":
         try:
             validate(profile, device)
             print(f"[Mozarie] DirectML GPU {device} is ready.")
             return 0
         except Exception:
+            # Fall through to the verified CPU fallback below.
             pass
-    elif profile == "cuda":
+    try:
+        runtime = _runtime_modules()
+    except Exception:
+        print(RUNTIME_IMPORT_FAILED_MESSAGE)
+        return 1
+    if profile == "cuda":
         try:
             if _gpu_is_ready(*runtime, device):
                 print("[Mozarie] GPU is ready.")

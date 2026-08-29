@@ -146,17 +146,25 @@ class SetupGpuCheckTests(unittest.TestCase):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 1}}))
         with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              patch.object(setup_gpu_check, "selected_profile", return_value="directml"), \
-             patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("DirectML failed")):
+             patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("DirectML failed")), \
+             patch.object(setup_gpu_check, "_runtime_modules", return_value=(object(), object(), object(), object())), \
+             patch.object(setup_gpu_check, "_cpu_is_ready", return_value=True):
             self.assertEqual(setup_gpu_check.main(), 0)
         store.save.assert_called_once_with({"models": {"provider": "cpu"}})
 
-    def test_cpu_profile_switches_detection_to_cpu_without_a_gpu_probe(self):
+    def test_cpu_profile_verifies_cpu_runtime_without_a_gpu_probe(self):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        gpu_ready = Mock()
+        cpu_ready = Mock(return_value=True)
         with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              patch.object(setup_gpu_check, "selected_profile", return_value="cpu"), \
-             patch.object(setup_gpu_check, "_runtime_modules") as runtime_modules:
+             patch.object(setup_gpu_check, "_runtime_modules", return_value=(object(), object(), object(), object())) as runtime_modules, \
+             patch.object(setup_gpu_check, "_gpu_is_ready", gpu_ready), \
+             patch.object(setup_gpu_check, "_cpu_is_ready", cpu_ready):
             self.assertEqual(setup_gpu_check.main(), 0)
-        runtime_modules.assert_not_called()
+        runtime_modules.assert_called_once()
+        cpu_ready.assert_called_once()
+        gpu_ready.assert_not_called()
         store.save.assert_called_once_with({"models": {"provider": "cpu"}})
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
