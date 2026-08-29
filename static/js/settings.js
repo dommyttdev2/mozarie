@@ -156,6 +156,8 @@ function handleToolRailKeydown(event) {
 
 function renderSettingsStatus(status, selectedDevice = null) {
   if (status) state.settingsStatus = status;
+  const backend = status?.runtimeBackend || state.settingsStatus?.runtimeBackend || "cpu";
+  $("#settingsRuntimeBackend").textContent = ({ cuda: "CUDA", directml: "DirectML", cpu: "CPU" })[backend] || backend;
   const gpuSelect = $("#settingsGpuDevice");
   const selected = selectedDevice == null ? gpuSelect.value : String(selectedDevice);
   gpuSelect.textContent = "";
@@ -163,7 +165,8 @@ function renderSettingsStatus(status, selectedDevice = null) {
   for (const gpu of gpus) {
     const option = document.createElement("option"); option.value = String(gpu.id);
     const memory = gpuMemoryLabel(gpu.totalMemory);
-    option.textContent = `GPU ${gpu.id}: ${gpu.name}${memory ? ` / VRAM: ${memory} GB` : ""}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
+    const gpuBackend = ({ cuda: "CUDA", directml: "DirectML" })[gpu.backend] || backend.toUpperCase();
+    option.textContent = `${gpuBackend} ${gpu.id}: ${gpu.name}${memory ? ` / VRAM: ${memory} GB` : ""}${gpu.supported === false ? ` (${t("settings.gpuUnsupported")})` : ""}`;
     option.disabled = gpu.supported === false; gpuSelect.append(option);
   }
   if (gpus.length) {

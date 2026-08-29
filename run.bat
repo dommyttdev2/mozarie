@@ -12,6 +12,7 @@ call :validate_python
 if errorlevel 1 goto :setup_required
 if defined MOZARIE_PYTHON goto :start
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
+if not defined MOZARIE_RUNTIME for /f "usebackq delims=" %%R in (`"%PYTHON%" "%APP_DIR%runtime_profile.py" show --venv "%APP_DIR%.venv"`) do set "MOZARIE_RUNTIME=%%R"
 :start
 echo [Mozarie] Preparing Mozarie... / Mozarieを準備しています...
 "%PYTHON%" "%APP_DIR%server.py"

@@ -129,7 +129,9 @@ function startFixtureServer() {
         const samVariants = Object.fromEntries(["vit_b", "vit_l", "vit_h"].map((key) => [key, {
           path: paths[key] || "", configured: Boolean(paths[key]), exists: Boolean(paths[key]), valid: Boolean(paths[key]), managed: String(paths[key] || "").includes("Mozarie\\models"), reasonCode: paths[key] ? null : "not_configured",
         }]));
-        const status = { models: {}, gpus };
+        // Match the real settings-status contract: CUDA devices inherit their
+        // backend label from the enclosing runtime status rather than each GPU.
+        const status = { models: {}, gpus, runtimeBackend: "cuda" };
         if (targetPath !== "legacy-sam-status.onnx") status.samVariants = samVariants;
         response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status }));
       };
@@ -1542,7 +1544,7 @@ async function main() {
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears after a successful response");
-    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^GPU 3: RTX Test \/ VRAM: 16 GBGPU 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\)$/, "status shows actual GPU names, VRAM, and the incompatibility without a fabricated fallback device");
+    assert.match(await page.locator("#settingsGpuDevice").textContent(), /^CUDA 3: RTX Test \/ VRAM: 16 GBCUDA 4: Legacy Test \/ VRAM: 3 GB \(このPyTorchでは非対応\)$/, "status shows the CUDA backend, actual GPU names, VRAM, and the incompatibility without a fabricated fallback device");
     assert.equal(await page.locator('#settingsGpuDevice option[value="4"]').evaluate((option) => option.disabled), true, "unsupported GPUs remain unavailable");
     assert.equal(await page.locator('#settingsGpuDevice option[value="0"]').count(), 0, "a pending or mismatched setting never creates a fake GPU 0 option");
     await page.locator("#settingsGpuDevice").selectOption("3");

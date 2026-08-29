@@ -39,6 +39,7 @@ class SetupGpuCheckTests(unittest.TestCase):
         )
         output = io.StringIO()
         with patch.object(setup_gpu_check, "_runtime_modules", return_value=runtime), \
+             patch.object(setup_gpu_check, "selected_profile", return_value="cuda"), \
              patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              contextlib.redirect_stdout(output):
             result = setup_gpu_check.main()
@@ -127,6 +128,44 @@ class SetupGpuCheckTests(unittest.TestCase):
         self.assertEqual(output.strip(), "[Mozarie] GPU is ready.")
         # A successful smoke test does not touch an existing CPU selection.
         store.save.assert_not_called()
+
+    def test_directml_validates_the_configured_device_without_switching_provider(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 1}}))
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             patch.object(setup_gpu_check, "selected_profile", return_value="directml"), \
+             patch.object(setup_gpu_check, "validate") as validate, \
+             contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        self.assertEqual(result, 0)
+        validate.assert_called_once_with("directml", 1)
+        store.save.assert_not_called()
+        self.assertIn("DirectML GPU 1 is ready", output.getvalue())
+
+    def test_directml_probe_failure_switches_to_cpu(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 1}}))
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             patch.object(setup_gpu_check, "selected_profile", return_value="directml"), \
+             patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("DirectML failed")), \
+             patch.object(setup_gpu_check, "_runtime_modules", return_value=(object(), object(), object(), object())), \
+             patch.object(setup_gpu_check, "_cpu_is_ready", return_value=True):
+            self.assertEqual(setup_gpu_check.main(), 0)
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+
+    def test_cpu_profile_verifies_cpu_runtime_without_a_gpu_probe(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        gpu_ready = Mock()
+        cpu_ready = Mock(return_value=True)
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             patch.object(setup_gpu_check, "selected_profile", return_value="cpu"), \
+             patch.object(setup_gpu_check, "_runtime_modules", return_value=(object(), object(), object(), object())) as runtime_modules, \
+             patch.object(setup_gpu_check, "_gpu_is_ready", gpu_ready), \
+             patch.object(setup_gpu_check, "_cpu_is_ready", cpu_ready):
+            self.assertEqual(setup_gpu_check.main(), 0)
+        runtime_modules.assert_called_once()
+        cpu_ready.assert_called_once()
+        gpu_ready.assert_not_called()
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_fresh_venv_pip_dry_run_keeps_resolver_output_visible(self) -> None:

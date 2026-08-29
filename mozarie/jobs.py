@@ -16,6 +16,7 @@ from PIL import Image
 from .core import JOB_LABELS, LOGGER, CandidateRole, ClientError, ImageRecord, Job, JobControl
 from .image_io import calculate_block_size
 from .masks import compose_masks
+from .runtime import runtime_backend
 
 class JobsMixin:
     @staticmethod
@@ -32,6 +33,8 @@ class JobsMixin:
             "cuda out of memory",
             "could not allocate cuda",
             "not enough gpu video memory",
+            "not enough memory resources are available",
+            "e_outofmemory",
             "bfcarena",
         ))
 
@@ -63,7 +66,7 @@ class JobsMixin:
         if selected_provider != "gpu":
             return
         torch = sys.modules.get("torch")
-        if torch is not None:
+        if torch is not None and runtime_backend(torch_module=torch) == "cuda":
             self._empty_selected_gpu_cache(torch, int(gpu_device if gpu_device is not None else self.settings["models"].get("gpu_device", 0)))
 
     def _discard_gpu_models_after_oom(self) -> None:

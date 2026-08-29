@@ -16,13 +16,27 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 ### 動作環境
 
 - Windows
-- 64-bit Python 3.11〜3.14（Python Launcher `py`）
+- 64-bit Python（Python Launcher `py`）
+  - NVIDIA/CUDA: Python 3.11〜3.14
+  - AMD/DirectML: Python 3.11 または3.12
+  - CPU: Python 3.11 または3.12
 
 ### セットアップ
 
 ```powershell
 .\setup.bat
 ```
+
+`setup.bat`はGPUを検出し、NVIDIAがある場合はCUDA、NVIDIAがなくAMDがある場合はDirectMLを選択します。両方ある環境では、既存のCUDA動作を維持するためNVIDIA/CUDAを優先します。必要に応じて、実行前にバックエンドを明示できます。
+
+```powershell
+$env:MOZARIE_RUNTIME = "cuda"      # NVIDIA/CUDA
+$env:MOZARIE_RUNTIME = "directml"  # AMD/DirectML
+$env:MOZARIE_RUNTIME = "cpu"       # CPUのみ
+.\setup.bat
+```
+
+CUDA版とDirectML版のONNX Runtimeは同じ`.venv`へ混在させないでください。既存環境と選択されたバックエンドが異なる場合、`setup.bat`はパッケージを変更せず停止します。バックエンドを切り替える場合は、必要に応じて`.venv`をバックアップしてから削除し、`setup.bat`を再実行してください。
 
 ### 起動
 
@@ -92,7 +106,7 @@ GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメ�
 ## 困ったとき
 
 - **モデルを読み込めない:** ファイル形式と、SAMの種類・ファイルの組み合わせを確認してください。
-- **GPUまたはCUDAのエラー:** ほかのGPUアプリを閉じる、別のGPUを選ぶ、またはCPUへ切り替えてください。
+- **GPU、CUDA、DirectMLのエラー:** ほかのGPUアプリを閉じる、別のGPUを選ぶ、またはCPUへ切り替えてください。
 - **解決しない:** エラー文を添えて[Issues](https://github.com/norqis/mozarie/issues)へ報告してください。
 
 ## 開発

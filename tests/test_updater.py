@@ -78,6 +78,13 @@ def make_install(root: Path, version: str = "1.1.0") -> Path:
     return root
 
 
+def write_runtime_marker(app: Path, profile: str = "cuda") -> Path:
+    marker = app / ".venv" / ".mozarie-runtime.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"schema": 1, "profile": profile}), encoding="utf-8")
+    return marker
+
+
 UPDATE_ARCHIVE_CONTENTS = {
     **{f"wrapper/{relative}": "file" for relative in updater.MANAGED_FILES},
     "wrapper/server.py": "server",
@@ -139,16 +146,21 @@ class UpdaterTests(unittest.TestCase):
             python = app / ".venv" / "Scripts" / "python.exe"
             python.parent.mkdir(parents=True)
             python.touch()
+            write_runtime_marker(app)
             (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 self.assertTrue(updater.install_requirements(source, app))
-            self.assertEqual(run.call_args_list[0].args[0][:3], [str(python), "-m", "pip"])
             self.assertEqual(
-                run.call_args_list[0].args[0][3:],
+                run.call_args_list[0].args[0],
+                [str(python), str(source / "runtime_profile.py"), "preflight", "cuda", "--venv", str(app / ".venv")],
+            )
+            self.assertEqual(run.call_args_list[1].args[0][:3], [str(python), "-m", "pip"])
+            self.assertEqual(
+                run.call_args_list[1].args[0][3:],
                 ["install", "--disable-pip-version-check", "--progress-bar", "on", "-r", str(source / "requirements.txt")],
             )
-            self.assertEqual(run.call_args_list[1].args[0], [str(python), "-m", "pip", "check"])
+            self.assertEqual(run.call_args_list[2].args[0], [str(python), "-m", "pip", "check"])
 
     def test_requirements_update_removes_ready_marker_before_pip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,6 +170,7 @@ class UpdaterTests(unittest.TestCase):
             python = app / ".venv" / "Scripts" / "python.exe"
             python.parent.mkdir(parents=True)
             python.touch()
+            write_runtime_marker(app)
             ready_marker = app / ".venv" / ".mozarie-ready"
             ready_marker.write_text("ready\n", encoding="utf-8")
             (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
@@ -170,9 +183,14 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); source = make_source(root / "source"); app = make_install(root / "app")
             python = app / ".venv" / "Scripts" / "python.exe"; python.parent.mkdir(parents=True); python.touch()
+            write_runtime_marker(app)
             marker = app / ".venv" / ".mozarie-ready"; marker.write_text("ready\n", encoding="utf-8")
             (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
-            with patch("updater.subprocess.run", side_effect=[type("Result", (), {"returncode": 0})(), type("Result", (), {"returncode": 1})()]):
+            with patch("updater.subprocess.run", side_effect=[
+                type("Result", (), {"returncode": 0})(),
+                type("Result", (), {"returncode": 0})(),
+                type("Result", (), {"returncode": 1})(),
+            ]):
                 with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("requirements_failed"))):
                     updater.install_requirements(source, app)
             self.assertFalse(marker.exists())
@@ -247,11 +265,97 @@ class UpdaterTests(unittest.TestCase):
             app = make_install(root / "app")
             ready_marker = app / ".venv" / ".mozarie-ready"
             ready_marker.parent.mkdir()
+            write_runtime_marker(app)
             ready_marker.write_text("ready\n", encoding="utf-8")
             with patch("updater.subprocess.run") as run:
                 self.assertFalse(updater.install_requirements(source, app))
             run.assert_not_called()
             self.assertTrue(ready_marker.exists())
+
+    def test_requirements_install_preserves_the_directml_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (app / ".venv" / ".mozarie-runtime.json").write_text(
+                json.dumps({"schema": 1, "profile": "directml"}), encoding="utf-8"
+            )
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 0
+                updater.install_requirements(source, app)
+            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "runtime_profile.py"), "preflight", "directml"])
+            command = run.call_args_list[1].args[0]
+            self.assertEqual(command[:3], [str(python), "-m", "pip"])
+            self.assertEqual(Path(command[-1]), source / "requirements-directml.txt")
+            self.assertEqual(run.call_args_list[2].args[0], [str(python), "-m", "pip", "check"])
+            self.assertEqual(run.call_args_list[3].args[0][1:4], [str(source / "runtime_profile.py"), "validate", "directml"])
+
+    def test_requirements_install_preserves_the_cpu_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            write_runtime_marker(app, "cpu")
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 0
+                updater.install_requirements(source, app)
+            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "runtime_profile.py"), "preflight", "cpu"])
+            self.assertEqual(Path(run.call_args_list[1].args[0][-1]), source / "requirements-cpu.txt")
+
+    def test_markerless_cpu_and_directml_venvs_fail_before_pip(self):
+        for profile, distribution in (("cpu", "onnxruntime"), ("directml", "onnxruntime_directml")):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = make_source(root / "source")
+                app = make_install(root / "app")
+                python = app / ".venv" / "Scripts" / "python.exe"
+                python.parent.mkdir(parents=True)
+                python.touch()
+                (app / ".venv" / "Lib" / "site-packages" / f"{distribution}-1.24.4.dist-info").mkdir(parents=True)
+                with patch("updater.subprocess.run") as run:
+                    with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("runtime_profile_invalid"))):
+                        updater.install_requirements(source, app)
+                run.assert_not_called()
+
+    def test_invalid_runtime_markers_fail_before_pip(self):
+        invalid_markers = ("not-json", json.dumps({"profile": "directml"}), json.dumps({"schema": 1, "profile": "unknown"}))
+        for marker_body in invalid_markers:
+            with self.subTest(marker=marker_body), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = make_source(root / "source")
+                app = make_install(root / "app")
+                marker = app / ".venv" / ".mozarie-runtime.json"
+                marker.parent.mkdir(parents=True)
+                marker.write_text(marker_body, encoding="utf-8")
+                with patch("updater.subprocess.run") as run:
+                    with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("runtime_profile_invalid"))):
+                        updater.install_requirements(source, app)
+                run.assert_not_called()
+
+    def test_marker_and_runtime_mismatch_fails_before_pip_or_ready_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            app = make_install(root / "app")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            write_runtime_marker(app, "directml")
+            ready = app / ".venv" / ".mozarie-ready"
+            ready.write_text("ready\n", encoding="utf-8")
+            with patch("updater.subprocess.run") as run:
+                run.return_value.returncode = 1
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("runtime_profile_invalid"))):
+                    updater.install_requirements(source, app)
+            self.assertEqual(len(run.call_args_list), 1)
+            self.assertNotIn("pip", run.call_args.args[0])
+            self.assertTrue(ready.is_file())
 
     def test_fetch_latest_release_validates_payload(self):
         payload = json.dumps(make_release()).encode()
@@ -710,6 +814,7 @@ class UpdaterTests(unittest.TestCase):
             root = Path(directory)
             app = make_install(root / "install")
             (app / ".venv").mkdir()
+            write_runtime_marker(app)
             source = make_source(root / "source")
             with patch("updater.fetch_latest_release", return_value=make_release()), \
                     patch("updater.download_archive"), \
@@ -761,7 +866,7 @@ class UpdaterTests(unittest.TestCase):
         failed_branch = "if errorlevel 1 goto :failed"
         marker_removal = 'del /q "%APP_DIR%.venv\\.mozarie-ready" >nul 2>nul'
         self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip'
-        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%APP_DIR%requirements.txt"'
+        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%REQUIREMENTS%"'
 
         for step in range(1, 6):
             self.assertIn(f"[{step}/5]", batch)
@@ -813,15 +918,34 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("ultralytics==8.4.75", requirements)
         self.assertFalse(any(requirement.startswith(("onnxslim", "openvino", "export-base")) for requirement in requirements))
 
+        directml = (Path(__file__).parents[1] / "requirements-directml.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("onnxruntime-directml==1.24.4", directml)
+        self.assertIn("torch-directml==0.2.5.dev240914", directml)
+        self.assertIn("onnx>=1.12,<2", directml)
+        self.assertIn("ultralytics==8.4.75", directml)
+        self.assertNotIn("onnxruntime-gpu==1.27.0", directml)
+
+        cpu = (Path(__file__).parents[1] / "requirements-cpu.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("onnxruntime==1.24.4", cpu)
+        self.assertIn("onnx>=1.12,<2", cpu)
+        self.assertIn("ultralytics==8.4.75", cpu)
+
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
         setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
         run = (Path(__file__).parents[1] / "run.bat").read_text(encoding="utf-8")
         self.assertIn(expected_loop, setup)
-        self.assertEqual(setup.count("py -%%V -m venv"), 1)
+        self.assertEqual(setup.count("py -%%V -m venv"), 2)
+        self.assertIn("for %%V in (3.12-64 3.11-64) do (", setup)
+        self.assertIn('if /i not "%RUNTIME%"=="cuda" "%PYTHON%" -c', setup)
+        self.assertIn("sys.version_info < (3, 13)", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', setup)
         self.assertNotIn("python -m venv", setup)
-        self.assertNotIn("MOZARIE_PYTHON", setup)
+        self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)
+        self.assertIn("VEN_10DE", setup)
+        self.assertIn("VEN_1002", setup)
+        self.assertIn("runtime_profile.py\" preflight", setup)
+        self.assertIn("requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
         self.assertNotIn("pip install", run)

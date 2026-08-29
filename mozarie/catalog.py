@@ -27,6 +27,7 @@ from .core import (
 )
 from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
+from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 
 class CatalogMixin:
     def _effective_mask_for_draft(self, image_id: str, candidates: list[Candidate], draft: dict[str, Any]) -> bool:
@@ -779,10 +780,13 @@ class CatalogMixin:
                     except RuntimeError as exc:
                         raise ClientError("SAMチェックポイントを読み込めません。", "sam_checkpoint_invalid") from exc
                     provider = self.settings["models"]["provider"]
-                    if provider == "gpu" and not torch.cuda.is_available():
-                        raise ClientError("SAMをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "sam_provider_unavailable")
-                    device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
-                    if provider == "gpu":
+                    backend = runtime_backend(torch_module=torch)
+                    if provider == "gpu" and backend == "cpu":
+                        raise ClientError("SAMをGPUで実行できません。CPUを選ぶかGPU環境を確認してください。", "sam_provider_unavailable")
+                    device = torch_device(torch, provider, int(self.settings["models"].get("gpu_device", 0)), backend=backend)
+                    if provider == "gpu" and backend == "directml":
+                        patch_directml_sam_prompt_encoder(model, torch)
+                    if provider == "gpu" and backend == "cuda":
                         with warnings.catch_warnings():
                             warnings.filterwarnings(
                                 "ignore",
@@ -835,10 +839,13 @@ class CatalogMixin:
                             raise
                         raise ClientError("HandSegNetモデルを読み込めません。", "model_load_failed") from exc
                     provider = self.settings["models"]["provider"]
-                    if provider == "gpu" and not torch.cuda.is_available():
-                        raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかCUDA環境を確認してください。", "gpu_runtime_unavailable")
-                    device = f"cuda:{int(self.settings['models'].get('gpu_device', 0))}" if provider == "gpu" else "cpu"
-                    if provider == "gpu":
+                    backend = runtime_backend(torch_module=torch)
+                    if provider == "gpu" and backend == "cpu":
+                        raise ClientError("HandSegNetをGPUで実行できません。CPUを選ぶかGPU環境を確認してください。", "hand_segmentation_invalid")
+                    device = torch_device(torch, provider, int(self.settings["models"].get("gpu_device", 0)), backend=backend)
+                    if provider == "gpu" and backend == "directml":
+                        patch_directml_sam_prompt_encoder(model, torch)
+                    if provider == "gpu" and backend == "cuda":
                         with warnings.catch_warnings():
                             warnings.filterwarnings(
                                 "ignore",
@@ -1086,7 +1093,7 @@ class CatalogMixin:
                             self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
-            alpha = mask_image.convert("L")
+            alpha = mask_image.convert("L").point(lambda value: 255 if value else 0)
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
             rgba.putalpha(alpha)
             output = io.BytesIO()

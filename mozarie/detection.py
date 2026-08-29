@@ -17,13 +17,22 @@ from .core import (
     merge_tile_segment, padded_hand_box, read_boundary_request,
     read_polygon_boundary_request, sam_refinement_prompts,
     select_best_sam_mask, select_semantic_sam_mask,
-    _read_detection_parallelism, _read_target_classes,
+    torch_module, _read_detection_parallelism, _read_target_classes,
 )
 from .fluid import white_fluid_mask
 from .inference.generic_yolo_segment import GenericYoloSegmenter
 from .inference.yolo_detect import HandDetector
 from .inference.yolo_segment import TargetSegmenter
+from .runtime import runtime_backend
 from .runtime_types import DetectionModels
+
+
+def _save_binary_mask(mask: Any, path: Path) -> None:
+    """Persist every non-zero mask pixel as fully opaque PNG data."""
+
+    binary = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    Image.fromarray(binary).save(path, format="PNG")
+
 
 class DetectionMixin:
     def start_detection(
@@ -83,7 +92,10 @@ class DetectionMixin:
         models = self.settings.get("models", {})
         raw_path = str(models.get("sam_checkpoints", {}).get(models.get("sam_model_type"), "")).strip()
         if not raw_path:
-            raise ClientError("SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。", "model_not_configured")
+            raise ClientError(
+                "SAMモデルが未設定です。設定のモデルタブでチェックポイントを指定してください。",
+                "sam_checkpoint_missing",
+            )
         path = Path(raw_path).expanduser()
         if not path.is_file():
             raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")
@@ -147,6 +159,8 @@ class DetectionMixin:
         try:
             mode = str(self.settings["detection"]["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
+            if runtime_backend(torch_module=torch_module()) == "directml":
+                requested_parallelism = 1
             worker_count = min(requested_parallelism, len(records))
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
@@ -518,7 +532,7 @@ class DetectionMixin:
                     continue
                 exclusion_id = uuid.uuid4().hex
                 exclusion_path = destination / f".mozarie-pending-{exclusion_id}.tmp"
-                Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion_path, format="PNG")
+                _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
                     class_name=SOURCE_LABELS[f"{exclusion_kind}_exclusion"],
@@ -538,7 +552,7 @@ class DetectionMixin:
             # underlying target mask when turned off.
             candidate_id = uuid.uuid4().hex
             mask_path = destination / f".mozarie-pending-{candidate_id}.tmp"
-            Image.fromarray(np.asarray(apply_mask, dtype=np.uint8)).save(mask_path, format="PNG")
+            _save_binary_mask(apply_mask, mask_path)
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
@@ -556,7 +570,7 @@ class DetectionMixin:
                 exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
                 exclusion_path = destination / f".mozarie-pending-{exclusion_id}.tmp"
-                Image.fromarray(np.asarray(exclusion_mask, dtype=np.uint8)).save(exclusion_path, format="PNG")
+                _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
                     class_name=SOURCE_LABELS[exclusion_source],
@@ -684,7 +698,7 @@ class DetectionMixin:
                 for item, candidate_mask in zip(created, masks):
                     temporary = item.mask_path.with_name(f".mozarie-pending-{item.candidate_id}.tmp")
                     item.mask_path.parent.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(np.asarray(candidate_mask, dtype=np.uint8)).save(temporary, format="PNG")
+                    _save_binary_mask(candidate_mask, temporary)
                     temporary_paths.append(temporary)
                 with self.image_io_lock(image_id):
                     self._assert_record_stat_matches(record)

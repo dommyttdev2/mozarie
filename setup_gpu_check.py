@@ -6,6 +6,7 @@ from pathlib import Path
 import warnings
 
 from mozarie.config import SettingsStore
+from runtime_profile import selected_profile, validate
 
 
 CPU_MESSAGE = "[Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。"
@@ -72,20 +73,30 @@ def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
         device = int(settings["models"].get("gpu_device", 0))
+        profile = selected_profile(APP_DIR / ".venv") or "cuda"
     except Exception:
         print(SETTINGS_READ_FAILED_MESSAGE)
         return 1
+    if profile == "directml":
+        try:
+            validate(profile, device)
+            print(f"[Mozarie] DirectML GPU {device} is ready.")
+            return 0
+        except Exception:
+            # Fall through to the verified CPU fallback below.
+            pass
     try:
         runtime = _runtime_modules()
     except Exception:
         print(RUNTIME_IMPORT_FAILED_MESSAGE)
         return 1
-    try:
-        if _gpu_is_ready(*runtime, device):
-            print("[Mozarie] GPU is ready.")
-            return 0
-    except Exception:
-        pass
+    if profile == "cuda":
+        try:
+            if _gpu_is_ready(*runtime, device):
+                print("[Mozarie] GPU is ready.")
+                return 0
+        except Exception:
+            pass
     if not _cpu_is_ready(*runtime):
         print(CPU_RUNTIME_FAILED_MESSAGE)
         return 1
