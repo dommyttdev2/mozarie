@@ -6,6 +6,8 @@ if /i "%~1"=="--locked" goto :locked
 for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
   py -%%V -c "import sys; raise SystemExit(0)" >nul 2>nul
   if not errorlevel 1 (
+    py -%%V -X utf8 "%APP_DIR%updater.py" --check-running
+    if errorlevel 30 if not errorlevel 31 goto :mozarie_running
     py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
     exit /b %ERRORLEVEL%
   )
@@ -17,8 +19,8 @@ exit /b 1
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
 echo [Mozarie] [1/5] Checking Python environment...
 if not exist "%PYTHON%" call :create_venv
-if errorlevel 1 goto :missing_python
-if not exist "%PYTHON%" goto :missing_python
+if errorlevel 1 goto :venv_failed
+if not exist "%PYTHON%" goto :venv_failed
 call :validate_python
 if errorlevel 1 goto :python_too_old
 
@@ -43,7 +45,7 @@ exit /b 0
 
 :create_venv
 for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
-  py -%%V -m venv "%APP_DIR%.venv" >nul 2>nul
+  py -%%V -m venv "%APP_DIR%.venv"
   if not errorlevel 1 goto :venv_ready
 )
 exit /b 1
@@ -69,6 +71,11 @@ exit /b 1
 
 :missing_python
 echo [Mozarie] 64-bit Python 3.11 to 3.14 was not found. Install it, then run setup.bat again.
+pause
+exit /b 1
+
+:venv_failed
+echo [Mozarie] Could not create the Python environment. Check the message above, free disk space or folder access, then run setup.bat again. / Python環境を作成できませんでした。上のメッセージを確認し、空き容量またはフォルダへのアクセスを確認してから setup.bat を再実行してください。
 pause
 exit /b 1
 

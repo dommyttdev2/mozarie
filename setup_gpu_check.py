@@ -10,6 +10,8 @@ from mozarie.config import SettingsStore
 
 CPU_MESSAGE = "[Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。"
 CPU_SAVE_FAILED_MESSAGE = "[Mozarie] GPU unavailable, but switching to CPU could not be saved. Setup stopped; check config/local.json and run setup again. / GPUは利用できず、CPUへの切替も保存できませんでした。config/local.jsonを確認して、setupをもう一度実行してください。"
+RUNTIME_IMPORT_FAILED_MESSAGE = "[Mozarie] Required packages could not be loaded. Setup stopped; run setup.bat again. / 必要なパッケージを読み込めませんでした。setup.bat をもう一度実行してください。"
+CPU_RUNTIME_FAILED_MESSAGE = "[Mozarie] The CPU detection runtime could not start. Setup stopped; run setup.bat again. / CPUで検出処理を開始できませんでした。setup.bat をもう一度実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -43,6 +45,18 @@ def _gpu_is_ready(np, ort, torch, datasets, device: int) -> bool:
     return True
 
 
+def _cpu_is_ready(np, ort, _torch, datasets) -> bool:
+    try:
+        session = ort.InferenceSession(datasets.get_example("mul_1.onnx"), providers=["CPUExecutionProvider"])
+        session.disable_fallback()
+        if session.get_providers()[0] != "CPUExecutionProvider":
+            return False
+        session.run(None, {"X": np.ones((3, 2), dtype=np.float32)})
+        return True
+    except Exception:
+        return False
+
+
 def _switch_to_cpu() -> bool:
     try:
         SettingsStore(APP_DIR).save({"models": {"provider": "cpu"}})
@@ -57,12 +71,24 @@ def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
         device = int(settings["models"].get("gpu_device", 0))
-        if not _gpu_is_ready(*_runtime_modules(), device):
-            return 0 if _switch_to_cpu() else 1
     except Exception:
-        return 0 if _switch_to_cpu() else 1
-    print("[Mozarie] GPU is ready.")
-    return 0
+        print(RUNTIME_IMPORT_FAILED_MESSAGE)
+        return 1
+    try:
+        runtime = _runtime_modules()
+    except Exception:
+        print(RUNTIME_IMPORT_FAILED_MESSAGE)
+        return 1
+    try:
+        if _gpu_is_ready(*runtime, device):
+            print("[Mozarie] GPU is ready.")
+            return 0
+    except Exception:
+        pass
+    if not _cpu_is_ready(*runtime):
+        print(CPU_RUNTIME_FAILED_MESSAGE)
+        return 1
+    return 0 if _switch_to_cpu() else 1
 
 
 if __name__ == "__main__":
