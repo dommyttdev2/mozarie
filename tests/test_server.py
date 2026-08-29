@@ -6971,6 +6971,69 @@ class MozarieTests(unittest.TestCase):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
+    def test_staged_overwrites_reject_source_changes_during_backup_copy(self):
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                original_stat = source.stat()
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+                if route == "apply":
+                    stage = lambda: image_io_module._stage_save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    stage = lambda: image_io_module._stage_record_replacement(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+                original_copy2 = image_io_module.shutil.copy2
+
+                def copy_then_modify(current, backup, *args, **kwargs):
+                    result = original_copy2(current, backup, *args, **kwargs)
+                    Image.new("RGB", (16, 16), "blue").save(source)
+                    changed_mtime = original_stat.st_mtime_ns + 4_000_000_000
+                    os.utime(source, ns=(original_stat.st_atime_ns, changed_mtime))
+                    return result
+
+                with patch.object(image_io_module.shutil, "copy2", side_effect=copy_then_modify), \
+                     patch.object(image_io_module.os, "replace", wraps=image_io_module.os.replace) as replace:
+                    with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                        stage()
+
+                self.assertEqual(raised.exception.error_code, "stale_asset")
+                replace.assert_not_called()
+                self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+                self.assertEqual(list(source.parent.glob(".source.png.mozarie-backup-*")), [])
+
+    def test_staged_overwrites_remove_partial_backup_after_copy_failure(self):
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                source_bytes = source.read_bytes()
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+                if route == "apply":
+                    stage = lambda: image_io_module._stage_save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    stage = lambda: image_io_module._stage_record_replacement(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+
+                def partial_backup(_current, backup, *_args, **_kwargs):
+                    Path(backup).write_bytes(b"partial backup")
+                    raise OSError("disk full")
+
+                with patch.object(image_io_module.shutil, "copy2", side_effect=partial_backup):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        stage()
+
+                self.assertEqual(source.read_bytes(), source_bytes)
+                self.assertEqual(list(source.parent.glob(".source.png.mozarie-backup-*")), [])
+
     def test_rendered_saves_flush_and_sync_before_replace(self):
         original_temporary_file = image_io_module.tempfile.NamedTemporaryFile
         original_replace = image_io_module.os.replace
