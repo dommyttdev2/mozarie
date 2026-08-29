@@ -78,6 +78,7 @@ MESSAGES = {
         "archive_missing_app": "更新ZIPにMozarie本体が見つかりません。",
         "requirements_updating": "依存関係を更新しています...",
         "requirements_failed": "依存関係の更新に失敗しました。Mozarie本体は更新していません。setup.bat を実行して復旧してください。",
+        "runtime_profile_invalid": "既存の実行環境を安全に判定できません。Mozarie本体と依存関係は更新していません。setup.bat を実行して復旧してください。",
         "gpu_check_failed": "GPUの動作確認に失敗しました。setup.bat を実行して復旧してください。",
         "update_deps_changed": "更新は元に戻しましたが、依存関係は変更されています。setup.bat を実行してください。",
         "update_in_progress": "別の更新処理が実行中です。完了してからもう一度実行してください。",
@@ -118,6 +119,7 @@ MESSAGES = {
         "archive_missing_app": "The update archive does not contain Mozarie.",
         "requirements_updating": "Updating dependencies...",
         "requirements_failed": "Could not update dependencies. Mozarie was not changed. Run setup.bat to repair the installation.",
+        "runtime_profile_invalid": "The existing runtime could not be identified safely. Mozarie and its dependencies were not updated. Run setup.bat to repair the installation.",
         "gpu_check_failed": "The GPU check failed. Run setup.bat to repair the installation.",
         "update_deps_changed": "The app was restored, but dependencies changed. Run setup.bat to repair the installation.",
         "update_in_progress": "Another update is already running. Wait for it to finish, then try again.",
@@ -367,6 +369,8 @@ def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
 
 
 def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
+    if not any((source_root / name).is_file() for name in ("requirements.txt", "requirements-directml.txt", "requirements-cpu.txt")):
+        return False
     profile = _installed_runtime_profile(app_dir)
     relative = {
         "directml": "requirements-directml.txt",
@@ -378,10 +382,10 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
         return False
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
         return False
-    print(tr("requirements_updating"))
     python = app_dir / ".venv" / "Scripts" / "python.exe"
-    if not python.is_file():
-        raise UpdateError(tr("requirements_failed"))
+    validator = source_root / "runtime_profile.py"
+    _verify_installed_runtime_profile(app_dir, python, validator, profile)
+    print(tr("requirements_updating"))
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
         [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "on", "-r", str(incoming)],
@@ -397,15 +401,13 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     )
     if result.returncode != 0:
         raise UpdateError(tr("requirements_failed"))
-    validator = source_root / "runtime_profile.py"
-    if validator.is_file():
-        result = subprocess.run(
-            [str(python), str(validator), "validate", profile, "--venv", str(app_dir / ".venv")],
-            cwd=str(app_dir),
-            check=False,
-        )
-        if result.returncode != 0:
-            raise UpdateError(tr("requirements_failed"))
+    result = subprocess.run(
+        [str(python), str(validator), "validate", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(app_dir),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise UpdateError(tr("requirements_failed"))
     return True
 
 
@@ -426,15 +428,31 @@ def run_gpu_smoke(app_dir: Path = APP_DIR) -> None:
 
 def _installed_runtime_profile(app_dir: Path) -> str:
     marker = app_dir / ".venv" / ".mozarie-runtime.json"
-    if marker.is_file():
-        try:
-            value = json.loads(marker.read_text(encoding="utf-8"))
-            profile = str(value.get("profile", "")).lower()
-            if profile in {"cuda", "directml", "cpu"}:
-                return profile
-        except (OSError, ValueError, TypeError):
-            pass
-    return "cuda"
+    if not marker.is_file():
+        raise UpdateError(tr("runtime_profile_invalid"))
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("schema") != 1:
+            raise ValueError("unsupported runtime marker schema")
+        profile = value.get("profile")
+        if not isinstance(profile, str) or profile not in {"cuda", "directml", "cpu"}:
+            raise ValueError("invalid runtime marker profile")
+    except (OSError, ValueError, TypeError):
+        raise UpdateError(tr("runtime_profile_invalid")) from None
+    return profile
+
+
+def _verify_installed_runtime_profile(app_dir: Path, python: Path, validator: Path, profile: str) -> None:
+    """Reject an ambiguous or mismatched venv before pip can mutate it."""
+    if not python.is_file() or not validator.is_file():
+        raise UpdateError(tr("runtime_profile_invalid"))
+    result = subprocess.run(
+        [str(python), str(validator), "preflight", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(app_dir),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise UpdateError(tr("runtime_profile_invalid"))
 
 
 def _remove_path(path: Path) -> None:
