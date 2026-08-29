@@ -106,6 +106,7 @@ function userErrorCode(error) {
 
 function showUserError(error, invoker = document.activeElement) {
   const code = userErrorCode(error);
+  if (code === "connection_lost") { showConnectionFailure(); return; }
   const dialog = $("#errorDialog");
   if (!dialog) return;
   $("#errorDialogTitle").textContent = t(`errorDialog.${code}.title`);
@@ -160,6 +161,7 @@ function api(path, options = {}) {
     headers: { "Content-Type": "application/json", "X-Mozarie-Token": token, ...(options.headers || {}) },
   })
     .then(async (response) => {
+      if (state.status?.connectionFailure) clearStatus();
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         const code = data.error_code || (response.status === 404 ? "api_not_found" : "internal_error");
@@ -180,6 +182,11 @@ function api(path, options = {}) {
     });
 }
 
+function showConnectionFailure() {
+  state.status = { message: "Mozarieに接続できません", kind: "error", connectionFailure: true };
+  renderStatus();
+}
+
 function setStatus(message, kind = "") {
   if (kind === "error") { state.status = { message: "", kind: "" }; renderStatus(); showUserError(message); return; }
   state.status = { message, kind };
@@ -187,7 +194,10 @@ function setStatus(message, kind = "") {
 }
 
 function setStatusKey(key, params = {}, kind = "") {
-  if (kind === "error") { state.status = { message: "", kind: "" }; renderStatus(); showUserError(key === "error.connectionLost" ? "connection_lost" : "internal_error"); return; }
+  if (kind === "error") {
+    if (key === "error.connectionLost") { showConnectionFailure(); return; }
+    state.status = { message: "", kind: "" }; renderStatus(); showUserError("internal_error"); return;
+  }
   state.status = { key, params, kind };
   renderStatus();
 }

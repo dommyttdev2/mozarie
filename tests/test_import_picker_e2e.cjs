@@ -444,8 +444,6 @@ async function assertConnectionStatusLayout(page, width, height, language) {
     await loadTranslations(selected);
     setStatusKey("error.connectionLost", {}, "error");
   }, language);
-  await page.waitForFunction(() => document.querySelector("#errorDialog").open);
-  await page.evaluate(() => document.querySelector("#errorDialog").close());
   const layout = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const appbar = box(".appbar");
@@ -457,13 +455,19 @@ async function assertConnectionStatusLayout(page, width, height, language) {
       gap: settings.left - connection.right,
       settingsHit: document.elementFromPoint(settings.x + settings.width / 2, settings.y + settings.height / 2) === document.querySelector("#settingsButton"),
       connectionHidden: document.querySelector("#connectionStatus").hidden,
+      connectionText: document.querySelector("#connectionStatus").textContent,
+      connectionColor: getComputedStyle(document.querySelector("#connectionStatus")).color,
+      errorDialogOpen: document.querySelector("#errorDialog").open,
       parentIsAppbar: document.querySelector("#connectionStatus").parentElement === document.querySelector(".appbar"),
       rightAligned: getComputedStyle(document.querySelector("#connectionStatus")).textAlign === "right",
       ...dimensions,
     };
   });
-  assert.equal(layout.connectionHidden, true, `blocking errors do not remain in the header at ${width}x${height} (${language})`);
-  assert.equal(layout.parentIsAppbar && layout.settingsHit && layout.rightAligned, true, `settings stays clickable while the error dialog is closed at ${width}x${height} (${language})`);
+  assert.equal(layout.connectionHidden, false, `connection loss is visible in the header at ${width}x${height} (${language})`);
+  assert.equal(layout.connectionText, "Mozarieに接続できません", `connection loss uses the exact Japanese text at ${width}x${height} (${language})`);
+  assert.equal(layout.connectionColor, "rgb(255, 157, 146)", `connection loss is red at ${width}x${height} (${language})`);
+  assert.equal(layout.errorDialogOpen, false, `connection loss does not open a dialog at ${width}x${height} (${language})`);
+  assert.equal(layout.parentIsAppbar && layout.settingsHit && layout.rightAligned && layout.inAppbar && layout.gap >= 10, true, `connection loss stays left of the clickable settings button at ${width}x${height} (${language})`);
   assert.equal(layout.scrollWidth, layout.clientWidth, `connection status does not create horizontal overflow at ${width}x${height} (${language})`);
 
   await page.evaluate(() => setStatus("Test notification"));
@@ -1235,13 +1239,42 @@ async function main() {
         : fetchOriginal(...args);
     });
     await settingsFailurePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
-    await settingsFailurePage.waitForFunction(() => document.querySelector("#errorDialog").open);
-    assert.match(await settingsFailurePage.locator("#errorDialog").textContent(), /Mozarieに接続できません/, "initial settings failure uses the error dialog");
-    assert.doesNotMatch(await settingsFailurePage.locator("#errorDialog").textContent(), /settings unavailable/, "raw request errors are not shown");
-    await settingsFailurePage.locator("#errorDialog").evaluate((dialog) => dialog.close());
+    await settingsFailurePage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
+    assert.equal(await settingsFailurePage.locator("#connectionStatus").textContent(), "Mozarieに接続できません", "initial settings failure uses the inline connection status");
+    assert.equal(await settingsFailurePage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "initial settings failure does not open an error dialog");
     await settingsFailurePage.locator("#settingsButton").click();
     assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
     await settingsFailurePage.close();
+    const connectionRecoveryPage = await browser.newPage();
+    await connectionRecoveryPage.addInitScript(() => {
+      window.__connectionOffline = false;
+      const fetchOriginal = window.fetch;
+      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/job") && window.__connectionOffline
+        ? Promise.reject(new Error("fixture offline"))
+        : fetchOriginal(...args);
+    });
+    await connectionRecoveryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await connectionRecoveryPage.evaluate(async () => {
+      window.__connectionOffline = true;
+      state.pollFailures = 2;
+      await pollJob();
+    });
+    await connectionRecoveryPage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
+    assert.equal(await connectionRecoveryPage.locator("#connectionStatus").textContent(), "Mozarieに接続できません", "three failed polls show the inline connection status");
+    assert.equal(await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "failed polls do not open an error dialog");
+    await connectionRecoveryPage.evaluate(async () => {
+      window.__connectionOffline = false;
+      await pollJob();
+    });
+    await connectionRecoveryPage.waitForFunction(() => document.querySelector("#connectionStatus").hidden);
+    assert.equal(await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "a recovered poll clears the inline connection status without a dialog");
+    await connectionRecoveryPage.evaluate(async () => {
+      try { await api("/missing"); } catch (error) { showUserError(error); }
+    });
+    await connectionRecoveryPage.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.equal(await connectionRecoveryPage.locator("#connectionStatus").isHidden(), true, "an HTTP error keeps the recovered connection status cleared");
+    await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.close());
+    await connectionRecoveryPage.close();
     const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
       const fetchOriginal = window.fetch;
@@ -1631,7 +1664,7 @@ async function main() {
       state.drafts.delete("sample-two");
       const fetchOriginal = window.fetch;
       window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/workspace/manual/sample-two")
-        ? Promise.reject(new Error("manual draft rejected"))
+        ? Promise.resolve(new Response(JSON.stringify({ error_code: "workspace_write_failed" }), { status: 500, headers: { "Content-Type": "application/json" } }))
         : fetchOriginal(...args);
       await selectImage("sample-two", true, { saveCurrentDraft: false });
       window.fetch = fetchOriginal;
