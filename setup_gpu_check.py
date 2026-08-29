@@ -6,7 +6,7 @@ from pathlib import Path
 import warnings
 
 from mozarie.config import SettingsStore
-from runtime_profile import selected_profile, validate
+from mozarie.runtime_profile import selected_profile, validate
 
 
 CPU_READY_MESSAGE = "[Mozarie] CPU detection runtime is ready. / CPU検出ランタイムの準備ができました。"

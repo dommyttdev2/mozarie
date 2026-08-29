@@ -38,6 +38,8 @@ $env:MOZARIE_RUNTIME = "cpu"       # CPU only
 
 Do not mix the CUDA and DirectML ONNX Runtime packages in the same `.venv`. If an existing environment does not match the selected backend, `setup.bat` stops without changing its packages. To switch backends, back up `.venv` if needed, remove it, and run `setup.bat` again.
 
+`run.bat` does not start when its `.venv` setup information is missing; run `setup.bat` again.
+
 ### Run
 
 ```powershell

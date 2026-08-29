@@ -214,9 +214,9 @@ def selected_profile(venv: Path) -> str | None:
     if explicit is not None:
         return explicit
     marker = read_marker(venv)
-    if marker is not None:
+    if marker is not None and marker.get("schema") == 1:
         return normalize_profile(str(marker.get("profile", "")))
-    return installed_profile()
+    return None
 
 
 def main() -> int:

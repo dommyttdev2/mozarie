@@ -38,6 +38,8 @@ $env:MOZARIE_RUNTIME = "cpu"       # CPUのみ
 
 CUDA版とDirectML版のONNX Runtimeは同じ`.venv`へ混在させないでください。既存環境と選択されたバックエンドが異なる場合、`setup.bat`はパッケージを変更せず停止します。バックエンドを切り替える場合は、必要に応じて`.venv`をバックアップしてから削除し、`setup.bat`を再実行してください。
 
+`run.bat`は、setup済みを示す`.venv`内の情報がない場合にも起動せず、`setup.bat`を案内します。
+
 ### 起動
 
 ```powershell
