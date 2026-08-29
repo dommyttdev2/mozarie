@@ -9,11 +9,14 @@ from mozarie.config import SettingsStore
 from runtime_profile import selected_profile, validate
 
 
-CPU_MESSAGE = "[Mozarie] GPU unavailable. Switched the detection runtime to CPU; change it later in Settings. / GPUは利用できません。検出設定をCPUへ切り替えました。後で設定から変更できます。"
-CPU_SAVE_FAILED_MESSAGE = "[Mozarie] GPU unavailable, but switching to CPU could not be saved. Setup stopped; check config/local.json and run setup again. / GPUは利用できず、CPUへの切替も保存できませんでした。config/local.jsonを確認して、setupをもう一度実行してください。"
+CPU_READY_MESSAGE = "[Mozarie] CPU detection runtime is ready. / CPU検出ランタイムの準備ができました。"
+CPU_SAVE_FAILED_MESSAGE = "[Mozarie] CPU detection runtime passed its check, but the CPU setting could not be saved. Setup stopped; check config/local.json and run setup again. / CPU検出ランタイムの確認はできましたが、CPU設定を保存できませんでした。config/local.jsonを確認して、setup.bat をもう一度実行してください。"
 RUNTIME_IMPORT_FAILED_MESSAGE = "[Mozarie] Required packages could not be loaded. Setup stopped; run setup.bat again. / 必要なパッケージを読み込めませんでした。setup.bat をもう一度実行してください。"
 CPU_RUNTIME_FAILED_MESSAGE = "[Mozarie] The CPU detection runtime could not start. Setup stopped; run setup.bat again. / CPUで検出処理を開始できませんでした。setup.bat をもう一度実行してください。"
 SETTINGS_READ_FAILED_MESSAGE = "[Mozarie] Settings could not be read. Setup stopped; check config/local.json and run setup.bat again. / 設定を読み込めませんでした。config/local.json を確認してから setup.bat を実行してください。"
+PROFILE_UNAVAILABLE_MESSAGE = "[Mozarie] The selected runtime could not be identified. Setup stopped; run setup.bat again. / 選択されたランタイムを確認できませんでした。setup.bat をもう一度実行してください。"
+CUDA_RUNTIME_FAILED_MESSAGE = "[Mozarie] CUDA detection runtime could not start. Setup stopped; check the NVIDIA driver and run setup.bat again. / CUDA検出ランタイムを開始できませんでした。NVIDIAドライバーを確認して、setup.bat をもう一度実行してください。"
+DIRECTML_RUNTIME_FAILED_MESSAGE = "[Mozarie] DirectML detection runtime could not start. Setup stopped; check the GPU driver and run setup.bat again. / DirectML検出ランタイムを開始できませんでした。GPUドライバーを確認して、setup.bat をもう一度実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -59,13 +62,13 @@ def _cpu_is_ready(np, ort, _torch, datasets) -> bool:
         return False
 
 
-def _switch_to_cpu() -> bool:
+def _save_cpu_provider() -> bool:
     try:
         SettingsStore(APP_DIR).save({"models": {"provider": "cpu"}})
     except Exception:
         print(CPU_SAVE_FAILED_MESSAGE)
         return False
-    print(CPU_MESSAGE)
+    print(CPU_READY_MESSAGE)
     return True
 
 
@@ -73,9 +76,12 @@ def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
         device = int(settings["models"].get("gpu_device", 0))
-        profile = selected_profile(APP_DIR / ".venv") or "cuda"
+        profile = selected_profile(APP_DIR / ".venv")
     except Exception:
         print(SETTINGS_READ_FAILED_MESSAGE)
+        return 1
+    if profile not in {"cuda", "directml", "cpu"}:
+        print(PROFILE_UNAVAILABLE_MESSAGE)
         return 1
     if profile == "directml":
         try:
@@ -83,8 +89,8 @@ def main() -> int:
             print(f"[Mozarie] DirectML GPU {device} is ready.")
             return 0
         except Exception:
-            # Fall through to the verified CPU fallback below.
-            pass
+            print(DIRECTML_RUNTIME_FAILED_MESSAGE)
+            return 1
     try:
         runtime = _runtime_modules()
     except Exception:
@@ -97,10 +103,12 @@ def main() -> int:
                 return 0
         except Exception:
             pass
+        print(CUDA_RUNTIME_FAILED_MESSAGE)
+        return 1
     if not _cpu_is_ready(*runtime):
         print(CPU_RUNTIME_FAILED_MESSAGE)
         return 1
-    return 0 if _switch_to_cpu() else 1
+    return 0 if _save_cpu_provider() else 1
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import setup_gpu_check
 
 
 class SetupGpuCheckTests(unittest.TestCase):
-    def run_check(self, *, cuda=True, providers=("CUDAExecutionProvider",), session=None, cpu_session=None, save_error=None):
+    def run_check(self, *, profile="cuda", cuda=True, providers=("CUDAExecutionProvider",), session=None, cpu_session=None, save_error=None):
         session = session if session is not None else SimpleNamespace(
             disable_fallback=lambda: None,
             get_providers=lambda: ["CUDAExecutionProvider"],
@@ -39,46 +39,43 @@ class SetupGpuCheckTests(unittest.TestCase):
         )
         output = io.StringIO()
         with patch.object(setup_gpu_check, "_runtime_modules", return_value=runtime), \
-             patch.object(setup_gpu_check, "selected_profile", return_value="cuda"), \
+             patch.object(setup_gpu_check, "selected_profile", return_value=profile), \
              patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              contextlib.redirect_stdout(output):
             result = setup_gpu_check.main()
         return result, store, output.getvalue()
 
-    def test_cuda_unavailable_switches_to_cpu(self):
+    def test_cuda_unavailable_stops_without_changing_the_provider(self):
         result, store, output = self.run_check(cuda=False)
-        self.assertEqual(result, 0)
-        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
-        self.assertIn("CPU", output)
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CUDA detection runtime could not start", output)
 
-    def test_missing_execution_provider_switches_to_cpu(self):
-        result, _store, output = self.run_check(providers=("CPUExecutionProvider",))
-        self.assertEqual(result, 0)
-        self.assertIn("CPU", output)
+    def test_missing_execution_provider_stops_without_changing_the_provider(self):
+        result, store, output = self.run_check(providers=("CPUExecutionProvider",))
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CUDA detection runtime could not start", output)
 
-    def test_session_failure_switches_to_cpu(self):
-        result, _store, output = self.run_check(session=SimpleNamespace(
+    def test_session_failure_stops_without_changing_the_provider(self):
+        result, store, output = self.run_check(session=SimpleNamespace(
             disable_fallback=lambda: None, get_providers=lambda: ["CUDAExecutionProvider"],
             run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
         ))
-        self.assertEqual(result, 0)
-        self.assertIn("CPU", output)
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CUDA detection runtime could not start", output)
 
-    def test_gpu_provider_fallback_switches_to_a_verified_cpu_runtime(self):
-        fallback = SimpleNamespace(
+    def test_gpu_provider_fallback_stops_without_changing_the_provider(self):
+        wrong_provider = SimpleNamespace(
             disable_fallback=lambda: None,
             get_providers=lambda: ["CPUExecutionProvider"],
             run=lambda *_args: None,
         )
-        result, store, output = self.run_check(session=fallback)
-        self.assertEqual(result, 0)
-        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
-        self.assertIn("CPU", output)
-
-    def test_cpu_save_failure_fails_setup(self):
-        result, _store, output = self.run_check(cuda=False, save_error=OSError("locked"))
+        result, store, output = self.run_check(session=wrong_provider)
         self.assertEqual(result, 1)
-        self.assertIn("could not be saved", output)
+        store.save.assert_not_called()
+        self.assertIn("CUDA detection runtime could not start", output)
 
     def test_runtime_import_failure_stops_without_changing_the_provider(self):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
@@ -106,7 +103,7 @@ class SetupGpuCheckTests(unittest.TestCase):
             get_providers=lambda: ["CPUExecutionProvider"],
             run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
         )
-        result, store, output = self.run_check(cuda=False, cpu_session=failed_cpu)
+        result, store, output = self.run_check(profile="cpu", cpu_session=failed_cpu)
         self.assertEqual(result, 1)
         store.save.assert_not_called()
         self.assertIn("CPU detection runtime could not start", output)
@@ -117,7 +114,7 @@ class SetupGpuCheckTests(unittest.TestCase):
             get_providers=lambda: ["CUDAExecutionProvider"],
             run=lambda *_args: None,
         )
-        result, store, output = self.run_check(cuda=False, cpu_session=wrong_provider)
+        result, store, output = self.run_check(profile="cpu", cpu_session=wrong_provider)
         self.assertEqual(result, 1)
         store.save.assert_not_called()
         self.assertIn("CPU detection runtime could not start", output)
@@ -142,15 +139,13 @@ class SetupGpuCheckTests(unittest.TestCase):
         store.save.assert_not_called()
         self.assertIn("DirectML GPU 1 is ready", output.getvalue())
 
-    def test_directml_probe_failure_switches_to_cpu(self):
+    def test_directml_probe_failure_stops_without_changing_the_provider(self):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 1}}))
         with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              patch.object(setup_gpu_check, "selected_profile", return_value="directml"), \
-             patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("DirectML failed")), \
-             patch.object(setup_gpu_check, "_runtime_modules", return_value=(object(), object(), object(), object())), \
-             patch.object(setup_gpu_check, "_cpu_is_ready", return_value=True):
-            self.assertEqual(setup_gpu_check.main(), 0)
-        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+             patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("DirectML failed")):
+            self.assertEqual(setup_gpu_check.main(), 1)
+        store.save.assert_not_called()
 
     def test_cpu_profile_verifies_cpu_runtime_without_a_gpu_probe(self):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
@@ -166,6 +161,23 @@ class SetupGpuCheckTests(unittest.TestCase):
         cpu_ready.assert_called_once()
         gpu_ready.assert_not_called()
         store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+
+    def test_cpu_profile_save_failure_stops_setup(self):
+        result, _store, output = self.run_check(profile="cpu", save_error=OSError("locked"))
+        self.assertEqual(result, 1)
+        self.assertIn("could not be saved", output)
+
+    def test_missing_profile_stops_without_running_a_runtime_probe(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             patch.object(setup_gpu_check, "selected_profile", return_value=None), \
+             patch.object(setup_gpu_check, "_runtime_modules") as runtime_modules, \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(setup_gpu_check.main(), 1)
+        runtime_modules.assert_not_called()
+        store.save.assert_not_called()
+        self.assertIn("selected runtime could not be identified", output.getvalue())
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_fresh_venv_pip_dry_run_keeps_resolver_output_visible(self) -> None:

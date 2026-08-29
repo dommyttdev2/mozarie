@@ -892,7 +892,9 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("Could not create the Python environment.", batch)
         self.assertIn('"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"', batch)
         gpu_check = (Path(__file__).parents[1] / "setup_gpu_check.py").read_text(encoding="utf-8")
-        self.assertIn("GPU unavailable. Switched the detection runtime to CPU; change it later in Settings.", gpu_check)
+        self.assertIn("CUDA detection runtime could not start. Setup stopped", gpu_check)
+        self.assertIn("DirectML detection runtime could not start. Setup stopped", gpu_check)
+        self.assertNotIn("Switched the detection runtime to CPU", gpu_check)
         self.assertIn("setup_gpu_check.py", updater.MANAGED_FILES)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):
