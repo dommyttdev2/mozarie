@@ -444,6 +444,10 @@ class CatalogMixin:
                 self._pending_browser_save_cleanup.append((details.output_path, details.output_fingerprint))
         return details
 
+    def _release_browser_save_claim(self, token: str) -> None:
+        with self.lock:
+            self.browser_save_claims.discard(token)
+
     @staticmethod
     def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None]]) -> None:
         """Remove detached token files without touching a replacement at its path."""
@@ -465,6 +469,7 @@ class CatalogMixin:
     def _clear_browser_save_tokens_unchecked(self) -> None:
         for token in tuple(self.browser_save_tokens):
             self._discard_browser_save_token_unchecked(token)
+        self.browser_save_claims.clear()
 
     def _discard_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
         for token, details in tuple(self.browser_save_tokens.items()):
@@ -474,7 +479,7 @@ class CatalogMixin:
     def _discard_expired_browser_save_tokens_unchecked(self) -> None:
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
         for token, details in tuple(self.browser_save_tokens.items()):
-            if details.issued_at < cutoff:
+            if token not in self.browser_save_claims and details.issued_at < cutoff:
                 self._discard_browser_save_token_unchecked(token)
         for token, receipt in tuple(self.browser_save_receipts.items()):
             if receipt.completed_at < cutoff:
@@ -485,7 +490,7 @@ class CatalogMixin:
         cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
         with self.lock:
             for token, details in tuple(self.browser_save_tokens.items()):
-                if details.issued_at < cutoff:
+                if token not in self.browser_save_claims and details.issued_at < cutoff:
                     self._discard_browser_save_token_unchecked(token)
             for token, receipt in tuple(self.browser_save_receipts.items()):
                 if receipt.completed_at < cutoff:

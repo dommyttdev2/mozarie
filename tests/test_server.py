@@ -6419,6 +6419,10 @@ class MozarieTests(unittest.TestCase):
             original_replace = saving_module._stage_record_replacement
 
             def block_after_claim(record, rendered_path, fingerprint):
+                details = state.browser_save_tokens[token]
+                state.browser_save_tokens[token] = replace(
+                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                )
                 claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
 
             def commit():
@@ -6437,6 +6441,45 @@ class MozarieTests(unittest.TestCase):
             self.assertNotIn("error", outcome)
             self.assertTrue(outcome["value"]["cleared"])
             self.assertFalse(rendered_path.exists())
+
+    def test_expired_claimed_copy_survives_delete_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; copies = root / "copies"; copies.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(copies)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            claimed = threading.Event(); release = threading.Event(); outcome = {}
+            original_assert = state._assert_record_stat_matches
+
+            def block_assert(*args, **kwargs):
+                details = state.browser_save_tokens[rendered.save_token]
+                state.browser_save_tokens[rendered.save_token] = replace(
+                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                )
+                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+
+            def commit():
+                try:
+                    outcome["value"] = state.commit_browser_save(image_id, revision, rendered.save_token, "deleted")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
+                thread = threading.Thread(target=commit); thread.start()
+                self.assertTrue(claimed.wait(2))
+                state.cleanup_expired_browser_save_tokens()
+                self.assertTrue(rendered.output_path.exists())
+                release.set(); thread.join(2)
+
+            self.assertNotIn("error", outcome)
+            self.assertTrue(outcome["value"]["deleted"])
+            self.assertFalse(source.exists())
+            self.assertTrue(rendered.output_path.exists())
 
     def test_browser_save_catalog_mismatch_removes_rendered_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6952,7 +6995,7 @@ class MozarieTests(unittest.TestCase):
                 self.assertLess(events.index("flush"), events.index("fsync"))
                 if route != "browser copy":
                     self.assertIn("stale check", events)
-                    self.assertGreaterEqual(events.count("replace"), 2, "staged overwrite first quarantines the original")
+                    self.assertEqual(events.count("replace"), 1, "staged overwrite atomically replaces the original")
                 else:
                     self.assertEqual(events.count("replace"), 1)
                 if route == "browser copy":

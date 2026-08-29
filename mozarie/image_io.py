@@ -4,6 +4,7 @@ import binascii
 import io
 import math
 import os
+import shutil
 import tempfile
 import uuid
 import zlib
@@ -486,12 +487,8 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
-        os.replace(record.path, backup_path)
-        try:
-            os.replace(temporary_path, record.path)
-        except Exception:
-            os.replace(backup_path, record.path)
-            raise
+        shutil.copy2(record.path, backup_path)
+        os.replace(temporary_path, record.path)
         temporary_path = None
         _sync_directory(record.path.parent)
         if record.source_kind == "filesystem":
@@ -547,12 +544,8 @@ def _stage_save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record)
-        os.replace(destination, backup_path)
-        try:
-            os.replace(temporary_path, destination)
-        except Exception:
-            os.replace(backup_path, destination)
-            raise
+        shutil.copy2(destination, backup_path)
+        os.replace(temporary_path, destination)
         temporary_path = None
         _sync_directory(destination.parent)
         try:
