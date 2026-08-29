@@ -232,12 +232,12 @@ function moveCurrentBy(offset) {
   const target = visible[index + offset];
   if (target) void selectImage(target.id);
 }
-function reviewAndMoveNext() {
+async function reviewAndMoveNext() {
   if (isGestureActive()) return null;
   const current = currentRecord();
   if (!current) return null;
   const target = state.images.slice(imageIndex(current.id) + 1).find((image) => !isHidden(image)) || null;
-  setReviewed(current, true);
+  if (!await setReviewed(current, true)) return null;
   if (target) void selectImage(target.id);
   return target;
 }
@@ -246,11 +246,11 @@ async function hideAndMoveNext() {
   const current = currentRecord();
   if (!current) return;
   const target = state.images.slice(imageIndex(current.id) + 1).find((image) => !isHidden(image)) || null;
-  setHidden(current, true);
+  if (!await setHidden(current, true)) return;
   if (target) await selectImage(target.id);
 }
-function runNavigationAction(action) {
-  action();
+async function runNavigationAction(action) {
+  await action();
   focusCanvas();
 }
 function updateNavigationControls() {

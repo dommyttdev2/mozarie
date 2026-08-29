@@ -164,7 +164,7 @@ function bindEvents() {
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, detectionTargets()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
-  $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) setHidden(image, !isHidden(image)); });
+  $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) void setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
   $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
@@ -176,7 +176,7 @@ function bindEvents() {
   $("#closeOverviewButton").addEventListener("click", () => setViewMode("edit"));
   $("#previousImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(-1)));
   $("#nextImageButton").addEventListener("click", () => runNavigationAction(() => moveCurrentBy(1)));
-  $("#reviewAndNextButton").addEventListener("click", () => runNavigationAction(reviewAndMoveNext));
+  $("#reviewAndNextButton").addEventListener("click", () => { void runNavigationAction(reviewAndMoveNext); });
   $("#removeAndNextButton").addEventListener("click", () => { void removeImageFromCatalog(state.currentId); });
   $("#hideAndNextButton").addEventListener("click", () => { void hideAndMoveNext(); });
   document.querySelectorAll("[data-selection-action]").forEach((button) => button.addEventListener("click", () => { void runSelectionAction(button.dataset.selectionAction); }));
@@ -306,11 +306,11 @@ function bindEvents() {
   });
   $("#toggleReviewMenuItem").addEventListener("click", () => {
     const image = state.images.find((item) => item.id === state.contextMenuImageId);
-    if (image) setReviewed(image, !isReviewed(image));
+    if (image) void setReviewed(image, !isReviewed(image));
     closeCatalogContextMenu();
   });
   $("#copyImagePathMenuItem").addEventListener("click", () => { void copyContextMenuImagePath(); });
-  $("#removeImageMenuItem").addEventListener("click", () => { const image = state.images.find((item) => item.id === state.contextMenuImageId); if (image) setHidden(image, !isHidden(image)); closeCatalogContextMenu(); });
+  $("#removeImageMenuItem").addEventListener("click", () => { const image = state.images.find((item) => item.id === state.contextMenuImageId); if (image) void setHidden(image, !isHidden(image)); closeCatalogContextMenu(); });
   $("#gallery").addEventListener("dragenter", (event) => {
     if (!event.dataTransfer?.types?.includes("Files")) return;
     event.preventDefault(); setGalleryDropOverlay(true);
