@@ -9,7 +9,8 @@ for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
     py -%%V -X utf8 "%APP_DIR%updater.py" --check-running
     if errorlevel 30 if not errorlevel 31 goto :mozarie_running
     py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked
-    exit /b %ERRORLEVEL%
+    if errorlevel 1 goto :setup_locked_failed
+    exit /b 0
   )
 )
 echo [Mozarie] 64-bit Python 3.11 to 3.14 was not found. Install it, then run setup.bat again. / 64-bit Python 3.11〜3.14 をインストールしてから setup.bat を実行してください。
@@ -42,6 +43,9 @@ if errorlevel 1 goto :failed
 echo [Mozarie] Setup complete. Run run.bat.
 pause
 exit /b 0
+
+:setup_locked_failed
+exit /b 1
 
 :create_venv
 for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (

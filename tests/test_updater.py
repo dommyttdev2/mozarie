@@ -782,6 +782,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
         self.assertIn('py -%%V -X utf8 "%APP_DIR%updater.py" --check-running', batch)
         self.assertIn("if errorlevel 30 if not errorlevel 31 goto :mozarie_running", batch)
+        self.assertIn("if errorlevel 1 goto :setup_locked_failed", batch)
         self.assertIn(":venv_failed", batch)
         self.assertIn("Could not create the Python environment.", batch)
         self.assertIn('"%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"', batch)
@@ -856,6 +857,36 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("call setup.bat", batch.lower())
         self.assertNotIn("-m venv", batch.lower())
         self.assertNotIn("call :create_venv", batch.lower())
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
+    def test_setup_batch_reports_venv_and_running_states_without_marking_ready(self):
+        root_batch = Path(__file__).parents[1] / "setup.bat"
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"; app.mkdir()
+            (app / "setup.bat").write_text(root_batch.read_text(encoding="utf-8").replace("\n", "\r\n"), encoding="utf-8", newline="")
+            (app / "updater.py").write_text("""import os, subprocess, sys
+from pathlib import Path
+if sys.argv[-1] == "--check-running": raise SystemExit(30 if os.environ.get("MOZARIE_TEST_MODE") == "running" else 0)
+if sys.argv[-1] == "--run-setup-locked": raise SystemExit(subprocess.run(["cmd.exe", "/d", "/c", str(Path(__file__).with_name("setup.bat")), "--locked"]).returncode)
+raise SystemExit(1)
+""", encoding="utf-8")
+            (app / ".venv").write_text("not a directory", encoding="utf-8")
+            for mode, expected, absent in (
+                ("venv", "Could not create the Python environment.", "64-bit Python 3.11 to 3.14 was not found"),
+                ("running", "Close Mozarie, then run setup.bat again.", "Another update is already running"),
+            ):
+                with self.subTest(mode=mode):
+                    result = subprocess.run(
+                        ["cmd.exe", "/d", "/c", str(app / "setup.bat")], cwd=app,
+                        env=os.environ | {"MOZARIE_TEST_MODE": mode}, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertNotEqual(result.returncode, 0, output)
+                    self.assertIn(expected, output)
+                    self.assertNotIn(absent, output)
+                    self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
+                    if mode == "running": self.assertNotIn("Installing required packages", output)
 
 
 if __name__ == "__main__":

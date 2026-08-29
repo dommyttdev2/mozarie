@@ -7076,6 +7076,40 @@ class MozarieTests(unittest.TestCase):
                 self.assertEqual(source.read_bytes(), source_bytes)
                 self.assertEqual(list(source.parent.glob("*.mozarie.tmp")), [])
 
+    def test_overwrite_crash_never_leaves_the_source_path_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; rendered = root / "rendered.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            Image.new("RGB", (16, 16), "black").save(rendered)
+            source_stat = source.stat()
+            code = """
+import os, sys
+from pathlib import Path
+from mozarie.core import ImageRecord
+from mozarie import image_io
+source, rendered = map(Path, sys.argv[1:])
+record = ImageRecord('image', source, 'source.png', 16, 16, source.stat().st_mtime_ns, source.stat().st_size)
+original_replace = image_io.os.replace
+def crash_before_replace(current, destination):
+    if Path(destination) == source:
+        os._exit(91)
+    return original_replace(current, destination)
+image_io.os.replace = crash_before_replace
+image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns, source.stat().st_size))
+"""
+            environment = os.environ | {"PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+            before = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            self.assertEqual(before.returncode, 91, before.stdout + before.stderr)
+            self.assertTrue(source.is_file())
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (255, 255, 255))
+            self.assertTrue(list(root.glob(".source.png.mozarie-backup-*")))
+
+            code = code.replace("os._exit(91)", "return original_replace(current, destination)") + "\nos._exit(92)\n"
+            after = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            self.assertEqual(after.returncode, 92, after.stdout + after.stderr)
+            self.assertTrue(source.is_file())
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 0))
+
     def test_filesystem_save_rejects_change_during_source_read(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"
