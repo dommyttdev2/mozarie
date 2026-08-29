@@ -618,7 +618,7 @@ async function finishApplyJob(job) {
     for (const imageId of completedImageIds) {
       const previousImage = previousImagesById.get(imageId);
       const reloadedImage = reloadedImagesById.get(imageId);
-      if (previousImage && reloadedImage) moveReviewedPathAfterApply(previousImage, reloadedImage);
+      if (previousImage && reloadedImage) void moveReviewedPathAfterApply(previousImage, reloadedImage);
     }
     state.maskStatus.clear();
     for (const imageId of completedImageIds) state.drafts.delete(imageId);

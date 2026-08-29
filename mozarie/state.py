@@ -107,6 +107,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
         self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
+        # A claimed token is being committed outside ``lock``.  Expiry polling
+        # must leave its already-written copy alone until the commit finishes.
+        self.browser_save_claims: set[str] = set()
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
         self._pending_browser_save_cleanup: list[tuple[Path, tuple[int, int] | None]] = []
         self.output_destination_lock = threading.Lock()

@@ -4,6 +4,7 @@ import binascii
 import io
 import math
 import os
+import shutil
 import tempfile
 import uuid
 import zlib
@@ -472,6 +473,14 @@ def _sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+def _remove_incomplete_backup(backup_path: Path) -> None:
+    """Do not leave a rollback file behind when the replacement never happened."""
+    try:
+        backup_path.unlink(missing_ok=True)
+    except OSError:
+        LOGGER.warning("Incomplete save backup could not be removed: %s", backup_path)
+
+
 def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> SourceReplaceStage:
     """Replace a source while retaining a same-directory rollback copy."""
     original_stat = record.path.stat()
@@ -486,12 +495,15 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
-        os.replace(record.path, backup_path)
+        replaced = False
         try:
+            shutil.copy2(record.path, backup_path)
+            _assert_source_stat_matches(record, expected_source_fingerprint)
             os.replace(temporary_path, record.path)
-        except Exception:
-            os.replace(backup_path, record.path)
-            raise
+            replaced = True
+        finally:
+            if not replaced:
+                _remove_incomplete_backup(backup_path)
         temporary_path = None
         _sync_directory(record.path.parent)
         if record.source_kind == "filesystem":
@@ -547,12 +559,15 @@ def _stage_save_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record)
-        os.replace(destination, backup_path)
+        replaced = False
         try:
+            shutil.copy2(destination, backup_path)
+            _assert_source_stat_matches(record)
             os.replace(temporary_path, destination)
-        except Exception:
-            os.replace(backup_path, destination)
-            raise
+            replaced = True
+        finally:
+            if not replaced:
+                _remove_incomplete_backup(backup_path)
         temporary_path = None
         _sync_directory(destination.parent)
         try:

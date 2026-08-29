@@ -15,17 +15,25 @@ import setup_gpu_check
 
 
 class SetupGpuCheckTests(unittest.TestCase):
-    def run_check(self, *, cuda=True, providers=("CUDAExecutionProvider",), session=None, save_error=None):
+    def run_check(self, *, cuda=True, providers=("CUDAExecutionProvider",), session=None, cpu_session=None, save_error=None):
         session = session if session is not None else SimpleNamespace(
             disable_fallback=lambda: None,
             get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        cpu_session = cpu_session if cpu_session is not None else SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CPUExecutionProvider"],
             run=lambda *_args: None,
         )
         store = SimpleNamespace(save=Mock(side_effect=save_error), load=Mock(return_value={"models": {"gpu_device": 0}}))
         tensor = Mock(); tensor.add_.return_value = tensor; tensor.cpu.return_value = tensor
         runtime = (
             SimpleNamespace(ones=Mock(return_value=object()), float32=object()),
-            SimpleNamespace(get_available_providers=lambda: providers, InferenceSession=lambda *_args, **_kwargs: session),
+            SimpleNamespace(
+                get_available_providers=lambda: providers,
+                InferenceSession=lambda *_args, providers, **_kwargs: session if providers == ["CUDAExecutionProvider"] else cpu_session,
+            ),
             SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda, device_count=lambda: 1), ones=Mock(return_value=tensor)),
             SimpleNamespace(get_example=lambda _name: "model.onnx"),
         )
@@ -55,10 +63,63 @@ class SetupGpuCheckTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("CPU", output)
 
+    def test_gpu_provider_fallback_switches_to_a_verified_cpu_runtime(self):
+        fallback = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CPUExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        result, store, output = self.run_check(session=fallback)
+        self.assertEqual(result, 0)
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+        self.assertIn("CPU", output)
+
     def test_cpu_save_failure_fails_setup(self):
         result, _store, output = self.run_check(cuda=False, save_error=OSError("locked"))
         self.assertEqual(result, 1)
         self.assertIn("could not be saved", output)
+
+    def test_runtime_import_failure_stops_without_changing_the_provider(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "_runtime_modules", side_effect=ImportError("DLL load failed")), \
+             patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
+             contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("Required packages could not be loaded", output.getvalue())
+
+    def test_settings_failure_has_its_own_recovery_message(self):
+        store = SimpleNamespace(save=Mock(), load=Mock(side_effect=ValueError("bad settings")))
+        output = io.StringIO()
+        with patch.object(setup_gpu_check, "SettingsStore", return_value=store), contextlib.redirect_stdout(output):
+            result = setup_gpu_check.main()
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("Settings could not be read", output.getvalue())
+
+    def test_cpu_smoke_failure_stops_without_changing_the_provider(self):
+        failed_cpu = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CPUExecutionProvider"],
+            run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
+        )
+        result, store, output = self.run_check(cuda=False, cpu_session=failed_cpu)
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CPU detection runtime could not start", output)
+
+    def test_cpu_provider_fallback_is_not_accepted(self):
+        wrong_provider = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        result, store, output = self.run_check(cuda=False, cpu_session=wrong_provider)
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CPU detection runtime could not start", output)
 
     def test_gpu_success_keeps_existing_provider(self):
         result, store, output = self.run_check()

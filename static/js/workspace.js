@@ -3,12 +3,13 @@
 state.workspaceDraftChains = new Map();
 state.workspaceDraftTimers = new Map();
 state.workspaceMutationErrors = new Map();
+state.workspaceFlagPending = new Map();
 
-function queueWorkspaceMutation(imageId, send) {
+function queueWorkspaceMutation(imageId, send, rememberFailure = true) {
   const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();
   const next = previous.catch(() => {}).then(send);
   state.workspaceDraftChains.set(imageId, next);
-  next.then(
+  if (rememberFailure) next.then(
     () => {},
     (error) => { state.workspaceMutationErrors.set(imageId, error); },
   );
@@ -18,7 +19,7 @@ function queueWorkspaceFlags(imageId, payload) {
   if (!imageId) return Promise.resolve();
   return queueWorkspaceMutation(imageId, () => api(`/api/workspace/image/${encodeURIComponent(imageId)}`, {
     method: "POST", body: JSON.stringify(payload),
-  })).catch((error) => { showUserError(error); });
+  }), false);
 }
 
 const DIRECTORY_DB = "mozarie-directory-catalogs";

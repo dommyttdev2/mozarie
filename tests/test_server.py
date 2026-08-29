@@ -196,6 +196,17 @@ class MozarieTests(unittest.TestCase):
             output, _record, _revision, _token = replacement.render_browser_save(image_id, 1, 100, None)
             self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
 
+    def test_flag_change_keeps_the_visible_state_when_the_workspace_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.images[image_id]
+            with patch.object(state.workspace_store, "set_image_flags", side_effect=sqlite3.DatabaseError("write failed")):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
+            self.assertFalse(record.hidden)
+            self.assertFalse(record.reviewed)
+
     def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -6072,6 +6083,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state._candidate_revision(image_id), revision)
             self.assertEqual(len(state.candidates[image_id]), 1)
             self.assertIn(token, state.browser_save_tokens)
+            self.assertNotIn(token, state.browser_save_claims)
             self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
             self.assertEqual(state._candidate_revision(image_id), revision + 1)
             with state.workspace_store._connect() as db:
@@ -6419,6 +6431,10 @@ class MozarieTests(unittest.TestCase):
             original_replace = saving_module._stage_record_replacement
 
             def block_after_claim(record, rendered_path, fingerprint):
+                details = state.browser_save_tokens[token]
+                state.browser_save_tokens[token] = replace(
+                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                )
                 claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
 
             def commit():
@@ -6437,6 +6453,81 @@ class MozarieTests(unittest.TestCase):
             self.assertNotIn("error", outcome)
             self.assertTrue(outcome["value"]["cleared"])
             self.assertFalse(rendered_path.exists())
+
+    def test_expired_claimed_copy_survives_delete_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; copies = root / "copies"; copies.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(copies)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            claimed = threading.Event(); release = threading.Event(); outcome = {}
+            original_assert = state._assert_record_stat_matches
+
+            def block_assert(*args, **kwargs):
+                details = state.browser_save_tokens[rendered.save_token]
+                state.browser_save_tokens[rendered.save_token] = replace(
+                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                )
+                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+
+            def commit():
+                try:
+                    outcome["value"] = state.commit_browser_save(image_id, revision, rendered.save_token, "deleted")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
+                thread = threading.Thread(target=commit); thread.start()
+                self.assertTrue(claimed.wait(2))
+                state.cleanup_expired_browser_save_tokens()
+                self.assertTrue(rendered.output_path.exists())
+                release.set(); thread.join(2)
+
+            self.assertNotIn("error", outcome)
+            self.assertTrue(outcome["value"]["deleted"])
+            self.assertFalse(source.exists())
+            self.assertTrue(rendered.output_path.exists())
+
+    def test_shutdown_waits_for_a_claimed_copy_delete_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; copies = root / "copies"; copies.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(copies)
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
+            claimed = threading.Event(); release = threading.Event(); shutdown_done = threading.Event(); outcome = {}
+            original_assert = state._assert_record_stat_matches
+
+            def block_assert(*args, **kwargs):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+
+            def commit():
+                try:
+                    outcome["value"] = state.commit_browser_save(image_id, revision, rendered.save_token, "deleted")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+            with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
+                commit_thread = threading.Thread(target=commit); commit_thread.start()
+                self.assertTrue(claimed.wait(2))
+                shutdown_thread = threading.Thread(target=lambda: (state.shutdown(), shutdown_done.set())); shutdown_thread.start()
+                self.assertFalse(shutdown_done.wait(.1))
+                self.assertTrue(rendered.output_path.exists())
+                release.set(); commit_thread.join(2); shutdown_thread.join(2)
+
+            self.assertNotIn("error", outcome)
+            self.assertTrue(outcome["value"]["deleted"])
+            self.assertTrue(shutdown_done.is_set())
+            self.assertTrue(rendered.output_path.exists())
 
     def test_browser_save_catalog_mismatch_removes_rendered_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6880,6 +6971,69 @@ class MozarieTests(unittest.TestCase):
                     save_with_mask(record, self._mask(16, 16), 4)
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
 
+    def test_staged_overwrites_reject_source_changes_during_backup_copy(self):
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                original_stat = source.stat()
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+                if route == "apply":
+                    stage = lambda: image_io_module._stage_save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    stage = lambda: image_io_module._stage_record_replacement(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+                original_copy2 = image_io_module.shutil.copy2
+
+                def copy_then_modify(current, backup, *args, **kwargs):
+                    result = original_copy2(current, backup, *args, **kwargs)
+                    Image.new("RGB", (16, 16), "blue").save(source)
+                    changed_mtime = original_stat.st_mtime_ns + 4_000_000_000
+                    os.utime(source, ns=(original_stat.st_atime_ns, changed_mtime))
+                    return result
+
+                with patch.object(image_io_module.shutil, "copy2", side_effect=copy_then_modify), \
+                     patch.object(image_io_module.os, "replace", wraps=image_io_module.os.replace) as replace:
+                    with self.assertRaisesRegex(ClientError, "外部で変更") as raised:
+                        stage()
+
+                self.assertEqual(raised.exception.error_code, "stale_asset")
+                replace.assert_not_called()
+                self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 255))
+                self.assertEqual(list(source.parent.glob(".source.png.mozarie-backup-*")), [])
+
+    def test_staged_overwrites_remove_partial_backup_after_copy_failure(self):
+        for route in ("apply", "browser overwrite"):
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (16, 16), "white").save(source)
+                source_bytes = source.read_bytes()
+                state = self.new_state()
+                record = state.image_for_id(state.set_root(directory)[0]["id"])
+                if route == "apply":
+                    stage = lambda: image_io_module._stage_save_with_mask(record, self._mask(16, 16), 4)
+                else:
+                    rendered = Path(directory) / "rendered.png"
+                    Image.new("RGB", (16, 16), "black").save(rendered)
+                    stage = lambda: image_io_module._stage_record_replacement(
+                        record, rendered, (record.mtime_ns, record.size_bytes),
+                    )
+
+                def partial_backup(_current, backup, *_args, **_kwargs):
+                    Path(backup).write_bytes(b"partial backup")
+                    raise OSError("disk full")
+
+                with patch.object(image_io_module.shutil, "copy2", side_effect=partial_backup):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        stage()
+
+                self.assertEqual(source.read_bytes(), source_bytes)
+                self.assertEqual(list(source.parent.glob(".source.png.mozarie-backup-*")), [])
+
     def test_rendered_saves_flush_and_sync_before_replace(self):
         original_temporary_file = image_io_module.tempfile.NamedTemporaryFile
         original_replace = image_io_module.os.replace
@@ -6952,7 +7106,7 @@ class MozarieTests(unittest.TestCase):
                 self.assertLess(events.index("flush"), events.index("fsync"))
                 if route != "browser copy":
                     self.assertIn("stale check", events)
-                    self.assertGreaterEqual(events.count("replace"), 2, "staged overwrite first quarantines the original")
+                    self.assertEqual(events.count("replace"), 1, "staged overwrite atomically replaces the original")
                 else:
                     self.assertEqual(events.count("replace"), 1)
                 if route == "browser copy":
@@ -6984,6 +7138,40 @@ class MozarieTests(unittest.TestCase):
                 replace.assert_not_called()
                 self.assertEqual(source.read_bytes(), source_bytes)
                 self.assertEqual(list(source.parent.glob("*.mozarie.tmp")), [])
+
+    def test_overwrite_crash_never_leaves_the_source_path_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; rendered = root / "rendered.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            Image.new("RGB", (16, 16), "black").save(rendered)
+            source_stat = source.stat()
+            code = """
+import os, sys
+from pathlib import Path
+from mozarie.core import ImageRecord
+from mozarie import image_io
+source, rendered = map(Path, sys.argv[1:])
+record = ImageRecord('image', source, 'source.png', 16, 16, source.stat().st_mtime_ns, source.stat().st_size)
+original_replace = image_io.os.replace
+def crash_before_replace(current, destination):
+    if Path(destination) == source:
+        os._exit(91)
+    return original_replace(current, destination)
+image_io.os.replace = crash_before_replace
+image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns, source.stat().st_size))
+"""
+            environment = os.environ | {"PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+            before = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            self.assertEqual(before.returncode, 91, before.stdout + before.stderr)
+            self.assertTrue(source.is_file())
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (255, 255, 255))
+            self.assertTrue(list(root.glob(".source.png.mozarie-backup-*")))
+
+            code = code.replace("os._exit(91)", "return original_replace(current, destination)") + "\nos._exit(92)\n"
+            after = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            self.assertEqual(after.returncode, 92, after.stdout + after.stderr)
+            self.assertTrue(source.is_file())
+            self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 0))
 
     def test_filesystem_save_rejects_change_during_source_read(self):
         with tempfile.TemporaryDirectory() as directory:

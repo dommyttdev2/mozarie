@@ -229,8 +229,8 @@ async function runSelectionAction(action) {
   const images = selectedImages(); if (!images.length || isBusy() || state.importing) return;
   closeBatchMoreMenus();
   const ids = images.map((image) => image.id);
-  if (action === "hide" || action === "show") { images.forEach((image) => setHidden(image, action === "hide")); return; }
-  if (action === "reviewed" || action === "unreviewed") { images.forEach((image) => setReviewed(image, action === "reviewed")); renderCatalogViews(); return; }
+  if (action === "hide" || action === "show") { await Promise.all(images.map((image) => setHidden(image, action === "hide"))); return; }
+  if (action === "reviewed" || action === "unreviewed") { await Promise.all(images.map((image) => setReviewed(image, action === "reviewed"))); return; }
   if (action === "detect") return openDetectionDialog(ids);
   if (action === "clear") return clearMasks(ids, "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
   if (action === "remove") {
@@ -506,7 +506,7 @@ function handleNavigationKeydown(event) {
   else if (action === "nextVisible") moveCurrentBy(1);
   else if (action === "first" && state.images[0]) void selectImage(state.images[0].id);
   else if (action === "last" && state.images.at(-1)) void selectImage(state.images.at(-1).id);
-  else if (action === "reviewAndNext") reviewAndMoveNext();
+  else if (action === "reviewAndNext") void reviewAndMoveNext();
   else if (action === "undo") void restoreSnapshot(state.historyIndex - 1);
   else if (action === "redo") void restoreSnapshot(state.historyIndex + 1);
   return true;

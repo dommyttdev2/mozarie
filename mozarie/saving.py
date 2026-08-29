@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import time
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -257,7 +258,7 @@ class SavingMixin:
             # temporary replacement and may only overwrite the source.
             return source_action in ({"keep", "deleted"} if details.rendered_path is None else {"overwrite"})
 
-        with self.import_lock:
+        with self.import_lock, ExitStack() as exit_stack:
             with self.lock:
                 receipt = self.browser_save_receipts.get(save_token)
                 if receipt is not None:
@@ -300,6 +301,11 @@ class SavingMixin:
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
+                        # The expiry poll runs without ``import_lock``. Claim
+                        # first, then release in ExitStack's finally path so it
+                        # cannot delete a copy during this commit.
+                        self.browser_save_claims.add(save_token)
+                        exit_stack.callback(self._release_browser_save_claim, save_token)
                         record_snapshot = replace(record)
                         catalog_generation = self.catalog_generation
                         # The per-image lock keeps this render alive through

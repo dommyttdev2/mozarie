@@ -170,8 +170,9 @@ function startFixtureServer() {
       return;
     }
     if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
-      for await (const _chunk of request) { /* consume request */ }
-      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      let body = ""; for await (const chunk of request) body += chunk;
+      const flags = JSON.parse(body);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(flags));
       return;
     }
     if (requestPath === "/api/job") {
@@ -911,7 +912,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
     nextImageButton: async (before, after) => { await page.waitForFunction((current) => state.currentId !== current, before.state.current); assert.notEqual((await snapshot()).state.current, before.state.current, "nextImageButton must navigate"); },
     reviewAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id === id && currentRecord()?.reviewed === true, before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "reviewAndNextButton must mark the image reviewed"); },
     hideAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id !== id || Boolean(currentRecord()?.hidden), before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "hideAndNextButton must hide the image"); },
-    removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: (before, after) => changed(before, after, (item) => item.state.hiddenCount, "removeCurrentImageButton"),
+    removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: async (before) => { await page.waitForFunction((count) => state.hiddenPaths.size !== count, before.state.hiddenCount); assert.notEqual((await snapshot()).state.hiddenCount, before.state.hiddenCount, "removeCurrentImageButton must toggle hidden state"); },
     boundaryDetectButton: (before, after) => apiChanged(before, after, "boundaryDetectButton", "/api/boundary"),
     boundaryCancelButton: (before, after) => assert.equal(after.flags.boundaryActionsHidden, true, "boundaryCancelButton must hide boundary actions"),
     detectCurrentButton: dialog("processingDialog", true, "detectCurrentButton"), saveButton: dialog("applyDialog", true, "saveButton"), saveAllButton: dialog("applyDialog", true, "saveAllButton"),
@@ -921,7 +922,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
     selectionClearButton: (before, after) => assert.equal(after.state.batchMode, false, "selectionClearButton must clear batch mode"),
     toggleReviewMenuItem: (before, after) => assert.equal(after.popovers.catalogContextMenu, false, "toggleReviewMenuItem must complete and close the catalog context menu"),
     copyImagePathMenuItem: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "copyImagePathMenuItem must write the clipboard"),
-    removeImageMenuItem: (before, after) => { assert.notEqual(after.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(after.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
+    removeImageMenuItem: async (before) => { await page.waitForFunction((count) => state.hiddenPaths.size !== count, before.state.hiddenCount); const settled = await snapshot(); assert.notEqual(settled.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(settled.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
     detectAllButton: dialog("detectDialog", true, "detectAllButton"), detectCancelButton: dialog("detectDialog", false, "detectCancelButton"),
     detectStartButton: dialog("processingDialog", true, "detectStartButton"),
     settingsCloseButton: dialog("settingsDialog", false, "settingsCloseButton"),
@@ -1600,6 +1601,22 @@ async function main() {
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
+    const workspaceFlagBefore = await page.evaluate(() => ({ current: state.currentId, filter: state.galleryFilter, hidden: isHidden(currentRecord()), reviewed: isReviewed(currentRecord()) }));
+    await page.evaluate(() => {
+      window.__workspaceFlagFetch = window.fetch;
+      window.fetch = (input, ...rest) => String(input?.url || input).includes("/api/workspace/image/")
+        ? Promise.resolve(new Response(JSON.stringify({ error_code: "internal_error" }), { status: 500, headers: { "Content-Type": "application/json" } }))
+        : window.__workspaceFlagFetch(input, ...rest);
+    });
+    await page.locator("#hideAndNextButton").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.deepEqual(await page.evaluate(() => ({ current: state.currentId, filter: state.galleryFilter, hidden: isHidden(currentRecord()), reviewed: isReviewed(currentRecord()) })), workspaceFlagBefore, "a failed hide keeps the visible filter, current image, and flags unchanged");
+    await page.locator("#errorDialogClose").click();
+    await page.locator("#reviewAndNextButton").click();
+    await page.waitForFunction(() => document.querySelector("#errorDialog").open);
+    assert.deepEqual(await page.evaluate(() => ({ current: state.currentId, filter: state.galleryFilter, hidden: isHidden(currentRecord()), reviewed: isReviewed(currentRecord()) })), workspaceFlagBefore, "a failed review-and-next keeps the current image and review flag unchanged");
+    await page.locator("#errorDialogClose").click();
+    await page.evaluate(() => { window.fetch = window.__workspaceFlagFetch; delete window.__workspaceFlagFetch; });
     const atomicDraftFailure = await page.evaluate(async () => {
       const before = {
         id: state.currentId,
@@ -1878,10 +1895,30 @@ async function main() {
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
     assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
-    assert.deepEqual(detectRequests[0].targetClasses, ["penis", "pussy"], "current-image detection uses the persisted targets");
+    assert.deepEqual(detectRequests[0].targetClasses, ["penis", "pussy"], "current-image detection starts with both right-pane targets");
     assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
-
     resetJob();
+    await page.evaluate(async () => { await pollJob(); closeProcessing(); });
+    await page.locator("label.target-chip:has(#detectTargetPussy)").click();
+    await page.waitForFunction(() => document.querySelector("#detectTargetPussy").checked === false);
+    await page.locator("#detectCurrentButton").click();
+    await page.waitForTimeout(50);
+    assert.deepEqual(detectRequests[1].targetClasses, ["penis"], "current-image detection uses the visible penis-only choice");
+    resetJob();
+    await page.evaluate(async () => { await pollJob(); closeProcessing(); });
+    await page.locator("label.target-chip:has(#detectTargetPenis)").click();
+    await page.waitForFunction(() => document.querySelector("#detectTargetPenis").checked === false);
+    await page.locator("#detectCurrentButton").click();
+    await page.waitForTimeout(50);
+    assert.equal(detectRequests.length, 2, "current-image detection must not start without a selected target");
+    assert.match(await page.locator("#detectionTargetValidation").textContent(), /penis|pussy/, "current-image detection explains which target to select");
+    await page.locator("label.target-chip:has(#detectTargetPussy)").click();
+    await page.waitForFunction(() => document.querySelector("#detectTargetPussy").checked === true);
+    await page.locator("#detectCurrentButton").click();
+    await page.waitForTimeout(50);
+    assert.deepEqual(detectRequests[2].targetClasses, ["pussy"], "current-image detection uses the visible pussy-only choice");
+
+    const currentDetectionRequests = detectRequests.length;
     await page.reload({ waitUntil: "networkidle" });
     const persistedDetection = await page.evaluate(() => structuredClone(state.settings.detection));
     failNextSettingsSave();
@@ -1901,7 +1938,7 @@ async function main() {
     await page.locator("#errorDialogClose").click();
     await page.locator("#detectAllButton").click();
     assert.equal(await page.locator("#detectDialog").isVisible(), true, "detect settings should open before any request");
-    assert.equal(detectRequests.length, 1, "opening settings must not start another detection");
+    assert.equal(detectRequests.length, currentDetectionRequests, "opening settings must not start another detection");
     await page.locator("#detectConfidenceNumber").fill("0.67");
     assert.equal(await page.locator("#detectParallelism").isDisabled(), false, "GPU keeps the same editable worker control");
     assert.equal(await page.locator("#detectParallelism").inputValue(), "2", "the saved worker count is shown without rewriting it");
@@ -1914,10 +1951,10 @@ async function main() {
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
     await page.waitForTimeout(50);
-    assert.equal(detectRequests.length, 2, "starting settings should call detection once");
-    assert.equal(detectRequests[1].confidence, 0.67, "dialog threshold should be submitted");
-    assert.equal(detectRequests[1].parallelism, 4, "dialog parallelism should be submitted on GPU");
-    assert.equal(Object.hasOwn(detectRequests[1], "mode"), false, "all-image detection must not submit a mode override");
+    assert.equal(detectRequests.length, currentDetectionRequests + 1, "starting settings should call detection once");
+    assert.equal(detectRequests[currentDetectionRequests].confidence, 0.67, "dialog threshold should be submitted");
+    assert.equal(detectRequests[currentDetectionRequests].parallelism, 4, "dialog parallelism should be submitted on GPU");
+    assert.equal(Object.hasOwn(detectRequests[currentDetectionRequests], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
     await page.locator("#settingsButton").click();
@@ -2208,10 +2245,10 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#overviewPane").hidden);
     assert.equal(await page.locator('.gallery-item[aria-pressed], .gallery-item.batch-selected').count(), 0, "returning to the gallery never restores overview selection semantics");
 
-    const catalogCardsAndHidden = await page.evaluate(() => {
+    const catalogCardsAndHidden = await page.evaluate(async () => {
       const box = (node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }; };
       const image = state.images.find((item) => item.id === "sample");
-      setHidden(image, true); state.galleryFilter = "all"; renderGallery(true);
+      await setHidden(image, true); state.galleryFilter = "all"; renderGallery(true);
       const galleryCard = document.querySelector('.gallery-item[data-id="sample"]'); const galleryImage = galleryCard.querySelector("img"); const galleryFooter = galleryCard.querySelector(".catalog-card-footer");
       const allIncludesHidden = Boolean(galleryCard) && galleryCard.classList.contains("hidden");
       state.galleryFilter = "hidden"; renderGallery(true); const hiddenOnly = document.querySelectorAll(".gallery-item").length === 1;
@@ -2224,7 +2261,7 @@ async function main() {
         gallery,
         overview: { card: box(overviewCard), image: box(overviewImage), footer: box(overviewFooter), name: box(overviewCard.querySelector(".overview-item-name")), meta: box(overviewCard.querySelector(".overview-item-dimensions")) },
       };
-      setHidden(image, false); state.galleryFilter = "all"; setViewMode("edit"); return result;
+      await setHidden(image, false); state.galleryFilter = "all"; setViewMode("edit"); return result;
     });
     assert.deepEqual({ all: catalogCardsAndHidden.allIncludesHidden, hidden: catalogCardsAndHidden.hiddenOnly, overview: catalogCardsAndHidden.overviewIncludesHidden }, { all: true, hidden: true, overview: true }, "All includes dimmed hidden cards while Hidden isolates them");
     for (const [name, card] of Object.entries({ gallery: catalogCardsAndHidden.gallery, overview: catalogCardsAndHidden.overview })) {
@@ -2335,9 +2372,9 @@ async function main() {
     });
     assert.deepEqual(sharedBlinkColors.lit, { autoApply: "rgba(238, 78, 78, 0.3)", manualApply: "rgba(238, 78, 78, 0.3)", autoExclude: "rgba(50, 184, 220, 0.28)", manualExclude: "rgba(50, 184, 220, 0.28)" }, "auto and manual candidate highlights share one red/blue blink phase even when enabled at different times");
     assert.equal(Object.values(sharedBlinkColors.dark).every((color) => !color.includes("238, 78, 78") && !color.includes("50, 184, 220")), true, "all candidate highlight colors turn off together");
-    const targetModes = await page.evaluate(() => {
+    const targetModes = await page.evaluate(async () => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
-      setReviewed(state.images.find((image) => image.id === "sample"), true);
+      await setReviewed(state.images.find((image) => image.id === "sample"), true);
       state.currentId = "sample-two";
       return ["current", "masked", "reviewed"].map((mode) => ({ mode, ids: saveTargets(mode), count: saveTargets(mode).length }));
     });

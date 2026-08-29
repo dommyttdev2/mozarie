@@ -335,13 +335,45 @@ function loadReviewedPaths() {
   state.reviewedPaths = new Set(state.images.filter((image) => image.reviewed).map(reviewPath));
   state.hiddenPaths = new Set(state.images.filter((image) => image.hidden).map(reviewPath));
 }
-function setHidden(image, hidden) {
-  if (!image) return;
+function publishWorkspaceFlags(imageId, flags) {
+  const image = state.images.find((item) => item.id === imageId);
+  if (!image) return false;
   const path = reviewPath(image);
-  if (hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
-  image.hidden = hidden;
-  void queueWorkspaceFlags(image.id, { hidden });
-  renderCatalogViews(); updateSelectionActionBar();
+  if (typeof flags.hidden === "boolean") {
+    image.hidden = flags.hidden;
+    if (flags.hidden) state.hiddenPaths.add(path); else state.hiddenPaths.delete(path);
+  }
+  if (typeof flags.reviewed === "boolean") {
+    image.reviewed = flags.reviewed;
+    if (flags.reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
+  }
+  return true;
+}
+function saveWorkspaceFlag(image, field, desired, onSaved) {
+  if (!image) return Promise.resolve(false);
+  const key = `${image.id}:${field}`;
+  const pending = state.workspaceFlagPending.get(key);
+  if (pending?.desired === desired) return pending.promise;
+  if (!pending && image[field] === desired) return Promise.resolve(true);
+  let promise;
+  promise = queueWorkspaceFlags(image.id, { [field]: desired }).then((flags) => {
+    if (!publishWorkspaceFlags(image.id, flags)) return false;
+    onSaved?.();
+    return true;
+  }).catch((error) => {
+    showUserError(error);
+    return false;
+  }).finally(() => {
+    if (state.workspaceFlagPending.get(key)?.promise === promise) state.workspaceFlagPending.delete(key);
+  });
+  state.workspaceFlagPending.set(key, { desired, promise });
+  return promise;
+}
+function setHidden(image, hidden) {
+  return saveWorkspaceFlag(image, "hidden", hidden, () => {
+    if (!state.images.some((item) => item.id === image.id)) return;
+    renderCatalogViews(); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+  });
 }
 function clearStoredCatalogState() { state.reviewedPaths.clear(); state.hiddenPaths.clear(); }
 function selectedImages() { return state.images.filter((image) => state.selectedImageIds.has(image.id)); }
@@ -366,41 +398,30 @@ function refreshReviewViews() {
   updateActionButtons();
 }
 function setReviewed(image, reviewed) {
-  if (!image) return;
-  const path = reviewPath(image);
-  const changed = reviewed ? !state.reviewedPaths.has(path) : state.reviewedPaths.has(path);
-  if (!changed) return;
-  if (reviewed) state.reviewedPaths.add(path); else state.reviewedPaths.delete(path);
-  image.reviewed = reviewed;
-  void queueWorkspaceFlags(image.id, { reviewed });
-  refreshReviewViews();
+  return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
+    if (state.images.some((item) => item.id === image.id)) refreshReviewViews();
+  });
 }
-function moveReviewedPathAfterApply(previousImage, reloadedImage) {
+async function moveReviewedPathAfterApply(previousImage, reloadedImage) {
   const previousPath = reviewPath(previousImage);
   const reloadedPath = reviewPath(reloadedImage);
-  if (!previousPath || !reloadedPath || previousPath === reloadedPath) return;
+  if (!previousPath || !reloadedPath || previousPath === reloadedPath) return false;
 
   const wasReviewed = state.reviewedPaths.has(previousPath) || state.reviewedPaths.has(reloadedPath);
+  if (!await setReviewed(reloadedImage, wasReviewed)) return false;
   state.reviewedPaths.delete(previousPath);
-  if (!wasReviewed) state.reviewedPaths.delete(reloadedPath);
-  else state.reviewedPaths.add(reloadedPath);
-
-  void queueWorkspaceFlags(reloadedImage.id, { reviewed: wasReviewed });
+  refreshReviewViews();
+  return true;
 }
 function markImagesUnreviewed(imageIds, renderAfter = true) {
   let changed = false;
   for (const imageId of imageIds) {
     const image = state.images.find((item) => item.id === imageId);
-    if (!image) continue;
-    const path = reviewPath(image);
-    if (!state.reviewedPaths.delete(path)) continue;
-    image.reviewed = false;
-    void queueWorkspaceFlags(image.id, { reviewed: false });
+    if (!image || !isReviewed(image)) continue;
     changed = true;
+    void setReviewed(image, false).then((saved) => { if (saved && renderAfter) refreshReviewViews(); });
   }
-  if (!changed) return false;
-  if (renderAfter) refreshReviewViews();
-  return true;
+  return changed;
 }
 function markCurrentUnreviewed(renderAfter = true) { return markImagesUnreviewed([state.currentId], renderAfter); }
 function refreshCurrentReviewAndMask() {
