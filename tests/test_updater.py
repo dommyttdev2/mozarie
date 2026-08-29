@@ -879,7 +879,7 @@ raise SystemExit(1)
                     result = subprocess.run(
                         ["cmd.exe", "/d", "/c", str(app / "setup.bat")], cwd=app,
                         env=os.environ | {"MOZARIE_TEST_MODE": mode}, capture_output=True, text=True,
-                        encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
+                        input="\n", encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                     output = result.stdout + result.stderr
                     self.assertNotEqual(result.returncode, 0, output)
