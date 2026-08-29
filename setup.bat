@@ -33,7 +33,7 @@ if errorlevel 1 goto :venv_failed
 if not exist "%PYTHON%" goto :venv_failed
 call :validate_python
 if errorlevel 1 goto :python_too_old
-"%PYTHON%" "%APP_DIR%runtime_profile.py" preflight "%RUNTIME%" --venv "%APP_DIR%.venv"
+"%PYTHON%" "%APP_DIR%mozarie\runtime_profile.py" preflight "%RUNTIME%" --venv "%APP_DIR%.venv"
 if errorlevel 1 goto :runtime_mismatch
 
 echo [Mozarie] [2/5] Preparing the installer...
@@ -43,15 +43,15 @@ echo [Mozarie] [3/5] Installing required packages. This may download several GB 
 del /q "%APP_DIR%.venv\.mozarie-ready" >nul 2>nul
 echo [Mozarie] Runtime: %RUNTIME%
 set "REQUIREMENTS=%APP_DIR%requirements.txt"
-if /i "%RUNTIME%"=="directml" set "REQUIREMENTS=%APP_DIR%requirements-directml.txt"
-if /i "%RUNTIME%"=="cpu" set "REQUIREMENTS=%APP_DIR%requirements-cpu.txt"
+if /i "%RUNTIME%"=="directml" set "REQUIREMENTS=%APP_DIR%mozarie\requirements-directml.txt"
+if /i "%RUNTIME%"=="cpu" set "REQUIREMENTS=%APP_DIR%mozarie\requirements-cpu.txt"
 "%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%REQUIREMENTS%"
 if errorlevel 1 goto :failed
 echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking runtime support...
-"%PYTHON%" "%APP_DIR%runtime_profile.py" validate "%RUNTIME%" --venv "%APP_DIR%.venv" --write-marker
+"%PYTHON%" "%APP_DIR%mozarie\runtime_profile.py" validate "%RUNTIME%" --venv "%APP_DIR%.venv" --write-marker
 if errorlevel 1 goto :failed
 "%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"
 if errorlevel 1 goto :failed

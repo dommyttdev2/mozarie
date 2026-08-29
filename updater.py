@@ -38,10 +38,7 @@ MANAGED_FILES = (
     "LICENSE",
     "README.en.md",
     "README.md",
-    "requirements-cpu.txt",
-    "requirements-directml.txt",
     "requirements.txt",
-    "runtime_profile.py",
     "run.bat",
     "setup.bat",
     "setup_gpu_check.py",
@@ -369,12 +366,12 @@ def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
 
 
 def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
-    if not any((source_root / name).is_file() for name in ("requirements.txt", "requirements-directml.txt", "requirements-cpu.txt")):
+    if not any((source_root / name).is_file() for name in ("requirements.txt", "mozarie/requirements-directml.txt", "mozarie/requirements-cpu.txt")):
         return False
     profile = _installed_runtime_profile(app_dir)
     relative = {
-        "directml": "requirements-directml.txt",
-        "cpu": "requirements-cpu.txt",
+        "directml": "mozarie/requirements-directml.txt",
+        "cpu": "mozarie/requirements-cpu.txt",
     }.get(profile, "requirements.txt")
     incoming = source_root / relative
     current = app_dir / relative
@@ -383,7 +380,7 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
         return False
     python = app_dir / ".venv" / "Scripts" / "python.exe"
-    validator = source_root / "runtime_profile.py"
+    validator = source_root / "mozarie" / "runtime_profile.py"
     _verify_installed_runtime_profile(app_dir, python, validator, profile)
     print(tr("requirements_updating"))
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)

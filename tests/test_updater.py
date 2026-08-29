@@ -35,6 +35,9 @@ def make_source(root: Path, version: str = "1.2.0") -> Path:
     (root / "README.en.md").write_text("new English readme", encoding="utf-8")
     (root / "mozarie").mkdir()
     (root / "mozarie" / "core.py").write_text("new core", encoding="utf-8")
+    (root / "mozarie" / "runtime_profile.py").write_text("new profile", encoding="utf-8")
+    (root / "mozarie" / "requirements-directml.txt").write_text("directml\n", encoding="utf-8")
+    (root / "mozarie" / "requirements-cpu.txt").write_text("cpu\n", encoding="utf-8")
     (root / "static").mkdir()
     (root / "static" / "app.js").write_text("new app", encoding="utf-8")
     (root / "config").mkdir()
@@ -91,6 +94,9 @@ UPDATE_ARCHIVE_CONTENTS = {
     "wrapper/run.bat": "run",
     "wrapper/VERSION": "1.2.0",
     "wrapper/mozarie/core.py": "core",
+    "wrapper/mozarie/runtime_profile.py": "profile",
+    "wrapper/mozarie/requirements-directml.txt": "directml",
+    "wrapper/mozarie/requirements-cpu.txt": "cpu",
     "wrapper/static/app.js": "app",
 }
 
@@ -153,7 +159,7 @@ class UpdaterTests(unittest.TestCase):
                 self.assertTrue(updater.install_requirements(source, app))
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                [str(python), str(source / "runtime_profile.py"), "preflight", "cuda", "--venv", str(app / ".venv")],
+                [str(python), str(source / "mozarie" / "runtime_profile.py"), "preflight", "cuda", "--venv", str(app / ".venv")],
             )
             self.assertEqual(run.call_args_list[1].args[0][:3], [str(python), "-m", "pip"])
             self.assertEqual(
@@ -286,12 +292,12 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "runtime_profile.py"), "preflight", "directml"])
+            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "directml"])
             command = run.call_args_list[1].args[0]
             self.assertEqual(command[:3], [str(python), "-m", "pip"])
-            self.assertEqual(Path(command[-1]), source / "requirements-directml.txt")
+            self.assertEqual(Path(command[-1]), source / "mozarie" / "requirements-directml.txt")
             self.assertEqual(run.call_args_list[2].args[0], [str(python), "-m", "pip", "check"])
-            self.assertEqual(run.call_args_list[3].args[0][1:4], [str(source / "runtime_profile.py"), "validate", "directml"])
+            self.assertEqual(run.call_args_list[3].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "validate", "directml"])
 
     def test_requirements_install_preserves_the_cpu_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -305,8 +311,8 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "runtime_profile.py"), "preflight", "cpu"])
-            self.assertEqual(Path(run.call_args_list[1].args[0][-1]), source / "requirements-cpu.txt")
+            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "cpu"])
+            self.assertEqual(Path(run.call_args_list[1].args[0][-1]), source / "mozarie" / "requirements-cpu.txt")
 
     def test_markerless_cpu_and_directml_venvs_fail_before_pip(self):
         for profile, distribution in (("cpu", "onnxruntime"), ("directml", "onnxruntime_directml")):
@@ -392,7 +398,9 @@ class UpdaterTests(unittest.TestCase):
                 root = Path(directory)
                 archive = root / "release.zip"
                 contents = UPDATE_ARCHIVE_CONTENTS.copy()
-                contents.pop(f"wrapper/{content_path}")
+                for path in tuple(contents):
+                    if path.startswith(f"wrapper/{name}/"):
+                        contents.pop(path)
                 contents[f"wrapper/{name}"] = "not a required directory"
                 write_archive(archive, contents)
                 with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
@@ -510,6 +518,9 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / ".mozarie-cache/draft.bin").read_bytes(), b"draft")
             self.assertEqual((install / ".git/HEAD").read_text(encoding="utf-8"), "main")
             self.assertEqual((install / "update.bat").read_text(encoding="utf-8"), "new updater entry")
+            self.assertEqual((install / "mozarie/runtime_profile.py").read_text(encoding="utf-8"), "new profile")
+            self.assertEqual((install / "mozarie/requirements-directml.txt").read_text(encoding="utf-8"), "directml\n")
+            self.assertEqual((install / "mozarie/requirements-cpu.txt").read_text(encoding="utf-8"), "cpu\n")
             self.assertFalse(backup.exists())
 
     def test_apply_backup_failure_leaves_install_unchanged(self):
@@ -896,6 +907,9 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("DirectML detection runtime could not start. Setup stopped", gpu_check)
         self.assertNotIn("Switched the detection runtime to CPU", gpu_check)
         self.assertIn("setup_gpu_check.py", updater.MANAGED_FILES)
+        self.assertNotIn("runtime_profile.py", updater.MANAGED_FILES)
+        self.assertNotIn("requirements-cpu.txt", updater.MANAGED_FILES)
+        self.assertNotIn("requirements-directml.txt", updater.MANAGED_FILES)
 
     def test_requirements_pin_the_official_cuda_runtime_and_conversion_tools_without_replacing_pypi(self):
         requirements = (Path(__file__).parents[1] / "requirements.txt").read_text(encoding="utf-8").splitlines()
@@ -920,14 +934,14 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("ultralytics==8.4.75", requirements)
         self.assertFalse(any(requirement.startswith(("onnxslim", "openvino", "export-base")) for requirement in requirements))
 
-        directml = (Path(__file__).parents[1] / "requirements-directml.txt").read_text(encoding="utf-8").splitlines()
+        directml = (Path(__file__).parents[1] / "mozarie" / "requirements-directml.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("onnxruntime-directml==1.24.4", directml)
         self.assertIn("torch-directml==0.2.5.dev240914", directml)
         self.assertIn("onnx>=1.12,<2", directml)
         self.assertIn("ultralytics==8.4.75", directml)
         self.assertNotIn("onnxruntime-gpu==1.27.0", directml)
 
-        cpu = (Path(__file__).parents[1] / "requirements-cpu.txt").read_text(encoding="utf-8").splitlines()
+        cpu = (Path(__file__).parents[1] / "mozarie" / "requirements-cpu.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("onnxruntime==1.24.4", cpu)
         self.assertIn("onnx>=1.12,<2", cpu)
         self.assertIn("ultralytics==8.4.75", cpu)
@@ -946,8 +960,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)
         self.assertIn("VEN_10DE", setup)
         self.assertIn("VEN_1002", setup)
-        self.assertIn("runtime_profile.py\" preflight", setup)
-        self.assertIn("requirements-directml.txt", setup)
+        self.assertIn("mozarie\\runtime_profile.py\" preflight", setup)
+        self.assertIn("mozarie\\requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
         self.assertNotIn("pip install", run)
@@ -983,6 +997,50 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("call setup.bat", batch.lower())
         self.assertNotIn("-m venv", batch.lower())
         self.assertNotIn("call :create_venv", batch.lower())
+        self.assertIn('if not defined MOZARIE_RUNTIME goto :setup_required', batch)
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
+    def test_run_with_missing_or_invalid_marker_requires_setup(self):
+        root_batch = Path(__file__).parents[1] / "run.bat"
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "app"
+            app.mkdir()
+            shutil.copy2(root_batch, app / "run.bat")
+            (app / "mozarie").mkdir()
+            (app / "mozarie" / "runtime_profile.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+            (app / "server.py").write_text("raise RuntimeError('server must not start')\n", encoding="utf-8")
+            venv = app / ".venv"
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+            (venv / ".mozarie-ready").write_text("ready\n", encoding="utf-8")
+            for marker in (None, "{not-json"):
+                marker_path = venv / ".mozarie-runtime.json"
+                marker_path.unlink(missing_ok=True)
+                if marker is not None:
+                    marker_path.write_text(marker, encoding="utf-8")
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, input="\n",
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn("Initial setup is required", output)
+                self.assertNotIn("server must not start", output)
+
+            shutil.copy2(Path(__file__).parents[1] / "mozarie" / "runtime_profile.py", app / "mozarie" / "runtime_profile.py")
+            (venv / ".mozarie-runtime.json").write_text('{"schema": 1, "profile": "cuda"}', encoding="utf-8")
+            started = app / "server-ran.txt"
+            (app / "server.py").write_text(
+                f"from pathlib import Path; Path({str(started)!r}).write_text('ok', encoding='utf-8')",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, input="\n",
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(started.read_text(encoding="utf-8"), "ok")
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_setup_batch_reports_venv_and_running_states_without_marking_ready(self):
