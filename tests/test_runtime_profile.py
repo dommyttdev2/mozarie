@@ -5,12 +5,36 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import runtime_profile
 
 
 class RuntimeProfileTests(unittest.TestCase):
+    def test_onnx_probe_runs_on_the_selected_directml_device(self) -> None:
+        session = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"],
+            run=lambda *_args: [[[1.0]]],
+        )
+        ort = SimpleNamespace(
+            SessionOptions=lambda: SimpleNamespace(),
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+            InferenceSession=lambda *_args, **kwargs: session,
+        )
+        helper = SimpleNamespace(
+            make_tensor_value_info=lambda *_args: object(),
+            make_node=lambda *_args: object(),
+            make_graph=lambda *_args: object(),
+            make_opsetid=lambda *_args: object(),
+            make_model=lambda *_args, **_kwargs: SimpleNamespace(SerializeToString=lambda: b"model"),
+        )
+        onnx = SimpleNamespace(helper=helper, TensorProto=SimpleNamespace(FLOAT=1))
+        np = SimpleNamespace(float32="float32", ones=lambda *_args, **_kwargs: [[1.0]])
+
+        self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
+
     def test_rejects_cross_profile_install_before_pip(self) -> None:
         with patch.object(runtime_profile, "installed_profile", return_value="directml"):
             with self.assertRaisesRegex(runtime_profile.ProfileError, "selected cuda"):

@@ -781,7 +781,7 @@ class UpdaterTests(unittest.TestCase):
         failed_branch = "if errorlevel 1 goto :failed"
         marker_removal = 'del /q "%APP_DIR%.venv\\.mozarie-ready" >nul 2>nul'
         self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip'
-        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%APP_DIR%requirements.txt"'
+        requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%REQUIREMENTS%"'
 
         for step in range(1, 6):
             self.assertIn(f"[{step}/5]", batch)
@@ -836,7 +836,14 @@ class UpdaterTests(unittest.TestCase):
         directml = (Path(__file__).parents[1] / "requirements-directml.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("onnxruntime-directml==1.24.4", directml)
         self.assertIn("torch-directml==0.2.5.dev240914", directml)
+        self.assertIn("onnx>=1.12,<2", directml)
+        self.assertIn("ultralytics==8.4.75", directml)
         self.assertNotIn("onnxruntime-gpu==1.27.0", directml)
+
+        cpu = (Path(__file__).parents[1] / "requirements-cpu.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("onnxruntime==1.24.4", cpu)
+        self.assertIn("onnx>=1.12,<2", cpu)
+        self.assertIn("ultralytics==8.4.75", cpu)
 
     def test_setup_and_run_select_only_supported_64_bit_launchers(self):
         expected_loop = "for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do ("
@@ -845,6 +852,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(expected_loop, setup)
         self.assertEqual(setup.count("py -%%V -m venv"), 2)
         self.assertIn("for %%V in (3.12-64 3.11-64) do (", setup)
+        self.assertIn('if /i not "%RUNTIME%"=="cuda" "%PYTHON%" -c', setup)
+        self.assertIn("sys.version_info < (3, 13)", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', setup)
         self.assertNotIn("python -m venv", setup)
         self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)

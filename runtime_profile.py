@@ -93,7 +93,50 @@ def preflight(profile: str) -> None:
         )
 
 
-def validate(profile: str) -> dict[str, object]:
+def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device: int) -> str:
+    expected = {
+        "cuda": "CUDAExecutionProvider",
+        "directml": "DmlExecutionProvider",
+        "cpu": "CPUExecutionProvider",
+    }[profile]
+    providers: list[object] = [expected]
+    if profile == "cuda":
+        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+    elif profile == "directml":
+        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+
+    helper = onnx.helper
+    tensor_proto = onnx.TensorProto
+    input_value = helper.make_tensor_value_info("input", tensor_proto.FLOAT, [1, 1])
+    output_value = helper.make_tensor_value_info("output", tensor_proto.FLOAT, [1, 1])
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["input"], ["output"])],
+        "mozarie-setup-diagnostic",
+        [input_value],
+        [output_value],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    options = ort.SessionOptions()
+    if profile == "directml":
+        options.enable_mem_pattern = False
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    try:
+        session = ort.InferenceSession(model.SerializeToString(), sess_options=options, providers=providers)
+        session.disable_fallback()
+        active = list(session.get_providers())
+        if not active or active[0] != expected:
+            raise RuntimeError(f"ONNX Runtime selected {active[0] if active else 'no provider'}")
+        outputs = session.run(None, {"input": np.ones((1, 1), dtype=np.float32)})
+        if not outputs or float(outputs[0][0][0]) != 1.0:
+            raise RuntimeError("the identity model returned an unexpected result")
+    except Exception as exc:
+        raise ProfileError(
+            f"The ONNX {expected} probe failed on device {gpu_device}: {exc}"
+        ) from exc
+    return expected
+
+
+def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
     selected = normalize_profile(profile)
     assert selected is not None
     current = installed_profile()
@@ -102,6 +145,8 @@ def validate(profile: str) -> dict[str, object]:
             f"The installed ONNX Runtime profile is {current or 'missing'}, not {selected}."
         )
     try:
+        import numpy as np
+        import onnx
         import onnxruntime as ort
         import torch
     except Exception as exc:
@@ -114,8 +159,10 @@ def validate(profile: str) -> dict[str, object]:
             raise ProfileError("CUDA PyTorch or CUDAExecutionProvider is unavailable.")
         if not torch.cuda.is_available():
             raise ProfileError("CUDA packages are installed, but no usable NVIDIA CUDA device was found.")
+        if gpu_device < 0 or gpu_device >= torch.cuda.device_count():
+            raise ProfileError(f"CUDA device {gpu_device} is unavailable.")
         devices = [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
-        probe = torch.ones(1, device="cuda:0") + 1
+        probe = torch.ones(1, device=f"cuda:{gpu_device}") + 1
         if float(probe.cpu().item()) != 2.0:
             raise ProfileError("The CUDA tensor probe failed.")
     elif selected == "directml":
@@ -128,8 +175,10 @@ def validate(profile: str) -> dict[str, object]:
         count = int(torch_directml.device_count())
         if count < 1:
             raise ProfileError("torch-directml did not find a DirectML device.")
+        if gpu_device < 0 or gpu_device >= count:
+            raise ProfileError(f"DirectML device {gpu_device} is unavailable.")
         devices = [str(torch_directml.device_name(index)).rstrip("\0") for index in range(count)]
-        device = torch_directml.device(torch_directml.default_device())
+        device = torch_directml.device(gpu_device)
         probe = torch.ones(1, device=device) + 1
         if float(probe.cpu().item()) != 2.0:
             raise ProfileError("The DirectML tensor probe failed.")
@@ -140,11 +189,15 @@ def validate(profile: str) -> dict[str, object]:
         if float(probe.item()) != 2.0:
             raise ProfileError("The CPU tensor probe failed.")
 
+    onnx_provider = _probe_onnx(ort, onnx, np, selected, gpu_device)
+
     return {
         "schema": 1,
         "profile": selected,
         "python": sys.version.split()[0],
         "providers": providers,
+        "validated_provider": onnx_provider,
+        "validated_device": gpu_device if selected != "cpu" else None,
         "devices": devices,
     }
 
@@ -172,6 +225,7 @@ def main() -> int:
     parser.add_argument("profile", nargs="?")
     parser.add_argument("--venv", type=Path, default=Path(__file__).resolve().parent / ".venv")
     parser.add_argument("--write-marker", action="store_true")
+    parser.add_argument("--gpu-device", type=int, default=0)
     args = parser.parse_args()
     try:
         if args.command == "show":
@@ -184,7 +238,7 @@ def main() -> int:
         if args.command == "preflight":
             preflight(args.profile)
             return 0
-        result = validate(args.profile)
+        result = validate(args.profile, args.gpu_device)
         if args.write_marker:
             write_marker(args.venv, result)
         print(json.dumps(result, ensure_ascii=False))
