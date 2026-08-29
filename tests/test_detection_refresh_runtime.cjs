@@ -37,6 +37,8 @@ async function testCompletionInvalidatesAndReloadsCandidates() {
   };
   const context = {
     state, Array, Number, Promise, Map,
+    modalInvokers: new Map(),
+    $: () => ({}),
     api: async () => ({ images: [newRecord] }),
     isCurrentGeneration: () => true, isCurrentCatalogEpoch: () => true,
     pruneSourceAccess() {},

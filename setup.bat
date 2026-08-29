@@ -79,7 +79,8 @@ if not exist "%PYTHON%" exit /b 1
 exit /b 0
 
 :validate_python
-"%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+if /i "%RUNTIME%"=="cuda" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+if /i not "%RUNTIME%"=="cuda" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 13) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
 exit /b %ERRORLEVEL%
 
 :failed
@@ -99,7 +100,8 @@ pause
 exit /b 1
 
 :python_too_old
-echo [Mozarie] .venv needs 64-bit Python 3.11 to 3.14. Remove .venv and run setup.bat again.
+if /i "%RUNTIME%"=="cuda" echo [Mozarie] CUDA needs 64-bit Python 3.11 to 3.14. Remove .venv and run setup.bat again.
+if /i not "%RUNTIME%"=="cuda" echo [Mozarie] DirectML and CPU need 64-bit Python 3.11 or 3.12. Remove .venv and run setup.bat again.
 pause
 exit /b 1
 

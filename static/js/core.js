@@ -92,7 +92,7 @@ const USER_ERROR_CODES = {
   clipboard_write_failed: "clipboard_write_failed",
   workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", workspace_database_error: "workspace_write_failed",
   output_unavailable: "output_folder_unavailable", model_not_configured: "model_not_configured",
-  model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed",
+  model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed", sam_checkpoint_missing: "sam_checkpoint_missing",
   gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
   input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
   model_download_write_failed: "model_download_write_failed", model_download_integrity: "model_download_integrity",

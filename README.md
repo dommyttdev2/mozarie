@@ -19,6 +19,7 @@ Mozarieは、画像のモザイク範囲をローカルで検出・確認・修�
 - 64-bit Python（Python Launcher `py`）
   - NVIDIA/CUDA: Python 3.11〜3.14
   - AMD/DirectML: Python 3.11 または3.12
+  - CPU: Python 3.11 または3.12
 
 ### セットアップ
 
