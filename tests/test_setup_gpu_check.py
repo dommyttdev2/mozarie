@@ -81,6 +81,7 @@ class SetupGpuCheckTests(unittest.TestCase):
         store = SimpleNamespace(save=Mock(), load=Mock(return_value={"models": {"gpu_device": 0}}))
         output = io.StringIO()
         with patch.object(setup_gpu_check, "_runtime_modules", side_effect=ImportError("DLL load failed")), \
+             patch.object(setup_gpu_check, "selected_profile", return_value="cuda"), \
              patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
              contextlib.redirect_stdout(output):
             result = setup_gpu_check.main()

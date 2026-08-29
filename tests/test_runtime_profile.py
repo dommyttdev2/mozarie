@@ -102,8 +102,24 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile._probe_onnx(ort, onnx, np, "cpu", 0)
 
     def test_validate_cpu_and_main_commands(self) -> None:
+        class CpuProbe:
+            def __add__(self, _value: object) -> "CpuProbe":
+                return self
+
+            def item(self) -> float:
+                return 2.0
+
+        cpu_probe = CpuProbe()
+        fake_torch = SimpleNamespace(ones=lambda *_args, **_kwargs: cpu_probe)
+        fake_ort = SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"])
         with patch.object(runtime_profile, "installed_profile", return_value="cpu"), \
-                patch.object(runtime_profile, "_probe_onnx", return_value="CPUExecutionProvider"):
+                patch.object(runtime_profile, "_probe_onnx", return_value="CPUExecutionProvider"), \
+                patch.dict(sys.modules, {
+                    "numpy": SimpleNamespace(),
+                    "onnx": SimpleNamespace(),
+                    "onnxruntime": fake_ort,
+                    "torch": fake_torch,
+                }):
             result = runtime_profile.validate("cpu")
         self.assertEqual(result["profile"], "cpu")
         self.assertIsNone(result["validated_device"])
