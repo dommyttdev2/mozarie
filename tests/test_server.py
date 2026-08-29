@@ -196,6 +196,17 @@ class MozarieTests(unittest.TestCase):
             output, _record, _revision, _token = replacement.render_browser_save(image_id, 1, 100, None)
             self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
 
+    def test_flag_change_keeps_the_visible_state_when_the_workspace_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.images[image_id]
+            with patch.object(state.workspace_store, "set_image_flags", side_effect=sqlite3.DatabaseError("write failed")):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
+            self.assertFalse(record.hidden)
+            self.assertFalse(record.reviewed)
+
     def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1871,6 +1871,7 @@ async function main() {
       return { empty, restored: { all: document.querySelector("#detectAllButton").disabled, current: document.querySelector("#detectCurrentButton").disabled } };
     });
     assert.deepEqual(detectionControls, { empty: { all: true, current: true }, restored: { all: false, current: false } }, "detection actions use persisted targets, not unsaved controls");
+    await page.locator("#detectTargetPussy").click();
     await page.locator("#detectCurrentButton").click();
     await page.waitForTimeout(50);
     assert.equal(await page.locator("#detectDialog").isVisible(), false, "current-image detection must not open settings");
@@ -1878,7 +1879,7 @@ async function main() {
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
     assert.equal(detectRequests[0].confidence, 1.00, "current-image detection should use the right-pane threshold");
     assert.equal(detectRequests[0].parallelism, 1, "current-image detection must stay serial");
-    assert.deepEqual(detectRequests[0].targetClasses, ["penis", "pussy"], "current-image detection uses the persisted targets");
+    assert.deepEqual(detectRequests[0].targetClasses, ["penis"], "current-image detection uses the right-pane targets");
     assert.equal(Object.hasOwn(detectRequests[0], "mode"), false, "current-image detection must not submit a mode override");
 
     resetJob();

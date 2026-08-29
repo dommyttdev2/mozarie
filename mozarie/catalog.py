@@ -900,10 +900,10 @@ class CatalogMixin:
             record = self.images.get(image_id)
             if record is None:
                 raise ClientError("画像が見つかりません。", "image_not_found")
-            if hidden is not None: record.hidden = hidden
-            if reviewed is not None: record.reviewed = reviewed
             if self.workspace_store.has_image(image_id):
                 self.workspace_store.set_image_flags(image_id, hidden=hidden, reviewed=reviewed)
+            if hidden is not None: record.hidden = hidden
+            if reviewed is not None: record.reviewed = reviewed
             return {"hidden": record.hidden, "reviewed": record.reviewed}
 
     @staticmethod
