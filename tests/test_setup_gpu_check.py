@@ -63,6 +63,17 @@ class SetupGpuCheckTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("CPU", output)
 
+    def test_gpu_provider_fallback_switches_to_a_verified_cpu_runtime(self):
+        fallback = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CPUExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        result, store, output = self.run_check(session=fallback)
+        self.assertEqual(result, 0)
+        store.save.assert_called_once_with({"models": {"provider": "cpu"}})
+        self.assertIn("CPU", output)
+
     def test_cpu_save_failure_fails_setup(self):
         result, _store, output = self.run_check(cuda=False, save_error=OSError("locked"))
         self.assertEqual(result, 1)
@@ -95,6 +106,17 @@ class SetupGpuCheckTests(unittest.TestCase):
             run=lambda *_args: (_ for _ in ()).throw(RuntimeError("session failed")),
         )
         result, store, output = self.run_check(cuda=False, cpu_session=failed_cpu)
+        self.assertEqual(result, 1)
+        store.save.assert_not_called()
+        self.assertIn("CPU detection runtime could not start", output)
+
+    def test_cpu_provider_fallback_is_not_accepted(self):
+        wrong_provider = SimpleNamespace(
+            disable_fallback=lambda: None,
+            get_providers=lambda: ["CUDAExecutionProvider"],
+            run=lambda *_args: None,
+        )
+        result, store, output = self.run_check(cuda=False, cpu_session=wrong_provider)
         self.assertEqual(result, 1)
         store.save.assert_not_called()
         self.assertIn("CPU detection runtime could not start", output)
