@@ -93,6 +93,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
   const browserWindow = { devicePixelRatio: 1, addEventListener() {} };
   const context = {
+    codedError(code) { const error = new Error(); error.code = code; return error; },
     console,
     document,
     Date,
@@ -547,7 +548,7 @@ async function runQueuedHandleChangeCases() {
     runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, parentHandle: parentFor(firstHandle), name: "first.png", size: 12, lastModified: 34 });
     runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, parentHandle: parentFor(secondHandle), name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
     await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
-    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
+    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), (error) => error?.code === "stale_asset");
     assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
   }
 }

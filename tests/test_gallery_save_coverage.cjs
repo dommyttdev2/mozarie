@@ -77,6 +77,7 @@ function makeGalleryRuntime() {
     createElement() { return element(); },
   };
   const context = {
+    codedError(code) { const error = new Error(); error.code = code; return error; },
     console, Map, Set, Array, Math, String, Object, document, encodeURIComponent,
     IntersectionObserver: class { constructor(callback, options) { this.callback = callback; this.options = options; observers.push(this); } observe(image) { this.observed = image; } unobserve(image) { image.unobserved = true; } },
     state, $: (selector) => nodes.get(selector), $$: () => [],
@@ -187,6 +188,7 @@ function makeSaveRuntime() {
     return {};
   };
   const context = {
+    codedError(code) { const error = new Error(); error.code = code; return error; },
     console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="saveMode"]:checked') return saveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
     state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
     fetch(url, options) { return handler(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
@@ -228,10 +230,10 @@ async function saveInteractions() {
   state.currentId = "gone"; runtime.reconcileBrowserSaveState(); assert.equal(state.currentId, null); state.currentId = "file"; runtime.reconcileBrowserSaveState();
 
   let file = { name: "session.png", size: 2, lastModified: 3, async arrayBuffer() { return Uint8Array.from([1, 2]).buffer; } }; const handle = { name: "session.png", async getFile() { return file; }, async queryPermission() { return "prompt"; }, async requestPermission() { return "granted"; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } };
-  const access = { fileHandle: handle, name: file.name, size: file.size, lastModified: file.lastModified }; await runtime.ensureHandlePermission(access, true); file = { ...file, size: 4 }; await assert.rejects(runtime.ensureHandlePermission(access), /sourceChanged/); file = { ...file, size: 2 };
-  state.images = [{ id: "session", sourceKind: "session" }]; state.sourceAccess.set("session", access); await runtime.ensureSaveSources(["session"], "overwrite", false); await assert.rejects(runtime.ensureSaveSources(["missing"], "overwrite", false), /overwriteUnavailable/); await assert.rejects(runtime.ensureSaveSources(["missing"], "copy", true), /deleteUnavailable/);
+  const access = { fileHandle: handle, name: file.name, size: file.size, lastModified: file.lastModified }; await runtime.ensureHandlePermission(access, true); file = { ...file, size: 4 }; await assert.rejects(runtime.ensureHandlePermission(access), (error) => error?.code === "stale_asset"); file = { ...file, size: 2 };
+  state.images = [{ id: "session", sourceKind: "session" }]; state.sourceAccess.set("session", access); await runtime.ensureSaveSources(["session"], "overwrite", false); await assert.rejects(runtime.ensureSaveSources(["missing"], "overwrite", false), (error) => error?.code === "source_action_unavailable"); await assert.rejects(runtime.ensureSaveSources(["missing"], "copy", true), (error) => error?.code === "source_action_unavailable");
   const binary = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; await runtime.writeSourceHandle(access, binary); assert.equal(access.size, 2); assert.deepEqual([...await runtime.snapshotSourceHandle(access)], [1, 2]);
-  await assert.rejects(runtime.removeSourceHandle(access), /sourceDeleteUnavailable/); let removed = false; access.parentHandle = { async removeEntry() { removed = true; }, async getFileHandle() { return handle; } }; await runtime.removeSourceHandle(access); assert.equal(removed, true); await runtime.restoreSourceHandle(access, Uint8Array.from([1]), true);
+  await assert.rejects(runtime.removeSourceHandle(access), (error) => error?.code === "source_action_unavailable"); let removed = false; access.parentHandle = { async removeEntry() { removed = true; }, async getFileHandle() { return handle; } }; await runtime.removeSourceHandle(access); assert.equal(removed, true); await runtime.restoreSourceHandle(access, Uint8Array.from([1]), true);
 
   state.images = [{ id: "a" }, { id: "b" }]; state.currentId = "a"; state.selectedImageIds = new Set(["a"]); state.sourceAccess = new Map([["a", {}]]); state.drafts = new Map([["a", {}]]); state.maskStatus = new Map([["a", true]]);
   runtime.setHandler(async (url) => url === "/api/catalog/remove" ? { images: [{ id: "b" }], removedImageIds: ["a"] } : { images: state.images }); await runtime.removeCompletedImagesFromCatalog(["a"], ["a", "b"], new Map([["a", { id: "a" }]])); assert.ok(runtime.calls.includes("select:b")); await runtime.removeCompletedImagesFromCatalog([], [], new Map());
