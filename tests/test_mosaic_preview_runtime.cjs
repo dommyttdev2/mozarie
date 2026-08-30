@@ -26,7 +26,8 @@ const context = {
   mosaicCtx: { putImageData: () => draws.push("preview") },
   calculatedBlockSize: () => 16, flushMaskComposition() {}, prepareOriginalImage() {}, render() {},
 };
-vm.runInNewContext(fs.readFileSync(path.join(__dirname, "..", "static", "js", "editor-canvas.js"), "utf8"), context);
+const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
+vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: canvasPath });
 context.postMosaicPreview = () => {};
 context.rebuildMosaicPreview();
 const worker = state.mosaicWorker;

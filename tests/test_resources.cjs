@@ -13,7 +13,7 @@ assert.match(canvasSource, /candidateBundleCache\.take\(oldKey\)/, "candidate re
 const state = { currentId: null, pendingImageId: null, currentImage: null, pendingImageKey: null, pendingCandidateKey: null, candidateImages: new Map(), imageInflight: new Map(), prefetchQueue: [], prefetchTimer: null, prefetchActive: 0, catalogEpoch: 1, catalogLoadControllers: new Set() };
 const context = { state, setTimeout() { return 1; }, clearTimeout() {}, fetch() {}, document: { querySelector() { return null; } }, encodeURIComponent, Promise, Set, Map, Math, AbortController, DOMException, __fetchBitmap: null };
 vm.runInNewContext(`${resourcesSource}\nglobalThis.resourceTest = { WeightedLru, drainPrefetchQueue };`, context);
-vm.runInNewContext(canvasSource, context);
+vm.runInNewContext(canvasSource, context, { filename: canvasPath });
 const closed = []; const cache = new context.resourceTest.WeightedLru(8, (value) => closed.push(value.id));
 cache.set("one", { id: "one" }, 4); cache.set("two", { id: "two" }, 4); cache.get("one"); cache.set("three", { id: "three" }, 4);
 assert.equal(cache.has("one"), true, "recent entry remains"); assert.equal(cache.has("two"), false, "least-recent entry is evicted"); assert.deepEqual(closed, ["two"]);
