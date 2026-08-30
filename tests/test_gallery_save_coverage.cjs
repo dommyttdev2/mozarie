@@ -93,7 +93,7 @@ function makeGalleryRuntime() {
     async selectImage(id) { selected.push(`image:${id}`); }, async setReviewed(image, value) { image.reviewed = value; return context.reviewResult; }, async setHidden(image, value) { image.hidden = value; return context.hideResult; },
   };
   context.reviewResult = true; context.hideResult = true;
-  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers };`;
+  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogMoveIndex };`;
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
   return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
@@ -120,6 +120,8 @@ async function galleryInteractions() {
   const firstNode = state.galleryNodes.get("one");
   assert.equal(firstNode.getAttribute("aria-current"), "true"); assert.match(firstNode.getAttribute("aria-label"), /sets\/one/);
   firstNode.onclick(); firstNode.onmouseenter(); firstNode.oncontextmenu({});
+  const secondaryPointer = { button: 2, preventDefault() { this.prevented = true; } }; firstNode.onpointerdown(secondaryPointer);
+  assert.equal(secondaryPointer.prevented, true, "a secondary pointer press is consumed before it can move catalog focus");
   firstNode.onkeydown({ key: "Enter", preventDefault() { this.prevented = true; } });
   firstNode.onkeydown({ key: " ", preventDefault() {} }); firstNode.onkeydown({ key: "ContextMenu" }); firstNode.onkeydown({ key: "F10", shiftKey: true });
   assert.deepEqual(runtime.selected.slice(0, 3), ["one", "one", "one"]); assert.equal(runtime.menus.length, 3); assert.equal(runtime.prefetched.length, 2);
@@ -138,6 +140,14 @@ async function galleryInteractions() {
   runtime.document.createElement = () => element(); state.images = [first, second, third]; runtime.renderGallery(true);
   state.currentId = "two"; runtime.updateGalleryCurrent(); assert.ok(true, "current-image update tolerates an inactive virtual window");
   runtime.renderCatalogViews();
+
+  const navigationWindow = { images: Array.from({ length: 12 }, (_, index) => ({ id: `logical-${index}` })), container: { clientWidth: 500, clientHeight: 50 }, options: { columns: 5, minWidth: 1, padding: 0, gap: 0, rowHeight: 10 } };
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "Home" }), 5, "Home moves to the current logical row start");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "End" }), 9, "End moves to the current logical row end");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 11, { key: "Home" }), 10, "Home handles the first cell of an incomplete final row");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 10, { key: "End" }), 11, "End handles the last cell of an incomplete final row");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "Home", ctrlKey: true }), 0, "Ctrl+Home moves to the filtered grid start");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "End", ctrlKey: true }), 11, "Ctrl+End moves to the filtered grid end");
 
   const catalogImages = state.images;
   runtime.gallery.clientWidth = 360; runtime.gallery.clientHeight = 152;

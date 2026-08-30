@@ -20,7 +20,7 @@ const state = {
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true, manualExclusionEraseEnabled: true,
-  galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
+  galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, contextMenuScroll: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
   processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
@@ -403,10 +403,17 @@ function saveWorkspaceFlag(image, field, desired, onSaved) {
   state.workspaceFlagPending.set(key, { desired, promise });
   return promise;
 }
+function preserveCatalogScroll(renderCatalogs, positions = null) {
+  const gallery = $("#gallery"); const overview = $("#overviewGrid");
+  const galleryTop = positions?.gallery ?? gallery.scrollTop; const overviewTop = positions?.overview ?? overview.scrollTop;
+  renderCatalogs();
+  gallery.scrollTop = galleryTop; overview.scrollTop = overviewTop;
+}
 function setHidden(image, hidden) {
+  const scroll = state.contextMenuScroll;
   return saveWorkspaceFlag(image, "hidden", hidden, () => {
     if (!state.images.some((item) => item.id === image.id)) return;
-    renderCatalogViews(); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+    preserveCatalogScroll(renderCatalogViews, scroll); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
   });
 }
 function clearStoredCatalogState() { state.reviewedPaths.clear(); state.hiddenPaths.clear(); }
@@ -425,15 +432,15 @@ function selectCatalogImage(imageId) {
   updateSelectionActionBar();
   void selectImage(imageId);
 }
-function refreshReviewViews() {
-  renderGallery(true);
-  if (state.viewMode === "overview") renderOverview();
+function refreshReviewViews(scroll = null) {
+  preserveCatalogScroll(() => { renderGallery(true); if (state.viewMode === "overview") renderOverview(); }, scroll);
   updateNavigationControls();
   updateActionButtons();
 }
 function setReviewed(image, reviewed) {
+  const scroll = state.contextMenuScroll;
   return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
-    if (state.images.some((item) => item.id === image.id)) refreshReviewViews();
+    if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
   });
 }
 async function moveReviewedPathAfterApply(previousImage, reloadedImage) {

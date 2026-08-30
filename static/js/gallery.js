@@ -91,7 +91,8 @@ function setCatalogNode(windowState, image, index, layout, rowNode) {
     item.setAttribute("aria-label", states.join(t("a11y.separator")));
     item.onclick = (event) => { windowState.focusId = image.id; selectOverviewImage(image.id, event); };
   }
-  item.oncontextmenu = (event) => { windowState.focusId = image.id; openCatalogContextMenu(event, image.id); };
+  item.onpointerdown = (event) => { if (event.button === 2) event.preventDefault?.(); };
+  item.oncontextmenu = (event) => { openCatalogContextMenu(event, image.id); };
   item.tabIndex = image.id === windowState.focusId ? 0 : -1; item.setAttribute("aria-haspopup", "menu");
   item.onkeydown = (event) => {
     if (event.key === "Enter" || event.key === " ") { event.preventDefault?.(); event.stopPropagation?.(); windowState.focusId = image.id; scope === "gallery" ? selectCatalogImage(image.id) : selectOverviewImage(image.id, event); }
@@ -111,8 +112,8 @@ function catalogMoveIndex(windowState, index, event) {
   if (key === "ArrowDown") return Math.min(length - 1, index + columns);
   if (key === "PageUp") return Math.max(0, index - page);
   if (key === "PageDown") return Math.min(length - 1, index + page);
-  if (key === "Home") return 0;
-  if (key === "End") return length - 1;
+  if (key === "Home") return event.ctrlKey || event.metaKey ? 0 : Math.floor(index / columns) * columns;
+  if (key === "End") return event.ctrlKey || event.metaKey ? length - 1 : Math.min(length - 1, (Math.floor(index / columns) + 1) * columns - 1);
   return -1;
 }
 
@@ -121,7 +122,7 @@ function focusCatalogIndex(windowState, index, event = null) {
   windowState.focusId = image.id;
   scrollCatalogImage(windowState.scope, image.id);
   const item = windowState.nodes.get(image.id); focusElement(item);
-  if (windowState.scope === "overview" && state.batchMode && (event?.shiftKey || event?.ctrlKey || event?.metaKey)) selectOverviewImage(image.id, event);
+  if (windowState.scope === "overview" && state.batchMode && event?.shiftKey) selectOverviewImage(image.id, event);
 }
 
 function renderCatalogWindow(windowState) {
