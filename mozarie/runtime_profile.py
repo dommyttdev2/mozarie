@@ -115,6 +115,8 @@ def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device:
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     options = ort.SessionOptions()
+    if profile in {"cuda", "directml"}:
+        options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
     if profile == "directml":
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL

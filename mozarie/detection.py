@@ -42,9 +42,12 @@ def _scene_fluid_tags(info: dict[str, Any]) -> frozenset[str]:
         if not isinstance(scene_info, str):
             return frozenset()
         try:
-            positive = json.loads(scene_info).get("positive")
+            decoded = json.loads(scene_info)
         except (TypeError, ValueError):
             return frozenset()
+        if not isinstance(decoded, dict):
+            return frozenset()
+        positive = decoded.get("positive")
     if not isinstance(positive, str):
         return frozenset()
     return frozenset(tag for tag in (value.strip().casefold() for value in positive.split(",")) if tag in _SCENE_FLUID_TAGS)

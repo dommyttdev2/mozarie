@@ -22,11 +22,13 @@ class RuntimeProfileTests(unittest.TestCase):
             get_providers=lambda: providers,
             run=lambda *_args: [[[1.0]]] if output is None else output,
         )
+        options = SimpleNamespace(add_session_config_entry=lambda *_args: None)
         ort = SimpleNamespace(
-            SessionOptions=lambda: SimpleNamespace(),
+            SessionOptions=lambda: options,
             ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
             InferenceSession=lambda *_args, **_kwargs: session,
         )
+        ort.options = options
         helper = SimpleNamespace(
             make_tensor_value_info=lambda *_args: object(),
             make_node=lambda *_args: object(),
