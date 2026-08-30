@@ -115,7 +115,7 @@ async function galleryInteractions() {
   assert.equal(standalone.src, "/api/thumbnail/one?v=v%201"); runtime.forgetThumbnail(standalone); runtime.forgetThumbnail(null);
 
   runtime.renderGallery();
-  assert.equal(runtime.gallery.children.length, 3);
+  assert.equal(runtime.gallery.children.length, 4, "the fixed-row window keeps one spacer plus the mounted cards");
   const firstNode = state.galleryNodes.get("one");
   assert.equal(firstNode.getAttribute("aria-current"), "true"); assert.match(firstNode.getAttribute("aria-label"), /sets\/one/);
   firstNode.onclick(); firstNode.onmouseenter(); firstNode.oncontextmenu({});
@@ -131,8 +131,18 @@ async function galleryInteractions() {
   first.masked = false; state.galleryFilter = "masked"; runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryFilteredEmptyState").hidden, false); first.masked = true;
   state.images = []; runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryEmptyState").hidden, false);
   state.images = [first, second, third]; state.galleryFilter = "all"; state.viewMode = "overview"; const before = runtime.gallery.children.length; runtime.renderGallery(); assert.equal(runtime.gallery.children.length, before); runtime.renderGallery(true);
-  state.currentId = "two"; runtime.updateGalleryCurrent(); assert.equal(state.galleryNodes.get("two").getAttribute("aria-current"), "true");
-  state.viewMode = "edit"; runtime.renderCatalogViews();
+  state.viewMode = "edit"; runtime.renderGallery(true);
+  state.currentId = "two"; runtime.updateGalleryCurrent(); assert.ok(true, "current-image update tolerates an inactive virtual window");
+  runtime.renderCatalogViews();
+
+  const catalogImages = state.images;
+  runtime.gallery.clientWidth = 360; runtime.gallery.clientHeight = 152;
+  state.images = Array.from({ length: 800 }, (_, index) => ({ id: `window-${index}`, relativePath: `set/${index}.png`, width: 100, height: 100 }));
+  state.galleryFilter = "all"; runtime.renderGallery(true);
+  assert.ok(state.galleryNodes.size < 40, "the fixed-row gallery mounts only a small scroll window");
+  runtime.gallery.scrollTop = 152 * 120; runtime.renderGallery(true);
+  assert.ok(state.galleryNodes.has("window-360"), "scrolling remounts the logical row at the new position");
+  state.images = catalogImages; state.galleryFilter = "all"; runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
 
   assert.deepEqual([...runtime.overviewFolderOptions()], ["sets", "sets/sub"]);
   state.overviewFilter = "all"; state.overviewFolder = "sets"; state.overviewQuery = "two"; assert.deepEqual(runtime.overviewImages().map((image) => image.id), ["two"]);

@@ -54,7 +54,7 @@ const state = {
   maskStatus: new Map(), drafts: new Map(), draftLayerDirty: new Set(), draftSaveChains: new Map(), history: [], historyIndex: 0,
   historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(), view: { x: 2, y: 3, scale: 2 }, settings: { display: { apply_color: "#a", exclude_color: "#b", overlay_opacity: 0.5 }, detection: {} },
   manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: false, manualMaskPresent: false,
-  maskDirty: false, draftDirty: false, historyBaseDirty: false, mosaicPreviewGeneration: 0, mosaicPreviewEnabled: true, mosaicWorker: null, mosaicWorkerBusy: false, mosaicPending: false, mosaicPreviewRequested: false,
+  maskDirty: false, draftDirty: false, historyBaseDirty: false, mosaicPreviewGeneration: 0, mosaicPreviewEnabled: true, mosaicWorker: null, mosaicWorkerBusy: false, mosaicPending: false, mosaicPreviewRequested: false, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
   blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: true, hover: { x: 1, y: 2 }, tool: "mosaic_eraser", renderFrame: 0,
   boundaryDrafts: [], boundaryDragging: false, polygonPoints: [], boundaryBrushStroke: null, pendingImageId: null, boundaryPending: false, importing: false,
 };
@@ -70,6 +70,7 @@ class FileReader {
 const context = {
   state, Math, Map, Set, Promise, Object, Array, Number, String, Boolean, JSON, Uint8Array, Uint8ClampedArray,
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker, FileReader,
+  createImageBitmap: async (image) => ({ ...image, close() { this.closed = true; } }), OffscreenCanvas: class {},
   ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
   window: { devicePixelRatio: 2 }, document: { activeElement: null },
   stage: { clientWidth: 80, clientHeight: 60 }, toolRail: { offsetHeight: 10 }, canvas: displayCanvas,
@@ -89,7 +90,7 @@ const test = context.canvasCompletion;
 (async () => {
   test.canvasSizeForImage({ width: 20, height: 12 });
   assert.equal(addCanvas.width, 20, "resizing an image resets every editable canvas");
-  assert.equal(blinkCanvas.height, 12);
+  assert.equal(blinkCanvas.height, 1, "blink canvas stays tiny until a blink is requested");
   assert.equal(state.maskDirty, true);
   assert.equal(state.manualEnabled, true);
 
@@ -153,10 +154,10 @@ const test = context.canvasCompletion;
   state.currentImage = { width: 4, height: 3, alpha: 255 }; combinedCanvas.width = 4; combinedCanvas.height = 3;
   test.prepareOriginalImage();
   assert.deepEqual([originalCanvas.width, originalCanvas.height], [4, 3]);
-  test.rebuildMosaicPreview();
-  assert.equal(workerCreated, 1); assert.equal(state.mosaicWorker.posted.length, 1, "preview worker receives pixels and mask buffers");
-  state.mosaicWorker.onmessage({ data: { output: new Uint8ClampedArray(4 * 3 * 4).buffer } });
-  assert.ok(mosaicCanvas.ctx.calls.some(([name]) => name === "put"));
+  await test.rebuildMosaicPreview();
+  assert.equal(workerCreated, 1); assert.equal(state.mosaicWorker.posted.length, 2, "preview worker receives one source bitmap and one mask buffer");
+  state.mosaicWorker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: { close() {} } } });
+  assert.ok(mosaicCanvas.ctx.calls.some(([name]) => name === "image"));
   state.mosaicPreviewRequested = false; test.requestMosaicPreview(); assert.equal(state.mosaicPreviewRequested, false, "preview coalescing resets after the animation frame");
 
   test.paintMosaicPreview();

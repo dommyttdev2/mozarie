@@ -160,6 +160,7 @@ function syncCandidateDisplayButtons() {
 function clearCandidateBlink() {
   state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkPhase = false;
   if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
+  if (typeof releaseBlinkCanvas === "function") releaseBlinkCanvas();
   $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
 }
 
@@ -488,6 +489,7 @@ function updateHistoryButtons() {
 
 function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
+  if (typeof ensureHistoryCanvases === "function") ensureHistoryCanvases();
   copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
   state.historyRemovedCandidateIds = new Set(state.removedCandidateIds || []);
   state.historyCandidateIds = new Set(state.candidates.map((candidate) => candidate.id));

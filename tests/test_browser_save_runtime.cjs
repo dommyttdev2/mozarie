@@ -8,20 +8,23 @@ const index = fs.readFileSync(path.join(staticRoot, "index.html"), "utf8");
 const appPaths = [...index.matchAll(/<script src="\/js\/([a-z-]+\.js)"><\/script>/g)].map((match) => path.join(staticRoot, "js", match[1]));
 
 function element() {
-  return {
+  const node = {
     disabled: false,
     hidden: false,
     textContent: "",
     value: "",
     style: {},
     dataset: {},
-    classList: { toggle() {} },
+    children: [],
+    classList: { toggle() {}, add() {} },
     setAttribute() {},
-    append() {},
+    append(child) { this.children.push(child); child.parentNode = this; },
+    remove() { const siblings = this.parentNode?.children; const index = siblings?.indexOf(this); if (index >= 0) siblings.splice(index, 1); },
     addEventListener() {},
     showModal() { this.open = true; },
     close() { this.open = false; },
   };
+  return node;
 }
 
 function jsonResponse(body, status = 200) {

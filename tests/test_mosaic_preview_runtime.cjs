@@ -19,19 +19,21 @@ const state = {
 };
 const context = {
   Worker, ImageData: imageData, Uint8Array, Uint8ClampedArray, state,
+  createImageBitmap: async (image) => ({ ...image, close() {} }), OffscreenCanvas: class {},
   requestAnimationFrame: () => 1,
   originalCanvas: canvas(), combinedCanvas: canvas(), mosaicCanvas: canvas(),
-  originalCtx: { clearRect() {}, drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(3840 * 2160 * 4) }) },
-  combinedCtx: { getImageData: () => ({ data: new Uint8ClampedArray(3840 * 2160 * 4) }) },
-  mosaicCtx: { putImageData: () => draws.push("preview") },
+  originalCtx: { clearRect() {}, drawImage() {} },
+  combinedCtx: {},
+  mosaicCtx: { clearRect() {}, drawImage: () => draws.push("preview") },
   calculatedBlockSize: () => 16, flushMaskComposition() {}, prepareOriginalImage() {}, render() {},
 };
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: canvasPath });
-context.postMosaicPreview = () => {};
-context.rebuildMosaicPreview();
-const worker = state.mosaicWorker;
-state.mosaicPending = true; // A new 4K drag sample arrived while this frame ran.
-worker.onmessage({ data: { generation: 1, output: new Uint8ClampedArray(3840 * 2160 * 4).buffer } });
-assert.deepEqual(draws, ["preview"], "the completed 4K frame is displayed before the queued update");
-console.log("test_mosaic_preview_runtime: passed");
+(async () => {
+  await context.rebuildMosaicPreview();
+  const worker = state.mosaicWorker;
+  state.mosaicPending = true; // A new 4K drag sample arrived while this frame ran.
+  worker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: { close() {} } } });
+  assert.deepEqual(draws, ["preview"], "the completed 4K frame is displayed before the queued update");
+  console.log("test_mosaic_preview_runtime: passed");
+})().catch((error) => { console.error(error); process.exitCode = 1; });

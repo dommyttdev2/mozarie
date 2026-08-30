@@ -1,4 +1,5 @@
 const thumbnailObservers = new Map();
+const catalogWindows = new Map();
 function thumbnailObserver(scope) {
   if (thumbnailObservers.has(scope)) return thumbnailObservers.get(scope);
   const root = scope === "overview" ? $("#overviewGrid") : $("#gallery");
@@ -16,56 +17,114 @@ function observeThumbnail(image, record, scope = "gallery") {
 }
 function forgetThumbnail(image) { if (!image) return; for (const observer of thumbnailObservers.values()) observer.unobserve(image); image.removeAttribute?.("src"); image.dataset.src = ""; delete image.dataset.loaded; }
 
+function catalogWindow(scope, container, nodes, options) {
+  let windowState = catalogWindows.get(scope);
+  if (windowState) return windowState;
+  const spacer = document.createElement("div"); spacer.className = "catalog-window-spacer";
+  if (container.replaceChildren) container.replaceChildren(spacer);
+  else { for (const child of Array.from(container.children || [])) child.remove?.(); container.append(spacer); }
+  container.classList.add?.("catalog-window");
+  windowState = { scope, container, nodes, spacer, options, images: [], frame: 0 };
+  const schedule = () => {
+    if (windowState.frame) return;
+    windowState.frame = requestAnimationFrame(() => { windowState.frame = 0; renderCatalogWindow(windowState); });
+  };
+  container.addEventListener("scroll", schedule, { passive: true });
+  if (typeof window !== "undefined") window.addEventListener?.("resize", schedule);
+  catalogWindows.set(scope, windowState); return windowState;
+}
+
+function catalogLayout(windowState) {
+  const { container, options } = windowState;
+  const width = Math.max(1, (Number(container.clientWidth) || options.minWidth + options.padding * 2) - options.padding * 2);
+  const columns = options.columns || Math.max(1, Math.floor((width + options.gap) / (options.minWidth + options.gap)));
+  const itemWidth = (width - (columns - 1) * options.gap) / columns;
+  return { columns, itemWidth, rowHeight: options.rowHeight, totalHeight: Math.ceil(windowState.images.length / columns) * options.rowHeight + options.padding * 2 };
+}
+
+function setCatalogNode(windowState, image, index, layout) {
+  const { scope, nodes, container, options } = windowState;
+  let item = nodes.get(image.id);
+  if (!item) { item = document.querySelector(options.template).content.firstElementChild.cloneNode(true); nodes.set(image.id, item); }
+  const row = Math.floor(index / layout.columns); const column = index % layout.columns;
+  item.dataset.id = image.id; item.style.width = `${layout.itemWidth}px`; item.style.height = `${layout.rowHeight - options.gap}px`;
+  item.style.transform = `translate(${options.padding + column * (layout.itemWidth + options.gap)}px, ${options.padding + row * layout.rowHeight}px)`;
+  const current = image.id === state.currentId;
+  const batchSelected = scope === "overview" && state.batchMode && state.selectedImageIds.has(image.id);
+  item.classList.toggle("current", current); item.classList.toggle("batch-selected", batchSelected); item.classList.toggle("hidden", isHidden(image));
+  if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
+  if (scope === "overview" && state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
+  const preview = item.querySelector("img"); observeThumbnail(preview, image, scope); preview.alt = image.relativePath;
+  const reviewed = isReviewed(image);
+  if (scope === "gallery") {
+    item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
+    item.querySelector(".gallery-meta").textContent = `${image.width} × ${image.height}`;
+    item.querySelector(".gallery-review-badge").textContent = reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge");
+    item.setAttribute("aria-label", [image.relativePath, reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
+    item.onclick = () => selectCatalogImage(image.id);
+    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
+  } else {
+    item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
+    item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
+    item.querySelector(".overview-review-badge").textContent = reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge");
+    item.title = image.relativePath;
+    const states = [image.relativePath]; if (reviewed) states.push(t("overview.stateReviewed")); if (imageHasMask(image)) states.push(t("overview.stateMasked"));
+    item.setAttribute("aria-label", states.join(t("a11y.separator")));
+    item.onclick = (event) => selectOverviewImage(image.id, event);
+  }
+  item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
+  item.tabIndex = 0; item.setAttribute("role", "button"); item.setAttribute("aria-haspopup", "menu");
+  item.onkeydown = (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scope === "gallery" ? selectCatalogImage(image.id) : selectOverviewImage(image.id, event); }
+    else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
+  };
+  container.append(item);
+}
+
+function renderCatalogWindow(windowState) {
+  const { container, nodes, spacer, options } = windowState;
+  const layout = catalogLayout(windowState); spacer.style.height = `${layout.totalHeight}px`;
+  const viewport = Number(container.clientHeight) || Number.MAX_SAFE_INTEGER;
+  const scrollTop = Number(container.scrollTop) || 0;
+  const firstRow = Math.max(0, Math.floor(scrollTop / layout.rowHeight) - options.overscan);
+  const lastRow = Math.ceil((scrollTop + viewport) / layout.rowHeight) + options.overscan;
+  const first = firstRow * layout.columns; const last = Math.min(windowState.images.length, lastRow * layout.columns);
+  const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
+  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.remove(); nodes.delete(id); }
+  for (let index = first; index < last; index += 1) setCatalogNode(windowState, windowState.images[index], index, layout);
+  return layout;
+}
+
+function renderCatalog(scope, images, nodes, options) {
+  if (!document.createElement) {
+    const ids = new Set(images.map((image) => image.id));
+    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); item.remove(); nodes.delete(id); }
+    return null;
+  }
+  const windowState = catalogWindow(scope, $(options.container), nodes, options);
+  windowState.images = images;
+  return renderCatalogWindow(windowState);
+}
+
+function scrollCatalogImage(scope, imageId, behavior = "auto") {
+  const windowState = catalogWindows.get(scope); if (!windowState) return;
+  const index = windowState.images.findIndex((image) => image.id === imageId); if (index < 0) return;
+  const layout = catalogLayout(windowState); const row = Math.floor(index / layout.columns);
+  const target = Math.max(0, row * layout.rowHeight - Math.max(0, (windowState.container.clientHeight - layout.rowHeight) / 2));
+  windowState.container.scrollTo?.({ top: target, behavior });
+  if (!windowState.container.scrollTo) windowState.container.scrollTop = target;
+  renderCatalogWindow(windowState);
+}
+
 function renderGallery(force = false) {
   if (!force && state.viewMode === "overview") return;
-  const gallery = $("#gallery");
-  const scrollTop = gallery.scrollTop;
   const visibleImages = state.images.filter(imageMatchesGalleryFilter);
   const imageCount = t("gallery.count", { count: visibleImages.length });
   for (const element of document.querySelectorAll(".gallery-local-count")) element.textContent = imageCount;
   $("#galleryFilter").value = state.galleryFilter;
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
-  const template = $("#galleryItemTemplate");
-  const visibleIds = new Set(visibleImages.map((image) => image.id));
-  for (const [imageId, item] of state.galleryNodes) {
-    if (!visibleIds.has(imageId)) { forgetThumbnail(item.querySelector("img")); item.remove?.(); state.galleryNodes.delete(imageId); }
-  }
-  for (const image of visibleImages) {
-    let item = state.galleryNodes.get(image.id);
-    if (!item) {
-      item = template.content.firstElementChild.cloneNode(true);
-      state.galleryNodes.set(image.id, item);
-    }
-    item.dataset.id = image.id;
-    const current = image.id === state.currentId;
-    item.classList.toggle("current", current);
-    item.classList.toggle("batch-selected", false);
-    if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
-    item.removeAttribute?.("aria-pressed");
-    item.classList.toggle("hidden", isHidden(image));
-    item.classList.toggle("reviewed", isReviewed(image));
-    const preview = item.querySelector("img");
-    observeThumbnail(preview, image, "gallery");
-    preview.alt = image.relativePath;
-    item.querySelector(".gallery-name").textContent = image.relativePath.split("/").pop();
-    item.querySelector(".gallery-meta").textContent = `${image.width} × ${image.height}`;
-    const reviewBadge = item.querySelector(".gallery-review-badge");
-    reviewBadge.textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
-    item.onclick = () => selectCatalogImage(image.id);
-    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
-    item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
-    item.tabIndex = 0;
-    item.setAttribute("role", "button");
-    item.setAttribute("aria-haspopup", "menu");
-    item.setAttribute("aria-label", [image.relativePath, isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
-    item.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectCatalogImage(image.id); }
-      else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
-    };
-    gallery.append(item);
-  }
-  gallery.scrollTop = scrollTop;
+  renderCatalog("gallery", visibleImages, state.galleryNodes, { container: "#gallery", template: "#galleryItemTemplate", padding: 8, gap: 8, minWidth: 108, rowHeight: 152, overscan: 3 });
   updateActionButtons();
 }
 
@@ -80,13 +139,14 @@ function imageMatchesGalleryFilter(image) {
 }
 
 function updateGalleryCurrent() {
-  for (const item of $("#gallery").children) {
+  for (const item of state.galleryNodes.values()) {
     const current = item.dataset.id === state.currentId;
     item.classList.toggle("current", current);
     item.classList.toggle("batch-selected", false);
     if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
     item.removeAttribute?.("aria-pressed");
   }
+  scrollCatalogImage("gallery", state.currentId);
   updateActionButtons();
 }
 
@@ -156,48 +216,8 @@ function renderOverview(force = false) {
     const active = button.dataset.overviewFilter === state.overviewFilter;
     button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
   });
-  const template = $("#overviewItemTemplate");
-  const visibleIds = new Set(visibleImages.map((image) => image.id));
   $("#overviewEmptyState").hidden = visibleImages.length !== 0;
-  for (const [imageId, item] of state.overviewNodes) {
-    if (!visibleIds.has(imageId)) { forgetThumbnail(item.querySelector("img")); item.remove?.(); state.overviewNodes.delete(imageId); }
-  }
-  for (const image of visibleImages) {
-    let item = state.overviewNodes.get(image.id);
-    if (!item) {
-      item = template.content.firstElementChild.cloneNode(true);
-      state.overviewNodes.set(image.id, item);
-    }
-    item.dataset.id = image.id;
-    const current = image.id === state.currentId;
-    const batchSelected = state.batchMode && state.selectedImageIds.has(image.id);
-    item.classList.toggle("current", current);
-    item.classList.toggle("batch-selected", batchSelected);
-    item.classList.toggle("hidden", isHidden(image));
-    if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
-    if (state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
-    const preview = item.querySelector("img");
-    observeThumbnail(preview, image, "overview");
-    preview.alt = image.relativePath;
-    item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
-    item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
-    item.querySelector(".overview-review-badge").textContent = isReviewed(image) ? t("review.reviewedBadge") : t("review.unreviewedBadge");
-    item.title = image.relativePath;
-    const states = [image.relativePath];
-    if (isReviewed(image)) states.push(t("overview.stateReviewed"));
-    if (imageHasMask(image)) states.push(t("overview.stateMasked"));
-    item.setAttribute("aria-label", states.join(t("a11y.separator")));
-    item.onclick = (event) => selectOverviewImage(image.id, event);
-    item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
-    grid.append(item);
-    item.tabIndex = 0;
-    item.setAttribute("role", "button");
-    item.setAttribute("aria-haspopup", "menu");
-    item.onkeydown = (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectOverviewImage(image.id, event); }
-      else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
-    };
-  }
+  renderCatalog("overview", visibleImages, state.overviewNodes, { container: "#overviewGrid", template: "#overviewItemTemplate", padding: 14, gap: 10, minWidth: 1, columns: 8, rowHeight: 182, overscan: 3 });
 }
 function renderCatalogViews() { renderGallery(); renderOverview(); }
 function setViewMode(mode, refreshGallery = true) {
@@ -219,9 +239,10 @@ function setViewMode(mode, refreshGallery = true) {
   }
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   renderOverview(true);
+  scrollCatalogImage("overview", state.currentId);
   requestAnimationFrame(() => {
     if (state.viewMode !== "overview" || state.viewGeneration !== viewGeneration) return;
-    const current = [...$("#overviewGrid").children].find((item) => item.dataset.id === state.currentId);
+    const current = state.overviewNodes.get(state.currentId);
     current?.scrollIntoView({ block: "center", behavior: "smooth" });
     focusElement($("#overviewPane"));
   });

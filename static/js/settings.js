@@ -39,7 +39,7 @@ function selectSamVariant(variant, refresh = false) {
   $("#settingsSamType").value = variant;
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === variant; });
   $("#settingsSamModel").value = samCheckpointPaths[variant] || "";
-  if (refresh) void refreshSettingsStatus();
+  if (refresh) { modelStatusDirty = true; void refreshSettingsStatus(); }
 }
 
 function renderSamVariantStatuses() {
@@ -300,6 +300,7 @@ function selectSettingsTab(name) {
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
   if (changed) { const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error"); }
+  if (name === "models") void refreshSettingsStatus();
 }
 
 function moveSettingsTab(event) {
@@ -393,7 +394,7 @@ async function chooseSettingsModelFile(button) {
         samCheckpointPaths[variant] = data.path;
         $("#settingsSamModel").value = data.path;
       } else input.value = data.path;
-      void refreshSettingsStatus();
+      modelStatusDirty = true; void refreshSettingsStatus();
     }
   } catch (error) {
     showUserError(error, button);
@@ -446,6 +447,7 @@ function renderModelDownload(job) {
   }
   if (job.state === "complete" && modelDownloadStatusRefreshPending) {
     modelDownloadStatusRefreshPending = false;
+    modelStatusDirty = true;
     void refreshSettingsStatus();
   }
 }
@@ -549,6 +551,8 @@ async function cancelModelDownload() {
 }
 
 let settingsStatusGeneration = 0;
+let modelStatusDirty = true;
+let modelStatusLoaded = false;
 
 function setSettingsGpuLoading(loading) {
   $("#settingsGpuLoading").hidden = !loading;
@@ -557,6 +561,10 @@ function setSettingsGpuLoading(loading) {
 }
 
 async function refreshSettingsStatus() {
+  const modelsTab = document.querySelector?.('.settings-tab[data-settings-tab="models"]');
+  if (modelsTab && (!$("#settingsDialog")?.open || !modelsTab.classList.contains("active"))) { modelStatusDirty = true; return; }
+  if (modelStatusLoaded && !modelStatusDirty) return;
+  modelStatusDirty = false;
   const generation = ++settingsStatusGeneration;
   setSettingsGpuLoading(true);
   try {
@@ -565,9 +573,10 @@ async function refreshSettingsStatus() {
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
     if (generation !== settingsStatusGeneration || snapshot !== currentSnapshot) return;
+    modelStatusLoaded = true;
     renderSettingsStatus(data.status);
   } catch (error) {
-    if (generation === settingsStatusGeneration) showUserError(error);
+    if (generation === settingsStatusGeneration) { modelStatusDirty = true; showUserError(error); }
   } finally {
     if (generation === settingsStatusGeneration) setSettingsGpuLoading(false);
   }
