@@ -136,7 +136,7 @@ function renderCatalogWindow(windowState) {
   const lastRow = Math.min(Math.ceil(windowState.images.length / layout.columns), Math.ceil((scrollTop + viewport) / layout.rowHeight) + options.overscan);
   const first = firstRow * layout.columns; const last = Math.min(windowState.images.length, lastRow * layout.columns);
   const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
-  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode?.remove(); nodes.delete(id); }
+  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); (item.parentNode || item).remove(); nodes.delete(id); }
   for (const [row, rowNode] of windowState.rows) if (row < firstRow || row >= lastRow) { rowNode.remove(); windowState.rows.delete(row); }
   for (let row = firstRow; row < lastRow; row += 1) {
     const rowNode = catalogRow(windowState, row, layout); const rowStart = row * layout.columns;
@@ -149,7 +149,7 @@ function renderCatalogWindow(windowState) {
 function renderCatalog(scope, images, nodes, options) {
   if (!document.createElement) {
     const ids = new Set(images.map((image) => image.id));
-    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode?.remove(); nodes.delete(id); }
+    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); (item.parentNode || item).remove(); nodes.delete(id); }
     return null;
   }
   const windowState = catalogWindow(scope, $(options.container), nodes, options);
