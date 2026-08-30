@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import cv2
 from PIL import Image, ImageOps
 
 from .core import (
@@ -21,11 +23,51 @@ from .core import (
     torch_module, _read_detection_parallelism, _read_target_classes,
 )
 from .fluid import white_fluid_mask
-from .inference.generic_yolo_segment import GenericYoloSegmenter
-from .inference.yolo_detect import HandDetector
-from .inference.yolo_segment import TargetSegmenter
 from .runtime import runtime_backend
 from .runtime_types import DetectionModels
+
+if TYPE_CHECKING:
+    from .inference.generic_yolo_segment import GenericYoloSegmenter
+    from .inference.yolo_detect import HandDetector
+
+
+_SCENE_FLUID_TAGS = frozenset({"cum_on_breasts", "cum on fingers", "cum on ass"})
+_METADATA_FLUID_ANCHOR_RADIUS_PX = 120
+_METADATA_FLUID_ANCHOR_KERNEL_SIZE = _METADATA_FLUID_ANCHOR_RADIUS_PX * 2 + 1
+
+
+def _scene_fluid_tags(info: dict[str, Any]) -> frozenset[str]:
+    """Read only the exact Scene prompt tags that opt into local fluid search."""
+    positive = info.get("scene_positive")
+    if positive is None:
+        scene_info = info.get("scene_info")
+        if not isinstance(scene_info, str):
+            return frozenset()
+        try:
+            decoded = json.loads(scene_info)
+        except (TypeError, ValueError):
+            return frozenset()
+        if not isinstance(decoded, dict):
+            return frozenset()
+        positive = decoded.get("positive")
+    if not isinstance(positive, str):
+        return frozenset()
+    return frozenset(tag for tag in (value.strip().casefold() for value in positive.split(",")) if tag in _SCENE_FLUID_TAGS)
+
+
+def TargetSegmenter(*args: Any, **kwargs: Any) -> Any:
+    from .inference.yolo_segment import TargetSegmenter as implementation
+    return implementation(*args, **kwargs)
+
+
+def GenericYoloSegmenter(*args: Any, **kwargs: Any) -> Any:
+    from .inference.generic_yolo_segment import GenericYoloSegmenter as implementation
+    return implementation(*args, **kwargs)
+
+
+def HandDetector(*args: Any, **kwargs: Any) -> Any:
+    from .inference.yolo_detect import HandDetector as implementation
+    return implementation(*args, **kwargs)
 
 
 def _save_binary_mask(mask: Any, path: Path) -> None:
@@ -249,15 +291,17 @@ class DetectionMixin:
             candidate.mask_path.unlink(missing_ok=True)
 
     def _detect_arbitrated_segments(
-        self, models: DetectionModels, rgb: np.ndarray, confidence: float, target_classes: set[str] | None = None
+        self, models: DetectionModels, rgb: np.ndarray, confidence: float, target_classes: set[str] | None = None,
+        scene_fluid_tags: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         rgb = np.asarray(rgb)
         height, width = rgb.shape[:2]
         targets = target_classes or TARGET_CLASSES
         model_targets = targets | ({"testicles"} if "penis" in targets else set())
-        segments = (models.target.detect(rgb, confidence) if targets == TARGET_CLASSES
-                    else models.target.detect(rgb, confidence, model_targets))
-        collected = [segment for segment in segments if segment["class_name"] in model_targets and segment["mask"].shape == (height, width)]
+        detector_targets = model_targets | ({"female_face"} if "cum_on_breasts" in scene_fluid_tags else set())
+        segments = (models.target.detect(rgb, confidence, detector_targets) if detector_targets != TARGET_CLASSES
+                    else models.target.detect(rgb, confidence))
+        collected = [segment for segment in segments if segment["class_name"] in detector_targets and segment["mask"].shape == (height, width)]
         for source, model in models.auxiliaries:
             tiled_segments: list[dict[str, Any]] = []
             for x_offset, y_offset, tile_width, tile_height in detection_tiles(width, height):
@@ -393,18 +437,52 @@ class DetectionMixin:
                 hand_mask, _unconfirmed = self._apply_sam_hand_fallback(predictor, fallback_boxes, np.asarray(rgb).shape[:2], hand_mask)
         return self._attach_hand_evidence(segments, detected, hand_mask)
 
-    def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _metadata_fluid_mask(
+        rgb: np.ndarray, final_masks: list[np.ndarray], hand_evidence: np.ndarray, faces: list[dict[str, Any]], scene_fluid_tags: frozenset[str],
+    ) -> np.ndarray:
+        shape = np.asarray(rgb).shape[:2]
+        if not scene_fluid_tags:
+            return np.zeros(shape, dtype=np.uint8)
+        search = np.zeros(shape, dtype=np.uint8)
+        for mask in final_masks:
+            search = np.maximum(search, np.asarray(mask > 0, dtype=np.uint8))
+        search = np.maximum(search, np.asarray(hand_evidence > 0, dtype=np.uint8))
+        if np.any(search):
+            search = cv2.dilate(
+                search,
+                np.ones((_METADATA_FLUID_ANCHOR_KERNEL_SIZE, _METADATA_FLUID_ANCHOR_KERNEL_SIZE), dtype=np.uint8),
+            )
+        if "cum_on_breasts" in scene_fluid_tags:
+            for face in faces:
+                rows, columns = np.nonzero(np.asarray(face["mask"]) > 0)
+                if not rows.size:
+                    continue
+                top, bottom = int(rows.min()), int(rows.max()) + 1
+                left, right = int(columns.min()), int(columns.max()) + 1
+                width, height = right - left, bottom - top
+                center = (left + right) // 2
+                chest_left, chest_right = max(0, round(center - width * .38)), min(shape[1], round(center + width * .38))
+                chest_top, chest_bottom = min(shape[0], round(bottom + height * .64)), min(shape[0], round(bottom + height * 1.63))
+                search[chest_top:chest_bottom, chest_left:chest_right] = 1
+        return white_fluid_mask(rgb, search) if np.any(search) else np.zeros(shape, dtype=np.uint8)
+
+    def _finalize_exclusions(
+        self, rgb: np.ndarray, segments: list[dict[str, Any]], scene_fluid_tags: frozenset[str] = frozenset(),
+    ) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
         shape = np.asarray(rgb).shape[:2]
         targets = [segment for segment in segments if segment.get("class_name") in DETECTED_TARGET_CLASSES]
-        if not targets:
+        faces = [segment for segment in segments if segment.get("class_name") == "female_face"]
+        if not targets and not scene_fluid_tags:
             return segments
 
         final_masks = [np.asarray(segment["mask"] > 0, dtype=np.uint8) for segment in targets]
-        hand_evidence = np.maximum.reduce([
+        hand_masks = [
             np.asarray(segment.get("image_exclusions", {}).get("hand", np.zeros(shape)) > 0, dtype=np.uint8)
             for segment in targets
-        ])
+        ]
+        hand_evidence = np.maximum.reduce(hand_masks) if hand_masks else np.zeros(shape, dtype=np.uint8)
 
         safe_hand = np.zeros(shape, dtype=np.uint8)
         unsafe_targets = np.zeros(shape, dtype=np.uint8)
@@ -421,6 +499,11 @@ class DetectionMixin:
             for final_mask in final_masks:
                 if np.any(final_mask):
                     fluid_union = np.maximum(fluid_union, white_fluid_mask(rgb, final_mask))
+        metadata_fluid = self._metadata_fluid_mask(rgb, final_masks, hand_evidence, faces, scene_fluid_tags)
+        if not targets:
+            if np.any(metadata_fluid):
+                segments.append({"class_name": "__fluid_exclusion__", "metadata_exclusions": {"fluid": metadata_fluid}})
+            return segments
 
         # Publish just the reviewable hand and fluid exclusions for final
         # targets. Other detector segments do not participate in APPLY.
@@ -431,6 +514,9 @@ class DetectionMixin:
             targets[0]["image_exclusions"]["hand"] = safe_hand
         if np.any(fluid_union):
             targets[0]["exclusions"]["fluid"] = fluid_union
+        if np.any(metadata_fluid):
+            targets[0]["metadata_exclusions"] = {"fluid": np.maximum(fluid_union, metadata_fluid)}
+            targets[0]["exclusions"].pop("fluid", None)
         return segments
 
     def _high_precision_segments(
@@ -516,8 +602,9 @@ class DetectionMixin:
         with self.image_io_lock(record.image_id):
             self._assert_record_stat_matches(record)
             with Image.open(record.path) as image:
+                scene_fluid_tags = _scene_fluid_tags(dict(image.info))
                 rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB")).copy()
-        segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES)
+        segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES, scene_fluid_tags)
         detected, hand_mask, fallback_boxes = self._hand_refinement_context(models, record, rgb, segments)
         needs_high_precision = mode == "high_precision" and bool(detected)
         if needs_high_precision:
@@ -538,7 +625,8 @@ class DetectionMixin:
             # detector's APPLY union.
             hand_mask = np.maximum(hand_mask, self._fallback_hand_boxes_mask(rgb.shape[:2], fallback_boxes, detected))
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
-        segments = self._finalize_exclusions(rgb, segments)
+        segments = (self._finalize_exclusions(rgb, segments, scene_fluid_tags)
+                    if scene_fluid_tags else self._finalize_exclusions(rgb, segments))
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
@@ -559,6 +647,15 @@ class DetectionMixin:
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
+                ))
+            for exclusion_kind, exclusion_mask in dict(segment.get("metadata_exclusions", {})).items():
+                exclusion_id = uuid.uuid4().hex
+                exclusion_path = destination / f".mozarie-pending-{exclusion_id}.tmp"
+                _save_binary_mask(exclusion_mask, exclusion_path)
+                candidates.append(Candidate(
+                    candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
+                    mask_path=exclusion_path, color="#4ac3df", source=f"{exclusion_kind}_exclusion",
+                    origin="auto", role=CandidateRole.EXCLUDE, enabled=True, forced=False,
                 ))
             if segment["class_name"] not in DETECTED_TARGET_CLASSES:
                 continue

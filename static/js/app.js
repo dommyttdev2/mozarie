@@ -369,7 +369,7 @@ function bindEvents() {
   const processPointerMove = (event) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
-      state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; render(); return;
+      state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
     state.hover = pointFromEvent(event);
     if (state.drawing && (event.buttons & 1)) {
@@ -390,11 +390,11 @@ function bindEvents() {
         appendBoundaryBrushPoint(point);
       } else { appendManualStrokePoint(state.hover); state.pointer = state.hover; }
     }
-    render();
   };
   canvas.addEventListener("pointermove", (event) => {
     const events = event.getCoalescedEvents?.() || [event];
     for (const pointEvent of events) processPointerMove(pointEvent);
+    render();
   });
   function finishCanvasGesture(event, cancelled = false) {
     const wasDrawing = state.drawing;
@@ -412,7 +412,7 @@ function bindEvents() {
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool) ? "cell" : "crosshair";
+    canvas.style.cursor = "default";
     if (manualStrokeStarted) {
       if (cancelled) cancelManualStroke();
       else if (wasDrawing) completeManualStroke();

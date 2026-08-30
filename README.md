@@ -114,10 +114,11 @@ GPU処理を使う場合は、**設定 > 検出**でGPUを選びます。GPUメ�
 ## 開発
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
-npm test
+node scripts/test-quiet.cjs all
 ```
+
+失敗時だけ詳細を表示します。CI用にカバレッジを残す場合は `node scripts/test-quiet.cjs all --artifacts <保存先>` を使います。
 
 ## ライセンス
 

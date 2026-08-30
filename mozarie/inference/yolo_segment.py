@@ -60,7 +60,8 @@ class TargetSegmenter(BaseOnnxModel):
         rows = self._prediction_rows(prediction)
         class_ids_for_rows = np.argmax(rows[:, 4:4 + len(CLASS_NAMES)], axis=1)
         scores_for_rows = rows[np.arange(len(rows)), 4 + class_ids_for_rows]
-        target_class = np.isin(class_ids_for_rows, (2, 3))
+        class_names = {2: "penis", 3: "pussy", 4: "female_face"}
+        target_class = np.isin(class_ids_for_rows, tuple(class_id for class_id, name in class_names.items() if name in targets))
         selected_rows = np.flatnonzero(target_class & (scores_for_rows >= confidence))
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []
@@ -70,16 +71,14 @@ class TargetSegmenter(BaseOnnxModel):
             row = rows[row_index]
             class_id = int(class_ids_for_rows[row_index])
             score = float(scores_for_rows[row_index])
-            class_name = "penis" if class_id == 2 else "pussy"
-            if class_name not in targets:
-                continue
+            class_name = class_names[class_id]
             box = restore_box(row[:4], transform, xywh=True)
             if box is None:
                 continue
             boxes.append(box); scores.append(score); class_ids.append(class_id); coefficients.append(np.asarray(row[-32:], dtype=np.float32))
         return [
             {
-                "class_name": "penis" if class_ids[index] == 2 else "pussy",
+                "class_name": class_names[class_ids[index]],
                 "confidence": scores[index],
                 "mask": self._mask_from_coefficients(coefficients[index], prototype, boxes[index], transform),
                 "source": "target",

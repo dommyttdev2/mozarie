@@ -1,8 +1,5 @@
 function candidateLabel(candidate) {
-  const className = t(`candidateLabel.${candidate.labelToken}`);
-  const source = t(`candidateSource.${candidate.source}`);
-  const refinement = candidate.refinement ? ` · ${t(`candidateRefinement.${candidate.refinement}`)}` : "";
-  return t("candidates.label", { className, source, refinement });
+  return t(`candidateLabel.${candidate.labelToken}`);
 }
 
 function renderCandidates() {
@@ -510,6 +507,15 @@ function strokeLine(context, from, to, size, operation = "source-over") {
   context.beginPath(); context.moveTo(from.x, from.y); context.lineTo(to.x, to.y); context.stroke(); context.restore();
 }
 
+function strokePath(context, points, size, operation = "source-over") {
+  const [first, ...rest] = points;
+  context.save(); context.globalCompositeOperation = operation; context.strokeStyle = "#ffffff"; context.lineWidth = size; context.lineCap = "round";
+  context.beginPath(); context.moveTo(first.x, first.y);
+  if (rest.length) for (const point of rest) context.lineTo(point.x, point.y);
+  else context.lineTo(first.x, first.y);
+  context.stroke(); context.restore();
+}
+
 function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseContext, from, to, tool, size) {
   if (tool === "mosaic_eraser") { strokeLine(addContext, from, to, size + 2, "destination-out"); return; }
   if (tool === "exclude_eraser") { strokeLine(exclusionEraseContext, from, to, size); return; }
@@ -524,10 +530,22 @@ function paintStrokeOnContexts(addContext, exclusionContext, exclusionEraseConte
 
 function paintStroke(from, to, tool, size) {
   paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, from, to, tool, size);
+  markStrokeDirty(tool);
+}
+
+function markStrokeDirty(tool) {
   markMaskDirty();
   if (tool === "brush" || tool === "mosaic_eraser") markDraftDirty("add");
   if (tool === "eraser") markDraftDirty("exclusion", "exclusionErase");
   if (tool === "exclude_eraser") markDraftDirty("exclusionErase");
+}
+
+function paintStrokePath(points, tool, size) {
+  if (tool === "mosaic_eraser") strokePath(addCtx, points, size + 2, "destination-out");
+  else if (tool === "exclude_eraser") strokePath(exclusionEraseCtx, points, size);
+  else if (tool === "eraser") { strokePath(exclusionCtx, points, size); strokePath(exclusionEraseCtx, points, size, "destination-out"); }
+  else { strokePath(addCtx, points, size); if (!state.manualExclusionForced) strokePath(exclusionCtx, points, size, "destination-out"); }
+  markStrokeDirty(tool);
 }
 
 function fillAt(point, tool = state.tool) {
@@ -589,23 +607,31 @@ function enableManualLayerForTool(tool) {
 
 function beginManualStroke(point) {
   enableManualLayerForTool(state.tool);
-  state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
+  state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }], paintedPointCount: 1 };
+  state.mosaicPending = true;
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
-  flushMaskComposition(); requestMosaicPreview();
 }
 
 function appendManualStrokePoint(point) {
   if (!state.activeStroke) return;
-  const previous = state.activeStroke.points.at(-1);
   state.activeStroke.points.push({ ...point });
-  drawStroke(previous, point, state.activeStroke.tool, state.activeStroke.size);
-  flushMaskComposition(); requestMosaicPreview();
+  if (state.manualStrokePaintFrame) return;
+  state.manualStrokePaintFrame = requestAnimationFrame(() => { state.manualStrokePaintFrame = 0; paintPendingManualStroke(); });
+}
+
+function paintPendingManualStroke() {
+  const stroke = state.activeStroke;
+  if (!stroke || stroke.paintedPointCount >= stroke.points.length) return;
+  paintStrokePath(stroke.points.slice(stroke.paintedPointCount - 1), stroke.tool, stroke.size);
+  stroke.paintedPointCount = stroke.points.length;
 }
 
 function cancelManualStroke() {
   if (!state.activeStroke) return;
+  if (state.manualStrokePaintFrame) cancelAnimationFrame(state.manualStrokePaintFrame);
+  state.manualStrokePaintFrame = 0;
   state.activeStroke = null;
   rebuildManualMaskFromHistory();
   requestMosaicPreview(); renderCandidates(); render();
@@ -651,13 +677,14 @@ function rebuildManualMaskFromHistory() {
   state.removedCandidateIds = new Set(state.historyRemovedCandidateIds || []);
   for (const candidate of state.candidates) if (!(state.historyCandidateIds || new Set()).has(candidate.id)) state.removedCandidateIds.add(candidate.id);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
-  state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   markMaskDirty(); markDraftDirty("add", "exclusion", "exclusionErase");
-  flushMaskComposition();
 }
 
 function completeManualStroke() {
   const stroke = state.activeStroke;
+  if (state.manualStrokePaintFrame) cancelAnimationFrame(state.manualStrokePaintFrame);
+  state.manualStrokePaintFrame = 0;
+  paintPendingManualStroke();
   state.activeStroke = null;
   if (!stroke?.points?.length) return;
   state.history.splice(state.historyIndex);
@@ -665,6 +692,7 @@ function completeManualStroke() {
   trimHistory();
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+  flushMaskComposition();
   scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates();
@@ -672,11 +700,17 @@ function completeManualStroke() {
 
 function restoreSnapshot(index) {
   if (isBusy() || state.importing || index < 0 || index > state.history.length) return;
+  const restoreToken = ++state.historyRestoreToken;
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
   scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+  updateHistoryButtons(); renderCandidates(); render();
+  requestAnimationFrame(() => {
+    if (restoreToken !== state.historyRestoreToken) return;
+    state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+    updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview();
+  });
 }
 
 function buildCombinedMask() {

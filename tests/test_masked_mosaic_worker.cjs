@@ -7,10 +7,11 @@ let response;
 let transfer;
 let contextFailure = 0;
 let contextCalls = 0;
+let sourceDraws = 0;
 const self = { postMessage(value, transferList) { response = value; transfer = transferList; } };
 class OffscreenCanvas {
   constructor(width, height) { this.width = width; this.height = height; this.pixels = new Uint8ClampedArray(width * height * 4); }
-  getContext() { contextCalls += 1; if (contextFailure === contextCalls) return null; return { clearRect: () => this.pixels.fill(0), drawImage: (image) => this.pixels.set(image.pixels), getImageData: () => ({ data: this.pixels.slice() }), putImageData: (image) => this.pixels.set(image.data) }; }
+  getContext() { contextCalls += 1; if (contextFailure === contextCalls) return null; return { clearRect: () => this.pixels.fill(0), drawImage: (image) => { if (image.sourceTag) sourceDraws += 1; this.pixels.set(image.pixels); }, getImageData: () => ({ data: this.pixels.slice() }), putImageData: (image) => this.pixels.set(image.data) }; }
   transferToImageBitmap() { return { width: this.width, height: this.height, pixels: this.pixels.slice(), close() { this.closed = true; } }; }
 }
 const context = vm.createContext({ self, Uint8ClampedArray, Math, OffscreenCanvas, ImageData: class { constructor(data) { this.data = data; } } });
@@ -19,7 +20,7 @@ vm.runInContext(fs.readFileSync(workerPath, "utf8"), context, { filename: worker
 
 function render(source, mask, width, height, blockSize, generation) {
   self.onmessage({ data: {
-    type: "source", sourceId: "test", source: { width, height, pixels: new Uint8ClampedArray(source), close() { this.closed = true; } },
+    type: "source", sourceId: "test", source: { width, height, pixels: new Uint8ClampedArray(source), sourceTag: true, close() { this.closed = true; } },
     generation,
   } });
   self.onmessage({ data: {
@@ -89,6 +90,11 @@ contextCalls = 0; contextFailure = 0;
 self.onmessage({ data: { type: "source", sourceId: "reused", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 16 } });
 for (const generation of [16, 17]) self.onmessage({ data: { type: "render", sourceId: "reused", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation } });
 assert.equal(response.generation, 17, "a retained source reuses its worker canvases for subsequent frames");
+
+const drawsBeforeCacheCheck = sourceDraws;
+self.onmessage({ data: { type: "source", sourceId: "cached-pixels", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([9, 8, 7, 255]), sourceTag: true }, generation: 17 } });
+for (const generation of [18, 19]) self.onmessage({ data: { type: "render", sourceId: "cached-pixels", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation } });
+assert.equal(sourceDraws - drawsBeforeCacheCheck, 1, "the worker reads source pixels once when the source arrives, not once per preview frame");
 
 const postMessage = self.postMessage;
 let rejectFrame = true;

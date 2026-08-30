@@ -378,6 +378,7 @@ class CatalogMixin:
 
     def shutdown(self) -> None:
         """Stop background work before releasing the session import directory."""
+        self.model_downloads.shutdown()
         # Browser-save commits retain this lock from token claim through their
         # durable commit.  Do not discard a claimed copy while one is running.
         with self.import_lock:
@@ -915,8 +916,12 @@ class CatalogMixin:
             record = self.images.get(image_id)
             if record is None:
                 raise ClientError("画像が見つかりません。", "image_not_found")
-            if self.workspace_store.has_image(image_id):
-                self.workspace_store.set_image_flags(image_id, hidden=hidden, reviewed=reviewed)
+            catalog_generation = self.catalog_generation
+        if self.workspace_store.has_image(image_id):
+            self.workspace_store.set_image_flags(image_id, hidden=hidden, reviewed=reviewed)
+        with self.lock:
+            if self.images.get(image_id) is not record or self.catalog_generation != catalog_generation:
+                raise ClientError("画像一覧が更新されました。もう一度お試しください。", "operation_in_progress")
             if hidden is not None: record.hidden = hidden
             if reviewed is not None: record.reviewed = reviewed
             return {"hidden": record.hidden, "reviewed": record.reviewed}

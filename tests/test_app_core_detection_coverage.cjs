@@ -157,7 +157,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     forgetThumbnail() {},
   };
   const source = fs.readFileSync(path.join(jsRoot, "core.js"), "utf8");
-  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
+  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, markImagesUnreviewed, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
   const test = context.coreCoverage;
   const coreState = test.state;
   Object.assign(coreState, state);
@@ -190,6 +190,30 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   const reloaded = { id: "two", relativePath: "new.png", reviewed: false };
   coreState.images.push(reloaded);
   assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "old.png" }, reloaded), true);
+
+  const reviewCalls = [];
+  let reviewRefreshes = 0;
+  context.setReviewed = (image, reviewed) => {
+    reviewCalls.push([image.id, reviewed]);
+    return Promise.resolve(image.reviewResult);
+  };
+  const reviewed = { id: "reviewed", relativePath: "reviewed.png", reviewResult: true };
+  const failedReview = { id: "failed-review", relativePath: "failed.png", reviewResult: false };
+  const unreviewed = { id: "unreviewed", relativePath: "unreviewed.png", reviewResult: true };
+  coreState.images.push(reviewed, failedReview, unreviewed);
+  coreState.reviewedPaths.add("reviewed.png");
+  coreState.reviewedPaths.add("failed.png");
+  const originalRefreshReviewViews = context.refreshReviewViews;
+  context.refreshReviewViews = (...args) => { reviewRefreshes += 1; return originalRefreshReviewViews(...args); };
+  assert.equal(test.markImagesUnreviewed(["missing", "unreviewed"], true), false, "missing and unreviewed images do not report a review change");
+  assert.equal(test.markImagesUnreviewed(["reviewed"], false), true, "a reviewed image is marked for clearing without an immediate rerender");
+  await Promise.resolve();
+  assert.deepEqual(reviewCalls, [["reviewed", false]], "the reviewed image sends one clear request");
+  assert.equal(reviewRefreshes, 0, "renderAfter false suppresses the completion rerender");
+  assert.equal(test.markImagesUnreviewed(["reviewed", "failed-review"], true), true, "reviewed images report a pending clear with renderAfter true");
+  await Promise.resolve();
+  assert.deepEqual(reviewCalls, [["reviewed", false], ["reviewed", false], ["failed-review", false]], "reviewed records use the real mark helper for both successful and failed saves");
+  assert.equal(reviewRefreshes, 1, "only a successful clear rerenders when renderAfter is true");
   test.clearBoundaryConstruction();
   coreState.translations = {
     "duration.hour": "duration hour", "duration.minute": "duration minute", "duration.second": "duration second",

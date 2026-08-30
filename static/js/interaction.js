@@ -11,7 +11,7 @@ function setTool(tool) {
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
   $("#bucketToleranceControl").hidden = !["bucket", "exclude_bucket"].includes(tool);
-  canvas.style.cursor = ["mosaic_eraser", "eraser", "exclude_eraser"].includes(tool) ? "cell" : "crosshair";
+  canvas.style.cursor = "default";
   updateBoundaryActions(); render();
   if (focusedInBoundaryMenu) focusCanvas();
 }

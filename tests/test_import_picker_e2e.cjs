@@ -507,7 +507,7 @@ async function runCandidateBlinkScenario(browser) {
     const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
     await row.waitFor();
     assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
-    for (const [locale, label, toggle] of [["ja", "ペニス · 基本モデル", "ペニス · 基本モデルを使用"], ["en", "Penis · Base model", "Enable Penis · Base model"]]) {
+    for (const [locale, label, toggle] of [["ja", "penis", "penisを使用"], ["en", "Penis", "Enable Penis"]]) {
       await page.evaluate((language) => loadTranslations(language), locale);
       assert.equal(await row.locator(".candidate-class").textContent(), label, `the candidate label is localized in ${locale}`);
       assert.equal(await row.locator(".candidate-toggle").getAttribute("aria-label"), toggle, `the candidate toggle names the same localized candidate in ${locale}`);
@@ -1065,6 +1065,22 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   };
   await setupFixture();
 
+  // A configured server path is not a browser-granted directory. Exercise the
+  // visible single-save flow with no handle and require both the disabled
+  // button and the unselected label before any output picker is used.
+  await page.evaluate(() => { state.outputDirectoryHandle = null; renderOutputDirectory(); });
+  await page.locator("#brushTool").click();
+  const unavailableOutputCanvas = await page.locator("#editorCanvas").boundingBox();
+  assert.ok(unavailableOutputCanvas, "the editor canvas is available before testing an unselected save destination");
+  await page.mouse.move(unavailableOutputCanvas.x + unavailableOutputCanvas.width / 2, unavailableOutputCanvas.y + unavailableOutputCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(unavailableOutputCanvas.x + unavailableOutputCanvas.width / 2 + 10, unavailableOutputCanvas.y + unavailableOutputCanvas.height / 2 + 6); await page.mouse.up();
+  await page.locator("#saveButton").click();
+  await page.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
+  assert.equal(await page.locator("#singleSaveStartButton").isDisabled(), true, "single save remains disabled until a browser directory handle is selected");
+  assert.equal(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), await page.evaluate(() => t("apply.outputDirectoryUnset")), "single save never presents the configured server path as its browser destination");
+  await page.locator("#singleSaveCloseButton").click();
+  await setupFixture();
+
   // This snapshot intentionally contains only product results that a control
   // is allowed to prove: a particular dialog, value, state transition, canvas
   // hash, or actual request.  Do not replace these predicates with a generic
@@ -1614,45 +1630,47 @@ async function main() {
 
     // This is an actual browser catalogue load and control interaction.  It
     // protects the window renderer from quietly reverting to a full-DOM list.
-    setCatalog(Array.from({ length: 20000 }, (_, index) => ({
-      id: `performance-${index}`,
-      relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
-      sourceKind: "fixture", width: 100, height: 80,
-      candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
-    })));
-    const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
-    await performancePage.addInitScript(() => {
-      window.showOpenFilePicker = async () => [];
-      window.showDirectoryPicker = async () => ({ async *values() {} });
-    });
-    try {
-      const loadStart = performance.now();
-      await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
-      const loadElapsed = performance.now() - loadStart;
-      const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
-      assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
-      assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
-      const timings = [];
-      for (let index = 0; index < 10; index += 1) {
-        let started = performance.now();
-        await performancePage.locator("#overviewButton").click();
-        await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
-        timings.push(performance.now() - started);
-        started = performance.now();
-        await performancePage.locator("#closeOverviewButton").click();
-        await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
-        timings.push(performance.now() - started);
-        started = performance.now();
-        await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
-        await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
-        timings.push(performance.now() - started);
+    if (!browserCoverage) {
+      setCatalog(Array.from({ length: 20000 }, (_, index) => ({
+        id: `performance-${index}`,
+        relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
+        sourceKind: "fixture", width: 100, height: 80,
+        candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
+      })));
+      const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+      await performancePage.addInitScript(() => {
+        window.showOpenFilePicker = async () => [];
+        window.showDirectoryPicker = async () => ({ async *values() {} });
+      });
+      try {
+        const loadStart = performance.now();
+        await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+        const loadElapsed = performance.now() - loadStart;
+        const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
+        assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
+        assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
+        const timings = [];
+        for (let index = 0; index < 10; index += 1) {
+          let started = performance.now();
+          await performancePage.locator("#overviewButton").click();
+          await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+          timings.push(performance.now() - started);
+          started = performance.now();
+          await performancePage.locator("#closeOverviewButton").click();
+          await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+          timings.push(performance.now() - started);
+          started = performance.now();
+          await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
+          await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
+          timings.push(performance.now() - started);
+        }
+        const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
+        assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
+        console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
+      } finally {
+        await stopCoveredPage(performancePage, true);
+        resetScenario();
       }
-      const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
-      assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
-      console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
-    } finally {
-      await stopCoveredPage(performancePage, true);
-      resetScenario();
     }
     const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
@@ -2459,13 +2477,19 @@ async function main() {
       window.__pointerContextSaved = { images: state.images, currentId: state.currentId, galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, viewMode: state.viewMode, batchMode: state.batchMode, selectedImageIds: state.selectedImageIds, selectionAnchorId: state.selectionAnchorId };
       state.images = Array.from({ length: 96 }, (_, index) => ({ id: `pointer-${index}`, relativePath: `pointer/${index}.png`, sourcePath: `G:/pointer/${index}.png`, width: 80, height: 60 }));
       state.currentId = "pointer-0"; state.galleryFilter = "all"; state.viewMode = "edit"; state.batchMode = false; state.selectedImageIds = new Set(["pointer-0"]); state.selectionAnchorId = "pointer-0";
-      renderGallery(true); const gallery = document.querySelector("#gallery"); gallery.scrollTop = 100; await new Promise((resolve) => requestAnimationFrame(resolve)); renderGallery(true);
+      renderGallery(true); const gallery = document.querySelector("#gallery"); gallery.scrollTop = 100; resetCatalogWindows(); renderGallery(true);
+      const firstCard = document.querySelector('.gallery-item[data-id="pointer-0"]');
+      const firstInViewport = firstCard.getBoundingClientRect().top >= gallery.getBoundingClientRect().top;
+      scrollCatalogImage("gallery", "pointer-0"); const firstSelectionTop = gallery.scrollTop;
+      scrollCatalogImage("gallery", "pointer-1"); const visibleSelectionTop = gallery.scrollTop;
+      gallery.scrollTop = 100; await new Promise((resolve) => requestAnimationFrame(resolve)); renderGallery(true);
       const current = document.querySelector('.gallery-item[data-id="pointer-0"]'); const target = document.querySelector('.gallery-item[data-id="pointer-1"]'); current.focus();
       const snapshot = () => ({ scrollTop: gallery.scrollTop, currentId: state.currentId, selected: [...state.selectedImageIds].sort(), focused: document.activeElement?.dataset.id, tabStops: [...document.querySelectorAll('.gallery-item[tabindex="0"]')].map((item) => item.dataset.id) });
       const before = snapshot(); let pointerPrevented = false; target.onpointerdown({ button: 2, preventDefault() { pointerPrevented = true; } });
       target.oncontextmenu({ type: "contextmenu", currentTarget: target, clientX: target.getBoundingClientRect().left + 4, clientY: target.getBoundingClientRect().top + 4, preventDefault() {} });
-      return { before, after: snapshot(), pointerPrevented, target: state.contextMenuImageId, contextScroll: state.contextMenuScroll };
+      return { before, after: snapshot(), pointerPrevented, target: state.contextMenuImageId, contextScroll: state.contextMenuScroll, firstInViewport, firstSelectionTop, visibleSelectionTop };
     });
+    assert.deepEqual({ firstInViewport: pointerContextBefore.firstInViewport, firstSelectionTop: pointerContextBefore.firstSelectionTop, visibleSelectionTop: pointerContextBefore.visibleSelectionTop }, { firstInViewport: true, firstSelectionTop: 0, visibleSelectionTop: 0 }, "a replaced catalog starts at its first visible card and selecting another visible card does not move the gallery");
     assert.equal(pointerContextBefore.pointerPrevented, true, "secondary gallery pointerdown prevents focus movement");
     assert.deepEqual(pointerContextBefore.after, pointerContextBefore.before, "right-clicking a visible unselected gallery card leaves logical focus, selection, tab stop, current image, and scroll unchanged");
     assert.equal(pointerContextBefore.target, "pointer-1", "the gallery menu targets the right-clicked card");
@@ -2866,13 +2890,12 @@ async function main() {
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
-    // This deliberately uses real pointer events rather than the canvas helpers.  A
-    // preview must be painted while the button is still held: waiting until
-    // pointerup would miss the regression where long strokes only mosaicked at the
-    // end.  Test both a normal editor image and a 4K image because the latter used
-    // to starve the preview worker with every pointer move.
+    // This deliberately uses real pointer events rather than the canvas helpers.
+    // A stroke updates the effective mask during the drag, but the expensive
+    // mosaic worker receives one confirmed frame after pointerup. Test both a
+    // normal editor image and a 4K image.
     await page.setViewportSize({ width: 1280, height: 900 });
-    for (const [width, height] of [[1024, 768], [3840, 2160]]) {
+    for (const [width, height] of (browserCoverage ? [[1024, 768]] : [[1024, 768], [3840, 2160]])) {
       // Chromium's precise-coverage counters are signed 32-bit values.  One
       // real sample is enough for instrumentation; the ordinary E2E run keeps
       // the full eight-event pointer gesture below.
@@ -2907,21 +2930,34 @@ async function main() {
           logical,
         };
       }, { width, height });
+      await page.waitForFunction(() => !state.mosaicWorkerBusy && state.mosaicSourceId && !state.mosaicPreviewRequested, null, { timeout: 15000 });
+      const normalCursors = await page.evaluate(() => ["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary", "polygon", "boundary_brush", "bucket", "exclude_bucket"].map((tool) => {
+        setTool(tool); return getComputedStyle(document.querySelector("#editorCanvas")).cursor;
+      }));
+      assert.deepEqual(normalCursors, Array(9).fill("default"), `${width}x${height} ordinary editor tools never use crosshair, cell, or a hidden cursor`);
+      await page.mouse.move(geometry.x, geometry.y); await page.mouse.down({ button: "middle" });
+      assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "grabbing", `${width}x${height} middle-button panning alone uses grabbing`);
+      await page.mouse.up({ button: "middle" });
+      assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "default", `${width}x${height} ending a pan restores the standard pointer`);
+      await page.locator("#brushTool").click();
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
       await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });
-      await page.waitForTimeout(250);
+      await page.waitForFunction(({ logical }) => state.activeStroke?.points.length >= 2
+        && combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0, geometry);
       const duringBrush = await page.evaluate(({ logical }) => ({
         active: state.activeStroke?.points.length >= 2,
         mask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
         preview: [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
           .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]),
       }), geometry);
-      assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mask and mosaic before pointerup`);
+      assert.deepEqual(duringBrush, { active: true, mask: true, preview: false }, `${width}x${height} brush defers its mosaic worker frame until pointerup`);
       await page.mouse.up();
-      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0);
+      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0 && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+      const afterBrushPreview = await page.evaluate(({ logical }) => [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
+        .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
+      assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
-        await page.waitForFunction(() => !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
         const mismatchedPixels = await page.evaluate(() => {
           const width = originalCanvas.width; const height = originalCanvas.height;
           const source = originalCtx.getImageData(0, 0, width, height).data;
@@ -2949,6 +2985,56 @@ async function main() {
           return mismatches;
         });
         assert.equal(mismatchedPixels, 0, "the 4K worker preview exactly matches the mosaic pixel golden");
+
+        await page.evaluate(() => {
+          const samples = []; let started = 0; let pendingMax = 0; const canvas = document.querySelector("#editorCanvas");
+          const begin = (event) => { if (window.__editorPerf.recording && (event.buttons & 1)) started = performance.now(); };
+          const end = () => { if (window.__editorPerf.recording && started) samples.push(performance.now() - started); started = 0; pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
+          window.__editorPerf = { samples, pendingMax, recording: false, begin, end };
+          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
+        });
+        const toolPixels = [
+          ["#brushTool", "add", (value) => value > 0],
+          ["#mosaicEraserTool", "add", (value) => value === 0],
+          ["#eraserTool", "exclusion", (value) => value > 0],
+          ["#excludeEraserTool", "exclusionErase", (value) => value > 0],
+        ];
+        const toolMetrics = [];
+        for (const [tool, layer, accepts] of toolPixels) {
+          await page.locator(tool).click();
+          await page.evaluate(() => { window.__editorPerf.samples.length = 0; window.__editorPerf.recording = true; });
+          await page.mouse.move(geometry.x, geometry.y); await page.mouse.down(); await page.mouse.move(geometry.endX, geometry.endY, { steps: 100 }); await page.mouse.up();
+          const toolMetric = await page.evaluate(() => {
+            const value = window.__editorPerf; value.recording = false;
+            const samples = [...value.samples].sort((left, right) => left - right);
+            return { count: samples.length, drag: samples.reduce((total, duration) => total + duration, 0), p95: samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0 };
+          });
+          assert.ok(toolMetric.count >= 100, `4K ${tool} records every 100-point drag event`);
+          toolMetrics.push(toolMetric);
+          await page.waitForFunction(() => !state.activeStroke);
+          const pixels = await page.evaluate(({ layer, logical }) => ({
+            add: addCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusionErase: exclusionEraseCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+          }[layer]), { layer, logical: geometry.logical });
+          assert.equal(accepts(pixels), true, `4K ${tool} changes its intended pixel layer`);
+        }
+        await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+        const editorPerf = await page.evaluate(() => {
+          let undo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.max(0, state.historyIndex - 1)); undo = Math.max(undo, performance.now() - start); }
+          let redo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1)); redo = Math.max(redo, performance.now() - start); }
+          const value = window.__editorPerf;
+          const result = { pendingMax: value.pendingMax, undo, redo };
+          const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
+          return result;
+        });
+        editorPerf.drag = Math.max(...toolMetrics.map((metric) => metric.drag));
+        editorPerf.p95 = Math.max(...toolMetrics.map((metric) => metric.p95));
+        assert.ok(editorPerf.drag < 250, `each 4K 100-point drag completes within 250ms (actual max ${editorPerf.drag.toFixed(1)}ms)`);
+        assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual max ${editorPerf.p95.toFixed(2)}ms)`);
+        assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
+        assert.equal(editorPerf.pendingMax <= 1, true, "4K preview keeps at most one pending worker frame");
+        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo=${editorPerf.undo.toFixed(1)}ms redo=${editorPerf.redo.toFixed(1)}ms pending=${editorPerf.pendingMax}`);
       }
 
       await page.locator("#eraserTool").click();

@@ -22,11 +22,13 @@ class RuntimeProfileTests(unittest.TestCase):
             get_providers=lambda: providers,
             run=lambda *_args: [[[1.0]]] if output is None else output,
         )
+        options = SimpleNamespace(add_session_config_entry=lambda *_args: None)
         ort = SimpleNamespace(
-            SessionOptions=lambda: SimpleNamespace(),
+            SessionOptions=lambda: options,
             ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
             InferenceSession=lambda *_args, **_kwargs: session,
         )
+        ort.options = options
         helper = SimpleNamespace(
             make_tensor_value_info=lambda *_args: object(),
             make_node=lambda *_args: object(),
@@ -89,8 +91,15 @@ class RuntimeProfileTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 self.assertIsNone(runtime_profile.selected_profile(venv))
     def test_onnx_probe_runs_on_the_selected_directml_device(self) -> None:
-        ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider", "CPUExecutionProvider"])
+        ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider"])
         self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
+
+    def test_onnx_probe_allows_cpu_graph_provider_after_cuda(self) -> None:
+        ort, onnx, np = self._probe_dependencies(["CUDAExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0), "CUDAExecutionProvider")
+        ort, onnx, np = self._probe_dependencies(["CPUExecutionProvider", "CUDAExecutionProvider"])
+        with self.assertRaisesRegex(runtime_profile.ProfileError, "selected"):
+            runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0)
 
     def test_onnx_probe_supports_cuda_and_cpu_and_rejects_bad_results(self) -> None:
         for profile, provider in (("cuda", "CUDAExecutionProvider"), ("cpu", "CPUExecutionProvider")):

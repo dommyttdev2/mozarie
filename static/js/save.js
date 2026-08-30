@@ -45,7 +45,7 @@ function syncApplyMode() {
   $("#applySuffix").disabled = state.applyRunning;
   $("#applyTargetMode").disabled = state.applyRunning || state.saveStarting;
   $("#chooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
-  $("#applyOutputDirectoryStatus").value = state.settings?.saving?.default_output_directory || "";
+  $("#applyOutputDirectoryStatus").value = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#removeAfterSave").disabled = state.applyRunning;
@@ -145,20 +145,52 @@ function singleOutputName(relativePath, suffix, sequence = 0) {
 }
 
 async function writeSingleOutput(handle, relativePath, suffix, response) {
-  let fileHandle; let name;
-  for (let sequence = 0; sequence < 10000; sequence += 1) {
-    name = singleOutputName(relativePath, suffix, sequence);
-    try { await handle.getFileHandle(name); }
-    catch (error) {
-      if (error?.name !== "NotFoundError") throw error;
-      fileHandle = await handle.getFileHandle(name, { create: true }); break;
+  if (!navigator.locks || typeof navigator.locks.request !== "function") throw codedError("output_write_unsupported");
+  let entered = false;
+  try {
+    return await navigator.locks.request("mozarie-output-write", { mode: "exclusive" }, async () => {
+      entered = true;
+      let fileHandle; let name; let created = false;
+      for (let sequence = 0; sequence < 10000; sequence += 1) {
+        name = singleOutputName(relativePath, suffix, sequence);
+        try { await handle.getFileHandle(name); }
+        catch (error) {
+          if (error?.name !== "NotFoundError") throw error;
+          fileHandle = await handle.getFileHandle(name, { create: true }); created = true; break;
+        }
+      }
+      if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
+      let stream;
+      try {
+        try { stream = await fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
+        catch (error) {
+          if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("output_write_unsupported");
+          throw error;
+        }
+        await response.body.pipeTo(stream);
+      } catch (error) {
+        try { await stream?.abort?.(); } catch {}
+        if (created) {
+          try { await handle.removeEntry(name); }
+          catch (cleanupError) {
+            const cleanupFailure = codedError("output_cleanup_failed");
+            cleanupFailure.cause = error;
+            cleanupFailure.cleanupCause = cleanupError;
+            throw cleanupFailure;
+          }
+        }
+        throw error;
+      }
+      return { name, fileHandle };
+    });
+  } catch (error) {
+    if (!entered) {
+      const lockFailure = codedError("output_write_unsupported");
+      lockFailure.cause = error;
+      throw lockFailure;
     }
+    throw error;
   }
-  if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
-  const stream = await fileHandle.createWritable({ keepExistingData: false });
-  try { await response.body.pipeTo(stream); }
-  catch (error) { try { await stream.abort?.(); } catch {} throw error; }
-  return { name, fileHandle };
 }
 
 async function renderSingleSave(payload) {
@@ -249,9 +281,9 @@ function draftPayload(imageIds) {
 
 function renderOutputDirectory() {
   const configuredDirectory = state.settings?.saving?.default_output_directory || "";
-  const directory = state.outputDirectoryHandle?.name || configuredDirectory;
+  const directory = state.outputDirectoryHandle?.name || "";
   $("#settingsDefaultOutputDirectory").value = configuredDirectory;
-  $("#applyOutputDirectoryStatus").value = directory;
+  $("#applyOutputDirectoryStatus").value = directory || t("apply.outputDirectoryUnset");
   $("#singleSaveOutputDirectoryStatus").textContent = directory ? t("apply.outputDirectorySelected", { name: directory }) : t("apply.outputDirectoryUnset");
   syncApplyMode();
 }
@@ -381,13 +413,11 @@ async function writeSourceHandle(access, response) {
   try {
     stream = await access.fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" });
   } catch (error) {
-    // Older File System Access implementations reject the new option. Only
-    // actual exclusive-writer conflicts become the retryable busy guidance.
     if (["NoModificationAllowedError", "InvalidStateError"].includes(error?.name)) {
       throw codedError("source_busy");
     }
-    if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
-    stream = await access.fileHandle.createWritable({ keepExistingData: false });
+    if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("source_write_unsupported");
+    throw error;
   }
   try {
     await response.body.pipeTo(stream);
@@ -417,11 +447,11 @@ async function restoreSourceHandle(access, snapshot, deleted) {
     ? await access.parentHandle.getFileHandle(access.fileHandle.name || access.name, { create: true })
     : access.fileHandle;
   let stream;
-  try {
-    stream = await handle.createWritable({ keepExistingData: false, mode: "exclusive" });
-  } catch (error) {
-    if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
-    stream = await handle.createWritable({ keepExistingData: false });
+  try { stream = await handle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
+  catch (error) {
+    if (["NoModificationAllowedError", "InvalidStateError"].includes(error?.name)) throw codedError("source_busy");
+    if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("source_write_unsupported");
+    throw error;
   }
   try { await stream.write(snapshot); await stream.close(); }
   catch (error) { try { await stream.abort?.(); } catch {} throw error; }

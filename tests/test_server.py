@@ -207,6 +207,20 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(record.hidden)
             self.assertFalse(record.reviewed)
 
+    def test_flag_change_does_not_publish_after_the_catalog_changes_during_a_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.images[image_id]
+            def change_catalog(_image_id):
+                with state.lock: state.catalog_generation += 1
+                return False
+            with patch.object(state.workspace_store, "has_image", side_effect=change_catalog):
+                with self.assertRaises(ClientError) as raised:
+                    state.set_image_flags(image_id, {"hidden": True})
+            self.assertEqual(raised.exception.error_code, "operation_in_progress")
+            self.assertFalse(record.hidden)
+
     def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -752,6 +766,10 @@ class MozarieTests(unittest.TestCase):
                 manager.start.assert_called_once_with("hand_detection", "vit_b")
                 status, _ = request("POST", "/api/model-download/cancel", {}, headers)
                 self.assertEqual(status, 200); manager.cancel.assert_called_once_with()
+                manager.start.side_effect = http_module.ModelDownloadInProgress()
+                status, body = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b"}, headers)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error_code"], "operation_in_progress")
         finally:
             httpd.shutdown(); httpd.server_close()
 
@@ -3670,6 +3688,57 @@ class MozarieTests(unittest.TestCase):
         self.assertTrue(np.array_equal(result[0]["mask"], penis))
         result = state._finalize_exclusions(np.zeros((16, 16, 3), dtype=np.uint8), result)
         self.assertEqual(result[0]["exclusions"], {})
+
+    def test_scene_metadata_fluid_search_uses_only_exact_tags_and_local_rois(self):
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_positive": " CUM_ON_BREASTS , cum on fingers"}), {"cum_on_breasts", "cum on fingers"})
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_info": '{"positive":"cum on ass"}'}), {"cum on ass"})
+        for info in ({}, {"scene_info": "bad"}, {"scene_info": "[]"}, {"scene_positive": "not_cum_on_breasts"}, {"scene_positive": ["cum_on_breasts"]}):
+            with self.subTest(info=info): self.assertEqual(detection_module._scene_fluid_tags(info), set())
+
+        rgb = np.zeros((300, 300, 3), dtype=np.uint8)
+        target = np.zeros((300, 300), dtype=np.uint8); target[100:120, 100:120] = 1
+        hand = np.zeros_like(target); hand[160:170, 160:170] = 1
+        face = np.zeros_like(target); face[20:40, 130:170] = 1
+        with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, search: np.asarray(search, dtype=np.uint8) * 255) as fluid:
+            searched = state = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum on fingers"}))
+            self.assertTrue(np.any(searched)); self.assertGreater(np.count_nonzero(searched), np.count_nonzero(target | hand))
+            chest = self.new_state()._metadata_fluid_mask(
+                rgb, [], np.zeros_like(target), [{"mask": np.zeros_like(face)}, {"mask": face}], frozenset({"cum_on_breasts"}),
+            )
+        self.assertEqual(fluid.call_count, 2)
+        self.assertEqual(searched[250, 165], 255)
+        self.assertTrue(np.any(chest[53:73, 135:165]))
+        self.assertFalse(np.any(chest[:40]))
+
+    def test_scene_metadata_fluid_candidate_is_optional_and_can_exist_without_apply(self):
+        state = self.new_state()
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+        target = np.zeros((40, 40), dtype=np.uint8); target[10:20, 10:20] = 255
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+            finalized = state._finalize_exclusions(rgb, [{"class_name": "penis", "mask": target, "confidence": .8, "source": "target"}], frozenset({"cum on ass"}))
+        self.assertIn("metadata_exclusions", finalized[0])
+        self.assertNotIn("fluid", finalized[0]["exclusions"])
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+            synthetic = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
+        self.assertEqual(synthetic[-1]["class_name"], "__fluid_exclusion__")
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.zeros((40, 40), dtype=np.uint8)):
+            unchanged = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
+        self.assertEqual(len(unchanged), 1)
+
+    def test_scene_metadata_fluid_is_a_non_forced_exclusion_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "scene.png"
+            info = PngImagePlugin.PngInfo(); info.add_text("scene_positive", "cum_on_breasts")
+            Image.new("RGB", (16, 16), "white").save(source, pnginfo=info)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]; record = state.images[image_id]
+            mask = np.ones((16, 16), dtype=np.uint8) * 255
+            with patch.object(state, "_detect_arbitrated_segments", return_value=[] ) as detect, \
+                    patch.object(state, "_hand_refinement_context", return_value=([], np.zeros_like(mask), [])), \
+                    patch.object(state, "_finalize_exclusions", return_value=[{"class_name": "__fluid_exclusion__", "metadata_exclusions": {"fluid": mask}}]):
+                candidates = state._detect_image(Mock(), record, .5)
+            self.assertEqual(detect.call_args.args[-1], frozenset({"cum_on_breasts"}))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual((candidates[0].label_token, candidates[0].role, candidates[0].forced), ("fluid", CandidateRole.EXCLUDE, False))
 
     def test_boundary_request_requires_a_valid_roi_and_click(self):
         roi, point = read_boundary_request(
@@ -6920,6 +6989,19 @@ class MozarieTests(unittest.TestCase):
         self.assertTrue(http_module._reserve_update_start())
         self.assertFalse(http_module._reserve_update_start())
         http_module._update_start_requested = False
+
+    def test_update_start_is_rejected_while_a_model_download_is_active(self):
+        handler = object.__new__(MosaicHandler)
+        handler.server = Mock()
+        handler._json = Mock()
+        state = self.new_state()
+        state.model_downloads = Mock(snapshot=Mock(return_value={"state": "running"}))
+        with patch.object(http_module, "STATE", state), \
+                patch.object(handler, "_require_json_request"), \
+                patch.object(handler, "_read_json_body", return_value={}):
+            handler.path = "/api/update/start"
+            handler.do_POST()
+        self.assertEqual(handler._json.call_args.args[0]["error_code"], "operation_in_progress")
 
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)

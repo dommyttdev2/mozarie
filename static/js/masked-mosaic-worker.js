@@ -2,6 +2,9 @@ let source = null;
 let sourceId = "";
 let sourceCanvas = null;
 let sourceContext = null;
+let sourcePixels = null;
+let sourceWidth = 0;
+let sourceHeight = 0;
 let maskCanvas = null;
 let maskContext = null;
 let outputCanvas = null;
@@ -11,22 +14,20 @@ function releaseSource() {
   source?.close?.();
   source = null; sourceId = "";
   for (const canvas of [sourceCanvas, maskCanvas, outputCanvas]) if (canvas) canvas.width = canvas.height = 1;
-  sourceCanvas = null; sourceContext = null; maskCanvas = null; maskContext = null; outputCanvas = null; outputContext = null;
+  sourceCanvas = null; sourceContext = null; sourcePixels = null; sourceWidth = 0; sourceHeight = 0; maskCanvas = null; maskContext = null; outputCanvas = null; outputContext = null;
 }
 
 function fail(generation, failedSourceId = sourceId) { self.postMessage({ type: "error", code: "mosaic_preview_failed", sourceId: failedSourceId, generation }); }
 
 function render({ mask, width, height, blockSize, generation }) {
   try {
-    if (!source || !sourceContext || !mask || source.width !== width || source.height !== height) throw new Error("invalid render state");
+    if (!sourcePixels || !mask || sourceWidth !== width || sourceHeight !== height) throw new Error("invalid render state");
     if (!maskCanvas || maskCanvas.width !== width || maskCanvas.height !== height) {
       maskCanvas = new OffscreenCanvas(width, height); maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
       outputCanvas = new OffscreenCanvas(width, height); outputContext = outputCanvas.getContext("2d");
       if (!maskContext || !outputContext) throw new Error("2d context unavailable");
     }
-    sourceContext.clearRect(0, 0, width, height);
-    sourceContext.drawImage(source, 0, 0);
-    const pixels = sourceContext.getImageData(0, 0, width, height).data;
+    const pixels = sourcePixels;
     maskContext.clearRect(0, 0, width, height); maskContext.drawImage(mask, 0, 0);
     const alphaPixels = maskContext.getImageData(0, 0, width, height).data;
     const output = new Uint8ClampedArray(pixels);
@@ -61,6 +62,12 @@ self.onmessage = ({ data }) => {
       sourceCanvas = new OffscreenCanvas(source.width, source.height);
       sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
       if (!sourceContext) throw new Error("2d context unavailable");
+      sourceWidth = source.width; sourceHeight = source.height;
+      sourceContext.drawImage(source, 0, 0);
+      sourcePixels = sourceContext.getImageData(0, 0, sourceWidth, sourceHeight).data;
+      source.close?.(); source = null;
+      sourceCanvas.width = sourceCanvas.height = 1;
+      sourceCanvas = null; sourceContext = null;
     } catch { releaseSource(); fail(data.generation, data.sourceId); }
     return;
   }

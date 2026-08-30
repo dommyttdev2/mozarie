@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from .core import GenericYoloSegmenter, HandDetector, TargetSegmenter
+if TYPE_CHECKING:
+    from .inference.generic_yolo_segment import GenericYoloSegmenter
+    from .inference.yolo_detect import HandDetector
+    from .inference.yolo_segment import TargetSegmenter
 
 
 @dataclass

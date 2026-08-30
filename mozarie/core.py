@@ -48,9 +48,6 @@ from mozarie.domain import Candidate, CandidateRole, CANDIDATE_LABEL_TOKENS, CAN
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
-from mozarie.inference.generic_yolo_segment import GenericYoloSegmenter
-from mozarie.inference.yolo_detect import HandDetector
-from mozarie.inference.yolo_segment import TargetSegmenter
 
 
 STATIC_DIR = APP_DIR / "static"

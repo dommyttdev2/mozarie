@@ -100,9 +100,7 @@ def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device:
         "cpu": "CPUExecutionProvider",
     }[profile]
     providers: list[object] = [expected]
-    if profile == "cuda":
-        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
-    elif profile == "directml":
+    if profile in {"cuda", "directml"}:
         providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
 
     helper = onnx.helper
