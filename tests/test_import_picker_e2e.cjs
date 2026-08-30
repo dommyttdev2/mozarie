@@ -2934,7 +2934,8 @@ async function main() {
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
       await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });
-      await page.waitForTimeout(250);
+      await page.waitForFunction(({ logical }) => state.activeStroke?.points.length >= 2
+        && combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0, geometry);
       const duringBrush = await page.evaluate(({ logical }) => ({
         active: state.activeStroke?.points.length >= 2,
         mask: combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0,
@@ -2975,6 +2976,52 @@ async function main() {
           return mismatches;
         });
         assert.equal(mismatchedPixels, 0, "the 4K worker preview exactly matches the mosaic pixel golden");
+
+        await page.evaluate(() => {
+          const samples = []; let started = 0; let pendingMax = 0; let dragStarted = 0; const canvas = document.querySelector("#editorCanvas");
+          const begin = (event) => { if (event.buttons & 1) { started = performance.now(); dragStarted ||= started; } };
+          const end = () => { if (started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); };
+          const finish = () => { window.__editorPerf.drag = performance.now() - dragStarted; dragStarted = 0; };
+          window.__editorPerf = { samples, pendingMax, begin, end, finish, heapBefore: performance.memory?.usedJSHeapSize ?? null };
+          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end); canvas.addEventListener("pointerup", finish);
+        });
+        const toolPixels = [
+          ["#brushTool", "add"], ["#mosaicEraserTool", "erase"], ["#eraserTool", "exclusion"], ["#excludeEraserTool", "exclusionErase"],
+        ];
+        for (const [tool, target] of toolPixels) {
+          await page.locator(tool).click();
+          await page.mouse.move(geometry.x, geometry.y); await page.mouse.down(); await page.mouse.move(geometry.endX, geometry.endY, { steps: 100 }); await page.mouse.up();
+          await page.waitForFunction(() => !state.activeStroke);
+          const pixels = await page.evaluate(({ layer, logical }) => ({
+            add: addCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusionErase: exclusionEraseCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+          }[layer]), { layer: target, logical: geometry.logical });
+          assert.equal(target === "erase" ? pixels : pixels > 0, target === "erase" ? 0 : true, `4K ${tool} changes its intended pixel layer`);
+        }
+        await page.locator("#brushTool").click();
+        for (let stroke = 0; stroke < 50; stroke += 1) {
+          const offset = (stroke % 10) * 3;
+          await page.mouse.move(geometry.x + offset, geometry.y + offset); await page.mouse.down(); await page.mouse.move(geometry.endX + offset, geometry.endY + offset); await page.mouse.up();
+        }
+        await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+        const editorPerf = await page.evaluate(() => {
+          const beforeUndo = performance.now(); for (let index = 0; index < 10; index += 1) restoreSnapshot(Math.max(0, state.historyIndex - 1));
+          const undo = performance.now() - beforeUndo;
+          const beforeRedo = performance.now(); for (let index = 0; index < 10; index += 1) restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1));
+          const redo = performance.now() - beforeRedo;
+          const value = window.__editorPerf; const samples = [...value.samples].sort((left, right) => left - right);
+          const p95 = samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0;
+          const result = { drag: value.drag, p95, pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
+          const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); canvas.removeEventListener("pointerup", value.finish); delete window.__editorPerf;
+          return result;
+        });
+        assert.ok(editorPerf.drag < 250, `4K 100-point drag completes within 250ms (actual ${editorPerf.drag.toFixed(1)}ms)`);
+        assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual ${editorPerf.p95.toFixed(2)}ms)`);
+        assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
+        assert.equal(editorPerf.pendingMax <= 1, true, "4K preview keeps at most one pending worker frame");
+        if (editorPerf.heapDelta != null) assert.ok(editorPerf.heapDelta < 100 * 1024 * 1024, `50 4K strokes keep JS heap growth below 100MB (actual ${(editorPerf.heapDelta / 1024 / 1024).toFixed(1)}MB)`);
+        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo=${editorPerf.undo.toFixed(1)}ms redo=${editorPerf.redo.toFixed(1)}ms pending=${editorPerf.pendingMax} heap=${editorPerf.heapDelta == null ? "n/a" : `${(editorPerf.heapDelta / 1024 / 1024).toFixed(1)}MB`}`);
       }
 
       await page.locator("#eraserTool").click();
