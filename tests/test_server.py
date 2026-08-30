@@ -3692,7 +3692,7 @@ class MozarieTests(unittest.TestCase):
     def test_scene_metadata_fluid_search_uses_only_exact_tags_and_local_rois(self):
         self.assertEqual(detection_module._scene_fluid_tags({"scene_positive": " CUM_ON_BREASTS , cum on fingers"}), {"cum_on_breasts", "cum on fingers"})
         self.assertEqual(detection_module._scene_fluid_tags({"scene_info": '{"positive":"cum on ass"}'}), {"cum on ass"})
-        for info in ({}, {"scene_info": "bad"}, {"scene_positive": "not_cum_on_breasts"}, {"scene_positive": ["cum_on_breasts"]}):
+        for info in ({}, {"scene_info": "bad"}, {"scene_info": "[]"}, {"scene_positive": "not_cum_on_breasts"}, {"scene_positive": ["cum_on_breasts"]}):
             with self.subTest(info=info): self.assertEqual(detection_module._scene_fluid_tags(info), set())
 
         rgb = np.zeros((300, 300, 3), dtype=np.uint8)
