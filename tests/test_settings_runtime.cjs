@@ -66,9 +66,11 @@ const context = {
   pickOutputDirectory: async () => "", api: async () => ({ settings: { general: { language: "ja", shortcuts_enabled: true }, display: { mosaic_preview: true } }, version: "v1" }), clearInterval() {}, setInterval() { return 1; },
   confirmAction: async () => true,
 };
-vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectSettingsTab,moveSettingsTab,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,startModelDownload,beginModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath};`, context, { filename: settingsPath });
+vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectSettingsTab,moveSettingsTab,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,startModelDownload,beginModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent};`, context, { filename: settingsPath });
 
 (async () => {
+  assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: true, metaKey: false, shiftKey: true, altKey: true, key: "a" }), "Ctrl+Shift+Alt+A", "shortcut capture normalizes modifiers and single letters");
+  assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: false, metaKey: true, shiftKey: false, altKey: false, key: "ArrowLeft" }), "Ctrl+ArrowLeft", "shortcut capture accepts the platform modifier for named keys");
   state.settingsStatus = { models: { unknown: { required: true, reasonCode: "missing" }, ntd11: { enabled: true, reasonCode: "missing" } }, gpuDeviceReasonCode: "unsupported" };
   context.settingsTest.renderModelStatus();
   assert.match(element("#settingsModelStatus").textContent, /settings\.ntd11Model/, "a known invalid model identifies its setting in the status summary");

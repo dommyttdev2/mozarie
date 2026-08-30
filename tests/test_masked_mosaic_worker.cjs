@@ -90,4 +90,15 @@ self.onmessage({ data: { type: "source", sourceId: "reused", source: { width: 1,
 for (const generation of [16, 17]) self.onmessage({ data: { type: "render", sourceId: "reused", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation } });
 assert.equal(response.generation, 17, "a retained source reuses its worker canvases for subsequent frames");
 
+const postMessage = self.postMessage;
+let rejectFrame = true;
+self.postMessage = (value, transferList) => {
+  if (value.type === "frame" && rejectFrame) { rejectFrame = false; throw new Error("transfer rejected"); }
+  response = value; transfer = transferList;
+};
+self.onmessage({ data: { type: "source", sourceId: "post-failure", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 18 } });
+self.onmessage({ data: { type: "render", sourceId: "post-failure", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]), close() { this.closed = true; } }, width: 1, height: 1, blockSize: 1, generation: 18 } });
+assert.equal(response.type, "error", "a rejected frame transfer reports the preview failure");
+self.postMessage = postMessage;
+
 console.log("test_masked_mosaic_worker: passed");

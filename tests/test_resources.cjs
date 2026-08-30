@@ -34,7 +34,7 @@ assert.deepEqual(closed, ["two", "three", "next", "current"], "trim and explicit
 const calls = []; const thumbnailContext = { state: { images: [], viewMode: "edit", galleryNodes: new Map(), galleryFilter: "all" }, Map, encodeURIComponent, IntersectionObserver: class { observe() {} unobserve() { calls.push("unobserve"); } }, $: () => ({ scrollTop: 0 }), t: () => "", imageAssetVersion: () => "", updateActionButtons() {}, document: { querySelectorAll() { return []; } } };
 vm.runInNewContext(`${gallerySource}\nglobalThis.thumbnailTest = { observeThumbnail, renderGallery, thumbnailObservers };`, thumbnailContext);
 const preview = { dataset: {}, removeAttribute() {} }; thumbnailContext.thumbnailTest.observeThumbnail(preview, { id: "old" }); thumbnailContext.thumbnailTest.thumbnailObservers.get("gallery").unobserve = () => calls.push("unobserve");
-thumbnailContext.state.galleryNodes.set("old", { querySelector() { return preview; }, remove() { calls.push("remove"); } });
+thumbnailContext.state.galleryNodes.set("old", { querySelector() { return preview; }, parentNode: { remove() { calls.push("remove"); } } });
 thumbnailContext.thumbnailTest.renderGallery();
 assert.deepEqual(calls, ["unobserve", "remove"], "filtered thumbnail nodes unobserve before removal");
 

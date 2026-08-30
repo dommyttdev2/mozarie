@@ -122,6 +122,14 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   worker.onmessage({ data: { type: "frame", sourceId: newest.sourceId, generation: newest.generation, output: releasedOutput } });
   assert.equal(releasedOutput.closed, true, "a released worker frame is closed");
 
+  state.mosaicPreviewEnabled = true;
+  await context.rebuildMosaicPreview();
+  const errorWorker = state.mosaicWorker;
+  const errorJob = await errorWorker.nextRender();
+  errorJob.mask.close?.();
+  errorWorker.onmessage({ data: { type: "error", code: "mosaic_preview_failed", sourceId: errorJob.sourceId, generation: errorJob.generation } });
+  assert.equal(state.mosaicPreviewEnabled, false, "an exact worker error fails closed");
+
   const drawCountBeforeSoak = draws.length;
   state.mosaicPreviewEnabled = true;
   for (let index = 0; index < 100; index += 1) {
