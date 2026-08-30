@@ -435,6 +435,218 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         self.state.sam_predictor.reset_image.assert_called_once()
         self.state.hand_segmentation_predictor.reset_image.assert_called_once()
 
+    def test_expired_receipt_and_nested_session_removal(self) -> None:
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        _images, imported = self.state.import_image_file_for_api(staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="key")
+        image_id = imported[0]["imageId"]
+        nested = self.state.images[image_id].path.parent
+        (nested / "keep.txt").write_text("keep")
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state.cleanup_expired_browser_save_tokens()
+        self.assertNotIn("old", self.state.browser_save_receipts)
+        self.state.remove_image_from_catalog(image_id)
+        self.assertTrue(nested.exists())
+
+    def test_import_validation_and_catalog_change(self) -> None:
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        self.assertEqual(self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": staged}], include_images=False), ([], []))
+        with self.assertRaises(ClientError):
+            self.state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": "not-a-path"}], include_images=False)
+        def mutate_generation(path, suffix):
+            self.state.catalog_generation += 1
+            return (4, 4)
+        with patch("mozarie.catalog.inspect_import_image", side_effect=mutate_generation):
+            with self.assertRaises(ClientError) as context:
+                self.state.import_image_file_for_api(staged, name="changed.png", relative_path="changed.png", client_key="changed")
+        self.assertEqual(context.exception.error_code, "catalog_changed")
+
+    def test_catalogue_file_cleanup_and_snapshot_errors(self) -> None:
+        self.state._unlink_browser_save_cleanup([(self.root / "absent.png", (1, 1))])
+        mask = self.root / "mask.png"; mask.write_bytes(png())
+        with patch.object(Path, "unlink", side_effect=OSError("busy")):
+            self.state._delete_mask_files([mask], [self.root / "missing-cache"])
+        cache_file = self.state.cache_dir / "cache-file"
+        self.state.cache_dir.mkdir(parents=True, exist_ok=True); cache_file.write_text("x")
+        with patch.object(Path, "unlink", side_effect=OSError("busy")):
+            self.state._clear_cache()
+        with self.assertRaises(ClientError): self.state.image_snapshot("missing")
+        with self.assertRaises(ClientError): self.state.candidate_snapshot("missing")
+
+    def test_import_rename_rolls_back_staged_files(self) -> None:
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        with patch("mozarie.catalog.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.state.import_image_file_for_api(staged, name="failed.png", relative_path="failed.png", client_key="failed")
+
+    def test_model_provider_and_import_failures(self) -> None:
+        image_id = self.add_image(); item = self.state.images[image_id]
+        checkpoint = self.root / "checkpoint.pth"; checkpoint.write_bytes(b"x")
+        hand = self.root / "hand.safetensors"; hand.write_bytes(b"x")
+        self.state.settings["models"]["provider"] = "gpu"
+        self.state.settings["models"]["sam_checkpoints"][self.state.settings["models"]["sam_model_type"]] = str(checkpoint)
+        self.state.settings["models"]["hand_segmentation"] = str(hand)
+        class Model:
+            def load_state_dict(self, *_args, **_kwargs): pass
+            def to(self, **_kwargs): pass
+        class Predictor:
+            def __init__(self, _model): pass
+            def set_image(self, _image): pass
+        class Torch:
+            def device(self, _name): return contextlib.nullcontext()
+            def load(self, *_args, **_kwargs): return {}
+        sam = types.ModuleType("segment_anything"); sam.SamPredictor = Predictor; sam.sam_model_registry = {"vit_b": lambda checkpoint=None: Model(), "vit_l": lambda checkpoint=None: Model(), "vit_h": lambda checkpoint=None: Model()}
+        before_sam, before_safe = sys.modules.get("segment_anything"), sys.modules.get("safetensors.torch")
+        sys.modules["segment_anything"] = sam
+        try:
+            with patch("mozarie.catalog.torch_module", return_value=Torch()), patch("mozarie.catalog.runtime_backend", return_value="cpu"):
+                with self.assertRaises(ClientError) as context: self.state._sam_predictor_for(item, object())
+                self.assertEqual(context.exception.error_code, "sam_provider_unavailable")
+            sys.modules["safetensors.torch"] = None
+            self.state.hand_segmentation_predictor = None
+            with self.assertRaises(ClientError) as context: self.state._hand_segmentation_predictor_for(item, object())
+            self.assertEqual(context.exception.error_code, "model_load_failed")
+        finally:
+            if before_sam is None: sys.modules.pop("segment_anything", None)
+            else: sys.modules["segment_anything"] = before_sam
+            if before_safe is None: sys.modules.pop("safetensors.torch", None)
+            else: sys.modules["safetensors.torch"] = before_safe
+
+    def test_owned_cache_shutdown_and_unchecked_receipt_expiry(self) -> None:
+        owned_cache = self.root / "owned-cache"
+        app = self.root / "app"
+        with patch.object(state_module, "APP_DIR", app), patch.object(state_module, "CACHE_BASE_DIR", owned_cache):
+            owned = StudioState(None, self.root / "owned-sessions")
+        created = owned.cache_dir
+        owned.shutdown()
+        self.assertFalse(created.exists())
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, 0)
+        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.assertNotIn("old", self.state.browser_save_receipts)
+
+    def test_catalogue_remaining_file_and_durable_state_edges(self) -> None:
+        image_id = self.add_image(); item = self.state.images[image_id]
+        token = self.state._issue_browser_save_token_unchecked(item, 0, (item.mtime_ns, item.size_bytes), self.state.catalog_generation, None)
+        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=0)
+        self.state._discard_expired_browser_save_tokens_unchecked()
+        cache_dir = self.root / "candidate-dir"; cache_dir.mkdir(); (cache_dir / "old.png").write_bytes(png())
+        with patch.object(Path, "unlink", side_effect=OSError("busy")):
+            self.state._delete_mask_files([], [cache_dir])
+        self.state._image_io_locks["missing"] = __import__("threading").RLock()
+        with self.assertRaises(ClientError): self.state.candidate_snapshot("missing")
+        absent = Candidate("absent", "penis", .5, self.root / "absent.png")
+        self.state.candidates[image_id] = [absent]
+        with self.assertRaises(Exception): self.state.read_candidate_mask_png(image_id, "absent")
+        self.state.workspace_store.delete_images([image_id])
+        self.assertIsNone(self.state.manual_workspace(image_id))
+        self.state.delete_manual_workspace(image_id)
+
+    def test_handseg_cpu_provider_failure(self) -> None:
+        image_id = self.add_image(); item = self.state.images[image_id]
+        hand = self.root / "hand.safetensors"; hand.write_bytes(b"x")
+        self.state.settings["models"]["hand_segmentation"] = str(hand)
+        self.state.settings["models"]["provider"] = "gpu"
+        class Model:
+            def load_state_dict(self, *_args, **_kwargs): pass
+        class Predictor:
+            def __init__(self, _model): pass
+            def set_image(self, _image): pass
+        class Torch:
+            def device(self, _name): return contextlib.nullcontext()
+        sam = types.ModuleType("segment_anything"); sam.SamPredictor = Predictor; sam.sam_model_registry = {"vit_b": lambda checkpoint=None: Model()}
+        safe = types.ModuleType("safetensors.torch"); safe.load_file = lambda *_args, **_kwargs: {}
+        old_sam, old_safe = sys.modules.get("segment_anything"), sys.modules.get("safetensors.torch")
+        sys.modules["segment_anything"] = sam; sys.modules["safetensors.torch"] = safe
+        try:
+            with patch("mozarie.catalog.torch_module", return_value=Torch()), patch("mozarie.catalog.runtime_backend", return_value="cpu"):
+                with self.assertRaises(ClientError) as context: self.state._hand_segmentation_predictor_for(item, object())
+            self.assertEqual(context.exception.error_code, "hand_segmentation_invalid")
+        finally:
+            if old_sam is None: sys.modules.pop("segment_anything", None)
+            else: sys.modules["segment_anything"] = old_sam
+            if old_safe is None: sys.modules.pop("safetensors.torch", None)
+            else: sys.modules["safetensors.torch"] = old_safe
+
+    def test_catalogue_finalization_and_import_failure_paths(self) -> None:
+        image_id = self.add_image(); item = self.state.images[image_id]
+        source = self.state.workspace_store.ensure_provisional_catalog()
+        target = self.state.workspace_store.ensure_catalog()
+        self.state.catalog_id = source
+        self.state.browser_catalog_provisional = True
+        self.state.browser_import_hashes = {item.relative_path: "hash"}
+        with patch.object(self.state.workspace_store, "best_catalog_for_manifest", return_value=target), patch.object(self.state.workspace_store, "reconcile_images", return_value={}):
+            self.state.finalize_browser_catalog()
+        source = self.state.workspace_store.ensure_provisional_catalog()
+        self.state.images = {item.image_id: item}
+        self.state.order = [item.image_id]
+        self.state.catalog_id = source
+        self.state.browser_catalog_provisional = True
+        self.state.browser_import_hashes = {item.relative_path: "hash"}
+        candidate = Candidate("restored", "penis", .5, self.root / "restored.png")
+        stored = {item.relative_path: {"image_id": item.image_id, "hidden": False, "reviewed": False}}
+        with patch.object(self.state.workspace_store, "best_catalog_for_manifest", return_value=target), patch.object(self.state.workspace_store, "reconcile_images", return_value=stored), patch.object(self.state.workspace_store, "hydrate_candidates", return_value=(1, [candidate])):
+            self.state.finalize_browser_catalog()
+        scan = self.root / "scan"; scan.mkdir(); image = scan / "race.png"; Image.new("RGB", (4, 4), "white").save(image)
+        def modify_after_read(path, suffix):
+            path.write_bytes(path.read_bytes() + b"x")
+            return (4, 4)
+        with patch("mozarie.catalog.inspect_import_image", side_effect=modify_after_read):
+            self.state.set_root(str(scan))
+        first = self.root / "one.png"; second = self.root / "two.png"
+        Image.new("RGB", (4, 4), "white").save(first); Image.new("RGB", (4, 4), "white").save(second)
+        real_replace = __import__("os").replace
+        attempts = 0
+        def replace_once(source_path, destination_path):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2: raise OSError("disk full")
+            real_replace(source_path, destination_path)
+        with patch("mozarie.catalog.os.replace", side_effect=replace_once):
+            with self.assertRaises(OSError):
+                self.state._import_images([
+                    {"name": "one.png", "relativePath": "one.png", "stagedPath": first},
+                    {"name": "two.png", "relativePath": "two.png", "stagedPath": second},
+                ], include_images=False)
+
+    def test_import_hydrates_durable_candidates(self) -> None:
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        self.state.activate_browser_catalog()
+        candidate = Candidate("restored", "penis", .5, self.root / "restored.png")
+        with patch.object(self.state.workspace_store, "hydrate_candidates", return_value=(1, [candidate])):
+            _images, imported = self.state.import_image_file_for_api(staged, name="restored.png", relative_path="restored.png", client_key="restored")
+        image_id = imported[0]["imageId"]
+        self.assertEqual(self.state.candidate_revisions[image_id], 1)
+
+    def test_catalogue_false_branches_are_stable_noops(self) -> None:
+        image_id = self.add_image()
+        self.state.remove_images_from_catalog(["not-present"])
+        self.state._discard_browser_save_token_unchecked("missing")
+        token = self.state._issue_browser_save_token_unchecked(self.state.images[image_id], 0, (1, 1), 0, None)
+        self.state._discard_browser_save_tokens_for_image_unchecked("different")
+        self.assertIn(token, self.state.browser_save_tokens)
+        self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, __import__("time").monotonic())
+        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.assertIn("fresh", self.state.browser_save_receipts)
+        self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": self.root / "source.png"}], include_images=False, transfer_active=True)
+        self.state.sam_image_id = image_id; self.state.sam_predictor = None
+        self.state.hand_segmentation_image_id = image_id; self.state.hand_segmentation_predictor = None
+        self.state.invalidate_sam_image(image_id)
+        self.state.workspace_store.delete_images([image_id])
+        self.assertEqual(self.state.set_image_flags(image_id, {"hidden": True})["hidden"], True)
+        absent = Candidate("absent", "penis", .5, self.root / "absent.png")
+        self.state.candidates[image_id] = [absent]
+        self.state.candidate_revisions[image_id] = 0
+        def missing_then_advance(*_args):
+            self.state.candidate_revisions[image_id] = 1
+            return None
+        with patch.object(self.state.workspace_store, "candidate_png", side_effect=missing_then_advance):
+            with self.assertRaises(Exception): self.state.read_candidate_mask_png(image_id, "absent")
+
+    def test_session_record_removal_without_import_root(self) -> None:
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        _images, imported = self.state.import_image_file_for_api(staged, name="session.png", relative_path="session.png", client_key="session")
+        self.state.session_imports_dir = None
+        self.state.remove_image_from_catalog(imported[0]["imageId"])
+
     def test_manual_mask_validation_and_persistence_errors(self) -> None:
         image_id = self.add_image()
         encoded = "data:image/png;base64," + base64.b64encode(png()).decode("ascii")
