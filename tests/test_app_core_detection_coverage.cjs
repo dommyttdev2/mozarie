@@ -200,6 +200,16 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.match(test.formatDuration(1), /duration/);
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3, startedAt: "job", activeElapsed: 3 }), /status/);
   test.updateActionButtons();
+  // The save dialog has a separate restriction and retains its live pause
+  // control while the rest of the UI is locked.
+  coreState.applyTargetIds = ["one"];
+  context.applyRestrictionMessage = () => "restricted";
+  context.document.querySelectorAll = (selector) => selector === "button, input, select, textarea" ? [element("applyPauseButton")] : [];
+  coreState.applyRunning = true; coreState.saving = true;
+  test.updateActionButtons();
+  coreState.applyRunning = false; coreState.saving = false;
+  context.applyRestrictionMessage = () => "";
+  context.document.querySelectorAll = () => [];
   coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenPaths.add("one.png");
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";

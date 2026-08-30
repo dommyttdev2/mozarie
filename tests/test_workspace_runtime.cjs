@@ -22,7 +22,7 @@ const context = {
     return Promise.resolve({});
   },
 };
-vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};`, context, { filename: workspacePath });
+vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,rememberedOutputDirectoryHandle,rememberOutputDirectoryHandle,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};`, context, { filename: workspacePath });
 
 (async () => {
   await context.workspaceTest.queueWorkspaceDraft("one", true);
@@ -133,6 +133,15 @@ vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flu
   assert.equal(await context.workspaceTest.directoryCatalogStore(), null, "an IndexedDB open error disables optional directory persistence");
   context.indexedDB = context.window.indexedDB = undefined;
   assert.equal(await context.workspaceTest.directoryCatalogStore(), null, "browsers without IndexedDB keep folder import usable");
+  assert.equal(await context.workspaceTest.rememberedOutputDirectoryHandle(), null, "browsers without IndexedDB have no remembered output directory");
+  await context.workspaceTest.rememberOutputDirectoryHandle({ name: "output" });
+
+  const outputReadErrorDb = {
+    close() {},
+    transaction() { return { objectStore() { return { get() { const request = {}; queueMicrotask(() => request.onerror()); return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: outputReadErrorDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  assert.equal(await context.workspaceTest.rememberedOutputDirectoryHandle(), null, "an unreadable remembered output directory is treated as absent");
 
   const sameEntry = { isSameEntry: async () => true };
   const directoryEvents = [];
