@@ -25,6 +25,9 @@ function element(id) {
     id, value: "10", textContent: "", hidden: false, disabled: false, checked: false,
     classList: { toggle() {} }, setAttribute() {}, contains() { return false; },
     style: {}, addEventListener() {}, removeEventListener() {},
+    getBoundingClientRect() { return { left: 10, top: 10, width: 80, height: 24 }; },
+    showPopover() { this.popoverOpen = true; }, hidePopover() { this.popoverOpen = false; },
+    matches(selector) { return selector === ":popover-open" && this.popoverOpen === true; },
   });
   return elements.get(id);
 }
@@ -38,12 +41,14 @@ const state = {
   boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryBrushStroke: null,
   boundaryPromptPoint: null, pendingImageId: null, boundaryPending: false, importing: false,
   manualExclusionForced: false, manualEnabled: false, manualExclusionEnabled: false, manualExclusionEraseEnabled: false,
-  images: [{ id: "image" }, { id: "other" }], sourceAccess: new Map([['gone', {}]]), drafts: new Map([['gone', {}]]),
+  images: [{ id: "image", sourcePath: "C:/images/sample.png" }, { id: "other" }], sourceAccess: new Map([['gone', {}]]), drafts: new Map([['gone', {}]]),
   maskStatus: new Map([['gone', true]]), selectedImageIds: new Set(['gone']), candidates: [], removedCandidateIds: new Set(),
   history: [], historyIndex: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   settings: { shortcuts: { bindings: { previous: "ArrowLeft", next: "ArrowRight", toggleOverview: "G" }, actions: {} }, confirmations: {} },
   tool: "brush", viewMode: "edit", navigationShortcutsEnabled: true,
 };
+const userErrors = [];
+const navigationActions = [];
 const context = {
   state, Math, Map, Set, Promise, Object, Array, Number, String, Boolean, JSON, Uint8ClampedArray, requestAnimationFrame: () => 1,
   canvas: { style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) }, addCtx, exclusionCtx, exclusionEraseCtx,
@@ -58,12 +63,14 @@ const context = {
   markMaskDirty() {}, markDraftDirty() {}, flushMaskComposition() {}, requestMosaicPreview() {}, scheduleManualWorkspaceSave() {},
   canvasHasPixels: () => true, setReviewed() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, renderCandidates() {},
   refreshMaskStatus() {}, releaseCandidateBundles() {}, markImagesUnreviewed() {}, renderCatalogViews() {}, updateNavigationControls() {},
-  updateActionButtons() {}, beginCatalogEpoch: () => 1, isCurrentCatalogEpoch: () => true, clearStatus() {}, flushAllWorkspaceMutations: async () => {},
+  updateActionButtons() {}, closeProcessing() {}, beginCatalogEpoch: () => 1, isCurrentCatalogEpoch: () => true, clearStatus() {}, flushAllWorkspaceMutations: async () => {},
   clearStoredCatalogState() {}, resetCatalog() {}, releaseImageCaches() {}, clearEditor() {}, updateSelectionActionBar() {}, renderOverview() {},
   selectedImages: () => state.images, closeBatchMoreMenus() {}, setHidden: async () => {}, setReviewed: async () => {}, openDetectionDialog() {},
   clearMasks: async () => {}, removeImageFromCatalog: async () => {}, shortcutFromEvent: (event) => event.binding,
-  isEditableTarget: () => false, hasOpenDialog: () => false, isGestureActive: () => false, moveCurrentBy() {}, selectImage() {}, reviewAndMoveNext() {}, setViewMode() {},
-  api: async () => ({ settings: state.settings }), showModalFromInvoker() {}, showUserError() {},
+  isEditableTarget: () => false, hasOpenDialog: () => false, isGestureActive: () => false,
+  moveCurrentBy(distance) { navigationActions.push(distance); }, selectImage() {}, reviewAndMoveNext() {}, setViewMode(mode) { state.viewMode = mode; },
+  isReviewed: () => false, isHidden: () => false,
+  api: async () => ({ settings: state.settings }), showModalFromInvoker() {}, showUserError(error) { userErrors.push(error); },
 };
 
 for (const sourcePath of [canvasPath, masksPath, interactionPath]) {
@@ -76,7 +83,8 @@ vm.runInNewContext(`globalThis.editorTest = {
   canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, escapeHtml, pointFromEvent, clampPoint, boundaryDragStarted,
   polygonVertexAt, completedPolygonVertexAt, rectangleDraftAt, paintStrokeOnContexts, enableManualLayerForTool,
   droppedFile, isSupportedImageFile, newClientKey, pruneSourceAccess, rememberImportedSource, remapImportedImageIds,
-  navigationShortcutAction, handleNavigationKeydown, setTool, updateBrushSize, updateBlockSizeDisplay
+  navigationShortcutAction, handleNavigationKeydown, handleWindowKeydown, setTool, updateBrushSize, updateBlockSizeDisplay,
+  openCatalogContextMenu, closeCatalogContextMenu, pickImageFiles, pickImageDirectory, importDroppedFiles
 };`, context);
 const test = context.editorTest;
 
@@ -154,4 +162,52 @@ test.updateBrushSize(999); assert.equal(element("#brushSize").value, 500);
 test.updateBlockSizeDisplay(); assert.match(element("#blockSizeValue").textContent, /4/);
 test.setTool("bucket"); assert.equal(state.tool, "bucket");
 
-console.log("test_editor_runtime: passed");
+async function interactionUserEventWorkflowTest() {
+  let contextMenuPrevented = false;
+  const catalogCard = { getBoundingClientRect: () => ({ left: 30, top: 40, width: 120, height: 32 }) };
+  test.openCatalogContextMenu({
+    type: "contextmenu", clientX: 75, clientY: 90, currentTarget: catalogCard,
+    preventDefault() { contextMenuPrevented = true; },
+  }, "image");
+  assert.equal(contextMenuPrevented, true, "a mouse context-menu event must suppress the browser menu");
+  assert.equal(element("#catalogContextMenu").popoverOpen, true, "a mouse context-menu event must open the catalog actions");
+  assert.equal(element("#copyImagePathMenuItem").hidden, false, "a source-backed image exposes copy-path action");
+  test.closeCatalogContextMenu({ restoreFocus: false });
+  assert.equal(element("#catalogContextMenu").popoverOpen, false, "closing the catalog actions hides the popover");
+
+  let navigationPrevented = false;
+  state.viewMode = "edit";
+  navigationActions.length = 0;
+  test.handleWindowKeydown({ binding: "ArrowRight", preventDefault() { navigationPrevented = true; } });
+  assert.equal(navigationPrevented, true, "the next-image keyboard shortcut must consume the event");
+  assert.deepEqual(navigationActions, [1], "the next-image keyboard shortcut must navigate forward");
+  test.handleWindowKeydown({ binding: "G", preventDefault() {} });
+  assert.equal(state.viewMode, "overview", "the overview keyboard shortcut must change the visible view");
+
+  context.window.showOpenFilePicker = async () => { const error = new Error("cancelled"); error.name = "AbortError"; throw error; };
+  await test.pickImageFiles();
+  assert.equal(state.importing, false, "cancelling the file picker must finish its import session");
+  assert.equal(userErrors.length, 0, "cancelling the file picker is not an error shown to the user");
+
+  context.window.showDirectoryPicker = async () => { const error = new Error("cancelled"); error.name = "AbortError"; throw error; };
+  await test.pickImageDirectory();
+  assert.equal(state.importing, false, "cancelling the directory picker must finish its import session");
+
+  let dropPrevented = false;
+  let dropStopped = false;
+  await test.importDroppedFiles({
+    dataTransfer: { items: [] },
+    preventDefault() { dropPrevented = true; },
+    stopPropagation() { dropStopped = true; },
+  });
+  assert.equal(dropPrevented, true, "a file drop must prevent browser navigation");
+  assert.equal(dropStopped, true, "a file drop must stop duplicate handlers");
+  assert.equal(element("#galleryDropOverlay").hidden, true, "finishing a drop hides the gallery overlay");
+}
+
+interactionUserEventWorkflowTest().then(() => {
+  console.log("test_editor_runtime: passed");
+}).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
