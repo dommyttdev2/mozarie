@@ -4452,7 +4452,7 @@ class MozarieTests(unittest.TestCase):
             def import_worker():
                 try:
                     import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
                 finally:
                     imported.set()
@@ -4487,7 +4487,7 @@ class MozarieTests(unittest.TestCase):
                 try:
                     barrier.wait()
                     import_image_list_for_test(state, [{"name": "same.png", "data": base64.b64encode(raw).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             first = threading.Thread(target=import_worker)
@@ -4540,7 +4540,7 @@ class MozarieTests(unittest.TestCase):
             def worker(name):
                 try:
                     import_image_list_for_test(state, [{"name": name, "data": base64.b64encode(raw).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
@@ -4734,7 +4734,7 @@ class MozarieTests(unittest.TestCase):
             def import_worker():
                 try:
                     import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
@@ -6727,7 +6727,7 @@ class MozarieTests(unittest.TestCase):
             def run_render():
                 try:
                     outcome["result"] = state.render_browser_save(image_id, revision, 100, None)
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     outcome["error"] = exc
 
             with patch.object(saving_module, "render_with_mask", side_effect=capture_snapshot):
