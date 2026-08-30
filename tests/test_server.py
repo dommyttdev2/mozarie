@@ -3689,6 +3689,54 @@ class MozarieTests(unittest.TestCase):
         result = state._finalize_exclusions(np.zeros((16, 16, 3), dtype=np.uint8), result)
         self.assertEqual(result[0]["exclusions"], {})
 
+    def test_scene_metadata_fluid_search_uses_only_exact_tags_and_local_rois(self):
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_positive": "cum_on_breasts, cum_on_fingers"}), {"cum_on_breasts", "cum_on_fingers"})
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_info": '{"positive":"cum_on_ass"}'}), {"cum_on_ass"})
+        for info in ({}, {"scene_info": "bad"}, {"scene_positive": "not_cum_on_breasts"}, {"scene_positive": ["cum_on_breasts"]}):
+            with self.subTest(info=info): self.assertEqual(detection_module._scene_fluid_tags(info), set())
+
+        rgb = np.zeros((300, 300, 3), dtype=np.uint8)
+        target = np.zeros((300, 300), dtype=np.uint8); target[100:120, 100:120] = 1
+        hand = np.zeros_like(target); hand[160:170, 160:170] = 1
+        face = np.zeros_like(target); face[20:40, 130:170] = 1
+        with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, search: np.asarray(search, dtype=np.uint8) * 255) as fluid:
+            searched = state = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum_on_fingers"}))
+            self.assertTrue(np.any(searched)); self.assertGreater(np.count_nonzero(searched), np.count_nonzero(target | hand))
+            chest = self.new_state()._metadata_fluid_mask(rgb, [], np.zeros_like(target), [{"mask": face}], frozenset({"cum_on_breasts"}))
+        self.assertEqual(fluid.call_count, 2)
+        self.assertTrue(np.any(chest[53:73, 135:165]))
+        self.assertFalse(np.any(chest[:40]))
+
+    def test_scene_metadata_fluid_candidate_is_optional_and_can_exist_without_apply(self):
+        state = self.new_state()
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+        target = np.zeros((40, 40), dtype=np.uint8); target[10:20, 10:20] = 255
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+            finalized = state._finalize_exclusions(rgb, [{"class_name": "penis", "mask": target, "confidence": .8, "source": "target"}], frozenset({"cum_on_ass"}))
+        self.assertIn("metadata_exclusions", finalized[0])
+        self.assertNotIn("fluid", finalized[0]["exclusions"])
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+            synthetic = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
+        self.assertEqual(synthetic[-1]["class_name"], "__fluid_exclusion__")
+        with patch.object(state, "_metadata_fluid_mask", return_value=np.zeros((40, 40), dtype=np.uint8)):
+            unchanged = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
+        self.assertEqual(len(unchanged), 1)
+
+    def test_scene_metadata_fluid_is_a_non_forced_exclusion_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "scene.png"
+            info = PngImagePlugin.PngInfo(); info.add_text("scene_positive", "cum_on_breasts")
+            Image.new("RGB", (16, 16), "white").save(source, pnginfo=info)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]; record = state.images[image_id]
+            mask = np.ones((16, 16), dtype=np.uint8) * 255
+            with patch.object(state, "_detect_arbitrated_segments", return_value=[] ) as detect, \
+                    patch.object(state, "_hand_refinement_context", return_value=([], np.zeros_like(mask), [])), \
+                    patch.object(state, "_finalize_exclusions", return_value=[{"class_name": "__fluid_exclusion__", "metadata_exclusions": {"fluid": mask}}]):
+                candidates = state._detect_image(Mock(), record, .5)
+            self.assertEqual(detect.call_args.args[-1], frozenset({"cum_on_breasts"}))
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual((candidates[0].label_token, candidates[0].role, candidates[0].forced), ("fluid", CandidateRole.EXCLUDE, False))
+
     def test_boundary_request_requires_a_valid_roi_and_click(self):
         roi, point = read_boundary_request(
             {"roi": {"left": 2.2, "top": 3.1, "right": 12.6, "bottom": 15.8}, "point": {"x": 7, "y": 9}},
