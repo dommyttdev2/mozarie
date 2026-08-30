@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -21,11 +21,27 @@ from .core import (
     torch_module, _read_detection_parallelism, _read_target_classes,
 )
 from .fluid import white_fluid_mask
-from .inference.generic_yolo_segment import GenericYoloSegmenter
-from .inference.yolo_detect import HandDetector
-from .inference.yolo_segment import TargetSegmenter
 from .runtime import runtime_backend
 from .runtime_types import DetectionModels
+
+if TYPE_CHECKING:
+    from .inference.generic_yolo_segment import GenericYoloSegmenter
+    from .inference.yolo_detect import HandDetector
+
+
+def TargetSegmenter(*args: Any, **kwargs: Any) -> Any:
+    from .inference.yolo_segment import TargetSegmenter as implementation
+    return implementation(*args, **kwargs)
+
+
+def GenericYoloSegmenter(*args: Any, **kwargs: Any) -> Any:
+    from .inference.generic_yolo_segment import GenericYoloSegmenter as implementation
+    return implementation(*args, **kwargs)
+
+
+def HandDetector(*args: Any, **kwargs: Any) -> Any:
+    from .inference.yolo_detect import HandDetector as implementation
+    return implementation(*args, **kwargs)
 
 
 def _save_binary_mask(mask: Any, path: Path) -> None:

@@ -60,6 +60,7 @@ from mozarie.model_downloads import (
     ModelDownload,
     ModelDownloadCancelled,
     ModelDownloadError,
+    ModelDownloadInProgress,
     ModelDownloadManager,
     _HttpsOnlyRedirects,
     _sam_key,
@@ -630,7 +631,8 @@ class DownloadCoverageTests(unittest.TestCase):
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
         self.assertEqual(manager.cancel()["state"], "idle")
         manager._job["state"] = "running"
-        self.assertEqual(manager.start("hand_detection", "vit_b")["state"], "running")
+        with self.assertRaises(ModelDownloadInProgress):
+            manager.start("hand_detection", "vit_b")
         manager._cancel.set()
         manager._run(["hand_detection"])
         self.assertEqual(manager.snapshot()["state"], "cancelled")

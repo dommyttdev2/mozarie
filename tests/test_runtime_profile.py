@@ -89,8 +89,13 @@ class RuntimeProfileTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 self.assertIsNone(runtime_profile.selected_profile(venv))
     def test_onnx_probe_runs_on_the_selected_directml_device(self) -> None:
-        ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider", "CPUExecutionProvider"])
+        ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider"])
         self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
+
+    def test_onnx_probe_rejects_an_added_fallback_provider(self) -> None:
+        ort, onnx, np = self._probe_dependencies(["CUDAExecutionProvider", "CPUExecutionProvider"])
+        with self.assertRaisesRegex(runtime_profile.ProfileError, "selected"):
+            runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0)
 
     def test_onnx_probe_supports_cuda_and_cpu_and_rejects_bad_results(self) -> None:
         for profile, provider in (("cuda", "CUDAExecutionProvider"), ("cpu", "CPUExecutionProvider")):

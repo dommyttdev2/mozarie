@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 import os
 from pathlib import Path
@@ -57,6 +59,15 @@ class OnnxAdapterTests(unittest.TestCase):
         self.assertEqual(preload.call_count, 1)
         onnx_module._preload_onnxruntime_dlls(SimpleNamespace(), {})
 
+    def test_detection_model_constructors_load_only_when_called(self) -> None:
+        import mozarie.detection as detection
+        with patch("mozarie.inference.yolo_segment.TargetSegmenter", return_value="target"):
+            self.assertEqual(detection.TargetSegmenter("model"), "target")
+        with patch("mozarie.inference.generic_yolo_segment.GenericYoloSegmenter", return_value="auxiliary"):
+            self.assertEqual(detection.GenericYoloSegmenter("model"), "auxiliary")
+        with patch("mozarie.inference.yolo_detect.HandDetector", return_value="hand"):
+            self.assertEqual(detection.HandDetector("model"), "hand")
+
     def test_nms_keeps_highest_score_and_other_classes(self) -> None:
         boxes = [(0, 0, 10, 10), (1, 1, 9, 9), (20, 20, 30, 30)]
         self.assertEqual(nms_indices(boxes, [0.9, 0.8, 0.7], 0.5), [0, 2])
@@ -67,7 +78,7 @@ class OnnxAdapterTests(unittest.TestCase):
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
             cuda_session = Mock()
-            cuda_session.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            cuda_session.get_providers.return_value = ["CUDAExecutionProvider"]
             cpu_session = Mock()
             cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers",
@@ -84,7 +95,7 @@ class OnnxAdapterTests(unittest.TestCase):
                     "cudnn_conv_use_max_workspace": "0",
                     "do_copy_in_default_stream": "1",
                 },
-            ), "CPUExecutionProvider"])
+            )])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
             cuda_session.disable_fallback.assert_called_once_with()
             cpu_session.disable_fallback.assert_called_once_with()
@@ -96,7 +107,7 @@ class OnnxAdapterTests(unittest.TestCase):
                 "cudnn_conv_algo_search": "HEURISTIC",
                 "cudnn_conv_use_max_workspace": "0",
                 "do_copy_in_default_stream": "1",
-            }), "CPUExecutionProvider"])
+            })])
 
     def test_available_providers_rejects_missing_selected_gpu_provider(self) -> None:
         with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), patch("mozarie.inference.onnx.ort.get_available_providers", return_value=[]):
@@ -111,7 +122,7 @@ class OnnxAdapterTests(unittest.TestCase):
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
             session = Mock()
-            session.get_providers.return_value = ["DmlExecutionProvider", "CPUExecutionProvider"]
+            session.get_providers.return_value = ["DmlExecutionProvider"]
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), \
                  patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session) as create:
@@ -119,9 +130,7 @@ class OnnxAdapterTests(unittest.TestCase):
             options = create.call_args.kwargs["sess_options"]
             self.assertFalse(options.enable_mem_pattern)
             self.assertEqual(options.execution_mode, 0)
-            self.assertEqual(create.call_args.kwargs["providers"], [
-                ("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider",
-            ])
+            self.assertEqual(create.call_args.kwargs["providers"], [("DmlExecutionProvider", {"device_id": 1})])
 
     def test_gpu_session_keeps_model_loading_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +171,12 @@ class OnnxAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"; path.write_bytes(b"model")
             wrong = Mock(); wrong.get_providers.return_value = ["CPUExecutionProvider"]
+            with patch.dict(os.environ, {"MOZARIE_RUNTIME": "cuda"}), \
+                    patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+                    patch("mozarie.inference.onnx.ort.InferenceSession", return_value=wrong):
+                with self.assertRaisesRegex(Exception, "GPU"):
+                    create_session(path)
+            wrong.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "cuda"}), \
                     patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
                     patch("mozarie.inference.onnx.ort.InferenceSession", return_value=wrong):
@@ -208,6 +223,45 @@ class OnnxAdapterTests(unittest.TestCase):
                 else:
                     self.assertIsNotNone(model.run_options)
                     run_options.return_value.add_run_config_entry.assert_called_once_with("memory.enable_memory_arena_shrinkage", "gpu:3")
+
+    def test_cuda_model_serializes_runs_without_blocking_another_model(self) -> None:
+        entered = threading.Event(); release = threading.Event(); active = 0; peak = 0; active_lock = threading.Lock()
+        def run(*_args):
+            nonlocal active, peak
+            with active_lock:
+                active += 1; peak = max(peak, active)
+            entered.set(); self.assertTrue(release.wait(1))
+            with active_lock: active -= 1
+            return [np.asarray([1])]
+        model = BaseOnnxModel.__new__(BaseOnnxModel)
+        model.device = "gpu"; model.input_name = "image"; model.run_options = Mock(); model.run_lock = threading.RLock()
+        model.session = Mock(); model.session.run.side_effect = run
+        first = threading.Thread(target=lambda: model.run(np.zeros((1,), dtype=np.float32)))
+        second = threading.Thread(target=lambda: model.run(np.zeros((1,), dtype=np.float32)))
+        first.start(); self.assertTrue(entered.wait(1)); second.start(); time.sleep(.02)
+        self.assertEqual(peak, 1)
+        release.set(); first.join(1); second.join(1)
+        self.assertFalse(first.is_alive()); self.assertFalse(second.is_alive())
+
+        barrier = threading.Barrier(2); active = 0; peak = 0
+        def parallel_run(*_args):
+            nonlocal active, peak
+            with active_lock:
+                active += 1; peak = max(peak, active)
+            barrier.wait(timeout=1)
+            with active_lock: active -= 1
+            return [np.asarray([1])]
+        models = []
+        for _index in range(2):
+            other = BaseOnnxModel.__new__(BaseOnnxModel)
+            other.device = "gpu"; other.input_name = "image"; other.run_options = Mock(); other.run_lock = threading.RLock()
+            other.session = Mock(); other.session.run.side_effect = parallel_run
+            models.append(other)
+        threads = [threading.Thread(target=lambda item=item: item.run(np.zeros((1,), dtype=np.float32))) for item in models]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(1)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(peak, 2)
 
     def test_restore_box_and_empty_nms_paths(self) -> None:
         transform = Letterbox(1, 0, 0, 10, 10, 10, 10)

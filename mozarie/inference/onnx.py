@@ -86,7 +86,7 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
-        return [("DmlExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        return [("DmlExecutionProvider", {"device_id": int(gpu_device)})]
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {
@@ -97,10 +97,7 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     }
     if int(gpu_device) != 0:
         options["device_id"] = int(gpu_device)
-    return [(
-        "CUDAExecutionProvider",
-        options,
-    ), "CPUExecutionProvider"]
+    return [("CUDAExecutionProvider", options)]
 
 
 def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.InferenceSession:
@@ -122,8 +119,12 @@ def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.Inf
     # Provider failure must be visible to the user.  ORT otherwise silently
     # recreates this session with a fallback provider during ``run``.
     session.disable_fallback()
-    expected = {"cuda": "CUDAExecutionProvider", "directml": "DmlExecutionProvider"}.get(backend)
-    if expected is not None and session.get_providers()[0] != expected:
+    expected = {
+        "cuda": "CUDAExecutionProvider",
+        "directml": "DmlExecutionProvider",
+        "cpu": "CPUExecutionProvider",
+    }[backend]
+    if list(session.get_providers()) != [expected]:
         raise _gpu_unavailable_error()
     return session
 
@@ -247,7 +248,7 @@ class BaseOnnxModel:
         self.session = create_session(path, device, gpu_device)
         self.input_name = self.session.get_inputs()[0].name
         self.run_options = None
-        self.run_lock = threading.RLock() if self.session.get_providers()[0] == "DmlExecutionProvider" else None
+        self.run_lock = threading.RLock() if self.session.get_providers()[0] in {"CUDAExecutionProvider", "DmlExecutionProvider"} else None
         if self.session.get_providers()[0] == "CUDAExecutionProvider":
             self.run_options = ort.RunOptions()
             self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{int(gpu_device)}")
@@ -258,7 +259,7 @@ class BaseOnnxModel:
             run_lock = getattr(self, "run_lock", None)
             if run_lock is not None:
                 with run_lock:
-                    outputs = self.session.run(None, feeds)
+                    outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
             else:
                 outputs = self.session.run(None, feeds) if self.run_options is None else self.session.run(None, feeds, self.run_options)
         except ort_state.EPFail as exc:

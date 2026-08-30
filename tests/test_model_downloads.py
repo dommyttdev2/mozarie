@@ -11,7 +11,7 @@ from unittest.mock import patch
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mozarie.model_downloads import ModelDownload, ModelDownloadCancelled, ModelDownloadError, ModelDownloadManager
+from mozarie.model_downloads import ModelDownload, ModelDownloadCancelled, ModelDownloadError, ModelDownloadInProgress, ModelDownloadManager
 
 
 class _Response:
@@ -191,6 +191,7 @@ class ModelDownloadTests(unittest.TestCase):
         self.assertEqual(calls, ["sam_vit_b", "hand_detection"])
         self.assertEqual(job["state"], "failed")
         self.assertIn("sam_vit_b", job["paths"])
+        self.assertIsNone(manager._thread)
 
     def test_download_failures_have_specific_safe_error_codes(self) -> None:
         cases = (
@@ -225,14 +226,42 @@ class ModelDownloadTests(unittest.TestCase):
             self.assertTrue(entered.wait(1))
             original_cancel = manager._cancel
             manager.cancel()
-            immediate = manager.start("hand_detection", "vit_b")
-            self.assertEqual(immediate["state"], "cancelling")
+            with self.assertRaises(ModelDownloadInProgress):
+                manager.start("hand_detection", "vit_b")
             self.assertIs(manager._cancel, original_cancel)
             self.assertTrue(original_cancel.is_set())
             self.assertEqual(download.call_count, 1)
             release.set()
             while manager.snapshot()["state"] in {"running", "cancelling"}: time.sleep(0.002)
         self.assertEqual(manager.snapshot()["state"], "cancelled")
+        self.assertIsNone(manager._thread)
+
+    def test_shutdown_cancels_a_running_worker_and_returns_when_it_finishes(self) -> None:
+        manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
+        entered = threading.Event(); release = threading.Event()
+        def blocked_download(_entry: ModelDownload) -> Path:
+            entered.set(); self.assertTrue(release.wait(1))
+            if manager._cancel.is_set(): raise ModelDownloadCancelled()
+            raise AssertionError("shutdown did not cancel the worker")
+        with patch.object(manager, "_download", side_effect=blocked_download):
+            manager.start("hand_detection", "vit_b")
+            self.assertTrue(entered.wait(1))
+            release.set()
+            self.assertTrue(manager.shutdown(timeout=1))
+        self.assertEqual(manager.snapshot()["state"], "cancelled")
+
+    def test_shutdown_returns_false_when_a_worker_does_not_stop_by_the_deadline(self) -> None:
+        manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
+        entered = threading.Event(); release = threading.Event()
+        def blocked_download(_entry: ModelDownload) -> Path:
+            entered.set(); self.assertTrue(release.wait(1)); raise ModelDownloadCancelled()
+        with patch.object(manager, "_download", side_effect=blocked_download):
+            manager.start("hand_detection", "vit_b")
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(manager.shutdown(timeout=.001))
+            self.assertEqual(manager.snapshot()["state"], "cancelling")
+            release.set()
+            self.assertTrue(manager.shutdown(timeout=1))
 
 
 if __name__ == "__main__":

@@ -9,10 +9,13 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import sqlite3
 import shutil
 import tempfile
 import threading
+import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -151,6 +154,40 @@ class LiveHttpEndpointTests(unittest.TestCase):
         response = json.loads(body)
         self.assertTrue(response["provisional"])
         self.assertEqual(len(response["imported"]), 1)
+
+    def test_job_endpoint_stays_responsive_while_a_flag_write_waits_for_sqlite(self) -> None:
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        entered = threading.Event(); release = threading.Event(); result: dict[str, object] = {}
+        original = self.state.workspace_store.set_image_flags
+        def delayed(*args, **kwargs):
+            entered.set(); self.assertTrue(release.wait(2)); return original(*args, **kwargs)
+        def flag_request() -> None:
+            result["response"] = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        with patch.object(self.state.workspace_store, "set_image_flags", side_effect=delayed):
+            worker = threading.Thread(target=flag_request); worker.start()
+            self.assertTrue(entered.wait(1))
+            started = time.perf_counter()
+            status, _headers, body = self.request("GET", "/api/job")
+            elapsed = time.perf_counter() - started
+            self.assertEqual(status, 200)
+            self.assertIn("state", json.loads(body))
+            self.assertLess(elapsed, .1)
+            self.assertFalse(self.state.images[image_id].hidden)
+            release.set(); worker.join(2)
+        self.assertFalse(worker.is_alive())
+        status, _headers, body = result["response"]  # type: ignore[misc]
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["hidden"])
+
+    def test_failed_flag_write_keeps_the_live_image_state_unchanged(self) -> None:
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        with patch.object(self.state.workspace_store, "set_image_flags", side_effect=sqlite3.DatabaseError("locked")):
+            status, _headers, body = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body)["error_code"], "workspace_database_error")
+        self.assertFalse(self.state.images[image_id].hidden)
 
 
 if __name__ == "__main__":

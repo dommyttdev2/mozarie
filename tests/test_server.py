@@ -207,6 +207,20 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(record.hidden)
             self.assertFalse(record.reviewed)
 
+    def test_flag_change_does_not_publish_after_the_catalog_changes_during_a_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.images[image_id]
+            def change_catalog(_image_id):
+                with state.lock: state.catalog_generation += 1
+                return False
+            with patch.object(state.workspace_store, "has_image", side_effect=change_catalog):
+                with self.assertRaises(ClientError) as raised:
+                    state.set_image_flags(image_id, {"hidden": True})
+            self.assertEqual(raised.exception.error_code, "operation_in_progress")
+            self.assertFalse(record.hidden)
+
     def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -752,6 +766,10 @@ class MozarieTests(unittest.TestCase):
                 manager.start.assert_called_once_with("hand_detection", "vit_b")
                 status, _ = request("POST", "/api/model-download/cancel", {}, headers)
                 self.assertEqual(status, 200); manager.cancel.assert_called_once_with()
+                manager.start.side_effect = http_module.ModelDownloadInProgress()
+                status, body = request("POST", "/api/model-download/start", {"modelKey": "hand_detection", "samType": "vit_b"}, headers)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error_code"], "operation_in_progress")
         finally:
             httpd.shutdown(); httpd.server_close()
 
@@ -6920,6 +6938,19 @@ class MozarieTests(unittest.TestCase):
         self.assertTrue(http_module._reserve_update_start())
         self.assertFalse(http_module._reserve_update_start())
         http_module._update_start_requested = False
+
+    def test_update_start_is_rejected_while_a_model_download_is_active(self):
+        handler = object.__new__(MosaicHandler)
+        handler.server = Mock()
+        handler._json = Mock()
+        state = self.new_state()
+        state.model_downloads = Mock(snapshot=Mock(return_value={"state": "running"}))
+        with patch.object(http_module, "STATE", state), \
+                patch.object(handler, "_require_json_request"), \
+                patch.object(handler, "_read_json_body", return_value={}):
+            handler.path = "/api/update/start"
+            handler.do_POST()
+        self.assertEqual(handler._json.call_args.args[0]["error_code"], "operation_in_progress")
 
     def test_default_output_suffix_rejects_path_and_keeps_relative_folder(self):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)

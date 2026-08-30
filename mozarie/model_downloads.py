@@ -23,6 +23,10 @@ class ModelDownloadCancelled(ModelDownloadError):
     pass
 
 
+class ModelDownloadInProgress(ModelDownloadError):
+    pass
+
+
 class _HttpsOnlyRedirects(HTTPRedirectHandler):
     """Follow the providers' HTTPS redirects, never downgrade a download."""
 
@@ -93,6 +97,7 @@ class ModelDownloadManager:
         self.app_dir = app_dir
         self._lock = threading.RLock()
         self._cancel = threading.Event()
+        self._thread: threading.Thread | None = None
         self._job: dict[str, Any] = {"state": "idle", "paths": {}, "errorCode": ""}
 
     def snapshot(self) -> dict[str, Any]:
@@ -108,14 +113,15 @@ class ModelDownloadManager:
             raise ModelDownloadError("ダウンロードするモデルの種類が正しくありません。")
         with self._lock:
             if self._job.get("state") in {"running", "cancelling"}:
-                return self.snapshot()
+                raise ModelDownloadInProgress()
             self._cancel = threading.Event()
             self._job = {
                 "state": "running", "key": key, "total": len(keys), "completed": 0,
                 "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size, "phase": "checking",
                 "paths": {}, "errorCode": "",
             }
-            threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download").start()
+            self._thread = threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download")
+            self._thread.start()
             return self.snapshot()
 
     def cancel(self) -> dict[str, Any]:
@@ -125,12 +131,24 @@ class ModelDownloadManager:
                 self._job["state"] = "cancelling"
             return self.snapshot()
 
+    def shutdown(self, timeout: float = 5) -> bool:
+        """Cancel an active transfer and wait briefly for its worker to leave."""
+        with self._lock:
+            thread = self._thread
+            if self._job.get("state") == "running":
+                self._cancel.set()
+                self._job["state"] = "cancelling"
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        return thread is None or not thread.is_alive()
+
     def _set(self, **changes: Any) -> None:
         with self._lock:
             self._job.update(changes)
 
     def _run(self, keys: list[str]) -> None:
         paths: dict[str, str] = {}
+        result: dict[str, Any] = {}
         try:
             for index, key in enumerate(keys):
                 if self._cancel.is_set():
@@ -140,17 +158,21 @@ class ModelDownloadManager:
                 destination = self._download(entry)
                 paths[entry.setting_key] = str(destination)
                 self._set(paths=dict(paths), completed=index + 1, received=entry.size)
-            self._set(state="complete", current="", paths=paths)
+            result = {"state": "complete", "current": "", "paths": paths}
         except ModelDownloadCancelled:
-            self._set(state="cancelled", current="", paths=paths)
+            result = {"state": "cancelled", "current": "", "paths": paths}
         except (HTTPError, URLError):
-            self._set(state="failed", current="", paths=paths, errorCode="model_download_network")
+            result = {"state": "failed", "current": "", "paths": paths, "errorCode": "model_download_network"}
         except OSError:
-            self._set(state="failed", current="", paths=paths, errorCode="model_download_write_failed")
+            result = {"state": "failed", "current": "", "paths": paths, "errorCode": "model_download_write_failed"}
         except ModelDownloadError:
-            self._set(state="failed", current="", paths=paths, errorCode="model_download_integrity")
+            result = {"state": "failed", "current": "", "paths": paths, "errorCode": "model_download_integrity"}
         except Exception:
-            self._set(state="failed", current="", paths=paths, errorCode="internal_error")
+            result = {"state": "failed", "current": "", "paths": paths, "errorCode": "internal_error"}
+        finally:
+            with self._lock:
+                self._job.update(result)
+                self._thread = None
 
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)

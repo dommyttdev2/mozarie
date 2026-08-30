@@ -25,7 +25,7 @@ from .core import (
 )
 from .state import STATE, StudioState
 from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
-from .model_downloads import ModelDownloadError
+from .model_downloads import ModelDownloadError, ModelDownloadInProgress
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
@@ -355,11 +355,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/model-download/start":
                 try:
                     self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
+                except ModelDownloadInProgress as exc:
+                    raise ClientError("", "operation_in_progress") from exc
                 except ModelDownloadError as exc:
                     raise ClientError("", "model_download_invalid") from exc
             elif path == "/api/model-download/cancel":
                 self._json(STATE.model_downloads.cancel())
             elif path == "/api/update/start":
+                if STATE.model_downloads.snapshot().get("state") in {"running", "cancelling"}:
+                    raise ClientError("", "operation_in_progress")
                 if not _reserve_update_start():
                     raise ClientError("更新を開始しています。完了するまでお待ちください。", "operation_in_progress")
                 self._json({"ok": True})

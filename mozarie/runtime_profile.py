@@ -100,10 +100,8 @@ def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device:
         "cpu": "CPUExecutionProvider",
     }[profile]
     providers: list[object] = [expected]
-    if profile == "cuda":
-        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
-    elif profile == "directml":
-        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+    if profile in {"cuda", "directml"}:
+        providers = [(expected, {"device_id": int(gpu_device)})]
 
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
@@ -124,8 +122,8 @@ def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device:
         session = ort.InferenceSession(model.SerializeToString(), sess_options=options, providers=providers)
         session.disable_fallback()
         active = list(session.get_providers())
-        if not active or active[0] != expected:
-            raise RuntimeError(f"ONNX Runtime selected {active[0] if active else 'no provider'}")
+        if active != [expected]:
+            raise RuntimeError(f"ONNX Runtime selected {active or 'no provider'}")
         outputs = session.run(None, {"input": np.ones((1, 1), dtype=np.float32)})
         if not outputs or float(outputs[0][0][0]) != 1.0:
             raise RuntimeError("the identity model returned an unexpected result")
