@@ -9,14 +9,16 @@ let outputContext = null;
 
 function releaseSource() {
   source?.close?.();
-  source = null; sourceId = ""; sourceCanvas = null; sourceContext = null; maskCanvas = null; maskContext = null; outputCanvas = null; outputContext = null;
+  source = null; sourceId = "";
+  for (const canvas of [sourceCanvas, maskCanvas, outputCanvas]) if (canvas) canvas.width = canvas.height = 1;
+  sourceCanvas = null; sourceContext = null; maskCanvas = null; maskContext = null; outputCanvas = null; outputContext = null;
 }
 
-function fail(generation) { self.postMessage({ type: "error", code: "mosaic_preview_failed", generation }); }
+function fail(generation, failedSourceId = sourceId) { self.postMessage({ type: "error", code: "mosaic_preview_failed", sourceId: failedSourceId, generation }); }
 
 function render({ mask, width, height, blockSize, generation }) {
-  if (!source || !sourceContext || !mask || source.width !== width || source.height !== height) return fail(generation);
   try {
+    if (!source || !sourceContext || !mask || source.width !== width || source.height !== height) throw new Error("invalid render state");
     if (!maskCanvas || maskCanvas.width !== width || maskCanvas.height !== height) {
       maskCanvas = new OffscreenCanvas(width, height); maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
       outputCanvas = new OffscreenCanvas(width, height); outputContext = outputCanvas.getContext("2d");
@@ -45,7 +47,8 @@ function render({ mask, width, height, blockSize, generation }) {
     }
     outputContext.putImageData(new ImageData(output, width, height), 0, 0);
     const frame = outputCanvas.transferToImageBitmap();
-    self.postMessage({ type: "frame", sourceId, generation, output: frame }, [frame]);
+    try { self.postMessage({ type: "frame", sourceId, generation, output: frame }, [frame]); }
+    catch { frame.close?.(); fail(generation); }
   } catch { fail(generation); } finally { mask.close?.(); }
 }
 
@@ -58,8 +61,11 @@ self.onmessage = ({ data }) => {
       sourceCanvas = new OffscreenCanvas(source.width, source.height);
       sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
       if (!sourceContext) throw new Error("2d context unavailable");
-    } catch { releaseSource(); fail(data.generation); }
+    } catch { releaseSource(); fail(data.generation, data.sourceId); }
     return;
   }
-  if (data.type === "render" && data.sourceId === sourceId) render(data);
+  if (data.type === "render") {
+    if (data.sourceId !== sourceId) { data.mask?.close?.(); fail(data.generation, data.sourceId); return; }
+    render(data);
+  }
 };

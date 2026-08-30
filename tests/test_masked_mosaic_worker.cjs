@@ -56,12 +56,16 @@ self.onmessage({ data: { type: "release" } });
 assert.equal(releasable.closed, true, "releasing a preview closes its retained source bitmap");
 
 response = undefined;
-self.onmessage({ data: { type: "render", sourceId: "", mask: {}, width: 1, height: 1, blockSize: 1, generation: 11 } });
+const missingSourceMask = { close() { this.closed = true; } };
+self.onmessage({ data: { type: "render", sourceId: "", mask: missingSourceMask, width: 1, height: 1, blockSize: 1, generation: 11 } });
 assert.equal(response.type, "error", "a render without a retained source reports the preview failure");
+assert.equal(missingSourceMask.closed, true, "a render without a retained source closes its transferred mask");
 
 response = undefined;
-self.onmessage({ data: { type: "render", sourceId: "different", mask: {}, width: 1, height: 1, blockSize: 1, generation: 12 } });
-assert.equal(response, undefined, "a frame for another source is ignored");
+const wrongSourceMask = { close() { this.closed = true; } };
+self.onmessage({ data: { type: "render", sourceId: "different", mask: wrongSourceMask, width: 1, height: 1, blockSize: 1, generation: 12 } });
+assert.equal(response.type, "error", "a frame for another source reports the preview failure");
+assert.equal(wrongSourceMask.closed, true, "a frame for another source closes its transferred mask");
 
 contextCalls = 0; contextFailure = 1;
 const rejectedSource = { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]), close() { this.closed = true; } };

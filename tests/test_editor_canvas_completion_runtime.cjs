@@ -163,7 +163,8 @@ const test = context.canvasCompletion;
   state.mosaicPreviewRequested = false; test.requestMosaicPreview(); assert.equal(state.mosaicPreviewRequested, false, "preview coalescing resets after the animation frame");
 
   context.Worker = class { constructor() { throw new Error("worker unavailable"); } };
-  state.mosaicWorker = null; state.mosaicSourceImage = null; state.mosaicSourceId = ""; state.mosaicPreviewEnabled = true;
+  test.releaseMosaicPreview();
+  state.mosaicSourceImage = null; state.mosaicSourceId = ""; state.mosaicPreviewEnabled = true;
   await test.rebuildMosaicPreview();
   assert.equal(state.mosaicPreviewEnabled, false, "an unavailable worker disables the preview instead of leaving it pending");
 

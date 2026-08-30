@@ -3,41 +3,151 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+const counters = { bitmaps: 0, closed: 0, workers: 0, terminated: 0, workerCanvases: 0, peakWorkerCanvases: 0 };
 const draws = [];
-class Worker {
-  constructor() { this.onmessage = null; }
-  postMessage() {}
-  terminate() {}
+function bitmap(kind) {
+  counters.bitmaps += 1;
+  return { kind, close() { if (!this.closed) { this.closed = true; counters.closed += 1; } } };
 }
+
+class Worker {
+  constructor() { this.onmessage = null; this.renderJobs = []; this.renderWaiters = []; this.renderMasks = []; counters.workers += 1; }
+  postMessage(payload) {
+    if (payload.type === "source") {
+      this.source = payload.source; this.sourceId = payload.sourceId;
+      counters.workerCanvases += 1; counters.peakWorkerCanvases = Math.max(counters.peakWorkerCanvases, counters.workerCanvases);
+    }
+    if (payload.type === "render") {
+      this.renderMasks.push(payload.mask);
+      if (this.renderWaiters.length) this.renderWaiters.shift()(payload);
+      else this.renderJobs.push(payload);
+    }
+    if (payload.type === "release") this.release();
+  }
+  release() {
+    this.source?.close?.(); this.source = null;
+    if (this.hasCanvas) return;
+    if (this.sourceId !== undefined) { counters.workerCanvases -= 1; this.hasCanvas = true; }
+  }
+  terminate() { this.release(); this.terminated = true; counters.terminated += 1; }
+  nextRender() {
+    if (this.renderJobs.length) return Promise.resolve(this.renderJobs.shift());
+    return new Promise((resolve) => this.renderWaiters.push(resolve));
+  }
+  frame(job, sourceId = job.sourceId, generation = job.generation) {
+    job.mask.close?.();
+    const output = bitmap("output");
+    this.onmessage({ data: { type: "frame", sourceId, generation, output } });
+    return output;
+  }
+}
+
 const imageData = class ImageData {
   constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
 };
 const canvas = (width = 3840, height = 2160) => ({ width, height });
 const state = {
-  mosaicPreviewEnabled: true, currentImage: { width: 3840, height: 2160 }, mosaicPreviewGeneration: 0,
+  mosaicPreviewEnabled: true, currentImage: { width: 3840, height: 2160 }, currentId: "first", imageGeneration: 1, mosaicPreviewGeneration: 0,
   mosaicWorker: null, mosaicWorkerBusy: false, mosaicPending: false,
 };
+const previewButton = { classList: { remove() {} }, setAttribute() {} };
 const context = {
   Worker, ImageData: imageData, Uint8Array, Uint8ClampedArray, state,
-  createImageBitmap: async (image) => ({ ...image, close() {} }), OffscreenCanvas: class {},
+  createImageBitmap: async (image) => bitmap(image === state.currentImage ? "source" : "mask"), OffscreenCanvas: class {},
   requestAnimationFrame: () => 1,
   originalCanvas: canvas(), combinedCanvas: canvas(), mosaicCanvas: canvas(),
-  originalCtx: { clearRect() {}, drawImage() {} },
-  combinedCtx: {},
-  mosaicCtx: { clearRect() {}, drawImage: () => draws.push("preview") },
+  originalCtx: { clearRect() {}, drawImage() {} }, combinedCtx: {},
+  mosaicCtx: { clearRect() {}, drawImage: (image) => draws.push(image.kind) },
   calculatedBlockSize: () => 16, flushMaskComposition() {}, prepareOriginalImage() {}, render() {},
+  $: () => previewButton, showUserError() {},
 };
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: canvasPath });
+
 (async () => {
   await context.rebuildMosaicPreview();
   const worker = state.mosaicWorker;
-  state.mosaicPending = true; // A new 4K drag sample arrived while this frame ran.
-  worker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: { close() {} } } });
-  assert.deepEqual(draws, ["preview"], "the completed 4K frame is displayed before the queued update");
-  const staleFrame = { close() { this.closed = true; } };
-  state.mosaicWorker = null;
-  worker.onmessage({ data: { type: "frame", sourceId: "stale", generation: state.mosaicPreviewGeneration, output: staleFrame } });
-  assert.equal(staleFrame.closed, true, "a frame from a released worker closes its transferred bitmap");
+  const first = await worker.nextRender();
+  const staleGeneration = bitmap("stale-generation");
+  worker.onmessage({ data: { type: "frame", sourceId: first.sourceId, generation: first.generation - 1, output: staleGeneration } });
+  assert.equal(staleGeneration.closed, true, "an outdated frame is closed");
+  assert.equal(state.mosaicWorkerBusy, true, "an outdated frame cannot finish the active render");
+  const staleSource = bitmap("stale-source");
+  worker.onmessage({ data: { type: "frame", sourceId: "other", generation: first.generation, output: staleSource } });
+  assert.equal(staleSource.closed, true, "a source-mismatched frame is closed");
+  assert.equal(state.mosaicWorkerBusy, true, "a source-mismatched frame cannot finish the active render");
+
+  state.mosaicPending = true;
+  const pendingOutput = worker.frame(first);
+  assert.equal(pendingOutput.closed, true, "a pending frame is closed without drawing");
+  assert.deepEqual(draws, [], "a pending frame is never drawn");
+  const newest = await worker.nextRender();
+  const newestOutput = worker.frame(newest);
+  assert.equal(newestOutput.closed, true, "the newest frame is closed after drawing");
+  assert.deepEqual(draws, ["output"], "only the exact newest frame is drawn");
+
+  let resolveMask; let oldMask; let deferFirstMask = true; let signalMaskRequest;
+  const maskRequested = new Promise((resolve) => { signalMaskRequest = resolve; });
+  context.createImageBitmap = (image) => {
+    if (image === context.combinedCanvas && deferFirstMask) {
+      deferFirstMask = false;
+      oldMask = bitmap("old-mask"); signalMaskRequest();
+      return new Promise((resolve) => { resolveMask = () => resolve(oldMask); });
+    }
+    return Promise.resolve(bitmap("source"));
+  };
+  const deferredBuild = context.rebuildMosaicPreview();
+  await maskRequested;
+  context.requestMosaicPreview();
+  resolveMask();
+  await deferredBuild;
+  assert.equal(oldMask.closed, true, "a mask superseded while it is being captured is closed");
+  assert.equal(worker.renderMasks.includes(oldMask), false, "a superseded mask is never posted to the worker");
+  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
+  const replacementAfterCapture = await worker.nextRender();
+  worker.frame(replacementAfterCapture);
+
+  const throwingOutput = bitmap("throwing");
+  context.mosaicCtx.drawImage = () => { throw new Error("paint failed"); };
+  await context.rebuildMosaicPreview();
+  const throwingJob = await worker.nextRender();
+  throwingJob.mask.close?.();
+  worker.onmessage({ data: { type: "frame", sourceId: throwingJob.sourceId, generation: throwingJob.generation, output: throwingOutput } });
+  assert.equal(throwingOutput.closed, true, "a frame bitmap closes when canvas painting throws");
+  assert.equal(state.mosaicPreviewEnabled, false, "a failed canvas paint closes the preview instead of leaking a worker frame");
+  context.mosaicCtx.drawImage = (image) => draws.push(image.kind);
+
+  context.releaseMosaicPreview();
+  const releasedOutput = bitmap("released");
+  worker.onmessage({ data: { type: "frame", sourceId: newest.sourceId, generation: newest.generation, output: releasedOutput } });
+  assert.equal(releasedOutput.closed, true, "a released worker frame is closed");
+
+  const drawCountBeforeSoak = draws.length;
+  state.mosaicPreviewEnabled = true;
+  for (let index = 0; index < 100; index += 1) {
+    context.releaseMosaicPreview();
+    state.currentImage = { width: 3840, height: 2160, index }; state.currentId = `image-${index}`; state.imageGeneration = index + 2;
+    await context.rebuildMosaicPreview();
+    const activeWorker = state.mosaicWorker;
+    const stroke = await activeWorker.nextRender();
+    context.requestMosaicPreview(); context.requestMosaicPreview();
+    activeWorker.frame(stroke);
+    const undo = await activeWorker.nextRender();
+    context.requestMosaicPreview();
+    activeWorker.frame(undo);
+    const newestStroke = await activeWorker.nextRender();
+    activeWorker.frame(newestStroke);
+    assert.equal(state.mosaicWorkerBusy, false, "each switch drains its final frame");
+    assert.equal(state.mosaicPending, false, "each switch retains no pending frame");
+    assert.equal(state.mosaicInFlightGeneration, 0, "each switch clears its active generation");
+  }
+  assert.equal(draws.length - drawCountBeforeSoak, 100, "each image switch paints only its newest stroke or undo frame");
+  context.releaseMosaicPreview();
+  assert.equal(state.mosaicWorker, null, "release leaves no active worker handle");
+  assert.equal(counters.workerCanvases, 0, "all controlled worker canvas handles are reclaimed");
+  assert.equal(counters.workers, counters.terminated, "all controlled workers are terminated");
+  assert.equal(counters.closed, counters.bitmaps, "all source, mask, and output bitmaps are reclaimed");
+  assert.ok(counters.peakWorkerCanvases <= 1, "at most one worker canvas bundle is live");
+  assert.ok(counters.workers <= 102, "100 switches create a bounded number of workers");
   console.log("test_mosaic_preview_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
