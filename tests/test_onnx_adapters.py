@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 import os
-import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
@@ -49,16 +48,14 @@ class OnnxAdapterTests(unittest.TestCase):
                     patch.object(onnx_module.os, "add_dll_directory", return_value="empty"):
                 onnx_module._register_torch_dll_directory()
 
-    def test_onnx_import_preloads_dlls_when_torch_is_not_loaded(self) -> None:
-        previous_torch = sys.modules.pop("torch", None)
+    def test_onnx_preload_helper_respects_torch_and_runtime_availability(self) -> None:
         preload = Mock()
-        try:
-            with patch.object(onnx_module.ort, "preload_dlls", preload, create=True):
-                importlib.reload(onnx_module)
-            preload.assert_called_once_with()
-        finally:
-            if previous_torch is not None:
-                sys.modules["torch"] = previous_torch
+        runtime = SimpleNamespace(preload_dlls=preload)
+        onnx_module._preload_onnxruntime_dlls(runtime, {})
+        preload.assert_called_once_with()
+        onnx_module._preload_onnxruntime_dlls(runtime, {"torch": object()})
+        self.assertEqual(preload.call_count, 1)
+        onnx_module._preload_onnxruntime_dlls(SimpleNamespace(), {})
 
     def test_nms_keeps_highest_score_and_other_classes(self) -> None:
         boxes = [(0, 0, 10, 10), (1, 1, 9, 9), (20, 20, 30, 30)]

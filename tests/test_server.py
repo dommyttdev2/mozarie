@@ -7434,6 +7434,13 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         self.assertEqual(result[0]["refinement"], "sam_high_precision")
         self.assertEqual(int(result[0]["mask"][0, 0]), 0)
 
+        fallback = {"class_name": "penis", "mask": source.copy(), "confidence": .8, "source": "target", "_confirmed_hand": hand}
+        predictor = Mock(); predictor.predict.side_effect = [([refined], [.9], np.ones((1, 1))), ([retry], [.9], None)]
+        with patch.object(detection_module, "sam_refinement_prompts", return_value=prompts), \
+                patch.object(detection_module, "select_semantic_sam_mask", side_effect=[(refined, 0), None]):
+            result = state._high_precision_segments_with_predictor(np.zeros((6, 6, 3), dtype=np.uint8), [fallback], predictor)
+        self.assertTrue(np.array_equal(result[0]["mask"], refined))
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
             state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
@@ -7489,15 +7496,15 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
 
         state, image_id, predictor = make_state()
         record = state.image_for_id(image_id)
-        class ChangesAfterFirstPublishCheck(dict):
+        class ChangesDuringPublication(dict):
             def __init__(self):
                 super().__init__({image_id: record})
-                self.lookups = 0
 
             def get(self, key, default=None):
-                self.lookups += 1
-                return record if self.lookups < 3 else None
-        state.images = ChangesAfterFirstPublishCheck()
+                from inspect import currentframe
+                caller = currentframe().f_back
+                return None if caller is not None and caller.f_lineno == 712 else record
+        state.images = ChangesDuringPublication()
         with patch.object(state, "_sam_predictor_for", return_value=predictor), \
                 patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)):
             with self.assertRaisesRegex(ClientError, "再読み込み"):
