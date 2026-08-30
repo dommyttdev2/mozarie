@@ -86,6 +86,9 @@ class TranslationContractTests(unittest.TestCase):
             set(candidate.as_api_dict()),
             {"id", "labelToken", "confidence", "enabled", "color", "source", "origin", "refinement", "role", "forced"},
         )
+        for values in (("unknown", "auto", None), ("penis", "unknown", None), ("penis", "auto", "unknown")):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Candidate("invalid", values[0], .9, Path("mask.png"), source=values[1], refinement=values[2])
 
     def test_model_download_invalid_has_its_own_error_presentation(self) -> None:
         root = Path(__file__).resolve().parents[1]

@@ -139,9 +139,10 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
                 return None
 
         class SchemaView:
-            def __init__(self, db: sqlite3.Connection, *, bad_primary: bool = False, bad_foreign: bool = False) -> None:
+            def __init__(self, db: sqlite3.Connection, *, bad_primary: bool = False, bad_unique: bool = False, bad_foreign: bool = False) -> None:
                 self.db = db
                 self.bad_primary = bad_primary
+                self.bad_unique = bad_unique
                 self.bad_foreign = bad_foreign
                 self.catalog_info_calls = 0
 
@@ -154,6 +155,8 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
                     return rows
                 if self.bad_foreign and sql == "PRAGMA foreign_key_list(images)":
                     return []
+                if self.bad_unique and sql == "PRAGMA index_list(catalogs)":
+                    return []
                 return self.db.execute(sql)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -164,6 +167,8 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
                 tables = {str(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 with self.assertRaises(WorkspaceOpenError):
                     WorkspaceStore._validate_schema(SchemaView(db, bad_primary=True), tables)
+                with self.assertRaises(WorkspaceOpenError):
+                    WorkspaceStore._validate_schema(SchemaView(db, bad_unique=True), tables)
                 with self.assertRaises(WorkspaceOpenError):
                     WorkspaceStore._validate_schema(SchemaView(db, bad_foreign=True), tables)
             finally:
