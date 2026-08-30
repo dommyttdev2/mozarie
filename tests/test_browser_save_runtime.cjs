@@ -144,9 +144,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
+  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   const outputFiles = new Map();
@@ -168,7 +168,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle, state, window: browserWindow };
+  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, state, window: browserWindow };
 }
 
 async function runOutputDirectoryPermissionCases() {
@@ -190,6 +190,59 @@ async function runOutputDirectoryPermissionCases() {
   }
   runtime.state.outputDirectoryHandle = { async queryPermission() { throw new DOMException("denied", "SecurityError"); }, async requestPermission() { throw new Error("unreachable"); } };
   await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", "a browser permission exception uses the dedicated code");
+}
+
+function deferred() {
+  let resolve;
+  return { promise: new Promise((done) => { resolve = done; }), resolve };
+}
+
+async function runOutputPermissionSubmissionLockCases() {
+  const event = { preventDefault() {} };
+  const runtime = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.applyTargetIds = ["image-1"];
+  runtime.element('input[name="batchSaveMode"]:checked').value = "copy";
+  runtime.element("#applySuffix").value = "_locked";
+  const batchPermission = deferred();
+  let batchQueries = 0;
+  runtime.state.outputDirectoryHandle.queryPermission = async () => { batchQueries += 1; return batchPermission.promise; };
+  const firstBatch = runtime.startApplyFromDialog(event);
+  const secondBatch = runtime.startApplyFromDialog(event);
+  assert.equal(runtime.state.saveStarting, true, "batch locks synchronously before the output permission await");
+  assert.equal(batchQueries, 1, "a second batch submit does not duplicate the permission request");
+  batchPermission.resolve("granted");
+  await Promise.all([firstBatch, secondBatch]);
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending batch permission starts one save loop and one commit");
+  assert.equal(runtime.state.saveStarting, false, "a completed batch releases the preflight lock");
+
+  const retryPermission = deferred();
+  runtime.state.applyTargetIds = ["image-1"];
+  runtime.state.outputDirectoryHandle.queryPermission = async () => retryPermission.promise;
+  const deniedBatch = runtime.startApplyFromDialog(event);
+  retryPermission.resolve("denied");
+  await deniedBatch;
+  assert.equal(runtime.state.saveStarting, false, "a rejected batch permission releases the lock");
+  const commitsBeforeRetry = runtime.requests.filter((request) => request.path === "/api/save/commit").length;
+  runtime.state.outputDirectoryHandle.queryPermission = async () => "granted";
+  await runtime.startApplyFromDialog(event);
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, commitsBeforeRetry + 1, "a rejected batch permission can be retried");
+
+  const single = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  single.state.singleSave = { imageId: "image-1", divisor: 100, draft: null };
+  single.element('input[name="singleSaveMode"]:checked').value = "copy";
+  single.element("#singleSaveSuffix").value = "_locked";
+  single.element("#singleSaveDeleteOriginal").checked = false;
+  const singlePermission = deferred();
+  let singleQueries = 0;
+  single.state.outputDirectoryHandle.queryPermission = async () => { singleQueries += 1; return singlePermission.promise; };
+  const firstSingle = single.startSingleSave(event);
+  const secondSingle = single.startSingleSave(event);
+  assert.equal(single.state.saveStarting, true, "single save locks synchronously before the output permission await");
+  assert.equal(singleQueries, 1, "a second single-save submit does not duplicate the permission request");
+  singlePermission.resolve("granted");
+  await Promise.all([firstSingle, secondSingle]);
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending single-save permission starts one save loop and one commit");
+  assert.equal(single.state.saveStarting, false, "a completed single save releases the preflight lock");
 }
 
 async function runExclusiveWritableCases() {
@@ -759,6 +812,7 @@ async function runServerCopyRemovalCases() {
 
 (async () => {
   await runOutputDirectoryPermissionCases();
+  await runOutputPermissionSubmissionLockCases();
   await runSuccessCase();
   await runDraftBarrierBeforeDefaultApplyCase();
   await runStaleCommitCase();

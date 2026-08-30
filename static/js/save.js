@@ -103,13 +103,13 @@ function syncSingleSaveMode() {
   $("#singleSaveSuffixRow").hidden = !copying;
   $("#singleSaveDeleteOriginalRow").hidden = !copying;
   $("#singleSaveOutputDirectoryRow").hidden = !copying;
-  $("#singleSaveOverwriteMode").disabled = !canOverwrite || state.saving;
+  $("#singleSaveOverwriteMode").disabled = !canOverwrite || state.saving || state.saveStarting;
   $("#singleSaveOverwriteRow").classList.toggle("muted", !canOverwrite);
-  $("#singleSaveDeleteOriginal").disabled = !canDelete || state.saving;
+  $("#singleSaveDeleteOriginal").disabled = !canDelete || state.saving || state.saveStarting;
   if (!canDelete) $("#singleSaveDeleteOriginal").checked = false;
-  $("#singleSaveChooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.saving;
-  $("#singleSaveStartButton").disabled = state.saving || !image || (copying && !state.outputDirectoryHandle) || (!copying && !canOverwrite);
-  $("#singleSaveSettings").disabled = state.saving;
+  $("#singleSaveChooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
+  $("#singleSaveStartButton").disabled = state.saving || state.saveStarting || !image || (copying && !state.outputDirectoryHandle) || (!copying && !canOverwrite);
+  $("#singleSaveSettings").disabled = state.saving || state.saveStarting;
   renderOutputDirectory();
 }
 
@@ -130,7 +130,7 @@ async function openSingleSaveDialog(imageId = state.currentId) {
 }
 
 async function chooseSingleOutputDirectory() {
-  if (state.saving) return;
+  if (state.saving || state.saveStarting) return;
   try { await pickOutputDirectory(); setSingleSaveResult(""); }
   catch (error) { if (error?.name !== "AbortError") { setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveChooseOutputDirectoryButton")); } }
   syncSingleSaveMode();
@@ -174,24 +174,20 @@ async function startSingleSave(event) {
   event.preventDefault();
   const save = state.singleSave;
   const image = state.images.find((entry) => entry.id === save?.imageId);
-  if (!save || !image || state.saving || isBusy() || state.importing) return;
+  if (!save || !image || state.saving || state.saveStarting || isBusy() || state.importing) return;
   const mode = selectedSingleSaveMode(); const copying = mode === "copy";
   const deleteOriginal = copying && $("#singleSaveDeleteOriginal").checked;
   const suffix = $("#singleSaveSuffix").value;
   if (copying && !state.outputDirectoryHandle) return syncSingleSaveMode();
-  if (copying) {
-    try { await ensureOutputDirectoryPermission(); }
-    catch (error) {
-      setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true);
-      showUserError(error, $("#singleSaveStartButton"));
-      return;
-    }
-  }
-  if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
-  if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
-  state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
-  let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let sourceChanged = false;
+  state.saveStarting = true;
+  syncSingleSaveMode();
   try {
+    if (copying) await ensureOutputDirectoryPermission();
+    if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
+    if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
+    state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
+    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let sourceChanged = false;
+    try {
     const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false }) });
     entry = prepared.entries?.[0]; if (!entry) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
     const access = sourceAccessFor(save.imageId);
@@ -222,11 +218,14 @@ async function startSingleSave(event) {
     if (savedImage && state.currentId === save.imageId) await selectImage(save.imageId, true, { saveCurrentDraft: false });
     renderCatalogViews();
     setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${state.outputDirectoryHandle.name}/${output.name}` : t("apply.complete", { completed: 1 }));
-  } catch (error) {
-    if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
-    setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveStartButton"));
+    } catch (error) {
+      if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
+      setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveStartButton"));
+    } finally {
+      state.saving = false; updateActionButtons(); syncSingleSaveMode();
+    }
   } finally {
-    state.saving = false; updateActionButtons(); syncSingleSaveMode();
+    state.saveStarting = false; updateActionButtons(); syncSingleSaveMode();
   }
 }
 
@@ -681,46 +680,40 @@ function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.sta
 async function startApplyFromDialog(event) {
   event.preventDefault();
   const imageIds = [...state.applyTargetIds];
-  if (!imageIds.length || isBusy() || state.importing) return;
+  if (!imageIds.length || state.saveStarting || isBusy() || state.importing) return;
   const mode = selectedSaveMode();
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value;
-  if (copy) {
-    try { await ensureOutputDirectoryPermission(); }
-    catch (error) { showApplyError(error); return; }
-  }
-  if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
-  if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
-  // This lock is intentionally set before the first await. A second submit must never create
-  // another browser save loop while permissions or the output-directory picker are pending.
   state.saveStarting = true;
-  state.saving = true;
-  state.applyRunning = true;
-  state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
-  updateActionButtons();
+  syncApplyMode();
   try {
-    // Permission requests must begin while this submit is still a user action.
+    if (copy) await ensureOutputDirectoryPermission();
+    if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
+    if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
+    state.saving = true;
+    state.applyRunning = true;
+    state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
+    updateActionButtons();
     await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
-  } catch (error) {
-    showApplyError(error);
-    return finishSaveStart();
-  }
-  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
-  if (state.importing) return finishSaveStart();
-  try {
+    if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+    if (state.importing) return;
     await flushDraftSaves(imageIds);
     state.saveStarting = false;
     await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
   } catch (error) {
     showApplyError(error);
-    state.saving = false;
-    state.applyRunning = false;
-    state.applyCatalogSnapshot = null;
-    state.browserSave = null;
-    $("#applyPauseButton").hidden = true;
-    $("#applyCancelButton").hidden = true;
-    $("#applyCloseButton").hidden = false;
-    updateActionButtons();
+    if (!state.saveStarting) {
+      state.saving = false;
+      state.applyRunning = false;
+      state.applyCatalogSnapshot = null;
+      state.browserSave = null;
+      $("#applyPauseButton").hidden = true;
+      $("#applyCancelButton").hidden = true;
+      $("#applyCloseButton").hidden = false;
+      updateActionButtons();
+    }
+  } finally {
+    if (state.saveStarting) finishSaveStart();
   }
 }
 
