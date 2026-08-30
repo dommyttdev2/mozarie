@@ -126,7 +126,21 @@ function startFixtureServer() {
       settingsRequests.push(requestUrl.search);
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
-        const submittedSettings = JSON.parse(body);
+        const submitted = JSON.parse(body);
+        // The product accepts a focused settings patch for the output-folder
+        // picker as well as a complete settings form submission.
+        const submittedSettings = {
+          ...settings,
+          ...submitted,
+          general: { ...settings.general, ...(submitted.general || {}) },
+          models: { ...settings.models, ...(submitted.models || {}) },
+          display: { ...settings.display, ...(submitted.display || {}) },
+          importing: { ...settings.importing, ...(submitted.importing || {}) },
+          saving: { ...settings.saving, ...(submitted.saving || {}) },
+          detection: { ...settings.detection, ...(submitted.detection || {}) },
+          shortcuts: { ...settings.shortcuts, ...(submitted.shortcuts || {}) },
+          confirmations: { ...settings.confirmations, ...(submitted.confirmations || {}) },
+        };
         if (failNextSettingsSave) {
           failNextSettingsSave = false;
           response.writeHead(500, { "Content-Type": "application/json" });
@@ -1133,7 +1147,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await input("folderPath", "G:\\fixture");
   await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
   await click("pickFolder"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
-  await page.locator('.gallery-item[data-id="sample"]').click(); await page.waitForFunction(() => state.currentId === "sample" && state.currentImage);
+  // Folder loading replaces the thumbnail-backed bitmap; re-enter the same
+  // normal-size editor fixture before pointer-only controls continue.
+  await setupFixture();
 
   // Gallery/editor controls operate after a genuine gallery selection.
   for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
@@ -2681,6 +2697,7 @@ async function main() {
     });
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await browserSavePage.locator("#pickFolder").click();
       await browserSavePage.locator("#folderPath").fill("G:\\selected-folder");
       await browserSavePage.locator("#loadFolderButton").click();
       await browserSavePage.waitForFunction(() => state.images.length === 2);
