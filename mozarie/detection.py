@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 
 _SCENE_FLUID_TAGS = frozenset({"cum_on_breasts", "cum on fingers", "cum on ass"})
+_METADATA_FLUID_ANCHOR_RADIUS_PX = 120
+_METADATA_FLUID_ANCHOR_KERNEL_SIZE = _METADATA_FLUID_ANCHOR_RADIUS_PX * 2 + 1
 
 
 def _scene_fluid_tags(info: dict[str, Any]) -> frozenset[str]:
@@ -447,7 +449,10 @@ class DetectionMixin:
             search = np.maximum(search, np.asarray(mask > 0, dtype=np.uint8))
         search = np.maximum(search, np.asarray(hand_evidence > 0, dtype=np.uint8))
         if np.any(search):
-            search = cv2.dilate(search, np.ones((161, 161), dtype=np.uint8))
+            search = cv2.dilate(
+                search,
+                np.ones((_METADATA_FLUID_ANCHOR_KERNEL_SIZE, _METADATA_FLUID_ANCHOR_KERNEL_SIZE), dtype=np.uint8),
+            )
         if "cum_on_breasts" in scene_fluid_tags:
             for face in faces:
                 rows, columns = np.nonzero(np.asarray(face["mask"]) > 0)
