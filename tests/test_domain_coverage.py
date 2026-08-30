@@ -363,6 +363,10 @@ class HttpCoverageTests(unittest.TestCase):
         handler._json = Mock()
         handler._send_static("/../../secret")
         handler._json.assert_called_once()
+        handler = self.handler()
+        handler._binary = Mock()
+        handler._send_static("style.css")
+        self.assertEqual(handler._binary.call_args.args[1], "text/css")
         with patch("mozarie.http.LOGGER.warning") as warning:
             handler.log_message("%s", "bad")
             warning.assert_called_once()
