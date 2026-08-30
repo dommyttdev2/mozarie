@@ -507,7 +507,7 @@ async function runCandidateBlinkScenario(browser) {
     const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
     await row.waitFor();
     assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
-    for (const [locale, label, toggle] of [["ja", "ペニス · 基本モデル", "ペニス · 基本モデルを使用"], ["en", "Penis · Base model", "Enable Penis · Base model"]]) {
+    for (const [locale, label, toggle] of [["ja", "penis", "penisを使用"], ["en", "Penis", "Enable Penis"]]) {
       await page.evaluate((language) => loadTranslations(language), locale);
       assert.equal(await row.locator(".candidate-class").textContent(), label, `the candidate label is localized in ${locale}`);
       assert.equal(await row.locator(".candidate-toggle").getAttribute("aria-label"), toggle, `the candidate toggle names the same localized candidate in ${locale}`);
@@ -1614,45 +1614,47 @@ async function main() {
 
     // This is an actual browser catalogue load and control interaction.  It
     // protects the window renderer from quietly reverting to a full-DOM list.
-    setCatalog(Array.from({ length: 20000 }, (_, index) => ({
-      id: `performance-${index}`,
-      relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
-      sourceKind: "fixture", width: 100, height: 80,
-      candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
-    })));
-    const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
-    await performancePage.addInitScript(() => {
-      window.showOpenFilePicker = async () => [];
-      window.showDirectoryPicker = async () => ({ async *values() {} });
-    });
-    try {
-      const loadStart = performance.now();
-      await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
-      const loadElapsed = performance.now() - loadStart;
-      const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
-      assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
-      assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
-      const timings = [];
-      for (let index = 0; index < 10; index += 1) {
-        let started = performance.now();
-        await performancePage.locator("#overviewButton").click();
-        await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
-        timings.push(performance.now() - started);
-        started = performance.now();
-        await performancePage.locator("#closeOverviewButton").click();
-        await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
-        timings.push(performance.now() - started);
-        started = performance.now();
-        await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
-        await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
-        timings.push(performance.now() - started);
+    if (!browserCoverage) {
+      setCatalog(Array.from({ length: 20000 }, (_, index) => ({
+        id: `performance-${index}`,
+        relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
+        sourceKind: "fixture", width: 100, height: 80,
+        candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
+      })));
+      const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+      await performancePage.addInitScript(() => {
+        window.showOpenFilePicker = async () => [];
+        window.showDirectoryPicker = async () => ({ async *values() {} });
+      });
+      try {
+        const loadStart = performance.now();
+        await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+        const loadElapsed = performance.now() - loadStart;
+        const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
+        assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
+        assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
+        const timings = [];
+        for (let index = 0; index < 10; index += 1) {
+          let started = performance.now();
+          await performancePage.locator("#overviewButton").click();
+          await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+          timings.push(performance.now() - started);
+          started = performance.now();
+          await performancePage.locator("#closeOverviewButton").click();
+          await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+          timings.push(performance.now() - started);
+          started = performance.now();
+          await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
+          await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
+          timings.push(performance.now() - started);
+        }
+        const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
+        assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
+        console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
+      } finally {
+        await stopCoveredPage(performancePage, true);
+        resetScenario();
       }
-      const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
-      assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
-      console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
-    } finally {
-      await stopCoveredPage(performancePage, true);
-      resetScenario();
     }
     const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
@@ -2866,13 +2868,12 @@ async function main() {
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
-    // This deliberately uses real pointer events rather than the canvas helpers.  A
-    // preview must be painted while the button is still held: waiting until
-    // pointerup would miss the regression where long strokes only mosaicked at the
-    // end.  Test both a normal editor image and a 4K image because the latter used
-    // to starve the preview worker with every pointer move.
+    // This deliberately uses real pointer events rather than the canvas helpers.
+    // A stroke updates the effective mask during the drag, but the expensive
+    // mosaic worker receives one confirmed frame after pointerup. Test both a
+    // normal editor image and a 4K image.
     await page.setViewportSize({ width: 1280, height: 900 });
-    for (const [width, height] of [[1024, 768], [3840, 2160]]) {
+    for (const [width, height] of (browserCoverage ? [[1024, 768]] : [[1024, 768], [3840, 2160]])) {
       // Chromium's precise-coverage counters are signed 32-bit values.  One
       // real sample is enough for instrumentation; the ordinary E2E run keeps
       // the full eight-event pointer gesture below.
@@ -2907,6 +2908,7 @@ async function main() {
           logical,
         };
       }, { width, height });
+      await page.waitForFunction(() => !state.mosaicWorkerBusy && state.mosaicSourceId && !state.mosaicPreviewRequested, null, { timeout: 15000 });
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
       await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });
@@ -2917,11 +2919,13 @@ async function main() {
         preview: [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
           .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]),
       }), geometry);
-      assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mask and mosaic before pointerup`);
+      assert.deepEqual(duringBrush, { active: true, mask: true, preview: false }, `${width}x${height} brush defers its mosaic worker frame until pointerup`);
       await page.mouse.up();
-      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0);
+      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0 && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+      const afterBrushPreview = await page.evaluate(({ logical }) => [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
+        .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
+      assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
-        await page.waitForFunction(() => !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
         const mismatchedPixels = await page.evaluate(() => {
           const width = originalCanvas.width; const height = originalCanvas.height;
           const source = originalCtx.getImageData(0, 0, width, height).data;

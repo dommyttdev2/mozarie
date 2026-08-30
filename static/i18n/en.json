@@ -40,7 +40,7 @@
   "candidates.aria": "Mosaic processing",
   "candidates.count": "{count} ranges",
   "candidates.countWithManual": "{count} ranges including manual edits",
-  "candidates.label": "{className} · {source}{refinement}",
+  "candidates.label": "{className}",
   "candidateLabel.penis": "Penis",
   "candidateLabel.pussy": "Vulva",
   "candidateLabel.testicles": "Testicles",

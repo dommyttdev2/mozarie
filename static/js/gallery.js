@@ -159,6 +159,13 @@ function renderCatalog(scope, images, nodes, options) {
   return renderCatalogWindow(windowState);
 }
 
+function resetCatalogWindows() {
+  for (const windowState of catalogWindows.values()) {
+    windowState.focusId = null;
+    windowState.container.scrollTop = 0;
+  }
+}
+
 function scrollCatalogImage(scope, imageId, behavior = "auto") {
   const windowState = catalogWindows.get(scope); if (!windowState) return;
   const index = windowState.images.findIndex((image) => image.id === imageId); if (index < 0) return;

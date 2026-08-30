@@ -619,6 +619,7 @@ function resetCatalog(images, root) {
   state.candidateUpdateChains.clear(); state.candidateUpdateVersions.clear(); state.candidateDeleting.clear(); state.candidateBatchPending.clear();
   discardCatalogNodes(state.galleryNodes, $("#gallery"));
   discardCatalogNodes(state.overviewNodes, $("#overviewGrid"));
+  resetCatalogWindows();
   renderCatalogViews(); updateSelectionActionBar(); clearEditor();
 }
 

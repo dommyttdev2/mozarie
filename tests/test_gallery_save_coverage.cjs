@@ -93,7 +93,7 @@ function makeGalleryRuntime() {
     async selectImage(id) { selected.push(`image:${id}`); }, async setReviewed(image, value) { image.reviewed = value; return context.reviewResult; }, async setHidden(image, value) { image.hidden = value; return context.hideResult; },
   };
   context.reviewResult = true; context.hideResult = true;
-  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogMoveIndex };`;
+  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows };`;
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
   return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
@@ -157,6 +157,14 @@ async function galleryInteractions() {
   runtime.gallery.scrollTop = 152 * 120; runtime.renderGallery(true);
   assert.ok(state.galleryNodes.has("window-360"), "scrolling remounts the logical row at the new position");
   state.images = catalogImages; state.galleryFilter = "all"; runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
+
+  runtime.gallery.scrollTop = 999; runtime.overviewGrid.scrollTop = 555;
+  runtime.renderGallery(true); runtime.renderOverview(true);
+  runtime.resetCatalogWindows();
+  assert.equal(runtime.gallery.scrollTop, 0, "replacing a catalog returns the gallery to its first row");
+  assert.equal(runtime.overviewGrid.scrollTop, 0, "replacing a catalog returns the overview to its first row");
+  assert.equal(runtime.catalogWindows.get("gallery").focusId, null, "replacing a catalog clears its virtual gallery focus");
+  assert.equal(runtime.catalogWindows.get("overview").focusId, null, "replacing a catalog clears its virtual overview focus");
 
   assert.deepEqual([...runtime.overviewFolderOptions()], ["sets", "sets/sub"]);
   state.overviewFilter = "all"; state.overviewFolder = "sets"; state.overviewQuery = "two"; assert.deepEqual(runtime.overviewImages().map((image) => image.id), ["two"]);

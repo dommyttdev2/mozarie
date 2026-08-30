@@ -1,8 +1,5 @@
 function candidateLabel(candidate) {
-  const className = t(`candidateLabel.${candidate.labelToken}`);
-  const source = t(`candidateSource.${candidate.source}`);
-  const refinement = candidate.refinement ? ` · ${t(`candidateRefinement.${candidate.refinement}`)}` : "";
-  return t("candidates.label", { className, source, refinement });
+  return t(`candidateLabel.${candidate.labelToken}`);
 }
 
 function renderCandidates() {
@@ -590,10 +587,10 @@ function enableManualLayerForTool(tool) {
 function beginManualStroke(point) {
   enableManualLayerForTool(state.tool);
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }] };
+  state.mosaicPending = true;
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
-  flushMaskComposition(); requestMosaicPreview();
 }
 
 function appendManualStrokePoint(point) {
@@ -601,7 +598,6 @@ function appendManualStrokePoint(point) {
   const previous = state.activeStroke.points.at(-1);
   state.activeStroke.points.push({ ...point });
   drawStroke(previous, point, state.activeStroke.tool, state.activeStroke.size);
-  flushMaskComposition(); requestMosaicPreview();
 }
 
 function cancelManualStroke() {
@@ -665,6 +661,7 @@ function completeManualStroke() {
   trimHistory();
   state.historyIndex = state.history.length;
   state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+  flushMaskComposition();
   scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
   updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates();
