@@ -3702,7 +3702,9 @@ class MozarieTests(unittest.TestCase):
         with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, search: np.asarray(search, dtype=np.uint8) * 255) as fluid:
             searched = state = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum on fingers"}))
             self.assertTrue(np.any(searched)); self.assertGreater(np.count_nonzero(searched), np.count_nonzero(target | hand))
-            chest = self.new_state()._metadata_fluid_mask(rgb, [], np.zeros_like(target), [{"mask": face}], frozenset({"cum_on_breasts"}))
+            chest = self.new_state()._metadata_fluid_mask(
+                rgb, [], np.zeros_like(target), [{"mask": np.zeros_like(face)}, {"mask": face}], frozenset({"cum_on_breasts"}),
+            )
         self.assertEqual(fluid.call_count, 2)
         self.assertEqual(searched[250, 165], 255)
         self.assertTrue(np.any(chest[53:73, 135:165]))

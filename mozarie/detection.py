@@ -456,6 +456,8 @@ class DetectionMixin:
         if "cum_on_breasts" in scene_fluid_tags:
             for face in faces:
                 rows, columns = np.nonzero(np.asarray(face["mask"]) > 0)
+                if not rows.size:
+                    continue
                 top, bottom = int(rows.min()), int(rows.max()) + 1
                 left, right = int(columns.min()), int(columns.max()) + 1
                 width, height = right - left, bottom - top
