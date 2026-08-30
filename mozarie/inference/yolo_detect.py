@@ -43,9 +43,7 @@ class HandDetector(BaseOnnxModel):
         boxes: list[tuple[int, int, int, int]] = []
         scores: list[float] = []
         for row in rows:
-            if row.shape[0] < 5:
-                continue
-            # Mozarie accepts the fixed one-class xywh-plus-score export only.
+            # _prediction_rows has already validated the fixed xywh-plus-score layout.
             score = float(row[4])
             if score < confidence:
                 continue
