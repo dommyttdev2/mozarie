@@ -2939,6 +2939,7 @@ async function main() {
       assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "grabbing", `${width}x${height} middle-button panning alone uses grabbing`);
       await page.mouse.up({ button: "middle" });
       assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "default", `${width}x${height} ending a pan restores the standard pointer`);
+      await page.locator("#brushTool").click();
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
       await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });
