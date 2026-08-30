@@ -400,6 +400,22 @@ class SavingCoverageTests(unittest.TestCase):
         saving.browser_save_tokens["pending"] = type("Token", (), {"image_id": "x", "candidate_revision": 1})()
         self.assertEqual(saving.browser_save_status("x", 1, "pending", "keep"), {"state": "pending"})
 
+    def test_prepare_and_start_apply_snapshot_a_filesystem_record(self) -> None:
+        saving = SavingMixin()
+        saving.lock = threading.RLock(); saving.catalog_generation = 4
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            saving.settings = {"saving": {"default_output_directory": str(output), "parallelism": 3}}
+            record = image_io.ImageRecord("x", output / "source.png", "folder/source.png", 2, 2, 1, 1)
+            saving.images = {"x": record}
+            saving._records_for_ids_with_catalog = lambda _ids: ([record], 4)
+            saving._candidate_revision = lambda _image_id: 7
+            saving._start_job = Mock()
+            prepared = saving.prepare_browser_save(["x"], 2, "_censored", True)
+            self.assertEqual(prepared, [{"imageId": "x", "relativePath": "folder/source.png", "sourceKind": "filesystem", "candidateRevision": 7, "sourceAction": "deleted"}])
+            self.assertTrue(saving.start_apply(["x"], 2, {}, copy_to_default=True))
+            self.assertEqual(saving._start_job.call_args.args[0], "apply")
+
 
 class SettingsCoverageTests(unittest.TestCase):
     def test_settings_primitives_reject_invalid_values(self) -> None:
