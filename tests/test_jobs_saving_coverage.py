@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from mozarie.core import BrowserSaveReceipt, BrowserSaveToken, ClientError, ImageRecord, Job, JobControl
+from mozarie.core import BrowserSaveReceipt, BrowserSaveToken, ClientError, ImageRecord, Job, JobControl, SAVE_TOKEN_TTL_SECONDS
 from mozarie.domain import Candidate, CandidateRole
 from mozarie.jobs import JobsMixin
 from mozarie.saving import SavingMixin
@@ -334,7 +334,9 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._has_active_worker = lambda: True
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "active", "keep")
             state._has_active_worker = lambda: False
-            state.browser_save_tokens["expired"] = BrowserSaveToken(record.image_id, 1, (1, 1), 1, 0, None)
+            state.browser_save_tokens["expired"] = BrowserSaveToken(
+                record.image_id, 1, (1, 1), 1, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1, None
+            )
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "expired", "keep")
             state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, time.monotonic(), None)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "changed", "keep")
