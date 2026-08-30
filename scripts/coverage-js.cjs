@@ -24,6 +24,7 @@ const testFiles = [
   "tests/test_mosaic_preview_runtime.cjs",
   "tests/test_resources.cjs",
   "tests/test_workspace_runtime.cjs",
+  "tests/test_workspace_flush_runtime.cjs",
   "tests/test_workspace_flags_runtime.cjs",
   "tests/test_workspace_idb_runtime.cjs",
   "tests/test_ui_control_manifest.cjs",

@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "static", "js", "workspace.js"), "utf8");
+const workspacePath = path.join(__dirname, "..", "static", "js", "workspace.js");
+const source = fs.readFileSync(workspacePath, "utf8");
 const calls = [];
 let rejectFirst = false;
 const state = {
@@ -13,15 +14,15 @@ const state = {
 };
 const context = {
   state, Map, Set, Promise, Object, Number, encodeURIComponent, window: {}, indexedDB: undefined,
-  clearTimeout, setTimeout,
-  setStatus() {}, saveDraft() {},
+  clearTimeout, setTimeout, queueMicrotask,
+  setStatus() {}, showUserError() {}, saveDraft() {},
   api(url, options = {}) {
     calls.push([url, options.method]);
     if (rejectFirst) { rejectFirst = false; return Promise.reject(new Error("write failed")); }
     return Promise.resolve({});
   },
 };
-vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushAllWorkspaceMutations,queueWorkspaceMutation,workspaceDraftPayload};`, context);
+vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};`, context, { filename: workspacePath });
 
 (async () => {
   await context.workspaceTest.queueWorkspaceDraft("one", true);
@@ -68,5 +69,163 @@ vm.runInNewContext(`${source}\nglobalThis.workspaceTest={queueWorkspaceDraft,flu
   resolveSecond();
   await flush;
   assert.equal(resolved, true, "the flush completes after the stable replacement chain");
+
+  calls.length = 0;
+  await context.workspaceTest.queueWorkspaceFlags(null, { hidden: true });
+  await context.workspaceTest.queueWorkspaceFlags("one", { hidden: true });
+  assert.deepEqual(calls.at(-1), ["/api/workspace/image/one", "POST"], "workspace flags ignore an empty image and persist a present image");
+
+  calls.length = 0;
+  state.drafts.set("one", { add: "data:image/png;base64,a", hasEffectiveMask: true });
+  await context.workspaceTest.queueWorkspaceDraft("one");
+  assert.deepEqual(calls.at(-1), ["/api/workspace/manual/one", "POST"], "a delayed draft is persisted after its debounce");
+
+  calls.length = 0;
+  rejectFirst = true;
+  await context.workspaceTest.queueWorkspaceDraft("one");
+  assert.equal(calls.at(-1)[0], "/api/workspace/manual/one", "a delayed failure still attempts the manual write");
+  state.workspaceMutationErrors.delete("one");
+
+  calls.length = 0;
+  state.workspaceDraftTimers.set("one", setTimeout(() => {}, 5000));
+  state.drafts.set("one", { add: "data:image/png;base64,a", hasEffectiveMask: true });
+  await context.workspaceTest.flushWorkspaceDraft("one");
+  assert.equal(state.workspaceDraftTimers.has("one"), false, "flushing an image sends its pending timer immediately");
+
+  state.workspaceMutationErrors.set("one", new Error("stored failure"));
+  await assert.rejects(context.workspaceTest.flushWorkspaceDraft("one"), /stored failure/, "an image flush surfaces and consumes a remembered mutation failure");
+
+  calls.length = 0;
+  const loaded = await context.workspaceTest.loadWorkspaceDraft("one");
+  assert.equal(loaded, null, "loading an absent draft returns null");
+
+  state.currentId = null;
+  assert.equal(await context.workspaceTest.scheduleManualWorkspaceSave(), undefined, "no current image has no scheduled encoder");
+  state.currentId = "one";
+  let saved = 0;
+  context.saveDraft = () => { saved += 1; };
+  await context.workspaceTest.scheduleManualWorkspaceSave();
+  assert.equal(saved, 1, "the current manual edit is encoded on the next task");
+  context.saveDraft = () => { throw new Error("encode synchronously failed"); };
+  await assert.rejects(context.workspaceTest.scheduleManualWorkspaceSave(), /encode synchronously failed/, "a synchronous encoder failure rejects its scheduling chain");
+
+  const originalApi = context.api;
+  const originalIndexedDb = context.indexedDB;
+  const originalWindowIndexedDb = context.window.indexedDB;
+  let createdStores = 0;
+  const openedDb = { createObjectStore() { createdStores += 1; } };
+  context.indexedDB = context.window.indexedDB = {
+    open() {
+      const request = { result: openedDb };
+      queueMicrotask(() => { request.onupgradeneeded(); request.onsuccess(); });
+      return request;
+    },
+  };
+  assert.equal(await context.workspaceTest.directoryCatalogStore(), openedDb, "a directory database creates its store on first open and returns the opened database");
+  assert.equal(createdStores, 1, "the directory database owns one catalog object store");
+  context.indexedDB = context.window.indexedDB = {
+    open() {
+      const request = {};
+      queueMicrotask(() => request.onerror());
+      return request;
+    },
+  };
+  assert.equal(await context.workspaceTest.directoryCatalogStore(), null, "an IndexedDB open error disables optional directory persistence");
+  context.indexedDB = context.window.indexedDB = undefined;
+  assert.equal(await context.workspaceTest.directoryCatalogStore(), null, "browsers without IndexedDB keep folder import usable");
+
+  const sameEntry = { isSameEntry: async () => true };
+  const directoryEvents = [];
+  const existingDb = {
+    close() { directoryEvents.push("close-existing"); },
+    transaction() { return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "known", handle: sameEntry }] }; queueMicrotask(() => request.onsuccess()); return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: existingDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  context.api = async (_url, options) => JSON.parse(options.body).catalogId === "known" ? { catalogId: "known" } : { catalogId: "fresh" };
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "known", "a server-accepted remembered folder catalog is reused");
+  assert.deepEqual(directoryEvents, ["close-existing"], "a reused catalog closes its IndexedDB handle before returning");
+
+  context.api = async () => ({});
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), null, "a successful catalog activation without an ID returns no catalog instead of inventing one");
+
+  const brokenHandleDb = {
+    close() { directoryEvents.push("close-broken"); },
+    transaction() { return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "bad", handle: { isSameEntry: async () => { throw new Error("permission lost"); } } }] }; queueMicrotask(() => request.onsuccess()); return request; }, delete() { directoryEvents.push("delete-broken"); } }; } }; },
+  };
+  const writeDb = { close() { directoryEvents.push("close-write"); }, transaction() { return { objectStore() { return { put() { throw new Error("quota"); } }; } }; } };
+  let opens = 0;
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: opens++ ? writeDb : brokenHandleDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  context.api = async () => ({ catalogId: "fresh" });
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "fresh", "a broken remembered folder falls back to a new catalog even if optional persistence fails");
+  assert.ok(directoryEvents.includes("delete-broken") && directoryEvents.includes("close-write"), "a broken handle is discarded and a failed optional replacement write is closed");
+
+  const errorReadDb = {
+    close() { directoryEvents.push("close-read-error"); },
+    transaction() { return { objectStore() { return { getAll() { const request = {}; queueMicrotask(() => request.onerror()); return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: errorReadDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  context.api = async () => ({ catalogId: "from-read-error" });
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "from-read-error", "an unreadable directory cache creates a fresh server catalog");
+
+  const emptyReadDb = {
+    close() { directoryEvents.push("close-read-empty"); },
+    transaction() { return { objectStore() { return { getAll() { const request = { result: null }; queueMicrotask(() => request.onsuccess()); return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: emptyReadDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  context.api = async () => ({ catalogId: "from-empty-read" });
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "from-empty-read", "an empty IndexedDB read is treated as an empty catalog list");
+
+  const deletionFailureDb = {
+    close() { directoryEvents.push("close-delete-error"); },
+    transaction(_name, mode) {
+      if (mode === "readwrite") throw new Error("cache deletion blocked");
+      return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "expired", handle: sameEntry }] }; queueMicrotask(() => request.onsuccess()); return request; } }; } };
+    },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: deletionFailureDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  context.api = async (_url, options) => JSON.parse(options.body).catalogId === "expired" ? Promise.reject(new Error("server reset")) : ({ catalogId: "after-delete-error" });
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "after-delete-error", "a cache deletion failure still creates a fresh catalog");
+
+  context.indexedDB = context.window.indexedDB = undefined;
+  context.api = async () => ({});
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), null, "a server response without a catalog ID remains an explicit no-catalog result");
+
+  state.currentId = null; state.draftDirty = false; state.draftSaveChains.clear(); state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear(); state.workspaceDraftTimers.clear();
+  assert.equal(JSON.stringify(context.workspaceTest.workspaceDraftPayload({})), JSON.stringify({ add: "", exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: true, hasEffectiveMask: false, removedCandidateIds: [], candidateRevision: 0 }), "a partially initialized manual draft receives the persisted defaults");
+  await context.workspaceTest.flushDraftSaves(["one"]);
+  state.currentId = "one"; state.draftDirty = true;
+  let skippedDraftEncodes = 0;
+  context.saveDraft = () => { skippedDraftEncodes += 1; };
+  await context.workspaceTest.flushDraftSaves(["other"]);
+  assert.equal(skippedDraftEncodes, 0, "flushing another image does not encode the current draft");
+  state.currentId = null; state.draftDirty = false;
+  state.draftSaveChains.set("one", Promise.resolve().then(() => { throw new Error("draft encoding failed"); }));
+  await assert.rejects(context.workspaceTest.flushDraftSaves(["one"]), /draft encoding failed/, "a rejected encoded draft stops its dependent transition");
+  state.draftSaveChains.clear();
+
+  await context.workspaceTest.flushWorkspaceDraft("one");
+  assert.equal(state.workspaceDraftChains.has("one"), false, "an image with no pending server write flushes without creating one");
+  assert.equal(await context.workspaceTest.queueWorkspaceDraft("missing"), undefined, "a missing catalog image never schedules a manual write");
+  state.drafts.set("one", { add: "data:image/png;base64,a", hasEffectiveMask: true });
+  const debouncedOne = context.workspaceTest.queueWorkspaceDraft("one");
+  const debouncedTwo = context.workspaceTest.queueWorkspaceDraft("one");
+  await Promise.all([debouncedOne, debouncedTwo]);
+  assert.equal(state.workspaceDraftTimers.has("one"), false, "a replacement debounce clears its earlier timer before writing");
+
+  context.api = async () => ({});
+  state.currentId = null; state.draftDirty = false; state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear(); state.workspaceDraftTimers.clear(); state.drafts.set("one", {});
+  state.workspaceDraftTimers.set("one", setTimeout(() => {}, 5000));
+  assert.equal(state.workspaceDraftTimers.size, 1, "the global flush fixture begins with one pending timer");
+  const flushCalls = calls.length;
+  await context.workspaceTest.flushAllWorkspaceMutations();
+  assert.equal(state.workspaceDraftTimers.size, 0, "a global flush drains every pending workspace timer before a catalog transition");
+  assert.equal(calls.length, flushCalls + 1, "a global flush sends the pending manual workspace write");
+
+  state.workspaceDraftChains.set("one", Promise.resolve().then(() => { throw new Error("queued write failed"); }));
+  await assert.rejects(context.workspaceTest.flushAllWorkspaceMutations(), /queued write failed/, "a rejected queued mutation blocks a catalog transition");
+  state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear();
+  context.api = originalApi;
+  context.indexedDB = originalIndexedDb;
+  context.window.indexedDB = originalWindowIndexedDb;
   console.log("test_workspace_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -36,4 +36,7 @@ const transparent = render([30, 40, 50, 0], [255], 1, 1, 1, 8);
 assert.deepEqual([...transparent], [30, 40, 50, 0], "a fully transparent masked pixel does not invent an RGB colour");
 assert.equal(response.generation, 8, "each render returns its own generation");
 
+const untouched = render([1, 2, 3, 255, 4, 5, 6, 255], [0, 0], 2, 1, 2, 9);
+assert.deepEqual([...untouched], [1, 2, 3, 255, 4, 5, 6, 255], "an unmasked block remains unchanged");
+
 console.log("test_masked_mosaic_worker: passed");
