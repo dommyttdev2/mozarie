@@ -378,6 +378,52 @@ class HttpCoverageTests(unittest.TestCase):
             handler._stream_file(file, None, "application/octet-stream", "no-store")
         self.assertTrue(handler.close_connection)
 
+    def test_http_routes_dispatch_json_operations_without_a_live_server(self) -> None:
+        state = Mock()
+        state.settings = {"detection": {"threshold": .5, "parallelism": 1}}
+        state.set_root.return_value = [{"id": "x"}]
+        state.start_apply.return_value = True
+        state.request_pause.return_value.as_dict.return_value = {"state": "paused"}
+        handler = self.handler()
+        handler._require_json_request = Mock()
+        handler._client_error = Mock()
+        handler._json = Mock()
+        with patch("mozarie.http.STATE", state):
+            for path, payload in (
+                ("/api/folder", {"path": "C:/images"}),
+                ("/api/catalog/clear", {}),
+                ("/api/detect", {"imageIds": [], "confidence": .5, "parallelism": 1}),
+                ("/api/masks/clear", {"imageIds": []}),
+                ("/api/apply", {"imageIds": [], "divisor": 2, "drafts": {}}),
+                ("/api/job/pause", {}),
+            ):
+                with self.subTest(path=path):
+                    handler.path = path
+                    handler._read_json_body = Mock(return_value=payload)
+                    handler.do_POST()
+        state.set_root.assert_called_once_with("C:/images")
+        state.clear_catalog.assert_called_once()
+        state.start_detection.assert_called_once_with([], .5, 1)
+        state.clear_masks.assert_called_once_with([])
+        state.start_apply.assert_called_once()
+        state.request_pause.assert_called_once()
+
+    def test_http_delete_routes_dispatch_and_unknown_route_is_not_found(self) -> None:
+        state = Mock()
+        state.delete_candidate.return_value = True
+        state._candidate_revision.return_value = 3
+        handler = self.handler()
+        handler._require_mutation_request = Mock()
+        handler._json = Mock(); handler._client_error = Mock()
+        with patch("mozarie.http.STATE", state):
+            for path in ("/api/catalog/image/x", "/api/candidate/x/y", "/api/workspace/manual/x", "/api/unknown"):
+                with self.subTest(path=path):
+                    handler.path = path
+                    handler.do_DELETE()
+        state.remove_image_from_catalog.assert_called_once_with("x")
+        state.delete_candidate.assert_called_once_with("x", "y")
+        state.delete_manual_workspace.assert_called_once_with("x")
+
 
 class SavingCoverageTests(unittest.TestCase):
     def test_start_apply_and_browser_status_edge_states(self) -> None:
