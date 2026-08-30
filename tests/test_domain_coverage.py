@@ -65,7 +65,7 @@ from mozarie.model_downloads import (
     _sam_key,
 )
 from mozarie.jobs import JobsMixin
-from mozarie.http import MosaicHandler, _read_bool, _read_candidate_revision, _request_version, _route_ids
+from mozarie.http import MosaicHandler, _pick_model_file, _read_bool, _read_candidate_revision, _request_version, _route_ids, _run_native_picker
 from mozarie.saving import SavingMixin
 from mozarie.core import BrowserSaveReceipt
 
@@ -357,6 +357,28 @@ class HttpCoverageTests(unittest.TestCase):
                 _read_candidate_revision(value)
         with self.assertRaises(ClientError): _read_bool("true", "flag")
         self.assertTrue(_read_bool(True, "flag"))
+
+    def test_native_picker_rejects_busy_missing_and_invalid_results(self) -> None:
+        state = MagicMock()
+        state.native_picker_lock.acquire.return_value = False
+        with self.assertRaises(ClientError):
+            _run_native_picker("", {}, failed_message="failed", busy_message="busy", state=state)
+        state = MagicMock(); state.native_picker_lock.acquire.return_value = True
+        with patch("mozarie.http.Path.is_file", return_value=False):
+            with self.assertRaises(ClientError):
+                _run_native_picker("", {}, failed_message="failed", busy_message="busy", state=state)
+        state.native_picker_lock.release.assert_called_once()
+        state = MagicMock(); state.native_picker_lock.acquire.return_value = True
+        completed = type("Result", (), {"returncode": 0, "stdout": b"not-base64"})()
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=completed):
+            with self.assertRaises(ClientError):
+                _run_native_picker("$x=1", {}, failed_message="failed", busy_message="busy", state=state)
+        state = MagicMock(); state.native_picker_lock.acquire.return_value = True
+        completed = type("Result", (), {"returncode": 0, "stdout": b""})()
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=completed):
+            self.assertIsNone(_run_native_picker("$x=1", {}, failed_message="failed", busy_message="busy", state=state))
+        with self.assertRaises(ClientError):
+            _pick_model_file("unknown", state=MagicMock())
 
     def test_http_static_log_and_stream_disconnect_paths(self) -> None:
         handler = self.handler()
