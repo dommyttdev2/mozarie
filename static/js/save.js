@@ -179,6 +179,14 @@ async function startSingleSave(event) {
   const deleteOriginal = copying && $("#singleSaveDeleteOriginal").checked;
   const suffix = $("#singleSaveSuffix").value;
   if (copying && !state.outputDirectoryHandle) return syncSingleSaveMode();
+  if (copying) {
+    try { await ensureOutputDirectoryPermission(); }
+    catch (error) {
+      setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true);
+      showUserError(error, $("#singleSaveStartButton"));
+      return;
+    }
+  }
   if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
   if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
   state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
@@ -264,10 +272,7 @@ async function pickOutputDirectory() {
     }
     outputDirectoryPickRequest = window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" })
       .then(async (handle) => {
-        const permission = await handle.queryPermission?.({ mode: "readwrite" });
-        if (permission && permission !== "granted" && await handle.requestPermission?.({ mode: "readwrite" }) !== "granted") {
-          const error = new Error("output_folder_unavailable"); error.code = "output_folder_unavailable"; throw error;
-        }
+        await ensureOutputDirectoryPermission(handle);
         state.outputDirectoryHandle = handle;
         await rememberOutputDirectoryHandle(handle);
         renderOutputDirectory();
@@ -279,6 +284,17 @@ async function pickOutputDirectory() {
       });
   }
   return outputDirectoryPickRequest;
+}
+
+async function ensureOutputDirectoryPermission(handle = state.outputDirectoryHandle) {
+  if (!handle) throw codedError("output_permission_denied");
+  try {
+    const options = { mode: "readwrite" };
+    let permission = await handle.queryPermission(options);
+    if (permission === "prompt") permission = await handle.requestPermission(options);
+    if (permission === "granted") return handle;
+  } catch {}
+  throw codedError("output_permission_denied");
 }
 
 async function chooseOutputDirectory() {
@@ -669,6 +685,10 @@ async function startApplyFromDialog(event) {
   const mode = selectedSaveMode();
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value;
+  if (copy) {
+    try { await ensureOutputDirectoryPermission(); }
+    catch (error) { showApplyError(error); return; }
+  }
   if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
   if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
   // This lock is intentionally set before the first await. A second submit must never create

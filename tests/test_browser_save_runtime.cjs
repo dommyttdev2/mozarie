@@ -144,14 +144,16 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
+  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   const outputFiles = new Map();
   state.outputDirectoryHandle = {
     name: "output",
+    async queryPermission() { return "granted"; },
+    async requestPermission() { return "granted"; },
     async getFileHandle(name, options = {}) {
       if (!options.create && !outputFiles.has(name)) throw new DOMException("missing", "NotFoundError");
       if (!outputFiles.has(name)) outputFiles.set(name, []);
@@ -166,7 +168,28 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
   };
-  return { elements, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle, state, window: browserWindow };
+  return { elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle, state, window: browserWindow };
+}
+
+async function runOutputDirectoryPermissionCases() {
+  const runtime = createRuntime({ commit: () => jsonResponse({}) });
+  const calls = [];
+  runtime.state.outputDirectoryHandle = {
+    async queryPermission(options) { calls.push(["query", options.mode]); return "prompt"; },
+    async requestPermission(options) { calls.push(["request", options.mode]); return "granted"; },
+  };
+  await runtime.ensureOutputDirectoryPermission();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["query", "readwrite"], ["request", "readwrite"]], "a restored output directory requests read/write access from the save click");
+
+  for (const result of ["denied", "prompt"]) {
+    runtime.state.outputDirectoryHandle = {
+      async queryPermission() { return result; },
+      async requestPermission() { return result; },
+    };
+    await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", `${result} output permission stops saving with the dedicated code`);
+  }
+  runtime.state.outputDirectoryHandle = { async queryPermission() { throw new DOMException("denied", "SecurityError"); }, async requestPermission() { throw new Error("unreachable"); } };
+  await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", "a browser permission exception uses the dedicated code");
 }
 
 async function runExclusiveWritableCases() {
@@ -735,6 +758,7 @@ async function runServerCopyRemovalCases() {
 }
 
 (async () => {
+  await runOutputDirectoryPermissionCases();
   await runSuccessCase();
   await runDraftBarrierBeforeDefaultApplyCase();
   await runStaleCommitCase();

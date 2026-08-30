@@ -2992,7 +2992,15 @@ async function main() {
         return originalFetch(...args);
       };
       window.showOpenFilePicker = async () => { window.__ledgerPickers.files += 1; return []; };
-      window.showDirectoryPicker = async () => { window.__ledgerPickers.directory += 1; return { async *values() {} }; };
+      window.showDirectoryPicker = async () => {
+        window.__ledgerPickers.directory += 1;
+        return {
+          name: "ledger-output",
+          async queryPermission() { return "granted"; },
+          async requestPermission() { return "granted"; },
+          async *values() {},
+        };
+      };
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { window.__ledgerClipboardWrites += 1; } } });
     });
     holdDetection(true);
@@ -3012,10 +3020,12 @@ async function main() {
     await browserSavePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
       const files = new Map([["sample_検証.png", new Uint8Array([0])]]);
-      window.__singleSaveFiles = files;
-      window.showDirectoryPicker = async () => ({
+      let outputPermission = "prompt";
+      const permissionCalls = [];
+      const outputHandle = {
         name: "fixture-output",
-        async queryPermission() { return "granted"; },
+        async queryPermission(options) { permissionCalls.push(["query", options.mode]); return outputPermission; },
+        async requestPermission(options) { permissionCalls.push(["request", options.mode]); if (outputPermission === "prompt") outputPermission = "granted"; return outputPermission; },
         async getFileHandle(name, options = {}) {
           if (!options.create && !files.has(name)) throw new DOMException("missing", "NotFoundError");
           if (!files.has(name)) files.set(name, new Uint8Array());
@@ -3028,7 +3038,31 @@ async function main() {
           } };
         },
         async removeEntry(name) { files.delete(name); },
-      });
+      };
+      window.__outputPermission = {
+        calls: permissionCalls,
+        set(value) { outputPermission = value; },
+      };
+      const outputStore = {
+        get(key) {
+          const request = {};
+          queueMicrotask(() => { request.result = key === "output-directory" ? { handle: outputHandle } : undefined; request.onsuccess?.(); });
+          return request;
+        },
+        put() {},
+      };
+      Object.defineProperty(window, "indexedDB", { configurable: true, value: {
+        open() {
+          const request = {};
+          queueMicrotask(() => {
+            request.result = { transaction() { return { objectStore() { return outputStore; } }; }, close() {} };
+            request.onsuccess?.();
+          });
+          return request;
+        },
+      }});
+      window.__singleSaveFiles = files;
+      window.showDirectoryPicker = async () => outputHandle;
     });
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
@@ -3049,21 +3083,27 @@ async function main() {
       await browserSavePage.waitForFunction(() => !document.querySelector("#saveButton").disabled);
       await browserSavePage.locator("#saveButton").click();
       await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
-      assert.equal(await browserSavePage.locator("#singleSaveStartButton").isDisabled(), true, "single copy requires an explicitly granted browser output directory");
-      await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
       await browserSavePage.waitForFunction(() => state.outputDirectoryHandle?.name === "fixture-output");
+      assert.equal(await browserSavePage.locator("#singleSaveStartButton").isDisabled(), false, "a restored output directory is available until its save-click permission check");
+      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls), [], "restoring the IndexedDB handle does not prompt before a save click");
       await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveOutputDirectoryStatus").textContent.includes("fixture-output"));
-      assert.match(await browserSavePage.locator("#singleSaveOutputDirectoryStatus").textContent(), /fixture-output/, "the single-save picker updates its own visible destination");
+      assert.match(await browserSavePage.locator("#singleSaveOutputDirectoryStatus").textContent(), /fixture-output/, "the restored output directory updates its visible destination");
       await browserSavePage.locator("#singleSaveCopyMode").check();
       await browserSavePage.locator("#singleSaveSuffix").fill("_検証");
       await browserSavePage.locator("#singleSaveDeleteOriginal").check();
       await browserSavePage.locator("#singleSaveStartButton").click();
+      await browserSavePage.waitForFunction(() => window.__outputPermission.calls.length === 2);
+      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls), [["query", "readwrite"], ["request", "readwrite"]], "single save requests read/write access from the restored handle in its click chain");
       await browserSavePage.locator("#confirmAccept").click();
       await browserSavePage.waitForFunction(() => state.saving, null, { timeout: 5000 });
       await browserSavePage.waitForFunction(() => !state.saving && state.images.find((image) => image.id === "sample")?.reviewed, null, { timeout: 5000 });
       assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "single copy-and-delete drives prepare, render, and commit in order");
       assert.equal(await browserSavePage.evaluate(() => window.__singleSaveFiles.has("sample_検証_1.png")), true, "single save keeps Unicode suffixes and avoids an existing output name");
       assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: true }, "single save reloads and reviews the current image without changing the catalogue");
+      await browserSavePage.evaluate(() => window.__outputPermission.set("prompt"));
+      await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
+      await browserSavePage.waitForFunction(() => window.__outputPermission.calls.length === 4);
+      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls.slice(-2)), [["query", "readwrite"], ["request", "readwrite"]], "a newly selected output directory uses the same explicit permission check");
     } finally {
       await stopCoveredPage(browserSavePage, true);
     }

@@ -401,12 +401,10 @@ class DetectionMixin:
             return segments
 
         final_masks = [np.asarray(segment["mask"] > 0, dtype=np.uint8) for segment in targets]
-        apply_union = np.maximum.reduce(final_masks)
-        hand_evidence = np.zeros(shape, dtype=np.uint8)
-        for segment in segments:
-            for kind, mask in dict(segment.get("image_exclusions", {})).items():
-                if kind == "hand":
-                    hand_evidence = np.maximum(hand_evidence, np.asarray(mask > 0, dtype=np.uint8))
+        hand_evidence = np.maximum.reduce([
+            np.asarray(segment.get("image_exclusions", {}).get("hand", np.zeros(shape)) > 0, dtype=np.uint8)
+            for segment in targets
+        ])
 
         safe_hand = np.zeros(shape, dtype=np.uint8)
         unsafe_targets = np.zeros(shape, dtype=np.uint8)
@@ -424,19 +422,11 @@ class DetectionMixin:
                 if np.any(final_mask):
                     fluid_union = np.maximum(fluid_union, white_fluid_mask(rgb, final_mask))
 
-        # A hand is useful only where it passes the same per-target safety gate
-        # as the old destructive refinement.  Keep just one image-wide EXCLUDE;
-        # an unsafe overlapping target must not reintroduce the hand via another
-        # safe target.
-        for segment in segments:
-            image_exclusions = dict(segment.get("image_exclusions", {}))
-            image_exclusions.pop("hand", None)
-            segment["image_exclusions"] = {
-                kind: np.where(apply_union > 0, np.asarray(mask, dtype=np.uint8), 0).astype(np.uint8)
-                for kind, mask in image_exclusions.items()
-            }
-            if segment.get("class_name") in DETECTED_TARGET_CLASSES:
-                segment["exclusions"] = {}
+        # Publish just the reviewable hand and fluid exclusions for final
+        # targets. Other detector segments do not participate in APPLY.
+        for segment in targets:
+            segment["image_exclusions"] = {}
+            segment["exclusions"] = {}
         if np.any(safe_hand):
             targets[0]["image_exclusions"]["hand"] = safe_hand
         if np.any(fluid_union):
