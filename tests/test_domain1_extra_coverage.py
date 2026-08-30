@@ -84,6 +84,19 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.hydrate_candidates_bulk([image_id], root / "cache", lambda *_: None)
 
+    def test_restored_candidate_keeps_its_durable_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _catalog_id, image_id = self.make_store(root)
+            mask_path = root / "candidate.png"
+            mask_path.write_bytes(png())
+            candidate = Candidate("candidate", "penis", .8, mask_path)
+            store.commit_candidate_state(image_id, 1, [candidate], True, replace=True)
+            mask_path.unlink()
+            candidate.enabled = False
+            store.commit_candidate_state(image_id, 2, [candidate], True, replace=True)
+            self.assertEqual(store.candidate_png(image_id, "candidate"), png())
+
 
 class StateCatalogExtraCoverageTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -119,6 +132,24 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
                 self.state.diagnose_gpu_runtime()
             self.assertEqual(context.exception.error_code, "gpu_unavailable")
         self.assertEqual(self.state.reset_settings()["models"]["provider"], self.state.settings["models"]["provider"])
+
+    def test_stale_session_cleanup_does_not_touch_live_imports(self) -> None:
+        session_root = self.root / "sessions"
+        stale = session_root / "session-old"
+        stale.mkdir(parents=True)
+        old = 1
+        import os
+        os.utime(stale, (old, old))
+        fresh = session_root / "session-fresh"
+        fresh.mkdir()
+        self.state._cleanup_stale_sessions()
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+        imports = self.state._ensure_session()
+        self.assertEqual(self.state._ensure_session(), imports)
+        detached = self.state._detach_session_unchecked()
+        self.state._release_detached_session(detached)
+        self.assertFalse(imports.exists())
 
     def test_catalogue_guards_and_candidate_bulk_state(self) -> None:
         image_id = self.add_image()
