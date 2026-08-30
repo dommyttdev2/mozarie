@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import builtins
+import threading
+import io
+from email.message import Message
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +64,8 @@ from mozarie.model_downloads import (
     _HttpsOnlyRedirects,
     _sam_key,
 )
+from mozarie.jobs import JobsMixin
+from mozarie.http import MosaicHandler, _read_bool, _read_candidate_revision, _request_version, _route_ids
 
 
 class GeometryAndMaskCoverageTests(unittest.TestCase):
@@ -261,6 +266,111 @@ class ImageIoCoverageTests(unittest.TestCase):
         with patch.object(Path, "unlink", side_effect=OSError("locked")), patch("mozarie.image_io.LOGGER.warning") as warning:
             image_io._remove_incomplete_backup(Path("C:/locked"))
             warning.assert_called_once()
+
+
+class JobsCoverageTests(unittest.TestCase):
+    def make_jobs(self) -> JobsMixin:
+        jobs = JobsMixin()
+        jobs.lock = threading.RLock()
+        jobs.import_lock = threading.Lock()
+        jobs.settings = {"models": {"provider": "gpu", "gpu_device": 0}}
+        jobs.job = __import__("mozarie.core", fromlist=["Job"]).Job()
+        jobs.job_control = None
+        jobs.order = []
+        jobs.images = {}
+        jobs.candidates = {}
+        jobs.catalog_generation = 1
+        jobs.image_io_lock = lambda _image_id: threading.RLock()
+        return jobs
+
+    def test_jobs_reject_invalid_controls_and_selected_records(self) -> None:
+        jobs = self.make_jobs()
+        self.assertFalse(jobs._is_gpu_out_of_memory(MemoryError()))
+        torch = Mock(); torch.cuda.is_available.return_value = False
+        jobs._empty_selected_gpu_cache(torch, 0)
+        torch.cuda.empty_cache.assert_not_called()
+        with self.assertRaises(ClientError): jobs.request_pause()
+        with self.assertRaises(ClientError): jobs.resume_job()
+        with self.assertRaises(ClientError): jobs.request_cancel()
+        for ids in ("bad", ["x", "x"], []):
+            with self.subTest(ids=ids), self.assertRaises(ClientError):
+                jobs._records_for_ids(ids)
+        with self.assertRaises(ClientError):
+            jobs._records_for_ids_with_catalog("bad")
+        jobs.import_lock.acquire()
+        try:
+            with self.assertRaises(ClientError):
+                jobs._start_job("detect", [], lambda *_args: None)
+        finally:
+            jobs.import_lock.release()
+        with self.assertRaises(ClientError):
+            jobs.combined_candidate_mask("missing")
+
+    def test_jobs_gpu_oom_recovery_and_success_current_guard(self) -> None:
+        jobs = self.make_jobs()
+        jobs.inference_lock = threading.RLock()
+        jobs.sam_lock = threading.RLock()
+        jobs.sam_predictor = None; jobs.sam_image_id = None
+        jobs.hand_segmentation_predictor = None; jobs.hand_segmentation_image_id = None
+        jobs.models = object(); jobs.hand_model = object()
+        with patch.object(jobs, "_release_gpu_cache") as release:
+            error = jobs.recover_gpu_oom_for_request(RuntimeError("CUDA out of memory"))
+        self.assertEqual(error.error_code, "gpu_out_of_memory")
+        release.assert_called_once()
+        jobs._job_is_current = lambda *_args: False
+        jobs._record_job_success(0, "image", "out.png")
+        self.assertEqual(jobs.job.outputs, [])
+
+
+class HttpCoverageTests(unittest.TestCase):
+    def handler(self, payload: bytes = b"", content_length: str | None = None) -> MosaicHandler:
+        handler = object.__new__(MosaicHandler)
+        handler.headers = Message()
+        if content_length is not None:
+            handler.headers["Content-Length"] = content_length
+        handler.rfile = io.BytesIO(payload)
+        handler.wfile = io.BytesIO()
+        handler.close_connection = False
+        return handler
+
+    def test_http_body_and_route_validators_cover_invalid_and_valid_forms(self) -> None:
+        for length, payload in ((None, b""), ("0", b""), ("3", b"[1]"), ("3", b"bad")):
+            with self.subTest(length=length, payload=payload), self.assertRaises(ClientError):
+                self.handler(payload, length)._read_json_body()
+        self.assertEqual(self.handler(b'{"x":1}', "7")._read_json_body(), {"x": 1})
+        for length in (None, "0"):
+            with self.subTest(length=length), self.assertRaises(ClientError):
+                self.handler(b"x", length)._read_binary_body_to_file()
+        self.assertEqual(_request_version(""), None)
+        for query in ("v=", "v=1&v=2"):
+            with self.subTest(query=query), self.assertRaises(ClientError):
+                _request_version(query)
+        self.assertEqual(_request_version("v=42"), "42")
+        for path in ("/api/masks/x", "/api/masks//y", "/api/masks/x/y/z"):
+            with self.subTest(path=path), self.assertRaises(ClientError):
+                _route_ids(path, "/api/masks/")
+        self.assertEqual(_route_ids("/api/masks/x/y", "/api/masks/"), ("x", "y"))
+        for value in (True, -1, "1"):
+            with self.subTest(value=value), self.assertRaises(ClientError):
+                _read_candidate_revision(value)
+        with self.assertRaises(ClientError): _read_bool("true", "flag")
+        self.assertTrue(_read_bool(True, "flag"))
+
+    def test_http_static_log_and_stream_disconnect_paths(self) -> None:
+        handler = self.handler()
+        handler._json = Mock()
+        handler._send_static("/../../secret")
+        handler._json.assert_called_once()
+        with patch("mozarie.http.LOGGER.warning") as warning:
+            handler.log_message("%s", "bad")
+            warning.assert_called_once()
+        handler = self.handler()
+        handler.send_response = Mock(side_effect=BrokenPipeError())
+        handler.send_header = Mock(); handler.end_headers = Mock()
+        with tempfile.NamedTemporaryFile() as file:
+            file.write(b"image"); file.flush(); file.seek(0)
+            handler._stream_file(file, None, "application/octet-stream", "no-store")
+        self.assertTrue(handler.close_connection)
 
 
 class SettingsCoverageTests(unittest.TestCase):
