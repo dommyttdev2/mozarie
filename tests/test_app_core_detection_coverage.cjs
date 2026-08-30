@@ -98,7 +98,7 @@ async function testApplicationStartupPaths() {
   };
   for (const name of [
     "saveSettings", "syncProviderSelection", "handleToolRailKeydown", "loadFolder", "saveAll", "saveCurrent",
-    "startDetectionFromDialog", "startApplyFromDialog", "chooseOutputDirectory", "importDroppedFiles", "cancelBoundary",
+    "startDetectionFromDialog", "startApplyFromDialog", "startSingleSave", "chooseSingleOutputDirectory", "syncSingleSaveMode", "rememberedOutputDirectoryHandle", "renderOutputDirectory", "chooseOutputDirectory", "importDroppedFiles", "cancelBoundary",
     "restoreSnapshot", "copyContextMenuImagePath", "modelDownloadPoll", "fitImage", "refreshApplyTargets",
   ]) context[name] = () => {};
   context.toolRailItems = () => [];

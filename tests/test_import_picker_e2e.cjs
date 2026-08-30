@@ -2205,7 +2205,7 @@ async function main() {
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
     await page.evaluate(() => { state.maskStatus.set(state.currentId, true); updateActionButtons(); });
-    await page.locator("#saveButton").click();
+    await page.locator("#saveAllButton").click();
     await page.locator("#applySuffix").fill("_qa");
     await page.locator("#applyStartButton").click();
     await page.waitForFunction(() => state.applyRunning && state.saving);

@@ -114,16 +114,16 @@ vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,render
   await context.settingsTest.saveSettings({ preventDefault() {} });
   assert.equal(errors.at(-1)[0].code, "input_invalid", "saving rejects duplicate shortcut bindings before sending settings");
 
-  context.pickOutputDirectory = async () => "G:\\output";
+  context.pickOutputDirectory = async () => { state.outputDirectoryHandle = { name: "output" }; return state.outputDirectoryHandle; };
   await context.settingsTest.chooseSettingsOutputDirectory();
-  assert.equal(element("#settingsDefaultOutputDirectory").value, "G:\\output", "choosing an output directory writes the selected path");
+  assert.equal(element("#settingsDefaultOutputDirectory").value, "", "choosing an output directory keeps the configured path separate from its browser-only handle");
   context.pickOutputDirectory = async () => { throw Object.assign(new Error("cancel"), { name: "AbortError" }); };
   const errorsBeforeCancel = errors.length;
   await context.settingsTest.chooseSettingsOutputDirectory();
   assert.equal(errors.length, errorsBeforeCancel, "cancelling the native picker is silent");
   context.pickOutputDirectory = async () => { throw new Error("unavailable"); };
   await context.settingsTest.chooseSettingsOutputDirectory();
-  assert.equal(errors.at(-1)[0], "output_folder_unavailable", "a real output picker failure uses the localized folder error");
+  assert.equal(errors.at(-1)[0].message, "unavailable", "a real output picker failure reaches the shared localized error presenter");
 
   const railEvent = { target: element("#brushTool"), key: "ArrowRight", preventDefault() { this.prevented = true; } };
   context.settingsTest.handleToolRailKeydown(railEvent);
