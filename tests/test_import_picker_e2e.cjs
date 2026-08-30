@@ -2980,7 +2980,7 @@ async function main() {
         await page.evaluate(() => {
           const samples = []; let started = 0; let pendingMax = 0; const canvas = document.querySelector("#editorCanvas");
           const begin = (event) => { if (window.__editorPerf.recording && (event.buttons & 1)) started = performance.now(); };
-          const end = () => { if (window.__editorPerf.recording && started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
+          const end = () => { if (window.__editorPerf.recording && started) samples.push(performance.now() - started); started = 0; pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
           window.__editorPerf = { samples, pendingMax, recording: false, begin, end, heapBefore: performance.memory?.usedJSHeapSize ?? null };
           canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
         });
@@ -2998,8 +2998,9 @@ async function main() {
           const toolMetric = await page.evaluate(() => {
             const value = window.__editorPerf; value.recording = false;
             const samples = [...value.samples].sort((left, right) => left - right);
-            return { drag: samples.reduce((total, duration) => total + duration, 0), p95: samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0 };
+            return { count: samples.length, drag: samples.reduce((total, duration) => total + duration, 0), p95: samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0 };
           });
+          assert.ok(toolMetric.count >= 100, `4K ${tool} records every 100-point drag event`);
           toolMetrics.push(toolMetric);
           await page.waitForFunction(() => !state.activeStroke);
           const pixels = await page.evaluate(({ layer, logical }) => ({
