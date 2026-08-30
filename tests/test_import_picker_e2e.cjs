@@ -91,6 +91,16 @@ function startFixtureServer() {
   let failNextSettingsSave = false;
   let updateAvailable = false;
   let currentJob = { kind: "idle", state: "idle" };
+  let nextSaveToken = 1;
+  const saveTokens = new Map();
+  const saveRequests = [];
+  const catalogRemoveRequests = [];
+  const folderRequests = [];
+  const initialCatalog = [
+    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+  ];
+  let catalog = structuredClone(initialCatalog);
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
@@ -164,12 +174,73 @@ function startFixtureServer() {
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        images: [
-          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-        ],
+        images: catalog,
         root: "G:/fixture",
       }));
+      return;
+    }
+    if (requestPath === "/api/folder" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      folderRequests.push(JSON.parse(body));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ images: catalog, root: folderRequests.at(-1).path }));
+      return;
+    }
+    if (requestPath === "/api/output-directory/pick" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ path: "G:\\fixture-output" }));
+      return;
+    }
+    if (requestPath === "/api/catalog/remove" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { imageIds = [] } = JSON.parse(body);
+      catalogRemoveRequests.push(imageIds);
+      const removedImageIds = catalog.filter((image) => imageIds.includes(image.id)).map((image) => image.id);
+      catalog = catalog.filter((image) => !imageIds.includes(image.id));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ images: catalog, removedImageIds }));
+      return;
+    }
+    if (requestPath === "/api/save/prepare" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ entries: payload.imageIds.map((imageId) => ({ imageId, candidateRevision: 0, relativePath: catalog.find((image) => image.id === imageId)?.relativePath || imageId })) }));
+      return;
+    }
+    if (requestPath === "/api/save/render" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const saveToken = `save-${nextSaveToken++}`;
+      saveTokens.set(saveToken, { state: "pending", imageId: payload.imageId }); saveRequests.push({ path: requestPath, payload });
+      if (payload.copyToDefault) {
+        response.writeHead(200, { "Content-Type": "application/json", "X-Mozarie-Save-Token": saveToken });
+        response.end(JSON.stringify({ saveToken }));
+      } else {
+        response.writeHead(200, { "Content-Type": "image/png", "Content-Length": onePixelPng.length, "X-Mozarie-Save-Token": saveToken });
+        response.end(onePixelPng);
+      }
+      return;
+    }
+    if (requestPath === "/api/save/commit" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
+      if (!token || token.imageId !== payload.imageId) { response.writeHead(400, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "invalid_save_token" })); return; }
+      token.state = "committed"; saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ cleared: true, stale: false }));
+      return;
+    }
+    if (requestPath === "/api/save/status" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: token?.state || "unknown", cleared: token?.state === "committed", stale: false }));
+      return;
+    }
+    if (requestPath === "/api/save/cancel" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken); if (token) token.state = "cancelled";
+      saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
       return;
     }
     if (requestPath === "/api/catalog/clear" && request.method === "POST") {
@@ -344,7 +415,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1061,7 +1132,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await click("pickFolder");
   await input("folderPath", "G:\\fixture");
   await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
-  await click("pickFolder"); await click("loadFolderButton"); await page.waitForTimeout(100); await closeDialogs();
+  await click("pickFolder"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
+  await page.locator('.gallery-item[data-id="sample"]').click(); await page.waitForFunction(() => state.currentId === "sample" && state.currentImage);
 
   // Gallery/editor controls operate after a genuine gallery selection.
   for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
@@ -1254,7 +1326,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishCancel, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -1264,7 +1336,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     const settingsFailurePage = await newCoveredPage(browser);
     await settingsFailurePage.addInitScript(() => {
@@ -2595,6 +2667,50 @@ async function main() {
     } finally {
       holdDetection(false);
       await stopCoveredPage(ledgerPage, true);
+    }
+
+    // Run the browser-owned save path in a fresh, stateful fixture.  This is
+    // deliberately after the control ledger because remove-after-save changes
+    // the catalogue for real; the fixture is reset instead of faking state in
+    // the page.
+    resetScenario();
+    const browserSavePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+    await browserSavePage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    try {
+      await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await browserSavePage.locator("#folderPath").fill("G:\\selected-folder");
+      await browserSavePage.locator("#loadFolderButton").click();
+      await browserSavePage.waitForFunction(() => state.images.length === 2);
+      assert.deepEqual(folderRequests, [{ path: "G:\\selected-folder" }], "folder selection posts the typed path and reloads the catalogue");
+      await browserSavePage.locator('.gallery-item[data-id="sample"]').click();
+      await browserSavePage.waitForFunction(() => state.currentId === "sample" && state.currentImage);
+      await browserSavePage.locator("#brushTool").click();
+      const canvasBox = await browserSavePage.locator("#editorCanvas").boundingBox();
+      assert.ok(canvasBox, "the editor canvas is available for a user brush gesture");
+      await browserSavePage.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 2);
+      await browserSavePage.mouse.down();
+      await browserSavePage.mouse.move(canvasBox.x + canvasBox.width / 2 + 12, canvasBox.y + canvasBox.height / 2 + 8);
+      await browserSavePage.mouse.up();
+      await browserSavePage.waitForFunction(() => !document.querySelector("#saveButton").disabled);
+      await browserSavePage.locator("#saveButton").click();
+      await browserSavePage.locator("#chooseOutputDirectoryButton").click();
+      await browserSavePage.waitForFunction(() => state.settings.saving.default_output_directory === "G:\\fixture-output");
+      assert.equal(await browserSavePage.locator("#applyOutputDirectoryStatus").inputValue(), "G:\\fixture-output", "the output picker updates the visible save destination");
+      await browserSavePage.locator("#applyCopyMode").check();
+      await browserSavePage.locator("#applySuffix").fill("_browser");
+      await browserSavePage.locator("#deleteOriginal").check();
+      await browserSavePage.locator("#removeAfterSave").check();
+      await browserSavePage.locator("#applyStartButton").click();
+      await browserSavePage.locator("#confirmAccept").click();
+      await browserSavePage.waitForFunction(() => !state.applyRunning && state.images.length === 1, null, { timeout: 5000 });
+      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "copy-and-delete drives prepare, render, and commit in order");
+      assert.deepEqual(catalogRemoveRequests, [["sample"]], "remove-after-save deletes only the committed source from the catalogue");
+      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId })), { imageIds: ["sample-two"], currentId: "sample-two" }, "the next catalogue image remains selected after deleting the current source");
+    } finally {
+      await stopCoveredPage(browserSavePage, true);
     }
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);

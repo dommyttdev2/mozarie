@@ -457,18 +457,6 @@ function setNavigationShortcutsEnabled(enabled) {
   focusCanvas();
 }
 
-async function persistNavigationShortcuts(enabled) {
-  setNavigationShortcutsEnabled(enabled);
-  if (!state.settings) return;
-  try {
-    const payload = structuredClone(state.settings);
-    payload.general.shortcuts_enabled = Boolean(enabled);
-    payload.shortcuts = { ...(payload.shortcuts || {}), enabled: Boolean(enabled) };
-    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(payload) });
-    setSettingsForm(data.settings, state.settingsStatus);
-    setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
-  } catch (error) { showUserError(error); }
-}
 function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;

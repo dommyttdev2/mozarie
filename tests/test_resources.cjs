@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const gallerySource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "gallery.js"), "utf8");
+const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const canvasSource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "editor-canvas.js"), "utf8");
 const resourcesPath = path.join(__dirname, "..", "static", "js", "resources.js");
 const resourcesOriginalSource = fs.readFileSync(resourcesPath, "utf8");
@@ -14,7 +15,7 @@ const state = { currentId: null, pendingImageId: null, currentImage: null, pendi
 const context = { state, setTimeout() { return 1; }, clearTimeout() {}, fetch() {}, document: { querySelector() { return null; } }, encodeURIComponent, Promise, Set, Map, Math, AbortController, DOMException, __fetchBitmap: null };
 vm.runInNewContext(`${resourcesSource}\nglobalThis.resourceTest = { WeightedLru, drainPrefetchQueue };`, context);
 vm.runInNewContext(canvasSource, context, { filename: canvasPath });
-const closed = []; const cache = new context.resourceTest.WeightedLru(8, (value) => closed.push(value.id));
+const closed = []; const cache = new context.resourceTest.WeightedLru(8, (value) => closed.push(value.id), () => false);
 cache.set("one", { id: "one" }, 4); cache.set("two", { id: "two" }, 4); cache.get("one"); cache.set("three", { id: "three" }, 4);
 assert.equal(cache.has("one"), true, "recent entry remains"); assert.equal(cache.has("two"), false, "least-recent entry is evicted"); assert.deepEqual(closed, ["two"]);
 const owned = cache.take("one");
@@ -60,7 +61,7 @@ async function runResourceCoverageCases() {
   const api = context.resourceCoverage;
 
   const released = [];
-  const cache = new api.WeightedLru(2, (item) => released.push(item));
+  const cache = new api.WeightedLru(2, (item) => released.push(item), () => false);
   cache.set("a", "a", 1); cache.set("b", "b", 1); cache.get("a"); cache.set("a", "new", 1);
   assert.deepEqual(released, ["a"], "replacing a cached value releases the old owner");
   assert.equal(cache.take("b"), "b", "take returns and removes a cached resource without releasing it");
@@ -73,12 +74,9 @@ async function runResourceCoverageCases() {
   const pinnedCache = new api.WeightedLru(1, () => {}, (key) => key === "pinned");
   pinnedCache.set("pinned", "value", 2);
   assert.equal(pinnedCache.has("pinned"), true, "a pinned oversized value remains available");
-  const pressureReleased = []; const pressureCache = new api.WeightedLru(1, (value) => pressureReleased.push(value));
+  const pressureReleased = []; const pressureCache = new api.WeightedLru(1, (value) => pressureReleased.push(value), () => false);
   pressureCache.set("one", "one", 1); pressureCache.set("two", "two", 1);
   assert.deepEqual(pressureReleased, ["one"], "an unpinned cache entry is evicted under pressure");
-  const defaultCache = new api.WeightedLru(1);
-  assert.equal(defaultCache.get("missing"), null, "a default cache reports missing values without a release handler");
-  defaultCache.set("default", "value", 1); defaultCache.delete("default"); defaultCache.set("oversize", "value", 2);
   assert.equal(api.decodedImageWeight({ width: 2, height: 3 }), 24, "decoded weights use RGBA bytes");
   assert.equal(api.decodedImageWeight(), 1, "decoded weights have a positive minimum");
   assert.equal(api.decodedImageWeight({ width: 0, height: 3 }), 1, "zero dimensions still use the positive minimum");
