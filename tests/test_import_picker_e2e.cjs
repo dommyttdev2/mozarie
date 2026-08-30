@@ -94,6 +94,8 @@ function startFixtureServer() {
   let nextSaveToken = 1;
   const saveTokens = new Map();
   const saveRequests = [];
+  let holdSaveRender = false;
+  const pendingSaveRenders = [];
   const catalogRemoveRequests = [];
   const folderRequests = [];
   const initialCatalog = [
@@ -227,6 +229,7 @@ function startFixtureServer() {
       let body = ""; for await (const chunk of request) body += chunk;
       const payload = JSON.parse(body); const saveToken = `save-${nextSaveToken++}`;
       saveTokens.set(saveToken, { state: "pending", imageId: payload.imageId }); saveRequests.push({ path: requestPath, payload });
+      if (holdSaveRender) await new Promise((resolve) => { pendingSaveRenders.push(resolve); });
       if (payload.copyToDefault) {
         response.writeHead(200, { "Content-Type": "application/json", "X-Mozarie-Save-Token": saveToken });
         response.end(JSON.stringify({ saveToken }));
@@ -429,7 +432,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1033,7 +1036,7 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
 // not by page-side events that production code could synthesize.  Every
 // manifest assertion id must be present at the
 // end of the sweep.
-async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel) {
+async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel, holdSaveRender, releaseSaveRenders) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
@@ -1166,7 +1169,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: async (before) => { await page.waitForFunction((count) => state.hiddenPaths.size !== count, before.state.hiddenCount); assert.notEqual((await snapshot()).state.hiddenCount, before.state.hiddenCount, "removeCurrentImageButton must toggle hidden state"); },
     boundaryDetectButton: (before, after) => apiChanged(before, after, "boundaryDetectButton", "/api/boundary"),
     boundaryCancelButton: (before, after) => assert.equal(after.flags.boundaryActionsHidden, true, "boundaryCancelButton must hide boundary actions"),
-    detectCurrentButton: dialog("processingDialog", true, "detectCurrentButton"), saveButton: dialog("applyDialog", true, "saveButton"), saveAllButton: dialog("applyDialog", true, "saveAllButton"),
+    detectCurrentButton: dialog("processingDialog", true, "detectCurrentButton"), saveButton: dialog("singleSaveDialog", true, "saveButton"), saveAllButton: dialog("applyDialog", true, "saveAllButton"),
     clearCurrentMasksButton: dialog("confirmDialog", true, "clearCurrentMasksButton"),
     batchModeButton: (before, after) => assert.equal(after.state.batchMode, true, "batchModeButton must enable batch mode"),
     selectionActionsButton: (before, after) => assert.equal(after.popovers.selectionActionsMenu, true, "selectionActionsButton must open selection actions"),
@@ -1177,7 +1180,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     detectAllButton: dialog("detectDialog", true, "detectAllButton"), detectCancelButton: dialog("detectDialog", false, "detectCancelButton"),
     detectStartButton: dialog("processingDialog", true, "detectStartButton"),
     settingsCloseButton: dialog("settingsDialog", false, "settingsCloseButton"),
-    settingsChooseOutputDirectory: (before, after) => apiChanged(before, after, "settingsChooseOutputDirectory", "/api/output-directory/pick"),
+    settingsChooseOutputDirectory: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "settingsChooseOutputDirectory opens the browser directory picker"),
     checkUpdateButton: dialog("confirmDialog", true, "checkUpdateButton"),
     settingsResetButton: async (before, after) => { await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.url.includes("/api/settings/reset")), before.api.length); apiChanged(before, await snapshot(), "settingsResetButton", "/api/settings/reset"); },
     settingsSaveButton: (before, after) => apiChanged(before, after, "settingsSaveButton", "/api/settings"),
@@ -1185,11 +1188,17 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     modelDownloadCopy: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "modelDownloadCopy must write the clipboard"),
     modelDownloadStart: (before, after) => apiChanged(before, after, "modelDownloadStart", "/api/model-download/start"),
     modelDownloadCancel: (before, after) => apiChanged(before, after, "modelDownloadCancel", "/api/model-download/cancel"),
-    chooseOutputDirectoryButton: (before, after) => apiChanged(before, after, "chooseOutputDirectoryButton", "/api/output-directory/pick"),
+    chooseOutputDirectoryButton: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "chooseOutputDirectoryButton opens the browser directory picker"),
+    singleSaveChooseOutputDirectoryButton: async () => {
+      await page.waitForFunction(() => Boolean(state.outputDirectoryHandle));
+      assert.ok(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), "singleSaveChooseOutputDirectoryButton shows the selected output directory");
+    },
+    singleSaveCloseButton: dialog("singleSaveDialog", false, "singleSaveCloseButton"),
+    singleSaveStartButton: dialog("confirmDialog", true, "singleSaveStartButton"),
     applyCloseButton: dialog("applyDialog", false, "applyCloseButton"),
-    applyPauseButton: (before, after) => apiChanged(before, after, "applyPauseButton", "/api/job/"),
-    applyCancelButton: (before, after) => apiChanged(before, after, "applyCancelButton", "/api/job/cancel"),
-    applyStartButton: (before, after) => apiChanged(before, after, "applyStartButton", "/api/apply"),
+    applyPauseButton: async () => { await page.waitForFunction(() => state.browserSave?.paused === true); },
+    applyCancelButton: async () => { await page.waitForFunction(() => state.browserSave?.cancelled === true); },
+    applyStartButton: async () => { await page.waitForFunction(() => state.applyRunning && state.saving); },
     processingPauseButton: (before, after) => apiChanged(before, after, "processingPauseButton", "/api/job/"),
     processingCancelButton: (before, after) => apiChanged(before, after, "processingCancelButton", "/api/job/cancel"),
     modelHelpCloseButton: dialog("modelHelpDialog", false, "modelHelpCloseButton"),
@@ -1387,7 +1396,18 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await page.mouse.down(); await page.mouse.move(saveCanvas.x + saveCanvas.width / 2 + 8, saveCanvas.y + saveCanvas.height / 2 + 8); await page.mouse.up();
   await page.waitForFunction(() => !document.querySelector("#saveButton").disabled);
   await click("saveButton");
-  for (const [id, value] of [["applyTargetMode", "current"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["removeAfterSave", true], ["applyDivisor", "102"]]) await input(id, value);
+  for (const [id, value] of [["singleSaveCopyMode", true], ["singleSaveSuffix", "_ledger"], ["singleSaveDeleteOriginal", true]]) await input(id, value);
+  await click("singleSaveChooseOutputDirectoryButton");
+  await input("singleSaveOverwriteMode", true);
+  await click("singleSaveStartButton");
+  await click("confirmAccept");
+  await page.waitForFunction(() => state.saving);
+  await page.waitForFunction(() => !state.saving);
+  await input("singleSaveCopyMode", true); await click("singleSaveCloseButton");
+  await page.evaluate(() => { addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 1, 1); markMaskDirty(); refreshMaskStatus(true); });
+  await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled);
+  await click("saveAllButton");
+  for (const [id, value] of [["applyTargetMode", "masked"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["removeAfterSave", true], ["applyDivisor", "102"]]) await input(id, value);
   await click("chooseOutputDirectoryButton"); await page.waitForTimeout(50);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await input("applyOverwriteMode", true); await input("applyCopyMode", true); await click("applyCloseButton");
@@ -1395,9 +1415,10 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   const runningSaveCanvas = await page.locator("#editorCanvas").boundingBox();
   await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2, runningSaveCanvas.y + runningSaveCanvas.height / 2);
   await page.mouse.down(); await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2 + 8, runningSaveCanvas.y + runningSaveCanvas.height / 2 + 8); await page.mouse.up();
-  await page.waitForFunction(() => !document.querySelector("#saveButton").disabled); await click("saveButton"); await click("applyStartButton");
+  await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled); await click("saveAllButton"); await click("chooseOutputDirectoryButton"); await input("deleteOriginal", false);
+  holdSaveRender(true); await click("applyStartButton");
   await page.waitForFunction(() => !document.querySelector("#applyPauseButton").hidden);
-  await click("applyPauseButton"); await click("applyCancelButton"); await click("applyCloseButton");
+  await click("applyPauseButton"); await click("applyCancelButton"); releaseSaveRenders(); await page.waitForFunction(() => !state.saving); await click("applyCloseButton");
   await click("saveAllButton"); await click("applyCloseButton");
   await page.waitForTimeout(100);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
@@ -1482,12 +1503,12 @@ async function main() {
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
-  let cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload;
+  let cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload;
   let deferFullSettings;
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -1636,9 +1657,21 @@ async function main() {
     const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
+      window.__ledgerPickers = { directory: 0 };
       window.showDirectoryPicker = async () => {
         window.__openDirectoryCalled = true;
-        return { async *values() {} };
+        window.__ledgerPickers.directory += 1;
+        const files = new Map();
+        return {
+          name: "ledger-output",
+          async queryPermission() { return "granted"; },
+          async getFileHandle(name, options = {}) {
+            if (!options.create && !files.has(name)) throw new DOMException("missing", "NotFoundError");
+            if (!files.has(name)) files.set(name, new Uint8Array());
+            return { async createWritable() { return new WritableStream({ write(bytes) { files.set(name, new Uint8Array(bytes)); } }); } };
+          },
+          async *values() {},
+        };
       };
       window.__copiedPaths = [];
       window.__clipboardFail = false;
@@ -2204,21 +2237,27 @@ async function main() {
     assert.equal(await page.locator("#removeAfterSave").isVisible(), true);
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
-    await page.evaluate(() => { state.maskStatus.set(state.currentId, true); updateActionButtons(); });
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.waitForFunction(() => state.currentId === "sample");
+    await page.evaluate(() => {
+      addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 1, 1);
+      markMaskDirty(); refreshMaskStatus(true);
+    });
+    assert.deepEqual(await page.evaluate(() => ({ currentId: state.currentId, targets: saveTargets("masked"), hasMask: hasEffectiveMask() })), { currentId: "sample", targets: ["sample"], hasMask: true }, "the batch test has one real masked filesystem source");
     await page.locator("#saveAllButton").click();
-    await page.locator("#applySuffix").fill("_qa");
+    await page.locator("#applyOverwriteMode").check();
+    const saveRequestStart = saveRequests.length;
     await page.locator("#applyStartButton").click();
-    await page.waitForFunction(() => state.applyRunning && state.saving);
-    assert.equal(applyRequests.length, 1, "copy save starts exactly one server job");
-    assert.equal(await page.locator("#settingsButton").isDisabled(), true, "background controls lock while a server copy is running");
-    finishApply();
-    await page.evaluate(() => pollJob());
-    await page.waitForFunction(() => !state.applyRunning && !state.saving);
-    assert.match(await page.locator("#applyResult").textContent(), /完了しました。1件を処理しました。/, "server copy reports its completed result");
-    assert.equal(await page.locator("#applyCloseButton").isDisabled(), false, "the completed copy dialog can be closed");
+    await page.locator("#confirmAccept").click();
+    await page.waitForFunction(() => state.applyRunning && state.saving, null, { timeout: 5000 });
+    await page.waitForFunction(() => !state.applyRunning && !state.saving, null, { timeout: 5000 });
+    assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, `batch overwrite must not fail: ${await page.locator("#applyResult").textContent}`);
+    assert.deepEqual(saveRequests.slice(saveRequestStart).map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "batch overwrite renders and commits through the browser-owned save path");
+    assert.match(await page.locator("#applyResult").textContent(), /完了しました。1件を処理しました。/, "batch overwrite reports its completed result");
+    assert.equal(await page.locator("#applyCloseButton").isDisabled(), false, "the completed overwrite dialog can be closed");
     await page.locator("#applyCloseButton").click();
     assert.equal(await page.locator("#applyDialog").evaluate((dialog) => dialog.open), false, "the completed copy dialog closes");
-    assert.equal(await page.locator("#settingsButton").isDisabled(), false, "background controls unlock after a reconciled server copy");
+    assert.equal(await page.locator("#settingsButton").isDisabled(), false, "background controls unlock after a reconciled browser overwrite");
 
     await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
@@ -2958,7 +2997,7 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel, holdSaveRender, releaseSaveRenders);
     } finally {
       holdDetection(false);
       await stopCoveredPage(ledgerPage, true);
@@ -2972,7 +3011,24 @@ async function main() {
     const browserSavePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
     await browserSavePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
-      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const files = new Map([["sample_検証.png", new Uint8Array([0])]]);
+      window.__singleSaveFiles = files;
+      window.showDirectoryPicker = async () => ({
+        name: "fixture-output",
+        async queryPermission() { return "granted"; },
+        async getFileHandle(name, options = {}) {
+          if (!options.create && !files.has(name)) throw new DOMException("missing", "NotFoundError");
+          if (!files.has(name)) files.set(name, new Uint8Array());
+          return { async createWritable() {
+            const chunks = [];
+            return new WritableStream({
+              write(chunk) { chunks.push(new Uint8Array(chunk)); },
+              close() { files.set(name, chunks.length === 1 ? chunks[0] : new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0))); },
+            });
+          } };
+        },
+        async removeEntry(name) { files.delete(name); },
+      });
     });
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
@@ -2992,19 +3048,22 @@ async function main() {
       await browserSavePage.mouse.up();
       await browserSavePage.waitForFunction(() => !document.querySelector("#saveButton").disabled);
       await browserSavePage.locator("#saveButton").click();
-      await browserSavePage.locator("#chooseOutputDirectoryButton").click();
-      await browserSavePage.waitForFunction(() => state.settings.saving.default_output_directory === "G:\\fixture-output");
-      assert.equal(await browserSavePage.locator("#applyOutputDirectoryStatus").inputValue(), "G:\\fixture-output", "the output picker updates the visible save destination");
-      await browserSavePage.locator("#applyCopyMode").check();
-      await browserSavePage.locator("#applySuffix").fill("_browser");
-      await browserSavePage.locator("#deleteOriginal").check();
-      await browserSavePage.locator("#removeAfterSave").check();
-      await browserSavePage.locator("#applyStartButton").click();
+      await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
+      assert.equal(await browserSavePage.locator("#singleSaveStartButton").isDisabled(), true, "single copy requires an explicitly granted browser output directory");
+      await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
+      await browserSavePage.waitForFunction(() => state.outputDirectoryHandle?.name === "fixture-output");
+      await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveOutputDirectoryStatus").textContent.includes("fixture-output"));
+      assert.match(await browserSavePage.locator("#singleSaveOutputDirectoryStatus").textContent(), /fixture-output/, "the single-save picker updates its own visible destination");
+      await browserSavePage.locator("#singleSaveCopyMode").check();
+      await browserSavePage.locator("#singleSaveSuffix").fill("_検証");
+      await browserSavePage.locator("#singleSaveDeleteOriginal").check();
+      await browserSavePage.locator("#singleSaveStartButton").click();
       await browserSavePage.locator("#confirmAccept").click();
-      await browserSavePage.waitForFunction(() => !state.applyRunning && state.images.length === 1, null, { timeout: 5000 });
-      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "copy-and-delete drives prepare, render, and commit in order");
-      assert.deepEqual(catalogRemoveRequests, [["sample"]], "remove-after-save deletes only the committed source from the catalogue");
-      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId })), { imageIds: ["sample-two"], currentId: "sample-two" }, "the next catalogue image remains selected after deleting the current source");
+      await browserSavePage.waitForFunction(() => state.saving, null, { timeout: 5000 });
+      await browserSavePage.waitForFunction(() => !state.saving && state.images.find((image) => image.id === "sample")?.reviewed, null, { timeout: 5000 });
+      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "single copy-and-delete drives prepare, render, and commit in order");
+      assert.equal(await browserSavePage.evaluate(() => window.__singleSaveFiles.has("sample_検証_1.png")), true, "single save keeps Unicode suffixes and avoids an existing output name");
+      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: true }, "single save reloads and reviews the current image without changing the catalogue");
     } finally {
       await stopCoveredPage(browserSavePage, true);
     }
