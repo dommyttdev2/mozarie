@@ -95,7 +95,7 @@ function makeGalleryRuntime() {
   context.reviewResult = true; context.hideResult = true;
   const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers };`;
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
-  return { ...context.__galleryTest, calls, context, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
+  return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
 
 async function galleryInteractions() {
@@ -133,6 +133,9 @@ async function galleryInteractions() {
   state.images = []; runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryEmptyState").hidden, false);
   state.images = [first, second, third]; state.galleryFilter = "all"; state.viewMode = "overview"; const before = runtime.gallery.children.length; runtime.renderGallery(); assert.equal(runtime.gallery.children.length, before); runtime.renderGallery(true);
   state.viewMode = "edit"; runtime.renderGallery(true);
+  runtime.document.createElement = null; state.images = [first]; runtime.renderGallery(true);
+  assert.deepEqual([...state.galleryNodes.keys()], ["one"], "the gallery keeps the current catalog when DOM creation is unavailable");
+  runtime.document.createElement = () => element(); state.images = [first, second, third]; runtime.renderGallery(true);
   state.currentId = "two"; runtime.updateGalleryCurrent(); assert.ok(true, "current-image update tolerates an inactive virtual window");
   runtime.renderCatalogViews();
 
@@ -214,6 +217,8 @@ async function saveInteractions() {
   assert.equal(runtime.selectedSaveMode(), "copy"); assert.equal(runtime.sourceAccessFor("missing"), null); assert.equal(runtime.sourceCanOverwrite(state.images[0]), true); assert.equal(runtime.sourceCanDelete(state.images[1]), false); assert.equal(runtime.applyTargetsSupport("overwrite"), true);
   state.applyTargetIds = ["session"]; runtime.saveMode.value = "overwrite"; assert.match(runtime.applyRestrictionMessage(), /overwriteUnavailable/); runtime.syncApplyMode(); assert.equal(runtime.nodes.get("#applyStartButton").disabled, true);
   runtime.saveMode.value = "copy"; runtime.nodes.get("#deleteOriginal").checked = true; assert.match(runtime.applyRestrictionMessage(), /deleteUnavailable/); runtime.syncApplyMode(); assert.equal(runtime.nodes.get("#deleteOriginal").checked, false);
+  state.sourceAccess.set("session", { fileHandle: {} }); runtime.syncApplyMode();
+  assert.match(runtime.nodes.get("#applyTemporarySourceNote").textContent, /apply\.deleteUnavailable:1/, "temporary sources without a parent handle explain that deletion is unavailable");
   state.applyTargetIds = ["file"]; runtime.nodes.get("#applyTargetMode").value = "current"; runtime.refreshApplyTargets(); assert.equal(state.applyTargetMode, "current");
   runtime.context.busy = true; await runtime.openApplyDialog(); runtime.context.busy = false; runtime.context.flushError = new Error("draft failed"); await runtime.openApplyDialog(); runtime.context.flushError = null;
   state.applyTargetIds = []; await runtime.openApplyDialog([]); state.applyTargetIds = ["file"]; await runtime.openApplyDialog({ initialMode: "masked" }); assert.equal(runtime.nodes.get("#applyDialog").open, true);

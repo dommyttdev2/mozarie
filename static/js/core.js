@@ -165,12 +165,12 @@ async function loadTranslations(languageOverride = null) {
 }
 
 function responseError(response, payload) {
-  const error = new Error();
-  error.status = response.status;
-  error.code = typeof payload?.error_code === "string"
+  const code = typeof payload?.error_code === "string"
     ? payload.error_code
     : (response.status === 404 ? "api_not_found" : "internal_error");
-  error.params = payload?.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {};
+  const params = payload?.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {};
+  const error = codedError(code, params);
+  error.status = response.status;
   return error;
 }
 
