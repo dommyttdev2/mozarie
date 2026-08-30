@@ -485,7 +485,7 @@ class JobsMixin:
         return sorted(failures, key=lambda failure: failure[0])
 
     def _finish_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        finished = False
+        # The current-job gate makes terminal cleanup unconditional below.
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -498,9 +498,9 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
-            finished = True
-        if finished:
-            self._release_gpu_job_memory()
+            # Capture the final label while the job state is still protected.
+            # Cleanup intentionally happens outside the state lock.
+        self._release_gpu_job_memory()
         LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:

@@ -176,6 +176,63 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._fail_job(RuntimeError("CUDA out of memory"), 1, 1)
         self.assertEqual(state.job.error_code, "gpu_out_of_memory")
 
+    def test_job_races_and_remaining_worker_branches(self) -> None:
+        state = self.make_jobs()
+        class DeviceContext:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        cuda = Mock(); cuda.is_available.return_value = True; cuda.device.return_value = DeviceContext()
+        state._empty_selected_gpu_cache(SimpleNamespace(cuda=cuda), 2)
+        cuda.empty_cache.assert_called_once()
+        no_device_cuda = Mock(); no_device_cuda.is_available.return_value = True; no_device_cuda.device = None
+        state._empty_selected_gpu_cache(SimpleNamespace(cuda=no_device_cuda), 2)
+        no_device_cuda.empty_cache.assert_called_once()
+        state.job = Job(kind="apply", state="running", total=2); pause = JobControl(); state.job_control = pause
+        class ChangePause:
+            def __enter__(_self): state.job.state = "complete"
+            def __exit__(_self, *_args): return False
+        pause.claim_lock = ChangePause()
+        with self.assertRaises(ClientError): state.request_pause()
+        state.job = Job(kind="apply", state="running", total=2); cancel = JobControl(); state.job_control = cancel
+        class ChangeCancel:
+            def __enter__(_self): state.job.state = "complete"
+            def __exit__(_self, *_args): return False
+        cancel.claim_lock = ChangeCancel()
+        with self.assertRaises(ClientError): state.request_cancel()
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); record = self.record(directory)
+            state.images = {record.image_id: None}; state.order = [record.image_id]; state.root = directory
+            with self.assertRaises(ClientError): state._records_for_ids_with_catalog([record.image_id])
+            state.images[record.image_id] = record; state._allowed_root_for_record = lambda *_args: None
+            with self.assertRaises(ClientError): state._records_for_ids_with_catalog([record.image_id])
+            state._allowed_root_for_record = lambda *_args: directory
+            mask = directory / "mask.png"; Image.new("L", (3, 2), 255).save(mask)
+            state.candidates = {record.image_id: [Candidate("exclude", "x", .9, mask, role=CandidateRole.EXCLUDE, forced=False)]}
+            state.materialize_candidate_mask = lambda *_args: None
+            add = np.zeros((2, 3), dtype=np.uint8); add[0, 0] = 255
+            self.assertIsNotNone(state.combined_candidate_mask(record.image_id, (add, None, None)))
+            revision = [1]
+            state._candidate_revision = lambda _image: revision[0]
+            state.materialize_candidate_mask = lambda *_args: revision.__setitem__(0, 2)
+            with self.assertRaises(ClientError): state.combined_candidate_mask(record.image_id, (add, None, None))
+        state._job_is_current = lambda *_args: False
+        state._cancel_job(1, 1)
+        state._fail_job(RuntimeError("x"), 1, 1)
+        state._job_is_current = lambda *_args: True
+        control = JobControl(); control.pause_requested.set(); pauses = [0]
+        def wait_then_cancel(*_args):
+            pauses[0] += 1
+            if pauses[0] > 1: control.cancel_requested.set()
+        state._wait_while_paused = wait_then_cancel
+        state._run_fixed_workers([SimpleNamespace(image_id="x")], 1, lambda *_args: None, control, 1, 1)
+        calls = [0]
+        def current_once(*_args):
+            calls[0] += 1
+            return calls[0] < 2
+        state._job_is_current = current_once
+        state.job = Job(kind="detect", state="running")
+        state._run_fixed_workers([SimpleNamespace(image_id="x")], 1, lambda *_args: None, None, 1, 1)
+
     def test_saving_input_and_render_boundary_failures(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
@@ -205,6 +262,45 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state.settings["saving"]["default_output_directory"] = str(directory / "missing-output")
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {}, copy_to_default=True)
+
+    def test_render_browser_save_epoch_and_candidate_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
+            state.images[record.image_id] = record; state.order = [record.image_id]
+            state.image_snapshot = lambda _image: __import__("dataclasses").replace(record)
+            state.images.pop(record.image_id)
+            with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state.images[record.image_id] = record; state._has_active_worker = lambda: True
+            with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state._has_active_worker = lambda: False
+            with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 0, 2, {})
+            forced_mask = directory / "forced.png"; Image.new("L", (3, 2), 0).save(forced_mask)
+            state.candidates[record.image_id] = [Candidate("forced", "x", .9, forced_mask, role=CandidateRole.EXCLUDE, forced=True)]
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
+                state._issue_browser_save_token_unchecked = lambda *_args: "token"
+                rendered = state.render_browser_save(record.image_id, 1, 2, {})
+            self.assertEqual(rendered.save_token, "token")
+            zero_apply = directory / "zero.png"; Image.new("L", (3, 2), 0).save(zero_apply)
+            state.candidates[record.image_id] = [Candidate("zero", "x", .9, zero_apply)]
+            with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
+                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state.candidates[record.image_id] = []
+            def change_catalog(*_args):
+                state.catalog_generation += 1
+                return b"png"
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", side_effect=change_catalog):
+                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state.catalog_generation = 1; workers = [False]
+            def after_render(*_args):
+                workers[0] = True
+                return b"png"
+            state._has_active_worker = lambda: workers[0]
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", side_effect=after_render):
+                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state._has_active_worker = lambda: False
+            state._issue_browser_save_token_unchecked = Mock(side_effect=ClientError("x", "x"))
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
+                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
 
     def test_saving_tokens_apply_worker_and_cleanup_paths(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -263,3 +359,91 @@ class JobsSavingCoverageTests(unittest.TestCase):
             result = state.commit_browser_save(record.image_id, 1, "deleted", "deleted")
             self.assertEqual(result, {"cleared": True, "stale": False, "deleted": True})
             self.assertFalse(thumb.exists())
+
+    def test_browser_commit_second_lookup_and_catalog_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
+            state.images[record.image_id] = record; state.order = [record.image_id]
+            base = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            def second_lookup(token_name, mutate, action="keep"):
+                state.browser_save_tokens = {token_name: base}; state.browser_save_receipts = {}
+                class Mutate:
+                    def __enter__(_self): mutate()
+                    def __exit__(_self, *_args): return False
+                state.image_io_lock = lambda _image: Mutate()
+                return state.commit_browser_save(record.image_id, 1, token_name, action)
+            result = second_lookup("receipt", lambda: state.browser_save_receipts.__setitem__("receipt", BrowserSaveReceipt(record.image_id, 1, "keep", True, False, False, 1)))
+            self.assertEqual(result["cleared"], True)
+            for name, mutate in (
+                ("gone", lambda: state.browser_save_tokens.clear()),
+                ("revision", lambda: state.browser_save_tokens.__setitem__("revision", BrowserSaveToken(record.image_id, 2, (1, 1), 1, time.monotonic(), None))),
+                ("action", lambda: state.browser_save_tokens.__setitem__("action", BrowserSaveToken(record.image_id, 1, (1, 1), 1, time.monotonic(), directory / "rendered.png"))),
+            ):
+                with self.subTest(name=name), self.assertRaises(ClientError): second_lookup(name, mutate)
+            state.image_io_lock = lambda _image: threading.RLock()
+            record.source_kind = "session"; record.path.unlink()
+            state.browser_save_tokens = {"session-delete": base}; state.browser_save_receipts = {}
+            self.assertTrue(state.commit_browser_save(record.image_id, 1, "session-delete", "deleted")["deleted"])
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
+            state.images[record.image_id] = record; state.order = [record.image_id]
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            state.browser_save_tokens["catalog"] = token
+            state._assert_record_stat_matches = lambda _record: setattr(state, "catalog_generation", 2)
+            with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "catalog", "keep")
+            state.catalog_generation = 1; state._assert_record_stat_matches = lambda _record: None
+            state.browser_save_tokens["removed"] = token
+            state.workspace_store.commit_save.side_effect = lambda *_args, **_kwargs: state.images.pop(record.image_id)
+            with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "removed", "keep")
+
+    def test_apply_worker_and_candidate_remaining_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
+            state.images[record.image_id] = record; state.order = [record.image_id]
+            missing = directory / "missing.png"; state.candidates[record.image_id] = [Candidate("missing", "x", .9, missing)]
+            state.materialize_candidate_mask = lambda *_args: state.images.pop(record.image_id)
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)):
+                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+            state.images[record.image_id] = record
+            exclude = directory / "exclude.png"; Image.new("L", (3, 2), 0).save(exclude)
+            state.candidates[record.image_id] = [Candidate("exclude", "x", .9, exclude, role=CandidateRole.EXCLUDE, forced=False)]
+            state.materialize_candidate_mask = lambda *_args: None; state._issue_browser_save_token_unchecked = lambda *_args: "token"
+            with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
+                self.assertEqual(state.render_browser_save(record.image_id, 1, 2, {}).save_token, "token")
+            state._run_fixed_workers = lambda records, _workers, action, *_args: [action(index, item) for index, item in enumerate(records)] and []
+            state._set_job_current = lambda *_args: None; state._record_job_success = lambda *_args: None
+            state._finish_job = Mock(); state._fail_job = Mock(); state._cancel_job = Mock()
+            state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            state.combined_candidate_mask = lambda *_args, **_kwargs: None
+            state._job_is_current = lambda *_args: True
+            with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
+                state._apply_worker([record], 2, {record.image_id: {}}, control=JobControl(), job_generation=1, catalog_generation=1)
+            nonempty = np.ones((2, 3), dtype=np.uint8)
+            stage = Mock()
+            state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            state._job_is_current = lambda *_args: False
+            with patch("mozarie.saving._stage_save_with_mask", return_value=stage):
+                state._apply_worker([record], 2, {record.image_id: nonempty}, control=JobControl(), job_generation=1, catalog_generation=1)
+            stage.rollback.assert_called_once()
+            state._job_is_current = lambda *_args: True; state.workspace_store.commit_save.side_effect = RuntimeError("db")
+            stage = Mock(); state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            with patch("mozarie.saving._stage_save_with_mask", return_value=stage):
+                state._apply_worker([record], 2, {record.image_id: nonempty}, control=JobControl(), job_generation=1, catalog_generation=1)
+            stage.rollback.assert_called_once(); state._fail_job.assert_called()
+            state.workspace_store.commit_save.side_effect = RuntimeError("db")
+            state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            output = directory / "output"; output.mkdir(exist_ok=True)
+            state._reserve_output_destination = lambda *_args: output / "copy.png"; state._release_output_destination = lambda *_args: None
+            with patch("mozarie.saving.render_with_mask", return_value=b"png"), patch("mozarie.saving.write_rendered_copy", side_effect=lambda path, data: path.write_bytes(data)):
+                state._apply_worker([record], 2, {record.image_id: nonempty}, copy_to_default=True, output_directory=output, control=JobControl(), job_generation=1, catalog_generation=1)
+            self.assertFalse((output / "copy.png").exists())
+            state.workspace_store.commit_save.side_effect = None; state._job_is_current = lambda *_args: False
+            state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            with patch("mozarie.saving.render_with_mask", return_value=b"png"), patch("mozarie.saving.write_rendered_copy", side_effect=lambda path, data: path.write_bytes(data)):
+                state._apply_worker([record], 2, {record.image_id: nonempty}, copy_to_default=True, output_directory=output, control=JobControl(), job_generation=1, catalog_generation=1)
+            state.workspace_store.commit_save.side_effect = None; state._job_is_current = lambda *_args: False
+            state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
+            state._apply_worker([record], 2, {record.image_id: np.zeros((2, 3), dtype=np.uint8)}, control=JobControl(), job_generation=1, catalog_generation=1)
+            state._run_fixed_workers = Mock(side_effect=RuntimeError("worker")); state._fail_job = Mock()
+            state._apply_worker([record], 2, {}, control=JobControl(), job_generation=1, catalog_generation=1)
+            state._fail_job.assert_called_once()
