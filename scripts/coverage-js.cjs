@@ -14,6 +14,7 @@ const nodeCoverageRoot = path.join(coverageRoot, "node");
 const nodeCoverageTemp = path.join(coverageRoot, "v8");
 const browserCoverageFile = path.join(coverageRoot, "browser-v8.json");
 const testFiles = [
+  "tests/test_app_core_detection_coverage.cjs",
   "tests/test_browser_save_runtime.cjs",
   "tests/test_candidate_bundle.cjs",
   "tests/test_detection_refresh_runtime.cjs",
