@@ -35,5 +35,9 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   state.mosaicPending = true; // A new 4K drag sample arrived while this frame ran.
   worker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: { close() {} } } });
   assert.deepEqual(draws, ["preview"], "the completed 4K frame is displayed before the queued update");
+  const staleFrame = { close() { this.closed = true; } };
+  state.mosaicWorker = null;
+  worker.onmessage({ data: { type: "frame", sourceId: "stale", generation: state.mosaicPreviewGeneration, output: staleFrame } });
+  assert.equal(staleFrame.closed, true, "a frame from a released worker closes its transferred bitmap");
   console.log("test_mosaic_preview_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

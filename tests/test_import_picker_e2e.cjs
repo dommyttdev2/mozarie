@@ -429,7 +429,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1465,7 +1465,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -1475,7 +1475,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -1578,6 +1578,49 @@ async function main() {
     await initialPage.evaluate(() => clearStatus());
     assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
     await stopCoveredPage(initialPage, true);
+
+    // This is an actual browser catalogue load and control interaction.  It
+    // protects the window renderer from quietly reverting to a full-DOM list.
+    setCatalog(Array.from({ length: 20000 }, (_, index) => ({
+      id: `performance-${index}`,
+      relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
+      sourceKind: "fixture", width: 100, height: 80,
+      candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
+    })));
+    const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+    await performancePage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    try {
+      const loadStart = performance.now();
+      await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      const loadElapsed = performance.now() - loadStart;
+      const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
+      assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
+      assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
+      const timings = [];
+      for (let index = 0; index < 10; index += 1) {
+        let started = performance.now();
+        await performancePage.locator("#overviewButton").click();
+        await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+        timings.push(performance.now() - started);
+        started = performance.now();
+        await performancePage.locator("#closeOverviewButton").click();
+        await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
+        timings.push(performance.now() - started);
+        started = performance.now();
+        await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
+        await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
+        timings.push(performance.now() - started);
+      }
+      const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
+      assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
+      console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
+    } finally {
+      await stopCoveredPage(performancePage, true);
+      resetScenario();
+    }
     const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
@@ -2730,6 +2773,36 @@ async function main() {
       assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mask and mosaic before pointerup`);
       await page.mouse.up();
       await page.waitForFunction(() => !state.activeStroke && state.history.length > 0);
+      if (width === 3840) {
+        await page.waitForFunction(() => !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+        const mismatchedPixels = await page.evaluate(() => {
+          const width = originalCanvas.width; const height = originalCanvas.height;
+          const source = originalCtx.getImageData(0, 0, width, height).data;
+          const mask = combinedCtx.getImageData(0, 0, width, height).data;
+          const actual = mosaicCtx.getImageData(0, 0, width, height).data;
+          const expected = new Uint8ClampedArray(source);
+          const divisor = Math.max(1, Math.min(10000, Math.round(Number(document.querySelector("#divisor").value) || 100)));
+          const blockSize = Math.max(4, Math.ceil(Math.max(width, height) / divisor));
+          for (let top = 0; top < height; top += blockSize) for (let left = 0; left < width; left += blockSize) {
+            const bottom = Math.min(height, top + blockSize); const right = Math.min(width, left + blockSize);
+            let red = 0; let green = 0; let blue = 0; let weight = 0;
+            for (let y = top; y < bottom; y += 1) for (let x = left; x < right; x += 1) {
+              const pixel = y * width + x; if (!mask[pixel * 4 + 3]) continue;
+              const index = pixel * 4; const alpha = source[index + 3]; red += source[index] * alpha; green += source[index + 1] * alpha; blue += source[index + 2] * alpha; weight += alpha;
+            }
+            if (!weight) continue;
+            const color = [Math.round(red / weight), Math.round(green / weight), Math.round(blue / weight)];
+            for (let y = top; y < bottom; y += 1) for (let x = left; x < right; x += 1) {
+              const pixel = y * width + x; if (!mask[pixel * 4 + 3]) continue;
+              const index = pixel * 4; expected[index] = color[0]; expected[index + 1] = color[1]; expected[index + 2] = color[2];
+            }
+          }
+          let mismatches = 0;
+          for (let index = 0; index < actual.length; index += 1) if (actual[index] !== expected[index]) mismatches += 1;
+          return mismatches;
+        });
+        assert.equal(mismatchedPixels, 0, "the 4K worker preview exactly matches the mosaic pixel golden");
+      }
 
       await page.locator("#eraserTool").click();
       const exclusionGeometry = await page.evaluate(({ logical }) => {
@@ -2756,6 +2829,8 @@ async function main() {
       assert.deepEqual(duringExclusion, { active: true, exclusion: true, removedFromEffectiveMask: true }, `${width}x${height} exclusion immediately removes the effective mosaic area`);
       await page.mouse.up();
     }
+    await page.evaluate(() => releaseMosaicPreview());
+    await page.waitForFunction(() => !state.mosaicWorker && !state.mosaicSourceImage);
 
     const ledgerPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
     setUpdateAvailable(true);

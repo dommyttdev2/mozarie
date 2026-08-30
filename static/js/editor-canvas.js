@@ -539,7 +539,7 @@ function createMosaicWorker() {
   try {
     const worker = state.mosaicWorker = new Worker("/js/masked-mosaic-worker.js");
     worker.onmessage = ({ data }) => {
-      if (state.mosaicWorker !== worker) return;
+      if (state.mosaicWorker !== worker) { data.output?.close?.(); return; }
       if (data.type === "error") return mosaicPreviewFailed();
       if (data.type !== "frame") return;
       state.mosaicWorkerBusy = false;
@@ -548,9 +548,9 @@ function createMosaicWorker() {
       if (state.currentImage && data.sourceId === state.mosaicSourceId && data.generation <= state.mosaicPreviewGeneration) {
         mosaicCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
         mosaicCtx.drawImage(data.output, 0, 0);
-        data.output.close?.();
         render();
       }
+      data.output?.close?.();
       const pending = state.mosaicPending;
       state.mosaicPending = false;
       if (pending) void rebuildMosaicPreview();
