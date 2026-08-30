@@ -2731,6 +2731,10 @@ async function main() {
     // to starve the preview worker with every pointer move.
     await page.setViewportSize({ width: 1280, height: 900 });
     for (const [width, height] of [[1024, 768], [3840, 2160]]) {
+      // Chromium's precise-coverage counters are signed 32-bit values.  One
+      // real sample is enough for instrumentation; the ordinary E2E run keeps
+      // the full eight-event pointer gesture below.
+      const pointerSteps = browserCoverage ? 1 : 8;
       await page.locator("#brushTool").click();
       await page.locator("#editorCanvas").scrollIntoViewIfNeeded();
       const geometry = await page.evaluate(async ({ width, height }) => {
@@ -2763,7 +2767,7 @@ async function main() {
       }, { width, height });
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
-      await page.mouse.move(geometry.endX, geometry.endY, { steps: 8 });
+      await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });
       await page.waitForTimeout(250);
       const duringBrush = await page.evaluate(({ logical }) => ({
         active: state.activeStroke?.points.length >= 2,
@@ -2818,7 +2822,7 @@ async function main() {
       }, geometry);
       await page.mouse.move(exclusionGeometry.x, exclusionGeometry.y);
       await page.mouse.down();
-      await page.mouse.move(exclusionGeometry.endX, exclusionGeometry.endY, { steps: 8 });
+      await page.mouse.move(exclusionGeometry.endX, exclusionGeometry.endY, { steps: pointerSteps });
       await page.waitForFunction(({ logical }) => state.activeStroke?.points.length >= 2
         && exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3] > 0
         && combinedCtx.getImageData(logical.x, logical.y, 1, 1).data[3] === 0, exclusionGeometry);
