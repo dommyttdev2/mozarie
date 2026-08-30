@@ -424,6 +424,27 @@ class HttpCoverageTests(unittest.TestCase):
         state.delete_candidate.assert_called_once_with("x", "y")
         state.delete_manual_workspace.assert_called_once_with("x")
 
+    def test_http_get_routes_dispatch_json_and_asset_paths(self) -> None:
+        state = Mock()
+        state.settings = {"models": {"provider": "cpu"}}
+        state.settings_status.return_value = {"models": {"target": {"valid": True, "required": True, "enabled": True}}, "gpus": []}
+        state.job.as_dict.return_value = {"state": "idle"}
+        state.catalog_snapshot.return_value = [{"id": "x"}]
+        state.candidate_snapshot.return_value = []
+        state.manual_workspace.return_value = {"add": None}
+        handler = self.handler()
+        handler._require_local_host = Mock(); handler._json = Mock(); handler._client_error = Mock()
+        handler._send_image = Mock(); handler._send_candidate_mask = Mock()
+        with patch("mozarie.http.STATE", state), patch("mozarie.http._local_version", return_value="0.4.11"), patch("mozarie.http._update_status", return_value={"available": False}):
+            for path in ("/api/health", "/api/settings?status=0", "/api/model-download", "/api/update/status", "/api/images", "/api/job", "/api/candidates/x", "/api/workspace/manual/x", "/api/image/x?v=one", "/api/thumbnail/x?v=two", "/api/mask/x/y?v=3"):
+                with self.subTest(path=path):
+                    handler.path = path
+                    handler.do_GET()
+        state.cleanup_expired_browser_save_tokens.assert_called_once()
+        handler._send_image.assert_any_call("x", thumbnail=False, version="one")
+        handler._send_image.assert_any_call("x", thumbnail=True, version="two")
+        handler._send_candidate_mask.assert_called_once_with("x", "y", "3")
+
 
 class SavingCoverageTests(unittest.TestCase):
     def test_start_apply_and_browser_status_edge_states(self) -> None:
