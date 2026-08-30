@@ -1365,6 +1365,31 @@ async function main() {
     await unsupportedBrowserPage.waitForFunction(() => document.body.textContent.includes("File System Access API"));
     assert.match(await unsupportedBrowserPage.locator("body").textContent(), /File System Access API/, "unsupported browsers receive the startup requirement");
     await stopCoveredPage(unsupportedBrowserPage, true);
+    // Bootstrap tolerates a missing translation payload and an empty root,
+    // while an image-list transport failure remains a visible user error.
+    const degradedBootstrapPage = await newCoveredPage(browser);
+    await degradedBootstrapPage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const url = String(args[0]?.url || args[0]);
+        if (url.includes("/i18n/")) return new Response("unavailable", { status: 503 });
+        if (url.includes("/api/settings?status=0")) {
+          const response = await originalFetch(...args); const body = await response.json();
+          delete body.settings.general.shortcuts_enabled;
+          return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+        }
+        if (url.includes("/api/images")) {
+          const response = await originalFetch(...args); const body = await response.json(); body.root = "";
+          return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+        }
+        return originalFetch(...args);
+      };
+    });
+    await degradedBootstrapPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+    assert.equal(await degradedBootstrapPage.locator("#folderPath").inputValue(), "", "an empty catalogue root remains an empty folder field");
+    await stopCoveredPage(degradedBootstrapPage, true);
     const settingsFailurePage = await newCoveredPage(browser);
     await settingsFailurePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
