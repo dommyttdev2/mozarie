@@ -465,6 +465,10 @@ function startCandidateScenarioServer() {
     if (requestPath === "/api/job") { json({ kind: "idle", state: "idle" }); return; }
     if (requestPath === "/api/update/status") { json({ current: "v1.0.0", latest: "v1.0.0", available: false }); return; }
     if (requestPath === `/api/workspace/manual/${imageId}`) { json({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 7 } }); return; }
+    if (requestPath === `/api/workspace/image/${imageId}` && request.method === "POST") {
+      for await (const _chunk of request) { /* consume workspace flags */ }
+      json({}); return;
+    }
     if (requestPath === `/api/candidates/${imageId}`) { json({ candidates: [candidate], candidateRevision: 7 }); return; }
     if (requestPath === `/api/mask/${imageId}/${candidateId}` || requestPath === `/api/image/${imageId}` || requestPath === `/api/thumbnail/${imageId}`) {
       const body = await fs.readFile(imagePath);
