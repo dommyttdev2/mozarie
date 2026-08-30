@@ -3690,8 +3690,8 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(result[0]["exclusions"], {})
 
     def test_scene_metadata_fluid_search_uses_only_exact_tags_and_local_rois(self):
-        self.assertEqual(detection_module._scene_fluid_tags({"scene_positive": "cum_on_breasts, cum_on_fingers"}), {"cum_on_breasts", "cum_on_fingers"})
-        self.assertEqual(detection_module._scene_fluid_tags({"scene_info": '{"positive":"cum_on_ass"}'}), {"cum_on_ass"})
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_positive": " CUM_ON_BREASTS , cum on fingers"}), {"cum_on_breasts", "cum on fingers"})
+        self.assertEqual(detection_module._scene_fluid_tags({"scene_info": '{"positive":"cum on ass"}'}), {"cum on ass"})
         for info in ({}, {"scene_info": "bad"}, {"scene_positive": "not_cum_on_breasts"}, {"scene_positive": ["cum_on_breasts"]}):
             with self.subTest(info=info): self.assertEqual(detection_module._scene_fluid_tags(info), set())
 
@@ -3700,7 +3700,7 @@ class MozarieTests(unittest.TestCase):
         hand = np.zeros_like(target); hand[160:170, 160:170] = 1
         face = np.zeros_like(target); face[20:40, 130:170] = 1
         with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, search: np.asarray(search, dtype=np.uint8) * 255) as fluid:
-            searched = state = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum_on_fingers"}))
+            searched = state = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum on fingers"}))
             self.assertTrue(np.any(searched)); self.assertGreater(np.count_nonzero(searched), np.count_nonzero(target | hand))
             chest = self.new_state()._metadata_fluid_mask(rgb, [], np.zeros_like(target), [{"mask": face}], frozenset({"cum_on_breasts"}))
         self.assertEqual(fluid.call_count, 2)
@@ -3712,7 +3712,7 @@ class MozarieTests(unittest.TestCase):
         rgb = np.zeros((40, 40, 3), dtype=np.uint8)
         target = np.zeros((40, 40), dtype=np.uint8); target[10:20, 10:20] = 255
         with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
-            finalized = state._finalize_exclusions(rgb, [{"class_name": "penis", "mask": target, "confidence": .8, "source": "target"}], frozenset({"cum_on_ass"}))
+            finalized = state._finalize_exclusions(rgb, [{"class_name": "penis", "mask": target, "confidence": .8, "source": "target"}], frozenset({"cum on ass"}))
         self.assertIn("metadata_exclusions", finalized[0])
         self.assertNotIn("fluid", finalized[0]["exclusions"])
         with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):

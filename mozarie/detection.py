@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .inference.yolo_detect import HandDetector
 
 
-_SCENE_FLUID_TAGS = frozenset({"cum_on_breasts", "cum_on_fingers", "cum_on_ass"})
+_SCENE_FLUID_TAGS = frozenset({"cum_on_breasts", "cum on fingers", "cum on ass"})
 
 
 def _scene_fluid_tags(info: dict[str, Any]) -> frozenset[str]:
@@ -47,7 +47,7 @@ def _scene_fluid_tags(info: dict[str, Any]) -> frozenset[str]:
             return frozenset()
     if not isinstance(positive, str):
         return frozenset()
-    return frozenset(tag for tag in (value.strip() for value in positive.split(",")) if tag in _SCENE_FLUID_TAGS)
+    return frozenset(tag for tag in (value.strip().casefold() for value in positive.split(",")) if tag in _SCENE_FLUID_TAGS)
 
 
 def TargetSegmenter(*args: Any, **kwargs: Any) -> Any:
