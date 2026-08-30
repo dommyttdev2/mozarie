@@ -9,6 +9,7 @@ import importlib.util
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 import unittest
 from dataclasses import replace
@@ -19,7 +20,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 import mozarie.state as state_module
-from mozarie.core import BrowserSaveReceipt, Candidate, CandidateRole, ClientError, ImageRecord
+from mozarie.core import BrowserSaveReceipt, Candidate, CandidateRole, ClientError, ImageRecord, SAVE_TOKEN_TTL_SECONDS
 from mozarie.state import StudioState, cuda_device_statuses, gpu_device_statuses
 from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
@@ -217,10 +218,13 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         self.assertTrue(cuda_device_statuses(cuda)[0]["supported"])
         with patch.object(state_module, "runtime_backend", return_value="directml"), patch.object(state_module, "directml_devices", side_effect=OSError("no adapter")):
             self.assertEqual(gpu_device_statuses(cuda), [])
-        with patch("mozarie.inference.onnx.diagnose_runtime", side_effect=RuntimeError("broken")):
+        supported_gpu = [{"id": 0, "name": "GPU", "backend": "cuda", "supported": True}]
+        with patch.object(state_module, "gpu_device_statuses", return_value=supported_gpu), \
+                patch("mozarie.inference.onnx.diagnose_runtime", side_effect=RuntimeError("broken")):
             with self.assertRaises(ClientError) as context:
                 self.state.diagnose_gpu_runtime()
             self.assertEqual(context.exception.error_code, "gpu_unavailable")
+            self.assertEqual(str(context.exception), "GPU推論を確認できません。CUDA環境とモデルファイルを確認してください。")
         self.assertEqual(self.state.reset_settings()["models"]["provider"], self.state.settings["models"]["provider"])
 
     def test_stale_session_cleanup_does_not_touch_live_imports(self) -> None:
@@ -275,10 +279,14 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
             self.assertFalse(locked.exists())
 
     def test_state_startup_helpers_preserve_error_paths(self) -> None:
-        with patch("mozarie.inference.onnx.diagnose_runtime", side_effect=ClientError("known", "known")):
+        supported_gpu = [{"id": 0, "name": "GPU", "backend": "cuda", "supported": True}]
+        known_error = ClientError("known", "known")
+        with patch.object(state_module, "gpu_device_statuses", return_value=supported_gpu), \
+                patch("mozarie.inference.onnx.diagnose_runtime", side_effect=known_error):
             with self.assertRaises(ClientError) as context:
                 self.state.diagnose_gpu_runtime()
             self.assertEqual(context.exception.error_code, "known")
+            self.assertIs(context.exception, known_error)
         with patch.object(self.state.settings_store, "default_settings", side_effect=state_module.SettingsError("bad")):
             with self.assertRaises(ClientError) as context:
                 self.state.reset_settings()
@@ -384,7 +392,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         image_id = self.add_image()
         item = self.state.images[image_id]
         token = self.state._issue_browser_save_token_unchecked(item, 0, (item.mtime_ns, item.size_bytes), self.state.catalog_generation, None)
-        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=0)
+        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state.cleanup_expired_browser_save_tokens()
         self.assertNotIn(token, self.state.browser_save_tokens)
         item.path = self.root / "missing.png"
@@ -444,7 +452,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         image_id = imported[0]["imageId"]
         nested = self.state.images[image_id].path.parent
         (nested / "keep.txt").write_text("keep")
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state.cleanup_expired_browser_save_tokens()
         self.assertNotIn("old", self.state.browser_save_receipts)
         self.state.remove_image_from_catalog(image_id)
@@ -522,14 +530,14 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         created = owned.cache_dir
         owned.shutdown()
         self.assertFalse(created.exists())
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, 0)
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state._discard_expired_browser_save_tokens_unchecked()
         self.assertNotIn("old", self.state.browser_save_receipts)
 
     def test_catalogue_remaining_file_and_durable_state_edges(self) -> None:
         image_id = self.add_image(); item = self.state.images[image_id]
         token = self.state._issue_browser_save_token_unchecked(item, 0, (item.mtime_ns, item.size_bytes), self.state.catalog_generation, None)
-        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=0)
+        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state._discard_expired_browser_save_tokens_unchecked()
         cache_dir = self.root / "candidate-dir"; cache_dir.mkdir(); (cache_dir / "old.png").write_bytes(png())
         with patch.object(Path, "unlink", side_effect=OSError("busy")):
@@ -874,13 +882,13 @@ class FinalCatalogCoverageTests(unittest.TestCase):
 
     def test_token_expiry_predictor_and_session_directory_cleanup(self) -> None:
         image_id = self.add_image()
-        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state._discard_expired_browser_save_tokens_unchecked()
         self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(
-            image_id, 0, "copy", False, False, False, __import__("time").monotonic()
+            image_id, 0, "copy", False, False, False, time.monotonic()
         )
         self.state._discard_expired_browser_save_tokens_unchecked()
-        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
         self.state.cleanup_expired_browser_save_tokens()
         self.state.sam_predictor = Mock()
         self.state.hand_segmentation_predictor = Mock()

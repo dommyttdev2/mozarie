@@ -185,6 +185,15 @@ class CoreCoverageTests(unittest.TestCase):
 
     def test_torch_absence_has_a_safe_cuda_surface(self) -> None:
         original_import = builtins.__import__
+
+        fake_torch = object()
+        def has_torch(name, *args, **kwargs):
+            if name == "torch":
+                return fake_torch
+            return original_import(name, *args, **kwargs)
+        with patch("builtins.__import__", side_effect=has_torch):
+            self.assertIs(torch_module(), fake_torch)
+
         def no_torch(name, *args, **kwargs):
             if name == "torch":
                 raise ImportError("not installed")

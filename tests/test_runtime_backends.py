@@ -125,7 +125,85 @@ class RuntimeBackendTests(unittest.TestCase):
         self.assertIs(encoder._embed_points, patched_embed_points)
 
     def test_directml_sam_patch_preserves_points_boxes_masks_and_padding(self) -> None:
-        import torch
+        import numpy as np
+
+        class Tensor:
+            def __init__(self, values) -> None:
+                self.values = np.asarray(values)
+                self.device = "dml:0"
+
+            @property
+            def shape(self):
+                return self.values.shape
+
+            @property
+            def dtype(self):
+                return self.values.dtype
+
+            def __add__(self, other):
+                return Tensor(self.values + unwrap(other))
+
+            def __radd__(self, other):
+                return Tensor(unwrap(other) + self.values)
+
+            def __mul__(self, other):
+                return Tensor(self.values * unwrap(other))
+
+            def __rmul__(self, other):
+                return Tensor(unwrap(other) * self.values)
+
+            def __neg__(self):
+                return Tensor(-self.values)
+
+            def __eq__(self, other):
+                return Tensor(self.values == unwrap(other))
+
+            def unsqueeze(self, axis):
+                return Tensor(np.expand_dims(self.values, axis))
+
+            def to(self, **_kwargs):
+                return self
+
+            def reshape(self, *shape):
+                return Tensor(self.values.reshape(*shape))
+
+            def expand(self, *shape):
+                shape = tuple(current if requested == -1 else requested for current, requested in zip(self.values.shape, shape))
+                return Tensor(np.broadcast_to(self.values, shape).copy())
+
+        def unwrap(value):
+            return value.values if isinstance(value, Tensor) else value
+
+        class Torch:
+            @staticmethod
+            def zeros(shape, **_kwargs):
+                return Tensor(np.zeros(shape, dtype=np.float32))
+
+            @staticmethod
+            def ones(shape, **_kwargs):
+                return Tensor(np.ones(shape, dtype=np.float32))
+
+            @staticmethod
+            def full(shape, value, **_kwargs):
+                return Tensor(np.full(shape, value, dtype=np.float32))
+
+            @staticmethod
+            def tensor(values, **_kwargs):
+                return Tensor(values)
+
+            @staticmethod
+            def cat(values, dim=0):
+                return Tensor(np.concatenate([unwrap(value) for value in values], axis=dim))
+
+            @staticmethod
+            def where(condition, left, right):
+                return Tensor(np.where(unwrap(condition), unwrap(left), unwrap(right)))
+
+            @staticmethod
+            def empty(shape, **_kwargs):
+                return Tensor(np.empty(shape, dtype=np.float32))
+
+        torch = Torch()
 
         class Encoder:
             embed_dim = 4
@@ -160,13 +238,15 @@ class RuntimeBackendTests(unittest.TestCase):
         points = torch.zeros((1, 1, 2))
         labels = torch.tensor([[0]])
         embedded = encoder._embed_points(points, labels, pad=True)
-        self.assertEqual(tuple(embedded.shape), (1, 2, 4))
-        sparse, dense = encoder.forward((points, labels), torch.ones((1, 1, 4)), torch.ones((1, 4, 2, 2)))
-        self.assertEqual(tuple(sparse.shape), (1, 2, 4))
-        self.assertEqual(tuple(dense.shape), (1, 4, 2, 2))
+        np.testing.assert_array_equal(embedded.values, np.array([[[2, 2, 2, 2], [7, 7, 7, 7]]], dtype=np.float32))
+        boxes = torch.full((1, 1, 4), 11)
+        masks = torch.full((1, 4, 2, 2), 9)
+        sparse, dense = encoder.forward((points, labels), boxes, masks)
+        np.testing.assert_array_equal(sparse.values, np.array([[[2, 2, 2, 2], [11, 11, 11, 11]]], dtype=np.float32))
+        np.testing.assert_array_equal(dense.values, np.full((1, 4, 2, 2), 9, dtype=np.float32))
         sparse, dense = encoder.forward(None, None, None)
-        self.assertEqual(tuple(sparse.shape), (1, 0, 4))
-        self.assertEqual(tuple(dense.shape), (1, 4, 2, 2))
+        np.testing.assert_array_equal(sparse.values, np.empty((1, 0, 4), dtype=np.float32))
+        np.testing.assert_array_equal(dense.values, np.full((1, 4, 2, 2), 5, dtype=np.float32))
 
 
 if __name__ == "__main__":
