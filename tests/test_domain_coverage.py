@@ -9,7 +9,7 @@ from email.message import Message
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -379,7 +379,7 @@ class HttpCoverageTests(unittest.TestCase):
         self.assertTrue(handler.close_connection)
 
     def test_http_routes_dispatch_json_operations_without_a_live_server(self) -> None:
-        state = Mock()
+        state = MagicMock()
         state.settings = {"detection": {"threshold": .5, "parallelism": 1}}
         state.set_root.return_value = [{"id": "x"}]
         state.start_apply.return_value = True
@@ -425,7 +425,7 @@ class HttpCoverageTests(unittest.TestCase):
         state.delete_manual_workspace.assert_called_once_with("x")
 
     def test_http_get_routes_dispatch_json_and_asset_paths(self) -> None:
-        state = Mock()
+        state = MagicMock()
         state.settings = {"models": {"provider": "cpu"}}
         state.settings_status.return_value = {"models": {"target": {"valid": True, "required": True, "enabled": True}}, "gpus": []}
         state.job.as_dict.return_value = {"state": "idle"}
@@ -444,6 +444,40 @@ class HttpCoverageTests(unittest.TestCase):
         handler._send_image.assert_any_call("x", thumbnail=False, version="one")
         handler._send_image.assert_any_call("x", thumbnail=True, version="two")
         handler._send_candidate_mask.assert_called_once_with("x", "y", "3")
+
+    def test_http_post_routes_cover_settings_models_saves_and_jobs(self) -> None:
+        state = MagicMock()
+        state.settings = {"detection": {"threshold": .5, "parallelism": 1}}
+        state.model_downloads.cancel.return_value = {"state": "cancelled"}
+        state.resume_job.return_value.as_dict.return_value = {"state": "running"}
+        state.request_cancel.return_value.as_dict.return_value = {"state": "running"}
+        handler = self.handler()
+        handler._require_json_request = Mock(); handler._json = Mock(); handler._client_error = Mock()
+        routes = (
+            ("/api/workspace/image/x", {"hidden": True}),
+            ("/api/workspace/manual/x", {}),
+            ("/api/catalog/remove", {"imageIds": []}),
+            ("/api/candidates/batch", {"imageId": "x"}),
+            ("/api/settings/status", {}),
+            ("/api/settings/gpu-diagnostic", {}),
+            ("/api/model-download/cancel", {}),
+            ("/api/boundary", {"imageId": "x"}),
+            ("/api/save/status", {"imageId": "x", "candidateRevision": 0, "saveToken": "t", "sourceAction": "keep"}),
+            ("/api/save/cancel", {"imageId": "x", "candidateRevision": 0, "saveToken": "t"}),
+            ("/api/job/resume", {}),
+            ("/api/job/cancel", {}),
+            ("/api/candidate/x/y", {}),
+        )
+        with patch("mozarie.http.STATE", state):
+            for path, payload in routes:
+                with self.subTest(path=path):
+                    handler.path = path
+                    handler._read_json_body = Mock(return_value=payload)
+                    handler.do_POST()
+        state.set_image_flags.assert_called_once_with("x", {"hidden": True})
+        state.save_manual_workspace.assert_called_once_with("x", {})
+        state.model_downloads.cancel.assert_called_once()
+        state.resume_job.assert_called_once(); state.request_cancel.assert_called_once()
 
 
 class SavingCoverageTests(unittest.TestCase):
