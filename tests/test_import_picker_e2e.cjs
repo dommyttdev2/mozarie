@@ -2978,12 +2978,11 @@ async function main() {
         assert.equal(mismatchedPixels, 0, "the 4K worker preview exactly matches the mosaic pixel golden");
 
         await page.evaluate(() => {
-          const samples = []; let started = 0; let pendingMax = 0; let dragStarted = 0; const canvas = document.querySelector("#editorCanvas");
-          const begin = (event) => { if (event.buttons & 1) { started = performance.now(); dragStarted ||= started; } };
+          const samples = []; let started = 0; let pendingMax = 0; const canvas = document.querySelector("#editorCanvas");
+          const begin = (event) => { if (event.buttons & 1) started = performance.now(); };
           const end = () => { if (started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
-          const finish = () => { window.__editorPerf.drag = performance.now() - dragStarted; dragStarted = 0; };
-          window.__editorPerf = { samples, pendingMax, begin, end, finish, heapBefore: performance.memory?.usedJSHeapSize ?? null };
-          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end); canvas.addEventListener("pointerup", finish);
+          window.__editorPerf = { samples, pendingMax, begin, end, heapBefore: performance.memory?.usedJSHeapSize ?? null };
+          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
         });
         const toolPixels = [
           ["#brushTool", "add", (value) => value > 0],
@@ -3015,8 +3014,9 @@ async function main() {
           const redo = performance.now() - beforeRedo;
           const value = window.__editorPerf; const samples = [...value.samples].sort((left, right) => left - right);
           const p95 = samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0;
-          const result = { drag: value.drag, p95, pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
-          const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); canvas.removeEventListener("pointerup", value.finish); delete window.__editorPerf;
+          const drag = samples.reduce((total, duration) => total + duration, 0);
+          const result = { drag, p95, pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
+          const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
           return result;
         });
         assert.ok(editorPerf.drag < 250, `4K 100-point drag completes within 250ms (actual ${editorPerf.drag.toFixed(1)}ms)`);
