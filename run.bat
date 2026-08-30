@@ -13,7 +13,9 @@ if errorlevel 1 goto :setup_required
 if defined MOZARIE_PYTHON goto :start
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
 if not defined MOZARIE_RUNTIME (
-  for /f "delims=" %%R in ('call "%PYTHON%" "%APP_DIR%mozarie\runtime_profile.py" show --venv "%APP_DIR%.venv"') do set "MOZARIE_RUNTIME=%%R"
+  pushd "%APP_DIR%"
+  for /f "delims=" %%R in ('call "%PYTHON%" -m mozarie.runtime_profile show --venv "%APP_DIR%.venv"') do set "MOZARIE_RUNTIME=%%R"
+  popd
   if not defined MOZARIE_RUNTIME goto :setup_required
 )
 :start

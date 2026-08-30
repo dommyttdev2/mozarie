@@ -33,8 +33,11 @@ if errorlevel 1 goto :venv_failed
 if not exist "%PYTHON%" goto :venv_failed
 call :validate_python
 if errorlevel 1 goto :python_too_old
-"%PYTHON%" "%APP_DIR%mozarie\runtime_profile.py" preflight "%RUNTIME%" --venv "%APP_DIR%.venv"
-if errorlevel 1 goto :runtime_mismatch
+pushd "%APP_DIR%"
+"%PYTHON%" -m mozarie.runtime_profile preflight "%RUNTIME%" --venv "%APP_DIR%.venv"
+set "RUNTIME_CHECK=%ERRORLEVEL%"
+popd
+if not "%RUNTIME_CHECK%"=="0" goto :runtime_mismatch
 
 echo [Mozarie] [2/5] Preparing the installer...
 "%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip
@@ -51,8 +54,11 @@ echo [Mozarie] [4/5] Checking installed packages...
 "%PYTHON%" -m pip check
 if errorlevel 1 goto :failed
 echo [Mozarie] [5/5] Checking runtime support...
-"%PYTHON%" "%APP_DIR%mozarie\runtime_profile.py" validate "%RUNTIME%" --venv "%APP_DIR%.venv" --write-marker
-if errorlevel 1 goto :failed
+pushd "%APP_DIR%"
+"%PYTHON%" -m mozarie.runtime_profile validate "%RUNTIME%" --venv "%APP_DIR%.venv" --write-marker
+set "RUNTIME_CHECK=%ERRORLEVEL%"
+popd
+if not "%RUNTIME_CHECK%"=="0" goto :failed
 "%PYTHON%" -X utf8 "%APP_DIR%setup_gpu_check.py"
 if errorlevel 1 goto :failed
 :setup_ready

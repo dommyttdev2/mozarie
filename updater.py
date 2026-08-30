@@ -380,8 +380,7 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
         return False
     python = app_dir / ".venv" / "Scripts" / "python.exe"
-    validator = source_root / "mozarie" / "runtime_profile.py"
-    _verify_installed_runtime_profile(app_dir, python, validator, profile)
+    _verify_installed_runtime_profile(app_dir, source_root, python, profile)
     print(tr("requirements_updating"))
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
@@ -399,8 +398,8 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if result.returncode != 0:
         raise UpdateError(tr("requirements_failed"))
     result = subprocess.run(
-        [str(python), str(validator), "validate", profile, "--venv", str(app_dir / ".venv")],
-        cwd=str(app_dir),
+        [str(python), "-m", "mozarie.runtime_profile", "validate", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(source_root),
         check=False,
     )
     if result.returncode != 0:
@@ -439,13 +438,13 @@ def _installed_runtime_profile(app_dir: Path) -> str:
     return profile
 
 
-def _verify_installed_runtime_profile(app_dir: Path, python: Path, validator: Path, profile: str) -> None:
+def _verify_installed_runtime_profile(app_dir: Path, source_root: Path, python: Path, profile: str) -> None:
     """Reject an ambiguous or mismatched venv before pip can mutate it."""
-    if not python.is_file() or not validator.is_file():
+    if not python.is_file() or not (source_root / "mozarie" / "runtime_profile.py").is_file():
         raise UpdateError(tr("runtime_profile_invalid"))
     result = subprocess.run(
-        [str(python), str(validator), "preflight", profile, "--venv", str(app_dir / ".venv")],
-        cwd=str(app_dir),
+        [str(python), "-m", "mozarie.runtime_profile", "preflight", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(source_root),
         check=False,
     )
     if result.returncode != 0:

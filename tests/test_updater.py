@@ -159,8 +159,9 @@ class UpdaterTests(unittest.TestCase):
                 self.assertTrue(updater.install_requirements(source, app))
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                [str(python), str(source / "mozarie" / "runtime_profile.py"), "preflight", "cuda", "--venv", str(app / ".venv")],
+                [str(python), "-m", "mozarie.runtime_profile", "preflight", "cuda", "--venv", str(app / ".venv")],
             )
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             self.assertEqual(run.call_args_list[1].args[0][:3], [str(python), "-m", "pip"])
             self.assertEqual(
                 run.call_args_list[1].args[0][3:],
@@ -292,12 +293,14 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "directml"])
+            self.assertEqual(run.call_args_list[0].args[0][1:4], ["-m", "mozarie.runtime_profile", "preflight"])
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             command = run.call_args_list[1].args[0]
             self.assertEqual(command[:3], [str(python), "-m", "pip"])
             self.assertEqual(Path(command[-1]), source / "mozarie" / "requirements-directml.txt")
             self.assertEqual(run.call_args_list[2].args[0], [str(python), "-m", "pip", "check"])
-            self.assertEqual(run.call_args_list[3].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "validate", "directml"])
+            self.assertEqual(run.call_args_list[3].args[0][1:4], ["-m", "mozarie.runtime_profile", "validate"])
+            self.assertEqual(run.call_args_list[3].kwargs["cwd"], str(source))
 
     def test_requirements_install_preserves_the_cpu_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,7 +314,8 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "cpu"])
+            self.assertEqual(run.call_args_list[0].args[0][1:4], ["-m", "mozarie.runtime_profile", "preflight"])
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             self.assertEqual(Path(run.call_args_list[1].args[0][-1]), source / "mozarie" / "requirements-cpu.txt")
 
     def test_markerless_cpu_and_directml_venvs_fail_before_pip(self):
@@ -960,7 +964,11 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)
         self.assertIn("VEN_10DE", setup)
         self.assertIn("VEN_1002", setup)
-        self.assertIn("mozarie\\runtime_profile.py\" preflight", setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile preflight', setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile validate', setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile show', run)
+        self.assertNotIn('mozarie\\runtime_profile.py', setup)
+        self.assertNotIn('mozarie\\runtime_profile.py', run)
         self.assertIn("mozarie\\requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
