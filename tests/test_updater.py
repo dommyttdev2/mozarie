@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -687,6 +688,56 @@ class UpdaterTests(unittest.TestCase):
                     patch("updater.mozarie_running_status", return_value="check_failed"):
                 with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("running_check_failed"))):
                     updater._perform_update(app, input_fn=lambda _prompt: "y")
+
+    def test_main_handles_failure_log_access_errors_after_a_public_update_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app_file = Path(directory) / "not-a-directory"
+            app_file.write_text("blocked", encoding="utf-8")
+            with patch.object(updater, "APP_DIR", app_file), patch.object(updater, "perform_update", side_effect=updater.UpdateError("update failed")), \
+                    patch.object(sys, "argv", ["updater.py"]):
+                self.assertEqual(updater.main(), updater.EXIT_ERROR)
+
+    def test_maintenance_lock_closes_an_acquired_handle_when_initialization_flush_fails(self):
+        class FlushFailingHandle:
+            def __init__(self, handle):
+                self.handle = handle
+                self.closed = False
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def flush(self):
+                raise OSError("flush denied")
+
+            def close(self):
+                self.closed = True
+                self.handle.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            lock = updater.MaintenanceLock(app)
+            original_open = pathlib.io.open
+            handles = []
+
+            def open_with_failing_flush(path, *args, **kwargs):
+                handle = FlushFailingHandle(original_open(path, *args, **kwargs))
+                handles.append(handle)
+                return handle
+
+            with patch.object(pathlib.io, "open", side_effect=open_with_failing_flush):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("maintenance_lock_access"))):
+                    lock.__enter__()
+            self.assertEqual(len(handles), 1)
+            self.assertTrue(handles[0].closed)
+            self.assertIsNone(lock.handle)
+
+    def test_check_running_reports_cache_enumeration_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            (app / ".mozarie-cache").mkdir()
+            with patch.object(Path, "glob", side_effect=OSError("cache access denied")), \
+                    patch.object(updater, "APP_DIR", app), patch.object(sys, "argv", ["updater.py", "--check-running"]):
+                self.assertEqual(updater.main(), updater.EXIT_RUNNING_CHECK_FAILED)
 
     def test_read_language_prefers_valid_local_config_and_falls_back_safely(self):
         with tempfile.TemporaryDirectory() as directory:
