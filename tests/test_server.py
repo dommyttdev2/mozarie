@@ -3564,6 +3564,62 @@ class MozarieTests(unittest.TestCase):
         fluid_mask.assert_not_called()
         self.assertNotIn("refinement", result[0])
 
+    def test_finalization_applies_fluid_to_every_nonempty_target_once(self):
+        state = self.new_state()
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+        penis = np.zeros((40, 40), dtype=np.uint8); penis[2:18, 2:18] = 255
+        pussy = np.zeros((40, 40), dtype=np.uint8); pussy[22:38, 22:38] = 255
+        segments = [
+            {"class_name": "penis", "mask": penis, "confidence": .8, "source": "target"},
+            {"class_name": "pussy", "mask": pussy, "confidence": .8, "source": "target"},
+        ]
+        with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, mask: mask) as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, segments)
+        self.assertEqual(fluid_mask.call_count, 2)
+        self.assertTrue(np.array_equal(finalized[0]["exclusions"]["fluid"] > 0, (penis > 0) | (pussy > 0)))
+        self.assertEqual(finalized[1]["exclusions"], {})
+
+    def test_finalization_skips_fluid_search_for_empty_apply_masks_and_when_disabled(self):
+        state = self.new_state()
+        rgb = np.zeros((16, 16, 3), dtype=np.uint8)
+        empty = {"class_name": "penis", "mask": np.zeros((16, 16), dtype=np.uint8), "confidence": .8, "source": "target"}
+        with patch.object(detection_module, "white_fluid_mask") as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, [empty])
+        fluid_mask.assert_not_called()
+        self.assertEqual(finalized[0]["exclusions"], {})
+
+        state.settings["detection"]["fluid_exclusion_enabled"] = False
+        nonempty = {"class_name": "pussy", "mask": np.ones((16, 16), dtype=np.uint8), "confidence": .8, "source": "target"}
+        with patch.object(detection_module, "white_fluid_mask") as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, [nonempty])
+        fluid_mask.assert_not_called()
+        self.assertEqual(finalized[0]["exclusions"], {})
+
+    def test_hand_exclusion_is_not_published_when_it_would_remove_most_of_a_target(self):
+        state = self.new_state()
+        mask = np.ones((20, 20), dtype=np.uint8)
+        hand = np.zeros_like(mask); hand[:16, :] = 255
+        segment = {"class_name": "penis", "mask": mask, "confidence": .8, "source": "target", "image_exclusions": {"hand": hand}}
+        finalized = state._finalize_exclusions(np.zeros((20, 20, 3), dtype=np.uint8), [segment])
+        self.assertFalse(np.any(finalized[0]["image_exclusions"].get("hand", np.zeros_like(mask))))
+        self.assertTrue(np.array_equal(finalized[0]["mask"], mask))
+
+    def test_hand_exclusion_does_not_reenter_an_unsafe_target_via_an_overlap(self):
+        state = self.new_state()
+        unsafe = np.zeros((30, 30), dtype=np.uint8); unsafe[:20, :20] = 255
+        safe = np.zeros((30, 30), dtype=np.uint8); safe[14:30, 14:30] = 255
+        hand = np.zeros((30, 30), dtype=np.uint8)
+        hand[:16, :20] = 255
+        hand[22:24, 14:20] = 255
+        segments = [
+            {"class_name": "penis", "mask": unsafe, "confidence": .8, "source": "target", "image_exclusions": {"hand": hand}},
+            {"class_name": "pussy", "mask": safe, "confidence": .8, "source": "target"},
+        ]
+        finalized = state._finalize_exclusions(np.zeros((30, 30, 3), dtype=np.uint8), segments)
+        published = finalized[0]["image_exclusions"]["hand"]
+        self.assertFalse(np.any(published[unsafe > 0]))
+        self.assertTrue(np.all(published[22:24, 14:20] == 255))
+
     def test_hand_and_fluid_refinement_metadata(self):
         state = self.new_state()
         penis = np.zeros((24, 24), dtype=np.uint8)
@@ -3983,11 +4039,10 @@ class MozarieTests(unittest.TestCase):
             ), patch.object(state, "_sam_predictor_for") as sam:
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="standard")
             sam.assert_not_called()
-            self.assertEqual([candidate.source for candidate in candidates], ["hand_exclusion", "target"])
+            self.assertEqual([candidate.source for candidate in candidates], ["target"])
             with Image.open(candidates[0].mask_path) as mask_file:
                 mask = np.asarray(mask_file)
-            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
-            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+            self.assertTrue(np.array_equal(mask > 0, apply > 0))
 
     def test_high_precision_rejected_hand_sam_uses_the_constrained_box(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4006,10 +4061,10 @@ class MozarieTests(unittest.TestCase):
                 state, "_high_precision_segments_with_predictor", side_effect=lambda _rgb, values, _predictor: values,
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            self.assertEqual([candidate.source for candidate in candidates], ["target"])
             with Image.open(candidates[0].mask_path) as mask_file:
                 mask = np.asarray(mask_file)
-            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
-            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+            self.assertTrue(np.array_equal(mask > 0, apply > 0))
 
     def test_gpu_diagnostic_uses_a_disposable_session_without_model_cache_changes(self):
         state = self.new_state()
@@ -7323,7 +7378,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         state.settings["detection"]["fluid_exclusion_enabled"] = False
         finalized = state._finalize_exclusions(rgb, [segment])
         self.assertEqual(finalized[0]["exclusions"], {})
-        self.assertEqual(int(finalized[0]["image_exclusions"]["hand"].sum()), 9)
+        self.assertFalse(np.any(finalized[0]["image_exclusions"].get("hand", np.zeros((6, 6), dtype=np.uint8))))
 
     def test_detection_start_passes_explicit_target_subset(self):
         state = self.new_state()
