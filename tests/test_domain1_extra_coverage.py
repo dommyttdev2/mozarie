@@ -77,7 +77,7 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             self.assertEqual(store.hydrate_candidates_bulk([image_id], root / "cache", lambda row, path: (row["candidate_id"], path))[image_id][0], 2)
             db = sqlite3.connect(store.path)
             try:
-                db.execute("UPDATE candidates SET mask_png=NULL WHERE image_id=?", (image_id,))
+                db.execute("UPDATE candidates SET mask_png='not-bytes' WHERE image_id=?", (image_id,))
                 db.commit()
             finally:
                 db.close()
@@ -173,4 +173,3 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         (self.state.cache_dir / "file").write_text("x")
         self.state._clear_cache()
         self.assertTrue((self.state.cache_dir / ".active.lock").exists())
-
