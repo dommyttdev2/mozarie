@@ -107,8 +107,8 @@ async function testApplicationStartupPaths() {
   vm.runInNewContext(`${source}\nglobalThis.appCoverage={ initialise, bindEvents };`, context, { filename: path.join(jsRoot, "app.js") });
 
   // Initial load without the File System Access API uses the browser guidance.
-  await Promise.resolve();
-  assert.match(document.body.textContent, /File System Access API/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.body.textContent, "error.browserUnsupported");
 
   context.window.showOpenFilePicker = async () => [];
   context.window.showDirectoryPicker = async () => ({});
@@ -163,7 +163,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   Object.assign(coreState, state);
   coreState.workspaceFlagPending = new Map();
 
-  assert.equal(test.t("unknown"), "unknown");
+  assert.equal(test.t("unknown"), "");
   await test.loadTranslations();
   context.fetch = async () => ({ ok: true, json: async () => null });
   await test.loadTranslations();
@@ -176,6 +176,9 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   pendingTranslations.shift()({ ok: true, json: async () => ({ value: "new" }) });
   assert.equal(await currentTranslation, true);
   context.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  coreState.translations = { stale: "old locale" };
+  await test.loadTranslations("en");
+  assert.equal(Object.keys(coreState.translations).length, 0, "a failed locale request does not retain another locale");
   await assert.rejects(test.api("/api/failure"), (error) => error.code === "internal_error");
   test.setStatusKey("error.other", {}, "error");
   test.abortCatalogLoads();
@@ -188,6 +191,10 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   coreState.images.push(reloaded);
   assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "old.png" }, reloaded), true);
   test.clearBoundaryConstruction();
+  coreState.translations = {
+    "duration.hour": "duration hour", "duration.minute": "duration minute", "duration.second": "duration second",
+    "status.progressCount": "status {completed}/{total}", "status.eta": "status {duration}",
+  };
   assert.match(test.formatDuration(3661), /duration/);
   assert.match(test.formatDuration(61), /duration/);
   assert.match(test.formatDuration(1), /duration/);

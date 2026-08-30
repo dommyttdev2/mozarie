@@ -113,7 +113,7 @@ class ModelDownloadManager:
             self._job = {
                 "state": "running", "key": key, "total": len(keys), "completed": 0,
                 "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size, "phase": "checking",
-                "paths": {}, "error": "", "errorCode": "",
+                "paths": {}, "errorCode": "",
             }
             threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download").start()
             return self.snapshot()
@@ -144,13 +144,13 @@ class ModelDownloadManager:
         except ModelDownloadCancelled:
             self._set(state="cancelled", current="", paths=paths)
         except (HTTPError, URLError):
-            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_network")
+            self._set(state="failed", current="", paths=paths, errorCode="model_download_network")
         except OSError:
-            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_write_failed")
+            self._set(state="failed", current="", paths=paths, errorCode="model_download_write_failed")
         except ModelDownloadError:
-            self._set(state="failed", current="", paths=paths, error="", errorCode="model_download_integrity")
+            self._set(state="failed", current="", paths=paths, errorCode="model_download_integrity")
         except Exception:
-            self._set(state="failed", current="", paths=paths, error="", errorCode="internal_error")
+            self._set(state="failed", current="", paths=paths, errorCode="internal_error")
 
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)

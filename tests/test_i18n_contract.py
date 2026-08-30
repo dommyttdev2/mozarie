@@ -102,6 +102,14 @@ class TranslationContractTests(unittest.TestCase):
                 key,
             )
 
+    def test_languages_have_the_same_complete_key_set(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dictionaries = {
+            language: json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for language in ("ja", "en")
+        }
+        self.assertEqual(set(dictionaries["ja"]), set(dictionaries["en"]))
+
     def test_detect_progress_uses_the_same_complete_contract_in_both_languages(self) -> None:
         root = Path(__file__).resolve().parents[1]
         expected = {"completed", "total", "current"}
@@ -155,5 +163,12 @@ class TranslationContractTests(unittest.TestCase):
 
     def test_api_does_not_use_server_error_text_as_user_interface_copy(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
-        self.assertNotIn("data.error ||", source)
+        javascript = "\n".join(path.read_text(encoding="utf-8") for path in (root / "static" / "js").glob("*.js"))
+        self.assertNotIn("data.error", javascript)
+        self.assertNotRegex(javascript, r"[\u3040-\u30ff\u3400-\u9fff]")
+
+    def test_http_error_payloads_are_codes_and_allowlisted_params(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "mozarie" / "http.py").read_text(encoding="utf-8")
+        self.assertNotIn('{"error":', source)
+        self.assertIn('"error_code": code, "params": public_error_params(code, params)', source)

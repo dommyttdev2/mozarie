@@ -21,7 +21,7 @@ from .core import (
     APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE, STATIC_DIR,
     ClientError, ForbiddenClientError, ImageRecord, StaleMaskError,
     read_detection_confidence, _read_detection_parallelism, _read_mosaic_divisor,
-    _read_save_suffix, _read_target_classes,
+    _read_save_suffix, _read_target_classes, public_error_params,
 )
 from .state import STATE, StudioState
 from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
@@ -393,7 +393,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 try:
                     self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
                 except ModelDownloadError as exc:
-                    raise ClientError("モデルのダウンロードを開始できません。設定を確認してもう一度お試しください。", "model_download_invalid") from exc
+                    raise ClientError("", "model_download_invalid") from exc
             elif path == "/api/model-download/cancel":
                 self._json(STATE.model_downloads.cancel())
             elif path == "/api/update/start":
@@ -633,10 +633,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
         try:
             file_path.relative_to(STATIC_DIR.resolve())
         except ValueError:
-            self._json({"error": "見つかりません。"}, HTTPStatus.NOT_FOUND)
+            self._json({"error_code": "api_not_found", "params": {}}, HTTPStatus.NOT_FOUND)
             return
         if not file_path.is_file():
-            self._json({"error": "見つかりません。"}, HTTPStatus.NOT_FOUND)
+            self._json({"error_code": "api_not_found", "params": {}}, HTTPStatus.NOT_FOUND)
             return
         data = file_path.read_bytes()
         if file_path.name == "index.html":
@@ -648,14 +648,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def _client_error(self, error: Exception, status: HTTPStatus, default_code: str | None = None) -> None:
         if isinstance(error, ClientError):
-            message, code, params = str(error), error.error_code, error.params
+            code, params = error.error_code, error.params
         elif isinstance(error, StaleMaskError):
-            message, code, params = str(error), default_code or "mask_not_found", {}
+            code, params = default_code or "mask_not_found", {}
         elif isinstance(error, sqlite3.DatabaseError):
-            message, code, params = "作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error", {}
+            code, params = "workspace_database_error", {}
         else:
-            message, code, params = "処理に失敗しました。もう一度お試しください。", default_code or "request_failed", {}
-        self._json({"error": message, "error_code": code, "params": params}, status)
+            code, params = default_code or "request_failed", {}
+        self._json({"error_code": code, "params": public_error_params(code, params)}, status)
 
     def _binary(
         self,

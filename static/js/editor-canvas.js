@@ -99,7 +99,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
 
 function loadImage(source) {
   return new Promise((resolve, reject) => {
-    const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(t("error.imageLoad"))); image.src = source;
+    const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(codedError("image_read_failed")); image.src = source;
   });
 }
 
@@ -331,10 +331,10 @@ function updateCandidateStatus() {
 
 function canvasToDataUrl(target) {
   return new Promise((resolve, reject) => target.toBlob((blob) => {
-    if (!blob) return reject(new Error(t("error.requestFailed")));
+    if (!blob) return reject(codedError("internal_error"));
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error(t("error.requestFailed")));
+    reader.onerror = () => reject(codedError("internal_error"));
     reader.readAsDataURL(blob);
   }, "image/png"));
 }
@@ -535,7 +535,11 @@ function rebuildMosaicPreview() {
       state.mosaicPending = false;
       if (pending) rebuildMosaicPreview();
     };
-    worker.onerror = () => { if (state.mosaicWorker === worker) releaseMosaicPreview(); };
+    worker.onerror = () => {
+      if (state.mosaicWorker !== worker) return;
+      releaseMosaicPreview();
+      showUserError({ code: "mosaic_preview_failed" });
+    };
   }
   postMosaicPreview(payload);
 }

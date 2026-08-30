@@ -370,11 +370,7 @@ async function importSingleFile(entry, clientKey, catalogId = null) {
     body: entry.file,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(data.error || t("error.requestFailed"));
-    error.status = response.status;
-    throw error;
-  }
+  if (!response.ok) throw responseError(response, data);
   return data;
 }
 

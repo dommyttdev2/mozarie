@@ -2836,13 +2836,13 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "out of memory"):
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
 
-    def test_job_error_response_preserves_client_error_code_and_params(self):
+    def test_job_error_response_exposes_only_public_error_code_and_params(self):
         state = self.new_state(); state.job = core_module.Job(kind="detect", state="running")
         state._fail_job(ClientError("out of memory: invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
         data = state.job.as_dict()
-        self.assertEqual(data["error"], "out of memory: invalid checkpoint")
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
-        self.assertEqual(data["params"], {"model": "vit_b"})
+        self.assertEqual(data["params"], {})
+        self.assertNotIn("error", data)
 
     def test_detection_model_preparation_phase_tracks_real_loading_only(self):
         state = self.new_state(); state.job = core_module.Job(kind="detect", state="running")
@@ -5133,7 +5133,7 @@ class MozarieTests(unittest.TestCase):
                     response = connection.getresponse()
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(response.status, 404)
-                self.assertIn("検出候補", payload["error"])
+                self.assertEqual(payload, {"error_code": "mask_not_found", "params": {}})
                 logged.assert_not_called()
                 revision_after_read = state._candidate_revision(image_id)
                 self.assertEqual(revision_after_read, revision_before_read + 1)
@@ -5400,8 +5400,7 @@ class MozarieTests(unittest.TestCase):
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
-            self.assertEqual(payload["error"], "Windowsフォルダを入力してください。")
-            self.assertEqual(payload["error_code"], "input_invalid")
+            self.assertEqual(payload, {"error_code": "input_invalid", "params": {}})
         finally:
             if connection is not None:
                 connection.close()
@@ -5427,7 +5426,7 @@ class MozarieTests(unittest.TestCase):
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
             self.assertEqual(payload["error_code"], "input_invalid")
-            self.assertNotIn("ValueError", payload["error"])
+            self.assertNotIn("error", payload)
         finally:
             if connection is not None:
                 connection.close()
@@ -5441,7 +5440,7 @@ class MozarieTests(unittest.TestCase):
         payload, status = handler._json.call_args.args
         self.assertEqual(status, http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
         self.assertEqual(payload["error_code"], "internal_error")
-        self.assertNotIn("sqlite", payload["error"])
+        self.assertNotIn("error", payload)
 
     def test_database_http_error_has_a_stable_general_code(self):
         handler = object.__new__(MosaicHandler)
@@ -5449,7 +5448,17 @@ class MozarieTests(unittest.TestCase):
         handler._client_error(sqlite3.DatabaseError("database disk image is malformed"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
         payload, _status = handler._json.call_args.args
         self.assertEqual(payload["error_code"], "workspace_database_error")
-        self.assertNotIn("malformed", payload["error"])
+        self.assertNotIn("error", payload)
+
+    def test_http_error_params_are_allowlisted(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(
+            ClientError("private details", "gpu_out_of_memory", {"parallelism": 2, "path": "C:/private"}),
+            http_module.HTTPStatus.BAD_REQUEST,
+        )
+        payload, _status = handler._json.call_args.args
+        self.assertEqual(payload, {"error_code": "gpu_out_of_memory", "params": {"parallelism": 2}})
 
     def test_apply_output_error_has_a_stable_general_code(self):
         state = self.new_state()

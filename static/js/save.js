@@ -197,10 +197,10 @@ async function ensureHandlePermission(access, requireWrite = true) {
   const options = requireWrite ? { mode: "readwrite" } : { mode: "read" };
   let permission = await handle.queryPermission?.(options);
   if (permission !== "granted") permission = await handle.requestPermission?.(options);
-  if (permission && permission !== "granted") throw new Error(t("error.sourcePermissionDenied", { name: handle.name || access.name || "" }));
+  if (permission && permission !== "granted") throw codedError("source_permission_denied");
   const file = await handle.getFile();
   if (access.size != null && (file.size !== access.size || file.lastModified !== access.lastModified)) {
-    throw new Error(t("error.sourceChanged", { name: file.name || handle.name }));
+    throw codedError("stale_asset");
   }
 }
 
@@ -208,8 +208,8 @@ async function ensureSaveSources(imageIds, mode, deleteOriginal) {
   for (const imageId of imageIds) {
     const image = state.images.find((entry) => entry.id === imageId);
     const access = sourceAccessFor(imageId);
-    if (mode === "overwrite" && !sourceCanOverwrite(image)) throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
-    if (mode === "copy" && deleteOriginal && !sourceCanDelete(image)) throw new Error(t("apply.deleteUnavailable", { count: 1 }));
+    if (mode === "overwrite" && !sourceCanOverwrite(image)) throw codedError("source_action_unavailable");
+    if (mode === "copy" && deleteOriginal && !sourceCanDelete(image)) throw codedError("source_action_unavailable");
     if (access?.fileHandle) await ensureHandlePermission(access, mode === "overwrite" || deleteOriginal);
   }
 }
@@ -222,9 +222,7 @@ async function writeSourceHandle(access, response) {
     // Older File System Access implementations reject the new option. Only
     // actual exclusive-writer conflicts become the retryable busy guidance.
     if (["NoModificationAllowedError", "InvalidStateError"].includes(error?.name)) {
-      const busy = new Error("source_busy");
-      busy.code = "source_busy";
-      throw busy;
+      throw codedError("source_busy");
     }
     if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
     stream = await access.fileHandle.createWritable({ keepExistingData: false });
@@ -244,7 +242,7 @@ async function removeSourceHandle(access) {
     await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
     return;
   }
-  throw new Error(t("error.sourceDeleteUnavailable", { name: access.fileHandle.name || access.name || "" }));
+  throw codedError("source_action_unavailable");
 }
 
 async function snapshotSourceHandle(access) {
@@ -366,7 +364,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           }); }
           catch (error) {
             if (error.saveState === "pending") await cancelBrowserSave(entry, response.saveToken);
-            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, true); } catch { throw codedError("source_restore_failed"); }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -375,7 +373,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
+          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           await ensureHandlePermission(access, true);
           sourceSnapshot = await snapshotSourceHandle(access);
@@ -386,7 +384,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
           catch (error) {
             if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
-            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, false); } catch { throw codedError("source_restore_failed"); }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -395,13 +393,13 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
+          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else {
-          throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
+          throw codedError("source_action_unavailable");
         }
       };
       const finishBrowserSaveEntry = (committed, entry, save, sourceAction) => {

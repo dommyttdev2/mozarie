@@ -101,6 +101,15 @@ IO_CHUNK_BYTES = 1024 * 1024
 THUMBNAIL_WORKERS = 4
 SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
+PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
+    "gpu_out_of_memory": frozenset({"parallelism"}),
+}
+
+
+def public_error_params(error_code: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Return the small, documented parameter set that may cross the HTTP boundary."""
+    allowed = PUBLIC_ERROR_PARAMS.get(error_code, frozenset())
+    return {name: params[name] for name in allowed if name in params}
 
 
 def torch_module() -> Any:
@@ -247,9 +256,8 @@ class Job:
             "total": self.total,
             "completed": self.completed,
             "current": self.current,
-            "error": self.error,
             "errorCode": self.error_code,
-            "params": self.params,
+            "params": public_error_params(self.error_code, self.params),
             "startedAt": self.started_at,
             "activeElapsed": active_elapsed,
             "outputs": self.outputs,
