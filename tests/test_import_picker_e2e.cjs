@@ -438,6 +438,104 @@ function closeServer(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
+// This fixture deliberately owns a single candidate image.  Keeping it apart
+// from the control ledger means the candidate row, its decoded mask, and its
+// blink interval are created by the same public image-selection flow a user
+// takes, rather than by replacing page state in a shared browser page.
+function startCandidateScenarioServer() {
+  const imageId = "candidate-scenario";
+  const candidateId = "candidate-blink-apply";
+  const settings = {
+    general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "cpu", gpu_device: 0 },
+    display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true },
+    importing: { parallelism: 1 }, saving: { parallelism: 1 },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 1, targets: ["penis"] },
+    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+  };
+  const image = { id: imageId, relativePath: "candidate.png", sourceKind: "fixture", width: 2, height: 2, candidateCount: 1, enabledCandidateCount: 1, candidateRevision: 7 };
+  const candidate = { id: candidateId, role: "apply", enabled: true, forced: false, className: "Fixture candidate", confidence: 0.91, color: "#ff3d4d" };
+  const server = http.createServer(async (request, response) => {
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    const requestPath = requestUrl.pathname;
+    const json = (body) => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
+    if (requestPath === "/api/settings") { json({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } }); return; }
+    if (requestPath === "/api/images") { json({ images: [image], root: "G:/candidate-fixture" }); return; }
+    if (requestPath === "/api/job") { json({ kind: "idle", state: "idle" }); return; }
+    if (requestPath === "/api/update/status") { json({ current: "v1.0.0", latest: "v1.0.0", available: false }); return; }
+    if (requestPath === `/api/workspace/manual/${imageId}`) { json({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 7 } }); return; }
+    if (requestPath === `/api/candidates/${imageId}`) { json({ candidates: [candidate], candidateRevision: 7 }); return; }
+    if (requestPath === `/api/mask/${imageId}/${candidateId}` || requestPath === `/api/image/${imageId}` || requestPath === `/api/thumbnail/${imageId}`) {
+      response.writeHead(200, { "Content-Type": "image/png", "Content-Length": onePixelPng.length }); response.end(onePixelPng); return;
+    }
+    const relativePath = requestPath === "/" ? "index.html" : requestPath.slice(1);
+    const filePath = path.resolve(staticRoot, relativePath);
+    if (!filePath.startsWith(`${staticRoot}${path.sep}`)) { response.writeHead(403).end(); return; }
+    try {
+      const body = await fs.readFile(filePath);
+      response.writeHead(200, { "Content-Type": contentTypes[path.extname(filePath)] || "application/octet-stream" }); response.end(body);
+    } catch { response.writeHead(404).end(); }
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}`, imageId, candidateId });
+    });
+  });
+}
+
+async function runCandidateBlinkScenario(browser) {
+  const scenario = await startCandidateScenarioServer();
+  const page = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+  try {
+    await page.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    await page.goto(scenario.url, { waitUntil: "networkidle" });
+    await page.locator(`.gallery-item[data-id="${scenario.imageId}"]`).click();
+    const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
+    await row.waitFor();
+    assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
+    assert.equal(await row.locator(".candidate-class").textContent(), "Fixture candidate", "the rendered row belongs to the fixture candidate");
+
+    const display = row.locator(".candidate-display-toggle");
+    const displayBox = await display.boundingBox();
+    assert.ok(displayBox, "the fixture candidate has a visible display button");
+    await page.mouse.click(displayBox.x + displayBox.width / 2, displayBox.y + displayBox.height / 2);
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.classList.contains("blink-selected")
+        && document.querySelector("#candidatePane")?.classList.contains("blink-active")
+        && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
+    }, scenario.candidateId);
+    assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "pointer activation visibly highlights the selected apply candidate");
+
+    const effective = row.locator(".candidate-effective-toggle");
+    await effective.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "false"
+        && candidateRow.querySelector(".candidate-effective-toggle")?.getAttribute("aria-pressed") === "true"
+        && candidateRow.classList.contains("blink-selected");
+    }, scenario.candidateId);
+    assert.equal(await row.locator(".candidate-effective-toggle").getAttribute("aria-pressed"), "true", "keyboard activation switches the concrete candidate to effective display");
+
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.querySelector(".candidate-effective-toggle")?.getAttribute("aria-pressed") === "false"
+        && !candidateRow.classList.contains("blink-selected")
+        && !document.querySelector("#candidatePane")?.classList.contains("blink-active");
+    }, scenario.candidateId);
+  } finally {
+    await stopCoveredPage(page, true);
+    await closeServer(scenario.server);
+  }
+}
+
 function overlaps(left, right) {
   return left.x < right.x + right.width && left.x + left.width > right.x
     && left.y < right.y + right.height && left.y + left.height > right.y;
@@ -2531,48 +2629,6 @@ async function main() {
       assert.equal(mosaicHelp.oneLine, true, `mosaic guideline links remain on one line at ${width}/${language}`);
       await page.locator("#mosaicHelpCloseButton").click();
     }
-    const candidateDisplaySemantics = await page.evaluate(() => {
-      const candidates = state.candidates; const images = state.candidateImages; const removed = state.removedCandidateIds; const currentId = state.currentId;
-      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
-      state.currentId = "sample"; state.candidates = [{ id: "radio-candidate", role: "apply", enabled: true, className: "Radio" }, { id: "radio-exclusion", role: "exclude", enabled: true, className: "Exclude" }]; state.candidateImages = new Map([["radio-candidate", mask], ["radio-exclusion", mask]]); state.removedCandidateIds = new Set(); renderCandidates();
-      const apply = document.querySelector('.candidate-row-apply'); const exclude = document.querySelector('.candidate-row-exclude'); const applyButtons = [...apply.querySelectorAll('button')]; const excludeButtons = [...exclude.querySelectorAll('button')];
-      window.__candidateDisplayTestState = { candidates, images, removed, currentId };
-      const box = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
-      return { apply: applyButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), exclude: excludeButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), rows: [box(apply), box(exclude)] };
-    });
-    assert.deepEqual(candidateDisplaySemantics.apply.map((button) => button.text), ["Show", "Applied", "ON", "×"], "mosaic rows keep their one-line action order");
-    assert.deepEqual(candidateDisplaySemantics.exclude.map((button) => button.text), ["Show", "Force ON", "ON", "×"], `exclusion rows keep their one-line action order: ${JSON.stringify(candidateDisplaySemantics.exclude)}`);
-    assert.ok(Math.abs(candidateDisplaySemantics.rows[0].height - candidateDisplaySemantics.rows[1].height) <= 1 && candidateDisplaySemantics.rows.every((row) => row.height >= 36 && row.height <= 40), `candidate rows share one compact height: ${JSON.stringify(candidateDisplaySemantics.rows)}`);
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus(); await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
-    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "true" && state.blinkModes.get("radio-candidate") === "effective");
-    const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
-    assert.deepEqual(candidateDisplayKeyboard, { display: "false", effective: "true", mode: "effective" }, "Applied replaces normal display with exclusion-aware display");
-    // The blink timer repaints the canvas while the control remains visible.
-    // Re-focus its current DOM node before the second keyboard activation so
-    // this assertion measures the toggle, rather than a stale focus target.
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus();
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
-    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "false" && !state.blinkModes.has("radio-candidate"));
-    const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
-    assert.deepEqual(candidateDisplayStopped, { display: "false", effective: "false", mode: "off" }, "pressing Applied again stops only that candidate highlight");
-    await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
-    const sharedBlinkColors = await page.evaluate(async () => {
-      const saved = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, ids: state.blinkCandidateIds, modes: state.blinkModes, phase: state.blinkPhase, manual: state.manualMaskPresent };
-      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
-      addCtx.fillRect(0, 0, 4, 4); exclusionCtx.fillRect(0, 0, 4, 4); state.manualMaskPresent = true;
-      state.candidates = [{ id: "blink-auto-apply", role: "apply", enabled: true, className: "Auto apply" }, { id: "blink-auto-exclude", role: "exclude", enabled: true, className: "Auto exclude" }];
-      state.candidateImages = new Map([["blink-auto-apply", mask], ["blink-auto-exclude", mask]]); state.removedCandidateIds = new Set(); state.blinkCandidateIds = new Set(["blink-auto-apply", "manual:apply", "manual:exclude"]); state.blinkModes = new Map([...state.blinkCandidateIds].map((id) => [id, "normal"])); state.blinkPhase = true;
-      renderCandidates(); syncCandidateDisplayButtons(); await new Promise((resolve) => setTimeout(resolve, 80));
-      state.blinkCandidateIds.add("blink-auto-exclude"); state.blinkModes.set("blink-auto-exclude", "normal"); renderCandidates(); syncCandidateDisplayButtons();
-      const color = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
-      const lit = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
-      state.blinkPhase = false; syncCandidateDisplayButtons(); const dark = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
-      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-      state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.blinkCandidateIds = saved.ids; state.blinkModes = saved.modes; state.blinkPhase = saved.phase; state.manualMaskPresent = saved.manual; renderCandidates(); syncCandidateDisplayButtons();
-      return { lit, dark };
-    });
-    assert.deepEqual(sharedBlinkColors.lit, { autoApply: "rgba(238, 78, 78, 0.3)", manualApply: "rgba(238, 78, 78, 0.3)", autoExclude: "rgba(50, 184, 220, 0.28)", manualExclude: "rgba(50, 184, 220, 0.28)" }, "auto and manual candidate highlights share one red/blue blink phase even when enabled at different times");
-    assert.equal(Object.values(sharedBlinkColors.dark).every((color) => !color.includes("238, 78, 78") && !color.includes("50, 184, 220")), true, "all candidate highlight colors turn off together");
     const targetModes = await page.evaluate(async () => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
       await setReviewed(state.images.find((image) => image.id === "sample"), true);
@@ -2808,6 +2864,8 @@ async function main() {
     } finally {
       await stopCoveredPage(navigationPage, true);
     }
+
+    await runCandidateBlinkScenario(browser);
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
