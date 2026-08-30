@@ -66,6 +66,8 @@ from mozarie.model_downloads import (
 )
 from mozarie.jobs import JobsMixin
 from mozarie.http import MosaicHandler, _read_bool, _read_candidate_revision, _request_version, _route_ids
+from mozarie.saving import SavingMixin
+from mozarie.core import BrowserSaveReceipt
 
 
 class GeometryAndMaskCoverageTests(unittest.TestCase):
@@ -371,6 +373,32 @@ class HttpCoverageTests(unittest.TestCase):
             file.write(b"image"); file.flush(); file.seek(0)
             handler._stream_file(file, None, "application/octet-stream", "no-store")
         self.assertTrue(handler.close_connection)
+
+
+class SavingCoverageTests(unittest.TestCase):
+    def test_start_apply_and_browser_status_edge_states(self) -> None:
+        saving = SavingMixin()
+        saving.lock = threading.RLock()
+        saving.catalog_generation = 1
+        saving.settings = {"saving": {"default_output_directory": tempfile.gettempdir(), "parallelism": 2}}
+        record = image_io.ImageRecord("x", Path("C:/session.png"), "session.png", 2, 2, 1, 1, source_kind="session")
+        saving.images = {"x": record}
+        saving._records_for_ids_with_catalog = lambda _ids: ([record], 1)
+        saving._start_job = Mock()
+        self.assertFalse(saving.start_apply([], 2, {}))
+        with self.assertRaises(ClientError):
+            saving.start_apply(["x"], 2, {})
+        record.source_kind = "filesystem"
+        with self.assertRaises(ClientError):
+            saving.start_apply(["x"], 2, [])
+        saving.browser_save_receipts = {}
+        saving.browser_save_tokens = {}
+        self.assertEqual(saving.browser_save_status("x", 1, "missing", "keep"), {"state": "unknown"})
+        saving.browser_save_receipts["done"] = BrowserSaveReceipt("x", 1, "keep", True, False, False, 1.0)
+        self.assertEqual(saving.browser_save_status("x", 1, "done", "keep")["state"], "committed")
+        self.assertEqual(saving.browser_save_status("wrong", 1, "done", "keep"), {"state": "unknown"})
+        saving.browser_save_tokens["pending"] = type("Token", (), {"image_id": "x", "candidate_revision": 1})()
+        self.assertEqual(saving.browser_save_status("x", 1, "pending", "keep"), {"state": "pending"})
 
 
 class SettingsCoverageTests(unittest.TestCase):
