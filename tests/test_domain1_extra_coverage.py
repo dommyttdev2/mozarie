@@ -176,6 +176,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
     def test_settings_status_reports_actual_bad_paths(self) -> None:
         settings = self.state.settings_store.default_settings()
         models = settings["models"]
+        models["sam_model_type"] = "vit_h"
         models["target_segmentation"] = str(self.root / "wrong.txt")
         (self.root / "wrong.txt").write_text("x")
         settings["detection"]["mode"] = "high_precision"
@@ -184,11 +185,11 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         models["sam_checkpoints"][models["sam_model_type"]] = str(checkpoint)
         mismatch = self.root / "sam_vit_l_0b3195.pth"
         mismatch.write_text("x")
-        models["sam_checkpoints"]["vit_l"] = str(mismatch)
+        models["sam_checkpoints"]["vit_b"] = str(mismatch)
         status = self.state.settings_status(settings)
         self.assertEqual(status["models"]["target_segmentation"]["reasonCode"], "invalid_format")
         self.assertEqual(status["models"]["sam_checkpoint"]["reasonCode"], "invalid_format")
-        self.assertEqual(status["samVariants"]["vit_l"]["reasonCode"], "type_mismatch")
+        self.assertEqual(status["samVariants"]["vit_b"]["reasonCode"], "type_mismatch")
         self.state.end_import_transfer()
 
     def test_catalogue_guards_and_candidate_bulk_state(self) -> None:
