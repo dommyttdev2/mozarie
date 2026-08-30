@@ -95,7 +95,7 @@ class OnnxAdapterTests(unittest.TestCase):
                     "cudnn_conv_use_max_workspace": "0",
                     "do_copy_in_default_stream": "1",
                 },
-            )])
+            ), "CPUExecutionProvider"])
             self.assertEqual(create.call_args_list[1].kwargs["providers"], ["CPUExecutionProvider"])
             cuda_session.disable_fallback.assert_called_once_with()
             cpu_session.disable_fallback.assert_called_once_with()
@@ -107,7 +107,7 @@ class OnnxAdapterTests(unittest.TestCase):
                 "cudnn_conv_algo_search": "HEURISTIC",
                 "cudnn_conv_use_max_workspace": "0",
                 "do_copy_in_default_stream": "1",
-            })])
+            }), "CPUExecutionProvider"])
 
     def test_available_providers_rejects_missing_selected_gpu_provider(self) -> None:
         with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), patch("mozarie.inference.onnx.ort.get_available_providers", return_value=[]):
@@ -130,7 +130,7 @@ class OnnxAdapterTests(unittest.TestCase):
             options = create.call_args.kwargs["sess_options"]
             self.assertFalse(options.enable_mem_pattern)
             self.assertEqual(options.execution_mode, 0)
-            self.assertEqual(create.call_args.kwargs["providers"], [("DmlExecutionProvider", {"device_id": 1})])
+            self.assertEqual(create.call_args.kwargs["providers"], [("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"])
 
     def test_gpu_session_keeps_model_loading_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -170,7 +170,7 @@ class OnnxAdapterTests(unittest.TestCase):
     def test_session_creation_provider_mismatch_and_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"; path.write_bytes(b"model")
-            wrong = Mock(); wrong.get_providers.return_value = ["CPUExecutionProvider"]
+            wrong = Mock(); wrong.get_providers.return_value = ["CPUExecutionProvider", "CUDAExecutionProvider"]
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "cuda"}), \
                     patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
                     patch("mozarie.inference.onnx.ort.InferenceSession", return_value=wrong):
@@ -180,8 +180,8 @@ class OnnxAdapterTests(unittest.TestCase):
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "cuda"}), \
                     patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
                     patch("mozarie.inference.onnx.ort.InferenceSession", return_value=wrong):
-                with self.assertRaisesRegex(Exception, "GPU"):
-                    create_session(path)
+                self.assertIs(create_session(path), wrong)
+            self.assertEqual(wrong.disable_fallback.call_count, 2)
             session = Mock()
             session.get_inputs.return_value = [SimpleNamespace(name="image", shape=[None, "dynamic", -1, 3])]
             session.get_providers.return_value = ["CPUExecutionProvider"]

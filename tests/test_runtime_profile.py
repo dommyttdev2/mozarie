@@ -94,8 +94,10 @@ class RuntimeProfileTests(unittest.TestCase):
         ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider"])
         self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
 
-    def test_onnx_probe_rejects_an_added_fallback_provider(self) -> None:
+    def test_onnx_probe_allows_cpu_graph_provider_after_cuda(self) -> None:
         ort, onnx, np = self._probe_dependencies(["CUDAExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0), "CUDAExecutionProvider")
+        ort, onnx, np = self._probe_dependencies(["CPUExecutionProvider", "CUDAExecutionProvider"])
         with self.assertRaisesRegex(runtime_profile.ProfileError, "selected"):
             runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0)
 
