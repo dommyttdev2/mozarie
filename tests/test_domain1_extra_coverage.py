@@ -119,6 +119,59 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             store.commit_candidate_state(image_id, 1, [missing], True, replace=True)
             self.assertIsNone(store.candidate_png(image_id, "not-stored"))
 
+    def test_schema_metadata_and_manual_payload_rejections(self) -> None:
+        class InvalidPng:
+            format = "JPEG"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def load(self) -> None:
+                return None
+
+        class SchemaView:
+            def __init__(self, db: sqlite3.Connection, *, bad_primary: bool = False, bad_foreign: bool = False) -> None:
+                self.db = db
+                self.bad_primary = bad_primary
+                self.bad_foreign = bad_foreign
+                self.catalog_info_calls = 0
+
+            def execute(self, sql: str):
+                if sql == "PRAGMA table_info(catalogs)":
+                    self.catalog_info_calls += 1
+                    rows = list(self.db.execute(sql))
+                    if self.bad_primary and self.catalog_info_calls == 2:
+                        return [{**dict(row), "pk": 0} for row in rows]
+                    return rows
+                if self.bad_foreign and sql == "PRAGMA foreign_key_list(images)":
+                    return []
+                return self.db.execute(sql)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, _catalog_id, image_id = self.make_store(root)
+            db = store._connect()
+            try:
+                tables = {str(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                with self.assertRaises(WorkspaceOpenError):
+                    WorkspaceStore._validate_schema(SchemaView(db, bad_primary=True), tables)
+                with self.assertRaises(WorkspaceOpenError):
+                    WorkspaceStore._validate_schema(SchemaView(db, bad_foreign=True), tables)
+            finally:
+                db.close()
+            with patch("mozarie.workspace.Image.open", return_value=InvalidPng()):
+                with self.assertRaises(ValueError):
+                    WorkspaceStore._decode_png_mask(png())
+            for payload in (
+                {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": "bad", "hasEffectiveMask": False},
+                {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": [], "hasEffectiveMask": "bad"},
+            ):
+                with self.assertRaises(ValueError):
+                    store.save_manual(image_id, payload, lambda value: value)
+
 
 class StateCatalogExtraCoverageTests(unittest.TestCase):
     def setUp(self) -> None:
