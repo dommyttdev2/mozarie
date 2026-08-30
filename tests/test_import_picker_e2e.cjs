@@ -2392,8 +2392,11 @@ async function main() {
     await page.waitForFunction(() => state.contextMenuImageId === "sample-two");
     assert.equal(await page.locator("#copyImagePathMenuItem").getAttribute("hidden"), "", "session images never expose their temporary path");
     await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("#catalogContextMenu").matches(":popover-open"));
     await page.locator('.gallery-item[data-id="sample"]').focus();
+    await page.waitForFunction(() => document.activeElement?.dataset?.id === "sample");
     await page.keyboard.press("Shift+F10");
+    await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
     const keyboardMenu = await page.locator("#catalogContextMenu").evaluate((menu) => {
       const card = document.querySelector('.gallery-item[data-id="sample"]').getBoundingClientRect(); const rect = menu.getBoundingClientRect();
       return { open: menu.matches(":popover-open"), left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, cardLeft: card.left, cardTop: card.top, viewportWidth: innerWidth, viewportHeight: innerHeight };
