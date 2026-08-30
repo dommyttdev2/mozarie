@@ -21,9 +21,12 @@ function catalogWindow(scope, container, nodes, options) {
   let windowState = catalogWindows.get(scope);
   if (windowState) return windowState;
   const spacer = document.createElement("div"); spacer.className = "catalog-window-spacer";
+  spacer.setAttribute?.("aria-hidden", "true");
   container.append(spacer);
   container.classList.add?.("catalog-window");
-  windowState = { scope, container, nodes, spacer, options, images: [], frame: 0 };
+  container.setAttribute?.("role", "grid");
+  container.setAttribute?.("aria-multiselectable", String(scope === "overview"));
+  windowState = { scope, container, nodes, spacer, options, images: [], rows: new Map(), frame: 0, focusId: null };
   const schedule = () => {
     if (windowState.frame) return;
     windowState.frame = requestAnimationFrame(() => { windowState.frame = 0; renderCatalogWindow(windowState); });
@@ -36,23 +39,40 @@ function catalogWindow(scope, container, nodes, options) {
 function catalogLayout(windowState) {
   const { container, options } = windowState;
   const width = Math.max(1, (Number(container.clientWidth) || options.minWidth + options.padding * 2) - options.padding * 2);
-  const columns = options.columns || Math.max(1, Math.floor((width + options.gap) / (options.minWidth + options.gap)));
+  const cssColumns = Number(globalThis.getComputedStyle?.(container).getPropertyValue("--catalog-columns"));
+  const columns = cssColumns || options.columns || Math.max(1, Math.floor((width + options.gap) / (options.minWidth + options.gap)));
   const itemWidth = (width - (columns - 1) * options.gap) / columns;
   return { columns, itemWidth, rowHeight: options.rowHeight, totalHeight: Math.ceil(windowState.images.length / columns) * options.rowHeight + options.padding * 2 };
 }
 
-function setCatalogNode(windowState, image, index, layout) {
-  const { scope, nodes, container, options } = windowState;
-  let item = nodes.get(image.id);
-  if (!item) { item = document.querySelector(options.template).content.firstElementChild.cloneNode(true); nodes.set(image.id, item); }
+function catalogRow(windowState, row, layout) {
+  let rowNode = windowState.rows.get(row);
+  if (!rowNode) {
+    rowNode = document.createElement("div"); rowNode.className = "catalog-window-row"; rowNode.setAttribute("role", "row"); windowState.rows.set(row, rowNode);
+  }
+  rowNode.setAttribute("aria-rowindex", String(row + 1)); rowNode.style.height = `${layout.rowHeight - windowState.options.gap}px`;
+  rowNode.style.transform = `translateY(${windowState.options.padding + row * layout.rowHeight}px)`;
+  rowNode.style.left = `${windowState.options.padding}px`; rowNode.style.right = `${windowState.options.padding}px`;
+  rowNode.style.gridTemplateColumns = `repeat(${layout.columns}, minmax(0, 1fr))`; rowNode.style.columnGap = `${windowState.options.gap}px`;
+  if (rowNode.parentNode !== windowState.container) windowState.container.append(rowNode);
+  return rowNode;
+}
+
+function setCatalogNode(windowState, image, index, layout, rowNode) {
+  const { scope, nodes, options } = windowState;
+  let item = nodes.get(image.id); let cell = item?.parentNode;
+  if (!item) {
+    item = document.querySelector(options.template).content.firstElementChild.cloneNode(true); cell = document.createElement("div"); cell.className = "catalog-window-cell"; cell.setAttribute("role", "gridcell"); cell.append(item); nodes.set(image.id, item);
+  }
   const row = Math.floor(index / layout.columns); const column = index % layout.columns;
-  item.dataset.id = image.id; item.dataset.index = String(index); item.style.width = `${layout.itemWidth}px`; item.style.height = `${layout.rowHeight - options.gap}px`;
-  item.style.transform = `translate(${options.padding + column * (layout.itemWidth + options.gap)}px, ${options.padding + row * layout.rowHeight}px)`;
+  item.dataset.id = image.id; item.dataset.index = String(index); item.style.width = ""; item.style.height = `${layout.rowHeight - options.gap}px`; item.style.transform = "";
   const current = image.id === state.currentId;
   const batchSelected = scope === "overview" && state.batchMode && state.selectedImageIds.has(image.id);
   item.classList.toggle("current", current); item.classList.toggle("batch-selected", batchSelected); item.classList.toggle("hidden", isHidden(image));
   if (current) item.setAttribute("aria-current", "true"); else item.removeAttribute?.("aria-current");
   if (scope === "overview" && state.batchMode) item.setAttribute("aria-pressed", String(batchSelected)); else item.removeAttribute?.("aria-pressed");
+  cell.setAttribute("aria-selected", String(scope === "gallery" ? current : batchSelected));
+  cell.setAttribute("aria-colindex", String(column + 1));
   const preview = item.querySelector("img"); observeThumbnail(preview, image, scope); preview.alt = image.relativePath;
   const reviewed = isReviewed(image);
   if (scope === "gallery") {
@@ -60,7 +80,7 @@ function setCatalogNode(windowState, image, index, layout) {
     item.querySelector(".gallery-meta").textContent = `${image.width} × ${image.height}`;
     item.querySelector(".gallery-review-badge").textContent = reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.setAttribute("aria-label", [image.relativePath, reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
-    item.onclick = () => selectCatalogImage(image.id);
+    item.onclick = () => { windowState.focusId = image.id; selectCatalogImage(image.id); };
     item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
   } else {
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
@@ -69,28 +89,59 @@ function setCatalogNode(windowState, image, index, layout) {
     item.title = image.relativePath;
     const states = [image.relativePath]; if (reviewed) states.push(t("overview.stateReviewed")); if (imageHasMask(image)) states.push(t("overview.stateMasked"));
     item.setAttribute("aria-label", states.join(t("a11y.separator")));
-    item.onclick = (event) => selectOverviewImage(image.id, event);
+    item.onclick = (event) => { windowState.focusId = image.id; selectOverviewImage(image.id, event); };
   }
-  item.oncontextmenu = (event) => openCatalogContextMenu(event, image.id);
-  item.tabIndex = 0; item.setAttribute("role", "button"); item.setAttribute("aria-haspopup", "menu");
+  item.oncontextmenu = (event) => { windowState.focusId = image.id; openCatalogContextMenu(event, image.id); };
+  item.tabIndex = image.id === windowState.focusId ? 0 : -1; item.setAttribute("aria-haspopup", "menu");
   item.onkeydown = (event) => {
-    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scope === "gallery" ? selectCatalogImage(image.id) : selectOverviewImage(image.id, event); }
-    else if (event.key === "ContextMenu" || event.key === "F10") openCatalogContextMenu(event, image.id);
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault?.(); event.stopPropagation?.(); windowState.focusId = image.id; scope === "gallery" ? selectCatalogImage(image.id) : selectOverviewImage(image.id, event); }
+    else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) { event.preventDefault?.(); event.stopPropagation?.(); openCatalogContextMenu(event, image.id); }
+    else { const targetIndex = catalogMoveIndex(windowState, index, event); if (targetIndex >= 0) { event.preventDefault?.(); event.stopPropagation?.(); focusCatalogIndex(windowState, targetIndex, event); } }
   };
-  container.append(item);
+  if (cell.parentNode !== rowNode) rowNode.append(cell);
+}
+
+function catalogMoveIndex(windowState, index, event) {
+  const { key } = event; const { columns, rowHeight } = catalogLayout(windowState); const length = windowState.images.length;
+  if (!length) return -1;
+  const page = Math.max(1, Math.floor((Number(windowState.container.clientHeight) || rowHeight) / rowHeight) - 1) * columns;
+  if (key === "ArrowLeft") return Math.max(0, index - 1);
+  if (key === "ArrowRight") return Math.min(length - 1, index + 1);
+  if (key === "ArrowUp") return Math.max(0, index - columns);
+  if (key === "ArrowDown") return Math.min(length - 1, index + columns);
+  if (key === "PageUp") return Math.max(0, index - page);
+  if (key === "PageDown") return Math.min(length - 1, index + page);
+  if (key === "Home") return 0;
+  if (key === "End") return length - 1;
+  return -1;
+}
+
+function focusCatalogIndex(windowState, index, event = null) {
+  const image = windowState.images[index]; if (!image) return;
+  windowState.focusId = image.id;
+  scrollCatalogImage(windowState.scope, image.id);
+  const item = windowState.nodes.get(image.id); focusElement(item);
+  if (windowState.scope === "overview" && state.batchMode && (event?.shiftKey || event?.ctrlKey || event?.metaKey)) selectOverviewImage(image.id, event);
 }
 
 function renderCatalogWindow(windowState) {
   const { container, nodes, spacer, options } = windowState;
   const layout = catalogLayout(windowState); spacer.style.height = `${layout.totalHeight}px`;
+  container.setAttribute?.("aria-rowcount", String(Math.ceil(windowState.images.length / layout.columns)));
+  container.setAttribute?.("aria-colcount", String(layout.columns));
+  if (!windowState.images.some((image) => image.id === windowState.focusId)) windowState.focusId = windowState.images.find((image) => image.id === state.currentId)?.id || windowState.images[0]?.id || null;
   const viewport = Number(container.clientHeight) || Number.MAX_SAFE_INTEGER;
   const scrollTop = Number(container.scrollTop) || 0;
   const firstRow = Math.max(0, Math.floor(scrollTop / layout.rowHeight) - options.overscan);
-  const lastRow = Math.ceil((scrollTop + viewport) / layout.rowHeight) + options.overscan;
+  const lastRow = Math.min(Math.ceil(windowState.images.length / layout.columns), Math.ceil((scrollTop + viewport) / layout.rowHeight) + options.overscan);
   const first = firstRow * layout.columns; const last = Math.min(windowState.images.length, lastRow * layout.columns);
   const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
-  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.remove(); nodes.delete(id); }
-  for (let index = first; index < last; index += 1) setCatalogNode(windowState, windowState.images[index], index, layout);
+  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode?.remove(); nodes.delete(id); }
+  for (const [row, rowNode] of windowState.rows) if (row < firstRow || row >= lastRow) { rowNode.remove(); windowState.rows.delete(row); }
+  for (let row = firstRow; row < lastRow; row += 1) {
+    const rowNode = catalogRow(windowState, row, layout); const rowStart = row * layout.columns;
+    for (let index = rowStart; index < Math.min(windowState.images.length, rowStart + layout.columns); index += 1) setCatalogNode(windowState, windowState.images[index], index, layout, rowNode);
+  }
   for (const item of nodes.values()) item.style.visibility = "";
   return layout;
 }
@@ -98,10 +149,11 @@ function renderCatalogWindow(windowState) {
 function renderCatalog(scope, images, nodes, options) {
   if (!document.createElement) {
     const ids = new Set(images.map((image) => image.id));
-    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); item.remove(); nodes.delete(id); }
+    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode?.remove(); nodes.delete(id); }
     return null;
   }
   const windowState = catalogWindow(scope, $(options.container), nodes, options);
+  if (!nodes.size && windowState.rows.size) { for (const row of windowState.rows.values()) row.remove(); windowState.rows.clear(); }
   windowState.images = images;
   return renderCatalogWindow(windowState);
 }

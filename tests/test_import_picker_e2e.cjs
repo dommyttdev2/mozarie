@@ -2405,16 +2405,43 @@ async function main() {
     assert.equal(await page.locator("#copyImagePathMenuItem").getAttribute("hidden"), "", "session images never expose their temporary path");
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector("#catalogContextMenu").matches(":popover-open"));
-    await page.locator('.gallery-item[data-id="sample"]').press("Shift+F10");
-    await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
-    const keyboardMenu = await page.locator("#catalogContextMenu").evaluate((menu) => {
-      const card = document.querySelector('.gallery-item[data-id="sample"]').getBoundingClientRect(); const rect = menu.getBoundingClientRect();
-      return { open: menu.matches(":popover-open"), left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, cardLeft: card.left, cardTop: card.top, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    const keyboardMenu = await page.locator('.gallery-item[data-id="sample"]').evaluate((card) => {
+      card.focus();
+      const event = new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true });
+      const dispatched = card.dispatchEvent(event); const menu = document.querySelector("#catalogContextMenu");
+      const cardRect = card.getBoundingClientRect(); const rect = menu.getBoundingClientRect();
+      return { dispatched, defaultPrevented: event.defaultPrevented, open: menu.matches(":popover-open"), contextMenuImageId: state.contextMenuImageId, focusedId: document.activeElement?.id, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, cardLeft: cardRect.left, cardTop: cardRect.top, viewportWidth: innerWidth, viewportHeight: innerHeight };
     });
-    assert.equal(keyboardMenu.open, true, "Shift+F10 opens the gallery context menu");
+    assert.deepEqual({ dispatched: keyboardMenu.dispatched, defaultPrevented: keyboardMenu.defaultPrevented, open: keyboardMenu.open, contextMenuImageId: keyboardMenu.contextMenuImageId, focusedId: keyboardMenu.focusedId }, { dispatched: false, defaultPrevented: true, open: true, contextMenuImageId: "sample", focusedId: "toggleReviewMenuItem" }, "cancelable Shift+F10 opens the focused card menu synchronously");
     assert.ok(keyboardMenu.left >= 0 && keyboardMenu.top >= 0 && keyboardMenu.right <= keyboardMenu.viewportWidth && keyboardMenu.bottom <= keyboardMenu.viewportHeight && keyboardMenu.left >= keyboardMenu.cardLeft && keyboardMenu.top >= keyboardMenu.cardTop, "keyboard menu starts from the card and remains in the viewport");
     await page.keyboard.press("Tab");
     assert.equal(await page.locator("#catalogContextMenu").evaluate((menu) => menu.matches(":popover-open")), false, "Tab closes the catalog context menu without trapping focus");
+    const gridKeyboard = await page.evaluate(() => {
+      const saved = { images: state.images, currentId: state.currentId, galleryFilter: state.galleryFilter, viewMode: state.viewMode, batchMode: state.batchMode, selectedImageIds: state.selectedImageIds, selectionAnchorId: state.selectionAnchorId };
+      state.images = Array.from({ length: 200 }, (_, index) => ({ id: `keyboard-${index}`, relativePath: `keyboard/${index}.png`, width: 80, height: 60, hasEffectiveMask: index % 2 === 0 }));
+      state.currentId = null; state.galleryFilter = "masked"; renderGallery(true);
+      const press = (key, modifiers = {}) => {
+        const origin = document.activeElement;
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers }); origin.dispatchEvent(event);
+        return { defaultPrevented: event.defaultPrevented, activeId: document.activeElement?.dataset.id, mounted: Boolean(document.querySelector(`.gallery-item[data-id="${document.activeElement?.dataset.id}"], .overview-item[data-id="${document.activeElement?.dataset.id}"]`)) };
+      };
+      document.querySelector('.gallery-item[tabindex="0"]').focus();
+      const arrow = press("ArrowDown"); const pageDown = press("PageDown"); const end = press("End"); const home = press("Home"); const right = press("ArrowRight");
+      const galleryRole = document.querySelector("#gallery").getAttribute("role"); const galleryColumns = document.querySelector("#gallery").getAttribute("aria-colcount"); const galleryCellRole = document.querySelector(".gallery-item").parentElement.getAttribute("role");
+      setViewMode("overview"); state.batchMode = true; state.selectedImageIds = new Set(["keyboard-0"]); state.selectionAnchorId = "keyboard-0"; renderOverview(true);
+      document.querySelector('.overview-item[data-id="keyboard-0"]').focus();
+      const shift = press("ArrowRight", { shiftKey: true }); const additiveShift = press("ArrowRight", { shiftKey: true, ctrlKey: true });
+      const overviewRole = document.querySelector("#overviewGrid").getAttribute("role"); const overviewColumns = document.querySelector("#overviewGrid").getAttribute("aria-colcount"); const overviewCssColumns = getComputedStyle(document.querySelector("#overviewGrid")).getPropertyValue("--catalog-columns"); const overviewCellRole = document.querySelector(".overview-item").parentElement.getAttribute("role");
+      const result = { arrow, pageDown, end, home, right, shift, additiveShift, selected: [...state.selectedImageIds].sort(), galleryRole, overviewRole, galleryColumns, overviewColumns, overviewCssColumns, galleryCellRole, overviewCellRole };
+      state.images = saved.images; state.currentId = saved.currentId; state.galleryFilter = saved.galleryFilter; state.batchMode = saved.batchMode; state.selectedImageIds = saved.selectedImageIds; state.selectionAnchorId = saved.selectionAnchorId; setViewMode(saved.viewMode); renderCatalogViews();
+      return result;
+    });
+    for (const movement of [gridKeyboard.arrow, gridKeyboard.pageDown, gridKeyboard.end, gridKeyboard.home, gridKeyboard.right, gridKeyboard.shift, gridKeyboard.additiveShift]) { assert.equal(movement.defaultPrevented, true, JSON.stringify(movement)); assert.equal(movement.mounted, true, JSON.stringify(movement)); }
+    assert.equal(gridKeyboard.end.activeId, "keyboard-198", "End uses the filtered logical list, then mounts and focuses its last card");
+    assert.equal(gridKeyboard.home.activeId, "keyboard-0", "Home returns to the first filtered card");
+    assert.deepEqual(gridKeyboard.selected, ["keyboard-0", "keyboard-1", "keyboard-2"], "Shift and Ctrl+Shift keyboard selection retains the logical range");
+    assert.deepEqual({ galleryRole: gridKeyboard.galleryRole, overviewRole: gridKeyboard.overviewRole, galleryCellRole: gridKeyboard.galleryCellRole, overviewCellRole: gridKeyboard.overviewCellRole }, { galleryRole: "grid", overviewRole: "grid", galleryCellRole: "gridcell", overviewCellRole: "gridcell" }, "virtual catalogues expose a grid composite with grid cells");
+    assert.ok(Number(gridKeyboard.galleryColumns) >= 1 && Number(gridKeyboard.overviewColumns) === Number(gridKeyboard.overviewCssColumns), "virtual grids expose the same logical column counts as their visible layout");
     await page.locator("#overviewButton").click();
     await page.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
     await page.locator("#batchModeButton").click();
