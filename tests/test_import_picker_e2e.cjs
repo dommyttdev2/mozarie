@@ -2986,9 +2986,12 @@ async function main() {
           canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end); canvas.addEventListener("pointerup", finish);
         });
         const toolPixels = [
-          ["#brushTool", "add"], ["#mosaicEraserTool", "erase"], ["#eraserTool", "exclusion"], ["#excludeEraserTool", "exclusionErase"],
+          ["#brushTool", "add", (value) => value > 0],
+          ["#mosaicEraserTool", "add", (value) => value === 0],
+          ["#eraserTool", "exclusion", (value) => value > 0],
+          ["#excludeEraserTool", "exclusionErase", (value) => value > 0],
         ];
-        for (const [tool, target] of toolPixels) {
+        for (const [tool, layer, accepts] of toolPixels) {
           await page.locator(tool).click();
           await page.mouse.move(geometry.x, geometry.y); await page.mouse.down(); await page.mouse.move(geometry.endX, geometry.endY, { steps: 100 }); await page.mouse.up();
           await page.waitForFunction(() => !state.activeStroke);
@@ -2996,8 +2999,8 @@ async function main() {
             add: addCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
             exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
             exclusionErase: exclusionEraseCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
-          }[layer]), { layer: target, logical: geometry.logical });
-          assert.equal(target === "erase" ? pixels : pixels > 0, target === "erase" ? 0 : true, `4K ${tool} changes its intended pixel layer`);
+          }[layer]), { layer, logical: geometry.logical });
+          assert.equal(accepts(pixels), true, `4K ${tool} changes its intended pixel layer`);
         }
         await page.locator("#brushTool").click();
         for (let stroke = 0; stroke < 50; stroke += 1) {
