@@ -362,21 +362,15 @@ async function batchCandidateOperation(spec) {
         renderCatalogViews();
         return;
       }
-      if (operation === "delete") {
-        changed.forEach((item) => releaseCandidateBitmap(item.id));
-        state.candidates = state.candidates.filter((item) => item.role !== role);
-        if (manual) role === "apply" ? deleteManualMask() : deleteManualExclusion();
-      } else {
-        changed.forEach((item) => { item.enabled = operation === "enable"; });
+      changed.forEach((item) => { item.enabled = operation === "enable"; });
+      markMaskDirty();
+      if (manual) {
+        if (role === "apply") state.manualEnabled = operation === "enable";
+        else state.manualExclusionEnabled = operation === "enable";
         markMaskDirty();
-        if (manual) {
-          if (role === "apply") state.manualEnabled = operation === "enable";
-          else state.manualExclusionEnabled = operation === "enable";
-          markMaskDirty();
-        }
-        if (manualErase) { state.manualExclusionEraseEnabled = operation === "enable"; markMaskDirty(); }
-        if (manual || manualErase) saveDraft();
       }
+      if (manualErase) { state.manualExclusionEraseEnabled = operation === "enable"; markMaskDirty(); }
+      if (manual || manualErase) saveDraft();
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
       setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     } catch (error) {

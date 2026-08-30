@@ -81,13 +81,13 @@ const USER_ERROR_CODES = {
   no_effective_mask: "no_mosaic_area", stale_asset: "image_changed",
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
   sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
-  model_picker_busy: "operation_in_progress", model_picker_failed: "model_file_invalid", model_picker_invalid: "model_file_invalid",
+  model_picker_busy: "operation_in_progress", model_picker_failed: "model_picker_failed", model_picker_invalid: "model_file_invalid",
   model_download_invalid: "model_download_failed", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
-  mask_not_found: "no_mosaic_area", invalid_settings: "input_invalid", invalid_request: "input_invalid",
+  mask_not_found: "mask_not_found", invalid_settings: "input_invalid", invalid_request: "input_invalid",
   api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", request_failed: "internal_error",
   image_not_found: "image_not_found", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
   save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
-  source_restore_failed: "save_write_failed",
+  source_restore_failed: "source_restore_failed",
   source_busy: "source_busy",
   clipboard_write_failed: "clipboard_write_failed",
   workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", workspace_database_error: "workspace_write_failed",
@@ -457,18 +457,6 @@ function setNavigationShortcutsEnabled(enabled) {
   focusCanvas();
 }
 
-async function persistNavigationShortcuts(enabled) {
-  setNavigationShortcutsEnabled(enabled);
-  if (!state.settings) return;
-  try {
-    const payload = structuredClone(state.settings);
-    payload.general.shortcuts_enabled = Boolean(enabled);
-    payload.shortcuts = { ...(payload.shortcuts || {}), enabled: Boolean(enabled) };
-    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(payload) });
-    setSettingsForm(data.settings, state.settingsStatus);
-    setNavigationShortcutsEnabled(data.settings.shortcuts?.enabled ?? data.settings.general.shortcuts_enabled);
-  } catch (error) { showUserError(error); }
-}
 function updateActionButtons() {
   const running = isBusy();
   const locked = running || state.importing;

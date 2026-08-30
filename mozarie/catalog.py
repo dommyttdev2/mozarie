@@ -819,7 +819,7 @@ class CatalogMixin:
                     raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "model_not_configured")
                 path = Path(raw_path).expanduser()
                 if not path.is_file():
-                    raise ClientError(f"HandSegNetモデルが見つかりません: {path}", "model_file_missing")
+                    raise ClientError("HandSegNetモデルが見つかりません。設定のモデルタブで選び直してください。", "model_file_missing")
                 if path.suffix.lower() != ".safetensors":
                     raise ClientError("HandSegNetモデルは .safetensors ファイルを指定してください。", "model_file_invalid")
                 self._set_detection_model_preparation(True)

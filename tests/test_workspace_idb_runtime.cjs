@@ -2,7 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const source = fs.readFileSync(path.join(__dirname, "..", "static", "js", "workspace.js"), "utf8");
+const workspacePath = path.join(__dirname, "..", "static", "js", "workspace.js");
+const source = fs.readFileSync(workspacePath, "utf8");
 const deleted = []; const writes = []; const events = []; let opens = 0;
 function eventRequest(result) {
   return {
@@ -30,7 +31,7 @@ const context = {
   window: { indexedDB }, indexedDB, Promise, Map, Set, Object, Number, encodeURIComponent, setTimeout, clearTimeout, queueMicrotask,
   api: async (_url, options = {}) => options.body.includes("stale") ? Promise.reject(new Error("missing")) : { catalogId: "fresh" }, setStatus() {}, saveDraft() {},
 };
-vm.runInNewContext(`${source}\nglobalThis.idbTest={catalogForDirectoryHandle};`, context);
+vm.runInNewContext(`${source}\nglobalThis.idbTest={catalogForDirectoryHandle};`, context, { filename: workspacePath });
 (async () => {
   assert.equal(await context.idbTest.catalogForDirectoryHandle({}), "fresh");
   assert.deepEqual(deleted, ["stale"], "same-entry activation failure removes the stale IDB row before replacement");

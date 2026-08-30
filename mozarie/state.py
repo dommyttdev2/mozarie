@@ -360,7 +360,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         try:
             settings = self.settings_store.validate_update(update)
         except SettingsError as exc:
-            raise ClientError("設定の内容が正しくありません。", "invalid_settings", {"detail": str(exc)}) from exc
+            raise ClientError("設定の内容が正しくありません。", "invalid_settings") from exc
         return self.settings_status(settings)
 
     @staticmethod

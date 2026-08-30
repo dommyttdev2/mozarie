@@ -54,9 +54,17 @@ _register_torch_dll_directory()
 import onnxruntime as ort
 from onnxruntime.capi import _pybind_state as ort_state
 
-preload_dlls = getattr(ort, "preload_dlls", None)
-if preload_dlls is not None and "torch" not in sys.modules:
+
+def _preload_onnxruntime_dlls(runtime: Any, modules: dict[str, object] | None = None) -> None:
+    """Let ONNX Runtime load CUDA DLLs itself when PyTorch is not loaded."""
+    preload_dlls = getattr(runtime, "preload_dlls", None)
+    loaded_modules = sys.modules if modules is None else modules
+    if preload_dlls is None or "torch" in loaded_modules:
+        return
     preload_dlls()
+
+
+_preload_onnxruntime_dlls(ort)
 
 
 @dataclass(frozen=True)

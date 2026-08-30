@@ -1269,8 +1269,21 @@ class MozarieTests(unittest.TestCase):
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
 
+    def test_main_reports_the_specific_maintenance_lock_failure(self):
+        for message_key in ("update_in_progress", "maintenance_lock_access"):
+            with self.subTest(message_key=message_key):
+                message = updater.tr(message_key)
+                with patch("server.MaintenanceLock", side_effect=updater.UpdateError(message)), \
+                        patch.object(core_module.LOGGER, "error") as error, \
+                        patch.object(sys, "argv", ["server.py"]):
+                    with self.assertRaises(SystemExit) as raised:
+                        server_entry.main()
+                self.assertEqual(raised.exception.code, 1)
+                error.assert_called_once_with("%s", message)
+
     def test_main_reports_bind_error_without_traceback(self):
-        with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
+        bind_error = OSError("in use"); bind_error.winerror = 10048
+        with patch("server.ThreadingHTTPServer", side_effect=bind_error), \
                 patch.object(core_module.LOGGER, "error") as error, \
                 patch.object(core_module.LOGGER, "exception") as exception, \
                 patch.object(state_module.STATE, "shutdown") as shutdown, \
@@ -1280,6 +1293,20 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         error.assert_called_once_with("Mozarieを起動できません。ポート%sは使用中です。", 9876)
         exception.assert_not_called()
+        shutdown.assert_called_once()
+
+    def test_main_reports_non_port_bind_error_without_calling_it_a_port_conflict(self):
+        bind_error = OSError("access denied"); bind_error.winerror = 5
+        with patch("server.ThreadingHTTPServer", side_effect=bind_error), \
+                patch.object(core_module.LOGGER, "error") as error, \
+                patch.object(core_module.LOGGER, "exception") as exception, \
+                patch.object(state_module.STATE, "shutdown") as shutdown, \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            with self.assertRaises(SystemExit) as raised:
+                server_entry.main()
+        self.assertEqual(raised.exception.code, 1)
+        error.assert_not_called()
+        exception.assert_called_once_with("Mozarieを起動できませんでした。")
         shutdown.assert_called_once()
 
     def test_server_suppresses_normal_client_disconnect_tracebacks(self):
@@ -1336,9 +1363,45 @@ class MozarieTests(unittest.TestCase):
                 state._fail_job(exc)
         self.assertIn("バックグラウンド処理に失敗", "\n".join(logs.output))
 
+    def test_unknown_job_failure_hides_details_and_logs_the_original_traceback(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="detect", state="running")
+        original = None
+        try:
+            raise RuntimeError("private worker details")
+        except RuntimeError as raised:
+            original = raised
+            with patch.object(jobs_module.LOGGER, "error") as error:
+                state._fail_job(raised)
+
+        self.assertIsNotNone(original)
+        self.assertEqual(state.job.error_code, "internal_error")
+        self.assertNotIn("private worker details", state.job.error)
+        self.assertIs(error.call_args.kwargs["exc_info"], original)
+        self.assertNotIn("private worker details", " ".join(map(str, error.call_args.args)))
+        self.assertIsNotNone(original.__traceback__)
+
+    def test_known_job_failures_do_not_log_tracebacks(self):
+        cases = (
+            ("client", "detect", ClientError("safe", "safe_code"), "safe_code"),
+            ("database", "detect", sqlite3.DatabaseError("private database details"), "workspace_database_error"),
+            ("output", "apply", PermissionError("private output path"), "output_unavailable"),
+            ("memory", "detect", MemoryError("private allocation details"), "memory_allocation_failed"),
+            ("gpu_oom", "detect", RuntimeError("cuda out of memory"), "gpu_out_of_memory"),
+        )
+        for name, kind, failure, error_code in cases:
+            with self.subTest(name=name):
+                state = self.new_state()
+                state.job = core_module.Job(kind=kind, state="running")
+                with patch.object(jobs_module.LOGGER, "error") as error:
+                    state._fail_job(failure)
+                self.assertEqual(state.job.error_code, error_code)
+                self.assertNotIn("exc_info", error.call_args.kwargs)
+
     def test_main_logs_bind_failure_and_exits(self):
+        bind_error = OSError("port in use"); bind_error.winerror = 10048
         with patch("server.logging.basicConfig"), \
-              patch("server.ThreadingHTTPServer", side_effect=OSError("port in use")), \
+              patch("server.ThreadingHTTPServer", side_effect=bind_error), \
               patch.object(state_module.STATE, "shutdown") as shutdown, \
               patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):
@@ -2806,8 +2869,8 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_maps_worker_gpu_memory_errors(self):
         for message, error_code in (
-            ("out of memory", "memory_allocation_failed"),
-            ("failed to allocate memory", "memory_allocation_failed"),
+            ("out of memory", "internal_error"),
+            ("failed to allocate memory", "internal_error"),
             ("bfcarena exhausted", "gpu_out_of_memory"),
             ("cuda out of memory", "gpu_out_of_memory"),
             ("Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!", "gpu_out_of_memory"),
@@ -2866,13 +2929,13 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         self.assertIs(state.sam_lock, state.hand_segmentation_lock)
 
-    def test_detection_reports_an_unsupported_gpu_architecture(self):
+    def test_detection_reports_a_raw_gpu_execution_error_as_internal(self):
         state = self.new_state()
         state.job = core_module.Job(kind="detect", state="running")
         with patch.object(state, "_release_gpu_job_memory") as release:
             state._fail_job(RuntimeError("no kernel image is available for execution on the device"))
-        self.assertEqual(state.job.error_code, "gpu_unsupported")
-        self.assertIn("PyTorch", state.job.error)
+        self.assertEqual(state.job.error_code, "internal_error")
+        self.assertNotIn("kernel image", state.job.error)
         release.assert_called_once_with()
 
     def test_terminal_gpu_job_empties_the_pytorch_cache(self):
@@ -2914,14 +2977,21 @@ class MozarieTests(unittest.TestCase):
         state.hand_segmentation_predictor.reset_image.assert_called_once_with()
         self.assertIsNone(state.hand_segmentation_image_id)
 
-    def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
+    def test_raw_cpu_memory_runtime_error_is_internal(self):
         state = self.new_state()
         state.settings["models"]["provider"] = "cpu"
         state.job = core_module.Job(kind="detect", state="running")
         with patch.object(state, "_release_gpu_job_memory"):
             state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
-        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertEqual(state.job.error_code, "internal_error")
         self.assertNotIn("GPU", state.job.error)
+
+    def test_explicit_memory_error_has_a_stable_memory_code(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="detect", state="running")
+        state._fail_job(MemoryError("private allocation details"))
+        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertNotIn("private", state.job.error)
 
     def test_detection_worker_maps_plain_exception_ort_oom(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3147,13 +3217,13 @@ class MozarieTests(unittest.TestCase):
         state._fail_job(RuntimeError("CUDA model input shape is invalid"))
         self.assertNotEqual(state.job.error_code, "gpu_unavailable")
 
-    def test_invalid_active_model_outputs_are_reported_without_decoder_details(self):
+    def test_raw_invalid_model_outputs_are_reported_as_internal_without_decoder_details(self):
         for model_name in ("target", "ntd11", "sensitive", "hand"):
             with self.subTest(model_name=model_name):
                 state = self.new_state()
                 state.job = core_module.Job(kind="detect", state="running", total=1)
                 state._fail_job(ValueError(f"{model_name} private decoder shape"))
-                self.assertEqual(state.job.error_code, "model_load_failed")
+                self.assertEqual(state.job.error_code, "internal_error")
                 self.assertNotIn("private decoder", state.job.error)
 
     def test_active_onnx_model_loads_hide_runtime_details_for_each_model(self):
@@ -4452,7 +4522,7 @@ class MozarieTests(unittest.TestCase):
             def import_worker():
                 try:
                     import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
                 finally:
                     imported.set()
@@ -4487,7 +4557,7 @@ class MozarieTests(unittest.TestCase):
                 try:
                     barrier.wait()
                     import_image_list_for_test(state, [{"name": "same.png", "data": base64.b64encode(raw).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             first = threading.Thread(target=import_worker)
@@ -4540,7 +4610,7 @@ class MozarieTests(unittest.TestCase):
             def worker(name):
                 try:
                     import_image_list_for_test(state, [{"name": name, "data": base64.b64encode(raw).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
@@ -4734,7 +4804,7 @@ class MozarieTests(unittest.TestCase):
             def import_worker():
                 try:
                     import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     errors.append(exc)
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
@@ -6727,7 +6797,7 @@ class MozarieTests(unittest.TestCase):
             def run_render():
                 try:
                     outcome["result"] = state.render_browser_save(image_id, revision, 100, None)
-                except Exception as exc:  # pragma: no cover - asserted below
+                except Exception as exc:  # asserted below
                     outcome["error"] = exc
 
             with patch.object(saving_module, "render_with_mask", side_effect=capture_snapshot):
@@ -7249,6 +7319,270 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             self.assertTrue(mask_path.is_file())
             self.assertEqual(list(output.rglob("*.png")), [])
             self.assertEqual(state._candidate_revision(image_id), revision)
+
+    def test_detection_configuration_and_model_loading_error_paths(self):
+        state = self.new_state()
+        for raw, code in (("", "model_not_configured"), ("missing.onnx", "model_file_missing")):
+            state.settings["models"]["target_segmentation"] = raw
+            with self.subTest(raw=raw), self.assertRaises(ClientError) as raised:
+                state._configured_model_path("target_segmentation", "対象")
+            self.assertEqual(raised.exception.error_code, code)
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory) / "model.txt"; invalid.write_text("x", encoding="utf-8")
+            state.settings["models"]["target_segmentation"] = str(invalid)
+            with self.assertRaisesRegex(ClientError, "ONNX"):
+                state._configured_model_path("target_segmentation", "対象")
+            state.settings["models"]["sam_checkpoints"] = {"vit_b": str(invalid)}
+            state.settings["models"]["sam_model_type"] = "vit_b"
+            with self.assertRaisesRegex(ClientError, r"\.pth"):
+                state._configured_sam_path()
+            model = Path(directory) / "model.onnx"; model.write_bytes(b"model")
+            state.settings["models"]["target_segmentation"] = str(model)
+            with patch.object(detection_module, "TargetSegmenter", side_effect=ClientError("bad", "gpu_unavailable")):
+                with self.assertRaisesRegex(ClientError, "bad"):
+                    state._load_detection_models()
+            state.settings["models"].update({"ntd11_enabled": True, "ntd11": str(model)})
+            with patch.object(detection_module, "TargetSegmenter", return_value=Mock()), \
+                    patch.object(detection_module, "GenericYoloSegmenter", side_effect=ClientError("bad auxiliary", "gpu_unavailable")):
+                with self.assertRaisesRegex(ClientError, "bad auxiliary"):
+                    state._load_detection_models()
+            state.settings["models"]["hand_detection"] = str(model)
+            with patch.object(detection_module, "HandDetector", side_effect=ClientError("bad hand", "gpu_unavailable")):
+                with self.assertRaisesRegex(ClientError, "bad hand"):
+                    state._ensure_hand_model()
+        state.settings["models"]["sam_checkpoints"] = {}
+        with self.assertRaisesRegex(ClientError, "SAMモデルが未設定"):
+            state._configured_sam_path()
+        state.settings["models"]["sam_checkpoints"] = {"vit_b": str(Path(self.app_dir) / "missing.pth")}
+        with self.assertRaisesRegex(ClientError, "SAMモデルが見つかり"):
+            state._configured_sam_path()
+
+    def test_detection_segment_helpers_cover_invalid_and_empty_paths(self):
+        state = self.new_state()
+        rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+        target = Mock()
+        target.detect.return_value = [
+            {"class_name": "other", "mask": np.ones((8, 8), dtype=np.uint8), "confidence": .9},
+            {"class_name": "penis", "mask": np.ones((2, 2), dtype=np.uint8), "confidence": .9},
+        ]
+        auxiliary = Mock()
+        auxiliary.detect.return_value = [
+            {"class_name": "other", "mask": np.ones((8, 8), dtype=np.uint8), "confidence": .9},
+            {"class_name": "penis", "mask": np.ones((1, 1), dtype=np.uint8), "confidence": .9},
+        ]
+        models = DetectionModels(target=target, auxiliaries=[("ntd11", auxiliary)])
+        self.assertEqual(state._detect_arbitrated_segments(models, rgb, .5), [])
+        self.assertEqual(state._hand_boxes_over_apply([(0, 0, 2, 2)], []), [])
+        state.settings["models"]["hand_detection_enabled"] = True
+        hand = Mock(); hand.detect_boxes.return_value = [(1, 1, 3, 3)]
+        with patch.object(state, "_ensure_hand_model", return_value=hand):
+            self.assertEqual(state._hand_boxes(models, rgb), [(1, 1, 3, 3)])
+
+    def test_detection_refinement_and_exclusion_empty_and_fallback_paths(self):
+        state = self.new_state()
+        rgb = np.zeros((6, 6, 3), dtype=np.uint8)
+        empty = {"class_name": "penis", "mask": np.zeros((6, 6), dtype=np.uint8), "confidence": .8, "source": "target"}
+        other = {"class_name": "other", "mask": np.zeros((6, 6), dtype=np.uint8), "confidence": .8, "source": "target"}
+        self.assertIs(state._high_precision_segments(None, None, rgb, [other])[0], other)
+        predictor = Mock()
+        result = state._high_precision_segments_with_predictor(rgb, [empty], predictor)
+        self.assertEqual(result[0]["refinement"], "sam_fallback")
+        segments = state._attach_hand_evidence([other], [], np.ones((6, 6), dtype=np.uint8))
+        self.assertEqual(segments[-1]["class_name"], "__hand_exclusion__")
+        self.assertEqual(state._finalize_exclusions(rgb, segments), segments)
+        mask = np.zeros((6, 6), dtype=np.uint8); mask[1:4, 1:4] = 1
+        segment = {"class_name": "penis", "mask": mask, "confidence": .8, "source": "target", "image_exclusions": {"hand": np.ones((6, 6), dtype=np.uint8)}}
+        state.settings["detection"]["fluid_exclusion_enabled"] = False
+        finalized = state._finalize_exclusions(rgb, [segment])
+        self.assertEqual(finalized[0]["exclusions"], {})
+        self.assertEqual(int(finalized[0]["image_exclusions"]["hand"].sum()), 9)
+
+    def test_detection_start_passes_explicit_target_subset(self):
+        state = self.new_state()
+        state.settings["detection"]["targets"] = ["penis"]
+        with patch.object(state, "_require_supported_gpu"), \
+                patch.object(state, "_records_for_ids_with_catalog", return_value=([], 2)), \
+                patch.object(state, "_start_job") as start:
+            state.start_detection([], .6, 3)
+        self.assertEqual(start.call_args.args[-1], {"penis"})
+
+    def test_detection_worker_cancel_stale_directml_and_outer_error_paths(self):
+        state = self.new_state()
+        control = detection_module.JobControl(); control.cancel_requested.set()
+        with patch.object(detection_module, "runtime_backend", return_value="directml"), \
+                patch.object(state, "_set_job_parallelism"), patch.object(state, "_wait_while_paused"), \
+                patch.object(state, "_cancel_job") as cancelled:
+            state._detect_worker([], .5, 4, control=control)
+        cancelled.assert_called_once()
+        control = detection_module.JobControl()
+        with patch.object(state, "_set_job_parallelism"), patch.object(state, "_wait_while_paused"), \
+                patch.object(state, "_job_is_current", return_value=False):
+            state._detect_worker([], .5, control=control)
+        with patch.object(state, "_wait_while_paused", side_effect=RuntimeError("idle")), patch.object(state, "_fail_job") as failed:
+            state._detect_worker([], .5)
+        self.assertIsInstance(failed.call_args.args[0], RuntimeError)
+
+    def test_detect_image_skips_empty_exclusions_and_non_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
+            state = self.new_state(); record = state.image_for_id(state.set_root(directory)[0]["id"])
+            target_mask = np.ones((6, 6), dtype=np.uint8)
+            segments = [
+                {"class_name": "other", "mask": target_mask, "confidence": .8, "source": "target", "image_exclusions": {"hand": np.zeros((6, 6), dtype=np.uint8)}},
+                {"class_name": "penis", "mask": target_mask, "confidence": .8, "source": "target", "exclusions": {"fluid": np.zeros((6, 6), dtype=np.uint8)}},
+            ]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                    patch.object(state, "_hand_refinement_context", return_value=([segments[1]], np.zeros((6, 6), dtype=np.uint8), [])), \
+                    patch.object(state, "_fallback_hand_boxes_mask", return_value=np.zeros((6, 6), dtype=np.uint8)), \
+                    patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
+                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items: items):
+                candidates = state._detect_image(DetectionModels(target=Mock(), auxiliaries=[]), record, .5)
+            self.assertEqual(len(candidates), 1)
+            self.assertTrue(candidates[0].mask_path.is_file())
+
+    def test_polygon_boundary_zero_mask_and_second_operation_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            predictor = Mock(); predictor.predict.return_value = (np.zeros((1, 6, 6), dtype=np.uint8), [0.5], None)
+            with patch.object(detection_module, "read_polygon_boundary_request", return_value=((0, 0, 6, 6), (2, 2), np.ones((6, 6), dtype=np.uint8))), \
+                    patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                    patch.object(detection_module, "select_best_sam_mask", return_value=(np.zeros((6, 6), dtype=np.uint8), .5)):
+                with self.assertRaisesRegex(ClientError, "境界を検出"):
+                    state.add_boundary_candidate(image_id, {"points": [1, 2, 3, 4]})
+
+    def test_detection_worker_discards_candidates_on_stat_replace_and_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
+            state = self.new_state(); record = state.image_for_id(state.set_root(directory)[0]["id"])
+
+            def pending_candidate() -> Candidate:
+                path = state.cache_dir / record.image_id / ".mozarie-pending-test.tmp"
+                path.parent.mkdir(parents=True, exist_ok=True); Image.new("L", (6, 6), 255).save(path, format="PNG")
+                return Candidate("test", "penis", .8, path)
+
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=Mock(), auxiliaries=[])), \
+                    patch.object(state, "_detect_image", return_value=[pending_candidate()]), \
+                    patch.object(state, "_job_is_current", return_value=True), \
+                    patch.object(state, "_assert_record_stat_matches", side_effect=ClientError("stale", "stale_asset")), \
+                    patch.object(state, "_fail_job"):
+                state._detect_worker([record], .5, 1)
+
+            candidate = pending_candidate()
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=Mock(), auxiliaries=[])), \
+                    patch.object(state, "_detect_image", return_value=[candidate]), \
+                    patch.object(state, "_job_is_current", return_value=True), \
+                    patch.object(detection_module.os, "replace", side_effect=OSError("replace failed")), \
+                    patch.object(state, "_fail_job"):
+                state._detect_worker([record], .5, 1)
+            self.assertFalse(candidate.mask_path.exists())
+
+            candidate = pending_candidate(); control = detection_module.JobControl()
+            original_replace = detection_module.os.replace
+            def cancel_replace(source, destination):
+                original_replace(source, destination); control.cancel_requested.set()
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=Mock(), auxiliaries=[])), \
+                    patch.object(state, "_detect_image", return_value=[candidate]), \
+                    patch.object(state, "_job_is_current", return_value=True), \
+                    patch.object(detection_module.os, "replace", side_effect=cancel_replace), \
+                    patch.object(state, "_fail_job"):
+                state._detect_worker([record], .5, 1, control=control)
+            self.assertFalse((state.cache_dir / record.image_id / "test.png").exists())
+
+    def test_high_precision_retry_and_boundary_second_gate(self):
+        state = self.new_state()
+        source = np.ones((6, 6), dtype=np.uint8)
+        hand = np.zeros((6, 6), dtype=np.uint8); hand[0, 0] = 1
+        refined = np.zeros((6, 6), dtype=np.uint8); refined[:3, :] = 1
+        retry = source.copy(); retry[0, 0] = 0
+        segment = {"class_name": "penis", "mask": source.copy(), "confidence": .8, "source": "target", "_confirmed_hand": hand}
+        predictor = Mock(); predictor.predict.side_effect = [([refined], [.9], np.ones((1, 1))), ([retry], [.9], None)]
+        prompts = (np.asarray([[1, 1]], dtype=np.float32), np.asarray([1], dtype=np.int32))
+        with patch.object(detection_module, "sam_refinement_prompts", return_value=prompts), \
+                patch.object(detection_module, "select_semantic_sam_mask", side_effect=[(refined, 0), (retry, 0)]):
+            result = state._high_precision_segments_with_predictor(np.zeros((6, 6, 3), dtype=np.uint8), [segment], predictor)
+        self.assertEqual(result[0]["refinement"], "sam_high_precision")
+        self.assertEqual(int(result[0]["mask"][0, 0]), 0)
+
+        fallback = {"class_name": "penis", "mask": source.copy(), "confidence": .8, "source": "target", "_confirmed_hand": hand}
+        predictor = Mock(); predictor.predict.side_effect = [([refined], [.9], np.ones((1, 1))), ([retry], [.9], None)]
+        with patch.object(detection_module, "sam_refinement_prompts", return_value=prompts), \
+                patch.object(detection_module, "select_semantic_sam_mask", side_effect=[(refined, 0), None]):
+            result = state._high_precision_segments_with_predictor(np.zeros((6, 6, 3), dtype=np.uint8), [fallback], predictor)
+        self.assertTrue(np.array_equal(result[0]["mask"], refined))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            predictor = Mock(); predictor.predict.return_value = (np.ones((1, 6, 6), dtype=np.uint8), [.5], None)
+            with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                    patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                    patch.object(state, "_has_active_worker", side_effect=[False, True]):
+                with self.assertRaisesRegex(ClientError, "既存の処理"):
+                    state.add_boundary_candidate(image_id, {"roi": {"left": 0, "top": 0, "right": 6, "bottom": 6}, "point": {"x": 2, "y": 2}})
+
+    def test_boundary_hand_fallback_empty_exclusions_and_catalog_change_cleanup(self):
+        def make_state():
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name); image = root / "image.png"; Image.new("RGB", (6, 6), "white").save(image)
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            predictor = Mock(); predictor.predict.return_value = (np.ones((1, 6, 6), dtype=np.uint8), [.5], None)
+            return state, image_id, predictor
+
+        payload = {"roi": {"left": 0, "top": 0, "right": 6, "bottom": 6}, "point": {"x": 2, "y": 2}}
+        state, image_id, predictor = make_state()
+        state.settings["models"]["hand_segmentation_enabled"] = True
+        specialist = Mock(); specialist.predict.return_value = (np.zeros((1, 6, 6), dtype=np.uint8), [.5], None)
+        with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                patch.object(state, "_boundary_hand_boxes", return_value=[(1, 1, 4, 4)]), \
+                patch.object(state, "_hand_boxes_over_apply", return_value=[(1, 1, 4, 4)]), \
+                patch.object(state, "_hand_segmentation_predictor_for", return_value=specialist), \
+                patch.object(detection_module, "accepted_specialist_hand_mask", return_value=None), \
+                patch.object(state, "_fallback_hand_boxes_mask", return_value=np.ones((6, 6), dtype=np.uint8)):
+            self.assertEqual(state.add_boundary_candidate(image_id, payload)["candidates"][0]["source"], "boundary")
+
+        state, image_id, predictor = make_state()
+        with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                patch.object(state, "_boundary_hand_boxes", return_value=[(1, 1, 4, 4)]), \
+                patch.object(state, "_hand_boxes_over_apply", return_value=[(1, 1, 4, 4)]), \
+                patch.object(state, "_fallback_hand_boxes_mask", return_value=np.zeros((6, 6), dtype=np.uint8)), \
+                patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: (segments[0].update({"image_exclusions": {"hand": np.zeros((6, 6), dtype=np.uint8)}}), segments)[1]):
+            state.add_boundary_candidate(image_id, payload)
+
+        state, image_id, predictor = make_state()
+        record = state.image_for_id(image_id)
+        def remove_before_publish(_rgb, segments):
+            state.images.pop(image_id)
+            return segments
+        with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                patch.object(state, "_finalize_exclusions", side_effect=remove_before_publish):
+            with self.assertRaisesRegex(ClientError, "再読み込み"):
+                state.add_boundary_candidate(image_id, payload)
+        self.assertNotIn(image_id, state.images)
+
+        state, image_id, predictor = make_state()
+        record = state.image_for_id(image_id)
+        changed = threading.Event()
+        class ChangesDuringPublication(dict):
+            def __init__(self):
+                super().__init__({image_id: record})
+
+            def get(self, key, default=None):
+                return None if changed.is_set() else record
+        state.images = ChangesDuringPublication()
+        original_replace = detection_module.os.replace
+        def move_then_mark_changed(source, destination):
+            original_replace(source, destination)
+            changed.set()
+        with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                patch.object(detection_module.os, "replace", side_effect=move_then_mark_changed):
+            with self.assertRaisesRegex(ClientError, "再読み込み"):
+                state.add_boundary_candidate(image_id, payload)
 
 
 if __name__ == "__main__":

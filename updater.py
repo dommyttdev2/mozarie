@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 import urllib.error
 import urllib.request
 import zipfile
@@ -54,10 +55,13 @@ EXIT_CURRENT = 0
 EXIT_ERROR = 1
 EXIT_UPDATED = 10
 EXIT_CANCELLED = 20
+EXIT_RUNNING = 30
+EXIT_RUNNING_CHECK_FAILED = 31
+
 
 MESSAGES = {
     "ja": {
-        "version_invalid": "バージョン表記が正しくありません: {value!r}",
+        "version_invalid": "バージョン表記が正しくありません。",
         "version_read": "VERSIONファイルを読み込めません。",
         "release_fetch": "GitHubから更新情報を取得できませんでした。",
         "release_invalid": "GitHubの更新情報が正しくありません。",
@@ -79,10 +83,12 @@ MESSAGES = {
         "gpu_check_failed": "GPUの動作確認に失敗しました。setup.bat を実行して復旧してください。",
         "update_deps_changed": "更新は元に戻しましたが、依存関係は変更されています。setup.bat を実行してください。",
         "update_in_progress": "別の更新処理が実行中です。完了してからもう一度実行してください。",
+        "maintenance_lock_access": "更新用のロックファイルを開けません。フォルダへのアクセスを確認してから、もう一度実行してください。",
+        "running_check_failed": "Mozarieの起動状態を確認できませんでした。Mozarieのフォルダへアクセスできることを確認してから、もう一度実行してください。",
         "update_missing_version": "更新ZIPにVERSIONファイルがありません。",
         "update_backup_failed": "更新前のバックアップを作成できなかったため、本体は変更していません。",
         "update_rollback": "更新に失敗したため、元のファイルへ戻しました。",
-        "update_rollback_incomplete": "更新の取り消しが不完全です。次の項目を手動で復元してください: {paths}。バックアップ: {backup}",
+        "update_rollback_incomplete": "更新の取り消しが不完全です。更新前のフォルダを確認して、もう一度 setup.bat を実行してください。",
         "current": "現在最新バージョンです ({version})。",
         "version_change": "{current} → {latest}",
         "running": "新しいバージョンがあります。先にMozarieを閉じて、もう一度 update.bat を実行してください。",
@@ -95,10 +101,10 @@ MESSAGES = {
         "updated": "{current} から {latest} へアップデートしました。",
         "restart": "Mozarieを起動し直してください。",
         "error": "エラー: {message}",
-        "unexpected": "予期しないエラー: {message}",
+        "unexpected": "予期しないエラーが発生しました。",
     },
     "en": {
-        "version_invalid": "Invalid version format: {value!r}",
+        "version_invalid": "The version format is invalid.",
         "version_read": "Could not read the VERSION file.",
         "release_fetch": "Could not retrieve update information from GitHub.",
         "release_invalid": "GitHub returned invalid update information.",
@@ -120,10 +126,12 @@ MESSAGES = {
         "gpu_check_failed": "The GPU check failed. Run setup.bat to repair the installation.",
         "update_deps_changed": "The app was restored, but dependencies changed. Run setup.bat to repair the installation.",
         "update_in_progress": "Another update is already running. Wait for it to finish, then try again.",
+        "maintenance_lock_access": "Could not open the update lock file. Check folder access, then try again.",
+        "running_check_failed": "Could not check whether Mozarie is running. Check access to the Mozarie folder, then try again.",
         "update_missing_version": "The update archive does not contain a VERSION file.",
         "update_backup_failed": "Could not create a backup before updating. Mozarie was not changed.",
         "update_rollback": "The update failed, so the original files were restored.",
-        "update_rollback_incomplete": "Rollback was incomplete. Restore these paths manually: {paths}. Backup: {backup}",
+        "update_rollback_incomplete": "Rollback was incomplete. Check the app folder, then run setup.bat again.",
         "current": "Mozarie is already up to date ({version}).",
         "version_change": "{current} → {latest}",
         "running": "A new version is available. Close Mozarie, then run update.bat again.",
@@ -136,7 +144,7 @@ MESSAGES = {
         "updated": "Updated from {current} to {latest}.",
         "restart": "Please restart Mozarie.",
         "error": "Error: {message}",
-        "unexpected": "Unexpected error: {message}",
+        "unexpected": "An unexpected error occurred.",
     },
 }
 _language = "ja"
@@ -144,6 +152,17 @@ _language = "ja"
 
 def tr(key: str, **values: Any) -> str:
     return MESSAGES[_language][key].format(**values)
+
+
+def _write_failure_log(app_dir: Path, message: str) -> None:
+    """Keep technical details locally without putting them in the batch UI."""
+    try:
+        log_path = app_dir / ".mozarie-cache" / "updater.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as output:
+            output.write(f"{message}\n{traceback.format_exc()}\n")
+    except OSError:
+        pass
 
 
 def read_language(app_dir: Path = APP_DIR) -> str:
@@ -174,16 +193,24 @@ class MaintenanceLock(AbstractContextManager["MaintenanceLock"]):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.handle = self.path.open("a+b")
-            self.handle.seek(0)
-            if not self.handle.read(1):
-                self.handle.seek(0)
-                self.handle.write(b"0")
-                self.handle.flush()
+        except OSError as exc:
+            self.close()
+            raise UpdateError(tr("maintenance_lock_access")) from exc
+        try:
             self.handle.seek(0)
             msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
             self.close()
             raise UpdateError(tr("update_in_progress")) from exc
+        try:
+            self.handle.seek(0)
+            if not self.handle.read(1):
+                self.handle.seek(0)
+                self.handle.write(b"0")
+                self.handle.flush()
+        except OSError as exc:
+            self.close()
+            raise UpdateError(tr("maintenance_lock_access")) from exc
         return self
 
     def close(self) -> None:
@@ -342,27 +369,31 @@ def extract_archive(archive: Path, destination: Path) -> Path:
     return source_root
 
 
-def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
+def mozarie_running_status(app_dir: Path = APP_DIR) -> str:
+    """Return active, none, or check_failed without treating access errors as active."""
     cache_root = app_dir / ".mozarie-cache"
-    if not cache_root.is_dir():
-        return False
-    for process_dir in cache_root.glob("process-*"):
+    try:
+        if not cache_root.is_dir():
+            return "none"
+        process_dirs = list(cache_root.glob("process-*"))
+    except OSError:
+        return "check_failed"
+    for process_dir in process_dirs:
         lock_path = process_dir / ".active.lock"
-        if not lock_path.is_file():
-            continue
         try:
+            if not lock_path.is_file():
+                continue
             with lock_path.open("a+b") as handle:
                 handle.seek(0)
                 try:
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 except OSError:
-                    return True
-                else:
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    return "active"
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
-            return True
-    return False
+            return "check_failed"
+    return "none"
 
 
 def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
@@ -380,8 +411,7 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if current.is_file() and incoming.read_bytes() == current.read_bytes():
         return False
     python = app_dir / ".venv" / "Scripts" / "python.exe"
-    validator = source_root / "mozarie" / "runtime_profile.py"
-    _verify_installed_runtime_profile(app_dir, python, validator, profile)
+    _verify_installed_runtime_profile(app_dir, source_root, python, profile)
     print(tr("requirements_updating"))
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
@@ -399,8 +429,8 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if result.returncode != 0:
         raise UpdateError(tr("requirements_failed"))
     result = subprocess.run(
-        [str(python), str(validator), "validate", profile, "--venv", str(app_dir / ".venv")],
-        cwd=str(app_dir),
+        [str(python), "-m", "mozarie.runtime_profile", "validate", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(source_root),
         check=False,
     )
     if result.returncode != 0:
@@ -439,13 +469,13 @@ def _installed_runtime_profile(app_dir: Path) -> str:
     return profile
 
 
-def _verify_installed_runtime_profile(app_dir: Path, python: Path, validator: Path, profile: str) -> None:
+def _verify_installed_runtime_profile(app_dir: Path, source_root: Path, python: Path, profile: str) -> None:
     """Reject an ambiguous or mismatched venv before pip can mutate it."""
-    if not python.is_file() or not validator.is_file():
+    if not python.is_file() or not (source_root / "mozarie" / "runtime_profile.py").is_file():
         raise UpdateError(tr("runtime_profile_invalid"))
     result = subprocess.run(
-        [str(python), str(validator), "preflight", profile, "--venv", str(app_dir / ".venv")],
-        cwd=str(app_dir),
+        [str(python), "-m", "mozarie.runtime_profile", "preflight", profile, "--venv", str(app_dir / ".venv")],
+        cwd=str(source_root),
         check=False,
     )
     if result.returncode != 0:
@@ -516,10 +546,8 @@ def apply_update(source_root: Path, app_dir: Path = APP_DIR) -> None:
                     rollback_failures.append(relative)
 
         if rollback_failures:
-            paths = ", ".join(dict.fromkeys(rollback_failures))
-            raise UpdateError(
-                tr("update_rollback_incomplete", paths=paths, backup=str(backup_root.resolve()))
-            ) from exc
+            _write_failure_log(app_dir, f"Update rollback was incomplete: {', '.join(dict.fromkeys(rollback_failures))}; backup={backup_root}")
+            raise UpdateError(tr("update_rollback_incomplete")) from exc
 
         try:
             shutil.rmtree(backup_root)
@@ -551,7 +579,10 @@ def _perform_update(
         print(tr("current", version=current))
         return EXIT_CURRENT
 
-    if is_mozarie_running(app_dir):
+    running_status = mozarie_running_status(app_dir)
+    if running_status == "check_failed":
+        raise UpdateError(tr("running_check_failed"))
+    if running_status == "active":
         raise UpdateError(tr("running"))
 
     print(tr("version_change", current=current, latest=latest))
@@ -611,20 +642,27 @@ def main() -> int:
             with MaintenanceLock(APP_DIR):
                 return subprocess.run(["cmd", "/d", "/c", str(APP_DIR / "setup.bat"), "--locked"], cwd=str(APP_DIR), check=False).returncode
         except UpdateError as exc:
+            _write_failure_log(APP_DIR, "Mozarie setup lock failed")
             print(tr("error", message=exc), file=sys.stderr)
             return EXIT_ERROR
     if sys.argv[1:] == ["--check-running"]:
-        return 30 if is_mozarie_running(APP_DIR) else 0
+        return {
+            "active": EXIT_RUNNING,
+            "none": EXIT_CURRENT,
+            "check_failed": EXIT_RUNNING_CHECK_FAILED,
+        }[mozarie_running_status(APP_DIR)]
     try:
         return perform_update()
     except KeyboardInterrupt:
         print(f"\n{tr('cancelled')}")
         return EXIT_CANCELLED
     except UpdateError as exc:
+        _write_failure_log(APP_DIR, "Mozarie update failed")
         print(tr("error", message=exc), file=sys.stderr)
         return EXIT_ERROR
-    except Exception as exc:
-        print(tr("unexpected", message=exc), file=sys.stderr)
+    except Exception:
+        _write_failure_log(APP_DIR, "Mozarie update failed unexpectedly")
+        print(tr("unexpected"), file=sys.stderr)
         return EXIT_ERROR
 
 

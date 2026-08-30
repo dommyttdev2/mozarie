@@ -58,8 +58,6 @@ class TargetSegmenter(BaseOnnxModel):
         tensor, transform = letterbox_bgr(rgb, self.input_size)
         prediction, prototype = self._outputs(self.run(tensor))
         rows = self._prediction_rows(prediction)
-        if rows.shape[1] < 4 + len(CLASS_NAMES) + 32:
-            return []
         class_ids_for_rows = np.argmax(rows[:, 4:4 + len(CLASS_NAMES)], axis=1)
         scores_for_rows = rows[np.arange(len(rows)), 4 + class_ids_for_rows]
         target_class = np.isin(class_ids_for_rows, (2, 3))

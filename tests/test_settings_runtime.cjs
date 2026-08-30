@@ -1,0 +1,158 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const settingsPath = path.join(__dirname, "..", "static", "js", "settings.js");
+const source = fs.readFileSync(settingsPath, "utf8");
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) {
+    const attributes = new Map();
+    elements.set(id, {
+      id, value: "", textContent: "", hidden: false, disabled: false, checked: false, tabIndex: -1,
+      dataset: {}, options: [], parentElement: null,
+      classList: { values: new Set(), add(value) { this.values.add(value); }, remove(value) { this.values.delete(value); }, toggle(value, enabled) { if (enabled) this.values.add(value); else this.values.delete(value); }, contains(value) { return this.values.has(value); } },
+      append(option) { this.options.push(option); }, setAttribute(name, value) { attributes.set(name, value); }, removeAttribute(name) { attributes.delete(name); }, getAttribute(name) { return attributes.get(name) || null; },
+      closest() { return null; }, matches() { return false; }, contains() { return false; }, addEventListener() {}, focus() {},
+    });
+  }
+  return elements.get(id);
+}
+const tabs = ["general", "models", "display"].map((name, index) => {
+  const tab = element(`tab-${name}`); tab.dataset.settingsTab = name; tab.tabIndex = index === 0 ? 0 : -1;
+  return tab;
+});
+tabs[0].classList.add("active");
+const panels = tabs.map((tab) => { const panel = element(`panel-${tab.dataset.settingsTab}`); panel.dataset.settingsPanel = tab.dataset.settingsTab; return panel; });
+const samOutputs = ["missing", "type_mismatch", "invalid_format"].map((reason) => {
+  const output = element(`sam-${reason}`); output.dataset.samStatus = reason;
+  output.closest = () => ({ classList: { remove() {}, toggle() {} } });
+  return output;
+});
+const modelPickers = ["sam_checkpoint", "target_segmentation"].map((key) => {
+  const button = element(`picker-${key}`); button.dataset.modelPicker = key; button.dataset.modelInput = key === "sam_checkpoint" ? "settingsSamModel" : "settingsTargetModel";
+  return button;
+});
+const state = { settings: null, settingsStatus: { models: {} } };
+const errors = [];
+const context = {
+  state, Map, Set, Promise, Object, Array, Number, String, Boolean, JSON, Math, Error, RegExp,
+  document: {
+    activeElement: element("invoker"),
+    querySelectorAll(selector) {
+      if (selector === ".settings-tab") return tabs;
+      if (selector === "[data-settings-panel]") return panels;
+      if (selector === "[data-sam-status]") return samOutputs;
+      if (selector === "[data-model-picker]") return modelPickers;
+      return [];
+    },
+    createElement() { return element(`generated-${elements.size}`); },
+  },
+  $: element,
+  t: (key) => key,
+  isBusy: () => false,
+  showModalFromInvoker(dialog, invoker) { context.modal = [dialog, invoker]; },
+  showUserError(error, anchor) { errors.push([error, anchor]); },
+  closeBoundaryModeMenu() {}, stage: { dataset: {} }, toolRail: { setAttribute() {}, getAttribute() { return "horizontal"; } },
+  focusElement(item) { context.focused = item; },
+  renderSamVariantStatuses() {}, renderSettingsStatus() {}, syncProviderSelection() {},
+  setNavigationShortcutsEnabled() {}, setMosaicPreviewEnabled() {}, loadTranslations: async () => {},
+  validateDetectionTargets: () => true, detectionTargets: () => ["penis"], settingsPayload: () => ({ ok: true }),
+  pickOutputDirectory: async () => "", api: async () => ({ settings: { general: { language: "ja", shortcuts_enabled: true }, display: { mosaic_preview: true } }, version: "v1" }), clearInterval() {}, setInterval() { return 1; },
+  confirmAction: async () => true,
+};
+vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectSettingsTab,moveSettingsTab,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,startModelDownload,beginModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath};`, context, { filename: settingsPath });
+
+(async () => {
+  state.settingsStatus = { models: { unknown: { required: true, reasonCode: "missing" }, ntd11: { enabled: true, reasonCode: "missing" } }, gpuDeviceReasonCode: "unsupported" };
+  context.settingsTest.renderModelStatus();
+  assert.match(element("#settingsModelStatus").textContent, /settings\.ntd11Model/, "a known invalid model identifies its setting in the status summary");
+  assert.match(element("#settingsModelStatus").textContent, /settings\.gpu/, "an unsupported GPU is shown beside model errors");
+  state.settingsStatus = { models: { ntd11: { enabled: true, valid: true } }, samVariants: { missing: { reasonCode: "missing" }, type_mismatch: { reasonCode: "type_mismatch" }, invalid_format: { reasonCode: "invalid_format" } } };
+  context.settingsTest.renderModelStatus();
+  assert.equal(element("#settingsModelStatus").textContent, "", "all valid active models clear the status summary");
+
+  context.settingsTest.selectSettingsTab("missing");
+  const moved = { currentTarget: tabs[0], key: "ArrowLeft", preventDefault() { this.prevented = true; } };
+  context.settingsTest.moveSettingsTab(moved);
+  assert.equal(tabs.at(-1).classList.contains("active"), true, "left arrow wraps settings tabs to the final tab");
+  assert.equal(moved.prevented, true, "a handled tab key prevents browser scrolling");
+  const ignored = { currentTarget: tabs[0], key: "x", preventDefault() { this.prevented = true; } };
+  context.settingsTest.moveSettingsTab(ignored);
+  assert.equal(ignored.prevented, undefined, "unhandled tab keys keep their native behavior");
+
+  let formLoads = 0;
+  context.setSettingsForm = () => { formLoads += 1; };
+  context.refreshSettingsStatus = async () => {};
+  state.settings = null;
+  await context.settingsTest.openSettings();
+  assert.equal(formLoads, 2, "opening settings fetches once and renders the fetched settings before showing the dialog");
+  assert.equal(element("#settingsVersion").textContent, "v1", "opening settings displays the fetched version");
+  context.api = async () => { throw new Error("offline"); };
+  state.settings = null;
+  await context.settingsTest.openSettings();
+  assert.equal(errors.at(-1)[0].message, "offline", "an initial settings load failure is surfaced to the user");
+
+  context.validateDetectionTargets = () => false;
+  element("#settingsResult").textContent = "old";
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(element("#settingsResult").classList.contains("error"), true, "saving with no detection target leaves a visible inline validation error");
+
+  context.pickOutputDirectory = async () => "G:\\output";
+  await context.settingsTest.chooseSettingsOutputDirectory();
+  assert.equal(element("#settingsDefaultOutputDirectory").value, "G:\\output", "choosing an output directory writes the selected path");
+  context.pickOutputDirectory = async () => { throw Object.assign(new Error("cancel"), { name: "AbortError" }); };
+  const errorsBeforeCancel = errors.length;
+  await context.settingsTest.chooseSettingsOutputDirectory();
+  assert.equal(errors.length, errorsBeforeCancel, "cancelling the native picker is silent");
+  context.pickOutputDirectory = async () => { throw new Error("unavailable"); };
+  await context.settingsTest.chooseSettingsOutputDirectory();
+  assert.equal(errors.at(-1)[0], "output_folder_unavailable", "a real output picker failure uses the localized folder error");
+
+  const railEvent = { target: element("#brushTool"), key: "ArrowRight", preventDefault() { this.prevented = true; } };
+  context.settingsTest.handleToolRailKeydown(railEvent);
+  assert.equal(context.focused, element("#eraserTool"), "right arrow advances the horizontal tool rail");
+  context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "ArrowLeft", preventDefault() {} });
+  context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "Home", preventDefault() {} });
+  context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "End", preventDefault() {} });
+  context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "x", preventDefault() { throw new Error("unhandled tool key must not prevent default"); } });
+
+  element("#settingsSamType").value = "vit_b";
+  element("#settingsSamModel").value = "old.pth";
+  context.api = async () => ({ path: "new_vit_h.pth" });
+  await context.settingsTest.chooseSettingsModelFile(modelPickers[0]);
+  assert.equal(element("#settingsSamModel").value, "new_vit_h.pth", "choosing a SAM model updates its detected variant path");
+  context.api = async () => { throw new Error("picker failed"); };
+  await context.settingsTest.chooseSettingsModelFile(modelPickers[1]);
+  assert.equal(errors.at(-1)[0].message, "picker failed", "a model picker failure is surfaced with its invoking button");
+
+  assert.equal(context.settingsTest.modelDownloadInput("hand_detection"), "#settingsHandModel", "downloaded hand models map to their settings input");
+  assert.equal(context.settingsTest.modelDownloadInput("unknown"), undefined, "unknown downloaded model keys do not target an input");
+  element("#settingsSamType").value = "vit_h";
+  context.settingsTest.renderModelDownload({ expected: 10, received: 4, phase: "download", current: "sam_vit_h", completed: 2, total: 3, state: "complete", paths: { sam_vit_h: "downloaded.pth", hand_detection: "hand.onnx", ignored: "skip" } });
+  assert.equal(element("#settingsSamModel").value, "downloaded.pth", "completed downloads populate the selected SAM path");
+  assert.equal(element("#settingsHandModel").value, "hand.onnx", "completed downloads populate supported auxiliary models");
+  context.api = async () => { throw new Error("download status failed"); };
+  await context.settingsTest.refreshModelDownload();
+  assert.equal(errors.at(-1)[0].message, "download status failed", "download polling failures remain actionable");
+
+  context.api = async (url) => url.includes("/start") ? { state: "complete", paths: {} } : { state: "complete", paths: {} };
+  context.settingsTest.startModelDownload("sam");
+  await context.settingsTest.beginModelDownload();
+
+  context.settingsPayload = () => ({ status: true });
+  context.api = async () => { throw new Error("status failed"); };
+  await context.settingsTest.refreshSettingsStatus();
+  assert.equal(errors.at(-1)[0].message, "status failed", "the current settings status failure is reported");
+  context.api = async () => { throw new Error("update failed"); };
+  await context.settingsTest.checkForUpdate();
+  assert.equal(element("#updateStatus").classList.contains("error"), true, "a visible update check failure is shown inline");
+  element("#checkUpdateButton").dataset.available = "true";
+  await context.settingsTest.startUpdate();
+  assert.equal(errors.at(-1)[0].message, "update failed", "an update start failure remains anchored to the update action");
+
+  assert.equal(context.settingsTest.samTypeFromPath("models/sam_vit-h.pth"), "vit_h", "SAM file names select their matching variant");
+  assert.equal(context.settingsTest.samTypeFromPath("models/other.pth"), null, "unrecognised model names do not guess a SAM variant");
+  console.log("test_settings_runtime: passed");
+})().catch((error) => { console.error(error); process.exitCode = 1; });

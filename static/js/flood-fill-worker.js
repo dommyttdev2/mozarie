@@ -7,8 +7,8 @@ self.onmessage = ({ data }) => {
     const start = row * width + column;
     if (seen[start] || !matches(start)) return null;
     let left = column; let right = column;
-    while (left > 0 && !seen[row * width + left - 1] && matches(row * width + left - 1)) left -= 1;
-    while (right + 1 < width && !seen[row * width + right + 1] && matches(row * width + right + 1)) right += 1;
+    while (left > 0 && matches(row * width + left - 1)) left -= 1;
+    while (right + 1 < width && matches(row * width + right + 1)) right += 1;
     for (let current = left; current <= right; current += 1) seen[row * width + current] = 1;
     return [row, left, right];
   };

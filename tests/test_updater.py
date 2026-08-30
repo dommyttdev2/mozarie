@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -125,6 +126,22 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.parse_version("1.2")
 
+    def test_os_errors_are_reported_without_exposing_path_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "VERSION").mkdir()
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("version_read"))) as raised:
+                updater.read_local_version(root)
+            self.assertNotIn(str(root), str(raised.exception))
+
+            archive = root / "release.zip"
+            write_archive(archive, UPDATE_ARCHIVE_CONTENTS)
+            blocked_destination = root / "blocked"
+            blocked_destination.write_text("not a folder", encoding="utf-8")
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_extract"))) as raised:
+                updater.extract_archive(archive, blocked_destination)
+            self.assertNotIn(str(blocked_destination), str(raised.exception))
+
     def test_release_asset_must_be_the_immutable_mozarie_asset(self):
         release = make_release()
         release["assets"][0]["browser_download_url"] = "https://example.test/asset.zip"
@@ -159,8 +176,9 @@ class UpdaterTests(unittest.TestCase):
                 self.assertTrue(updater.install_requirements(source, app))
             self.assertEqual(
                 run.call_args_list[0].args[0],
-                [str(python), str(source / "mozarie" / "runtime_profile.py"), "preflight", "cuda", "--venv", str(app / ".venv")],
+                [str(python), "-m", "mozarie.runtime_profile", "preflight", "cuda", "--venv", str(app / ".venv")],
             )
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             self.assertEqual(run.call_args_list[1].args[0][:3], [str(python), "-m", "pip"])
             self.assertEqual(
                 run.call_args_list[1].args[0][3:],
@@ -292,12 +310,14 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "directml"])
+            self.assertEqual(run.call_args_list[0].args[0][1:4], ["-m", "mozarie.runtime_profile", "preflight"])
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             command = run.call_args_list[1].args[0]
             self.assertEqual(command[:3], [str(python), "-m", "pip"])
             self.assertEqual(Path(command[-1]), source / "mozarie" / "requirements-directml.txt")
             self.assertEqual(run.call_args_list[2].args[0], [str(python), "-m", "pip", "check"])
-            self.assertEqual(run.call_args_list[3].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "validate", "directml"])
+            self.assertEqual(run.call_args_list[3].args[0][1:4], ["-m", "mozarie.runtime_profile", "validate"])
+            self.assertEqual(run.call_args_list[3].kwargs["cwd"], str(source))
 
     def test_requirements_install_preserves_the_cpu_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,7 +331,8 @@ class UpdaterTests(unittest.TestCase):
             with patch("updater.subprocess.run") as run:
                 run.return_value.returncode = 0
                 updater.install_requirements(source, app)
-            self.assertEqual(run.call_args_list[0].args[0][1:4], [str(source / "mozarie" / "runtime_profile.py"), "preflight", "cpu"])
+            self.assertEqual(run.call_args_list[0].args[0][1:4], ["-m", "mozarie.runtime_profile", "preflight"])
+            self.assertEqual(run.call_args_list[0].kwargs["cwd"], str(source))
             self.assertEqual(Path(run.call_args_list[1].args[0][-1]), source / "mozarie" / "requirements-cpu.txt")
 
     def test_markerless_cpu_and_directml_venvs_fail_before_pip(self):
@@ -604,9 +625,7 @@ class UpdaterTests(unittest.TestCase):
                     patch("updater._remove_path", side_effect=lock_static_on_rollback):
                 with self.assertRaisesRegex(
                     updater.UpdateError,
-                    re.escape(updater.tr(
-                        "update_rollback_incomplete", paths="static", backup=str(backup.resolve())
-                    )),
+                    re.escape(updater.tr("update_rollback_incomplete")),
                 ):
                     updater.apply_update(source, install)
 
@@ -614,7 +633,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "new app")
             self.assertTrue(backup.is_dir())
 
-    def test_running_lock_is_detected(self):
+    def test_running_status_detects_an_active_lock_and_no_active_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory)
             process = app / ".mozarie-cache/process-test"
@@ -626,11 +645,11 @@ class UpdaterTests(unittest.TestCase):
                 handle.seek(0)
                 updater.msvcrt.locking(handle.fileno(), updater.msvcrt.LK_NBLCK, 1)
                 try:
-                    self.assertTrue(updater.is_mozarie_running(app))
+                    self.assertEqual(updater.mozarie_running_status(app), "active")
                 finally:
                     handle.seek(0)
                     updater.msvcrt.locking(handle.fileno(), updater.msvcrt.LK_UNLCK, 1)
-            self.assertFalse(updater.is_mozarie_running(app))
+            self.assertEqual(updater.mozarie_running_status(app), "none")
 
     def test_check_running_cli_returns_30_only_for_an_active_process(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -651,6 +670,74 @@ class UpdaterTests(unittest.TestCase):
                     finally:
                         handle.seek(0)
                         updater.msvcrt.locking(handle.fileno(), updater.msvcrt.LK_UNLCK, 1)
+
+            with patch.object(updater, "APP_DIR", app), patch.object(sys, "argv", ["updater.py", "--check-running"]), \
+                    patch("updater.mozarie_running_status", return_value="check_failed"):
+                self.assertEqual(updater.main(), updater.EXIT_RUNNING_CHECK_FAILED)
+
+    def test_maintenance_lock_access_and_running_check_failure_are_not_reported_as_active(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            lock = updater.MaintenanceLock(app)
+            with patch.object(Path, "open", side_effect=OSError("denied")):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("maintenance_lock_access"))):
+                    lock.__enter__()
+            app.mkdir(exist_ok=True)
+            (app / "VERSION").write_text("1.0.0", encoding="utf-8")
+            with patch("updater.fetch_latest_release", return_value=make_release("v1.1.0")), \
+                    patch("updater.mozarie_running_status", return_value="check_failed"):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("running_check_failed"))):
+                    updater._perform_update(app, input_fn=lambda _prompt: "y")
+
+    def test_main_handles_failure_log_access_errors_after_a_public_update_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app_file = Path(directory) / "not-a-directory"
+            app_file.write_text("blocked", encoding="utf-8")
+            with patch.object(updater, "APP_DIR", app_file), patch.object(updater, "perform_update", side_effect=updater.UpdateError("update failed")), \
+                    patch.object(sys, "argv", ["updater.py"]):
+                self.assertEqual(updater.main(), updater.EXIT_ERROR)
+
+    def test_maintenance_lock_closes_an_acquired_handle_when_initialization_flush_fails(self):
+        class FlushFailingHandle:
+            def __init__(self, handle):
+                self.handle = handle
+                self.closed = False
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def flush(self):
+                raise OSError("flush denied")
+
+            def close(self):
+                self.closed = True
+                self.handle.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            lock = updater.MaintenanceLock(app)
+            original_open = pathlib.io.open
+            handles = []
+
+            def open_with_failing_flush(path, *args, **kwargs):
+                handle = FlushFailingHandle(original_open(path, *args, **kwargs))
+                handles.append(handle)
+                return handle
+
+            with patch.object(pathlib.io, "open", side_effect=open_with_failing_flush):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("maintenance_lock_access"))):
+                    lock.__enter__()
+            self.assertEqual(len(handles), 1)
+            self.assertTrue(handles[0].closed)
+            self.assertIsNone(lock.handle)
+
+    def test_check_running_reports_cache_enumeration_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory)
+            (app / ".mozarie-cache").mkdir()
+            with patch.object(Path, "glob", side_effect=OSError("cache access denied")), \
+                    patch.object(updater, "APP_DIR", app), patch.object(sys, "argv", ["updater.py", "--check-running"]):
+                self.assertEqual(updater.main(), updater.EXIT_RUNNING_CHECK_FAILED)
 
     def test_read_language_prefers_valid_local_config_and_falls_back_safely(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -785,7 +872,7 @@ class UpdaterTests(unittest.TestCase):
                 assert_no_opposite_language(success_messages)
 
                 with patch("updater.fetch_latest_release", return_value=make_release()), \
-                        patch("updater.is_mozarie_running", return_value=True), \
+                        patch("updater.mozarie_running_status", return_value="active"), \
                         self.assertRaisesRegex(updater.UpdateError, re.escape(expected["running"])) as raised:
                     updater.perform_update(app)
                 assert_no_opposite_language([str(raised.exception)])
@@ -874,8 +961,7 @@ class UpdaterTests(unittest.TestCase):
         setup_check = "echo [Mozarie] [1/5] Checking Python environment..."
         create_venv = 'if not exist "%PYTHON%" call :create_venv'
         maintenance_check = 'py -%%V -X utf8 "%APP_DIR%updater.py" --run-setup-locked'
-        failed_branch = "if errorlevel 1 goto :failed"
-        marker_removal = 'del /q "%APP_DIR%.venv\\.mozarie-ready" >nul 2>nul'
+        marker_removal = 'if exist "%APP_DIR%.venv\\.mozarie-ready" del /q "%APP_DIR%.venv\\.mozarie-ready"'
         self_upgrade = '"%PYTHON%" -m pip install --disable-pip-version-check --no-cache-dir --progress-bar on --upgrade pip'
         requirements = '"%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%REQUIREMENTS%"'
 
@@ -895,9 +981,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("--no-cache-dir", (Path(__file__).parents[1] / "updater.py").read_text(encoding="utf-8"))
         self.assertLess(batch.index(maintenance_check), batch.index('"%PYTHON%" -m pip install'))
         self.assertLess(batch.index(marker_removal), batch.index(requirements))
-        self.assertIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
+        self.assertNotIn("If Windows denied access, close other setup windows and run setup.bat again.", batch)
         self.assertIn('py -%%V -X utf8 "%APP_DIR%updater.py" --check-running', batch)
-        self.assertIn("if errorlevel 30 if not errorlevel 31 goto :mozarie_running", batch)
+        self.assertIn("if errorlevel 31 goto :running_check_failed", batch)
+        self.assertIn("if errorlevel 30 goto :mozarie_running", batch)
         self.assertIn("if errorlevel 1 goto :setup_locked_failed", batch)
         self.assertIn(":venv_failed", batch)
         self.assertIn("Could not create the Python environment.", batch)
@@ -960,11 +1047,31 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('set "RUNTIME=%MOZARIE_RUNTIME%"', setup)
         self.assertIn("VEN_10DE", setup)
         self.assertIn("VEN_1002", setup)
-        self.assertIn("mozarie\\runtime_profile.py\" preflight", setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile preflight', setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile validate', setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile show', run)
+        self.assertNotIn('mozarie\\runtime_profile.py', setup)
+        self.assertNotIn('mozarie\\runtime_profile.py', run)
         self.assertIn("mozarie\\requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
+        self.assertIn(':invalid_mozarie_python', run)
+        self.assertIn('if not exist "%PYTHON%" if defined MOZARIE_PYTHON goto :invalid_mozarie_python', run)
         self.assertNotIn("pip install", run)
+
+    def test_setup_uses_module_runtime_validation_and_reports_each_failed_stage(self):
+        setup = (Path(__file__).parents[1] / "setup.bat").read_text(encoding="utf-8")
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile preflight', setup)
+        self.assertIn('"%PYTHON%" -m mozarie.runtime_profile validate', setup)
+        self.assertNotIn('mozarie\\runtime_profile.py', setup)
+        self.assertIn(':pip_upgrade_failed', setup)
+        self.assertIn(':requirements_failed', setup)
+        self.assertIn(':pip_check_failed', setup)
+        self.assertIn(':runtime_validation_failed', setup)
+        self.assertIn(':gpu_check_failed', setup)
+        self.assertIn(':ready_marker_remove_failed', setup)
+        self.assertIn(':ready_marker_create_failed', setup)
+        self.assertIn('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :ready_marker_create_failed', setup)
 
     @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
     def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):

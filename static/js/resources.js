@@ -1,5 +1,5 @@
 class WeightedLru {
-  constructor(limit, release = () => {}, isPinned = () => false) { this.limit = limit; this.release = release; this.isPinned = isPinned; this.items = new Map(); this.weight = 0; }
+  constructor(limit, release, isPinned) { this.limit = limit; this.release = release; this.isPinned = isPinned; this.items = new Map(); this.weight = 0; }
   has(key) { return this.items.has(key); }
   get(key) { const entry = this.items.get(key); if (!entry) return null; this.items.delete(key); this.items.set(key, entry); return entry.value; }
   take(key) { const entry = this.items.get(key); if (!entry) return null; this.items.delete(key); this.weight -= entry.weight; return entry.value; }

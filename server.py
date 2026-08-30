@@ -78,8 +78,11 @@ def main() -> None:
             try:
                 http_server = ThreadingHTTPServer(("127.0.0.1", port), MosaicHandler)
                 http_server.handle_error = types.MethodType(_handle_server_error, http_server)
-            except OSError:
-                LOGGER.error("Mozarieを起動できません。ポート%sは使用中です。", port)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 10048:
+                    LOGGER.error("Mozarieを起動できません。ポート%sは使用中です。", port)
+                else:
+                    LOGGER.exception("Mozarieを起動できませんでした。")
                 state.shutdown()
                 raise SystemExit(1) from None
             url = f"http://127.0.0.1:{port}"
@@ -95,8 +98,8 @@ def main() -> None:
                 state.shutdown()
                 LOGGER.info("Mozarieを終了しました")
             launch_update = bool(getattr(http_server, "mozarie_update_requested", False))
-    except UpdateError:
-        LOGGER.error("Mozarie is busy with setup or update. / setupまたは更新が完了してから起動してください。")
+    except UpdateError as exc:
+        LOGGER.error("%s", str(exc))
         raise SystemExit(1) from None
     if launch_update:
         import subprocess

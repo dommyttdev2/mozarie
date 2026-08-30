@@ -95,6 +95,12 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(validate_output_directory_ready(target), target.resolve())
             self.assertEqual(list(target.iterdir()), [])
 
+    def test_output_directory_probe_propagates_a_create_failure_without_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch("mozarie.config.tempfile.NamedTemporaryFile", side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "read-only"):
+                    validate_output_directory_ready(Path(directory))
+
     def test_valid_settings_are_persisted_only_to_local_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -155,6 +161,12 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(SettingsError): validate_settings(invalid_tool_position)
         with self.assertRaises(SettingsError): validate_settings(invalid_fluid_exclusion)
         with self.assertRaises(SettingsError): validate_settings(invalid_import_parallelism)
+
+    def test_invalid_hex_color_is_rejected(self):
+        invalid = default_settings()
+        invalid["display"]["apply_color"] = "#GGGGGG"
+        with self.assertRaises(SettingsError):
+            validate_settings(invalid)
 
     def test_hand_segmentation_settings_have_safe_defaults(self):
         settings = validate_settings(default_settings())

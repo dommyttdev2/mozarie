@@ -15,6 +15,28 @@ const contentTypes = {
   ".json": "application/json; charset=utf-8",
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
+const browserCoverage = process.env.MOZARIE_JS_COVERAGE === "1" ? [] : null;
+
+async function newCoveredPage(browser, options) {
+  const page = await browser.newPage(options);
+  if (browserCoverage) {
+    await page.coverage.startJSCoverage({ resetOnNavigation: false });
+    browserCoverage.push({ page, entries: null });
+  }
+  return page;
+}
+
+async function stopCoveredPage(page, close = false) {
+  const covered = browserCoverage?.find((item) => item.page === page);
+  if (covered && !covered.entries) covered.entries = await page.coverage.stopJSCoverage();
+  if (close) await page.close();
+}
+
+async function writeBrowserCoverage() {
+  if (!browserCoverage || !process.env.MOZARIE_BROWSER_COVERAGE_FILE) return;
+  await Promise.all(browserCoverage.map(({ page }) => stopCoveredPage(page)));
+  await fs.writeFile(process.env.MOZARIE_BROWSER_COVERAGE_FILE, JSON.stringify(browserCoverage.flatMap(({ entries }) => entries || [])));
+}
 
 // Kept outside the browser fixture so the negative case is a real unit test:
 // a no-op/failed catalog-clear handler cannot satisfy the same predicate that
@@ -69,6 +91,16 @@ function startFixtureServer() {
   let failNextSettingsSave = false;
   let updateAvailable = false;
   let currentJob = { kind: "idle", state: "idle" };
+  let nextSaveToken = 1;
+  const saveTokens = new Map();
+  const saveRequests = [];
+  const catalogRemoveRequests = [];
+  const folderRequests = [];
+  const initialCatalog = [
+    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+  ];
+  let catalog = structuredClone(initialCatalog);
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
@@ -94,7 +126,21 @@ function startFixtureServer() {
       settingsRequests.push(requestUrl.search);
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
-        const submittedSettings = JSON.parse(body);
+        const submitted = JSON.parse(body);
+        // The product accepts a focused settings patch for the output-folder
+        // picker as well as a complete settings form submission.
+        const submittedSettings = {
+          ...settings,
+          ...submitted,
+          general: { ...settings.general, ...(submitted.general || {}) },
+          models: { ...settings.models, ...(submitted.models || {}) },
+          display: { ...settings.display, ...(submitted.display || {}) },
+          importing: { ...settings.importing, ...(submitted.importing || {}) },
+          saving: { ...settings.saving, ...(submitted.saving || {}) },
+          detection: { ...settings.detection, ...(submitted.detection || {}) },
+          shortcuts: { ...settings.shortcuts, ...(submitted.shortcuts || {}) },
+          confirmations: { ...settings.confirmations, ...(submitted.confirmations || {}) },
+        };
         if (failNextSettingsSave) {
           failNextSettingsSave = false;
           response.writeHead(500, { "Content-Type": "application/json" });
@@ -142,12 +188,73 @@ function startFixtureServer() {
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        images: [
-          { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-          { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-        ],
+        images: catalog,
         root: "G:/fixture",
       }));
+      return;
+    }
+    if (requestPath === "/api/folder" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      folderRequests.push(JSON.parse(body));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ images: catalog, root: folderRequests.at(-1).path }));
+      return;
+    }
+    if (requestPath === "/api/output-directory/pick" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume request */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ path: "G:\\fixture-output" }));
+      return;
+    }
+    if (requestPath === "/api/catalog/remove" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { imageIds = [] } = JSON.parse(body);
+      catalogRemoveRequests.push(imageIds);
+      const removedImageIds = catalog.filter((image) => imageIds.includes(image.id)).map((image) => image.id);
+      catalog = catalog.filter((image) => !imageIds.includes(image.id));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ images: catalog, removedImageIds }));
+      return;
+    }
+    if (requestPath === "/api/save/prepare" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ entries: payload.imageIds.map((imageId) => ({ imageId, candidateRevision: 0, relativePath: catalog.find((image) => image.id === imageId)?.relativePath || imageId })) }));
+      return;
+    }
+    if (requestPath === "/api/save/render" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const saveToken = `save-${nextSaveToken++}`;
+      saveTokens.set(saveToken, { state: "pending", imageId: payload.imageId }); saveRequests.push({ path: requestPath, payload });
+      if (payload.copyToDefault) {
+        response.writeHead(200, { "Content-Type": "application/json", "X-Mozarie-Save-Token": saveToken });
+        response.end(JSON.stringify({ saveToken }));
+      } else {
+        response.writeHead(200, { "Content-Type": "image/png", "Content-Length": onePixelPng.length, "X-Mozarie-Save-Token": saveToken });
+        response.end(onePixelPng);
+      }
+      return;
+    }
+    if (requestPath === "/api/save/commit" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
+      if (!token || token.imageId !== payload.imageId) { response.writeHead(400, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "invalid_save_token" })); return; }
+      token.state = "committed"; saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ cleared: true, stale: false }));
+      return;
+    }
+    if (requestPath === "/api/save/status" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: token?.state || "unknown", cleared: token?.state === "committed", stale: false }));
+      return;
+    }
+    if (requestPath === "/api/save/cancel" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken); if (token) token.state = "cancelled";
+      saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
       return;
     }
     if (requestPath === "/api/catalog/clear" && request.method === "POST") {
@@ -238,7 +345,12 @@ function startFixtureServer() {
     if (requestPath === "/api/job/cancel" && request.method === "POST") {
       cancelRequests += 1;
       if (cancelShouldFail) { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "cancel failed" })); return; }
-      currentJob = { ...currentJob, state: "cancelled", current: "" };
+      // The detection worker keeps its in-flight image until it has observed
+      // the request. Saving remains terminal in this fixture so its dedicated
+      // save-control test can close the completed dialog normally.
+      currentJob = currentJob.kind === "detect"
+        ? { ...currentJob, state: "running", cancelRequested: true }
+        : { ...currentJob, state: "cancelled", current: "" };
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(currentJob));
       return;
     }
@@ -317,13 +429,133 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
 
 function closeServer(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+// This fixture deliberately owns a single candidate image.  Keeping it apart
+// from the control ledger means the candidate row, its decoded mask, and its
+// blink interval are created by the same public image-selection flow a user
+// takes, rather than by replacing page state in a shared browser page.
+function startCandidateScenarioServer() {
+  const imageId = "candidate-scenario";
+  const candidateId = "candidate-blink-apply";
+  const imagePath = path.join(staticRoot, "logo.png");
+  const settings = {
+    general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
+    models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "cpu", gpu_device: 0 },
+    display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true },
+    importing: { parallelism: 1 }, saving: { parallelism: 1 },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 1, targets: ["penis"] },
+    shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
+  };
+  const image = { id: imageId, relativePath: "candidate.png", sourceKind: "fixture", width: 409, height: 401, candidateCount: 1, enabledCandidateCount: 1, candidateRevision: 7 };
+  const candidate = { id: candidateId, role: "apply", enabled: true, forced: false, className: "Fixture candidate", confidence: 0.91, color: "#ff3d4d" };
+  const server = http.createServer(async (request, response) => {
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    const requestPath = requestUrl.pathname;
+    const json = (body) => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
+    if (requestPath === "/api/settings") { json({ settings, version: "v1.0.0", status: { models: {}, gpus: [] } }); return; }
+    if (requestPath === "/api/images") { json({ images: [image], root: "G:/candidate-fixture" }); return; }
+    if (requestPath === "/api/job") { json({ kind: "idle", state: "idle" }); return; }
+    if (requestPath === "/api/update/status") { json({ current: "v1.0.0", latest: "v1.0.0", available: false }); return; }
+    if (requestPath === `/api/workspace/manual/${imageId}`) { json({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 7 } }); return; }
+    if (requestPath === `/api/workspace/image/${imageId}` && request.method === "POST") {
+      for await (const _chunk of request) { /* consume workspace flags */ }
+      json({}); return;
+    }
+    if (requestPath === `/api/candidates/${imageId}`) { json({ candidates: [candidate], candidateRevision: 7 }); return; }
+    if (requestPath === `/api/mask/${imageId}/${candidateId}` || requestPath === `/api/image/${imageId}` || requestPath === `/api/thumbnail/${imageId}`) {
+      const body = await fs.readFile(imagePath);
+      response.writeHead(200, { "Content-Type": "image/png", "Content-Length": body.length }); response.end(body); return;
+    }
+    const relativePath = requestPath === "/" ? "index.html" : requestPath.slice(1);
+    const filePath = path.resolve(staticRoot, relativePath);
+    if (!filePath.startsWith(`${staticRoot}${path.sep}`)) { response.writeHead(403).end(); return; }
+    try {
+      const body = await fs.readFile(filePath);
+      response.writeHead(200, { "Content-Type": contentTypes[path.extname(filePath)] || "application/octet-stream" }); response.end(body);
+    } catch { response.writeHead(404).end(); }
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}`, imageId, candidateId });
+    });
+  });
+}
+
+async function runCandidateBlinkScenario(browser) {
+  const scenario = await startCandidateScenarioServer();
+  const page = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+  try {
+    await page.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    await page.goto(scenario.url, { waitUntil: "networkidle" });
+    await page.locator(`.gallery-item[data-id="${scenario.imageId}"]`).click();
+    const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
+    await row.waitFor();
+    assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
+    assert.equal(await row.locator(".candidate-class").textContent(), "Fixture candidate", "the rendered row belongs to the fixture candidate");
+
+    const sectionDisplay = page.locator('[data-candidate-display-toggle="apply"]');
+    await sectionDisplay.click();
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.classList.contains("blink-selected")
+        && document.querySelector("#candidatePane")?.classList.contains("blink-active")
+        && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
+    }, scenario.candidateId);
+    assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
+
+    await page.locator("#brushTool").click();
+    const canvas = await page.locator("#editorCanvas").boundingBox();
+    assert.ok(canvas, "the candidate scenario has a real editor canvas");
+    await page.mouse.move(canvas.x + canvas.width / 2, canvas.y + canvas.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(canvas.x + canvas.width / 2 + 1, canvas.y + canvas.height / 2 + 1);
+    await page.mouse.up();
+    const manualRow = page.locator('[data-candidate-blink-id="manual:apply"]');
+    await page.waitForFunction(() => {
+      const row = document.querySelector('[data-candidate-blink-id="manual:apply"]');
+      return row?.classList.contains("blink-selected")
+        && row.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
+    });
+    assert.equal(await manualRow.getAttribute("data-candidate-blink-role"), "apply", "a real brush stroke adds the manual apply row to the enabled section blink");
+    await manualRow.locator(".candidate-display-toggle").click();
+    await page.waitForFunction(() => !document.querySelector('[data-candidate-blink-id="manual:apply"]')?.classList.contains("blink-selected"));
+
+    const effective = row.locator(".candidate-effective-toggle");
+    await effective.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "false"
+        && candidateRow.querySelector(".candidate-effective-toggle")?.getAttribute("aria-pressed") === "true"
+        && candidateRow.classList.contains("blink-selected");
+    }, scenario.candidateId);
+    assert.equal(await row.locator(".candidate-effective-toggle").getAttribute("aria-pressed"), "true", "keyboard activation switches the concrete candidate to effective display");
+
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((id) => {
+      const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
+      return candidateRow?.querySelector(".candidate-effective-toggle")?.getAttribute("aria-pressed") === "false"
+        && !candidateRow.classList.contains("blink-selected")
+        && !document.querySelector("#candidatePane")?.classList.contains("blink-active");
+    }, scenario.candidateId);
+  } finally {
+    await stopCoveredPage(page, true);
+    scenario.server.closeAllConnections();
+    await closeServer(scenario.server);
+  }
 }
 
 function overlaps(left, right) {
@@ -441,6 +673,10 @@ async function assertCompactNavigationLayout(page, language) {
 async function assertConnectionStatusLayout(page, width, height, language) {
   await page.setViewportSize({ width, height });
   await page.evaluate(async (selected) => {
+    // This layout assertion supplies an artificial connection loss. A pending
+    // successful background poll is a real recovery signal and would clear it
+    // concurrently, so keep recovery testing separate from the viewport check.
+    clearTimeout(state.jobPollTimer); state.jobPollTimer = null;
     await loadTranslations(selected);
     setStatusKey("error.connectionLost", {}, "error");
   }, language);
@@ -788,7 +1024,7 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
 // not by page-side events that production code could synthesize.  Every
 // manifest assertion id must be present at the
 // end of the sweep.
-async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
+async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
@@ -1030,7 +1266,10 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await click("pickFolder");
   await input("folderPath", "G:\\fixture");
   await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
-  await click("pickFolder"); await click("loadFolderButton"); await page.waitForTimeout(100); await closeDialogs();
+  await click("pickFolder"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
+  // Folder loading replaces the thumbnail-backed bitmap; re-enter the same
+  // normal-size editor fixture before pointer-only controls continue.
+  await setupFixture();
 
   // Gallery/editor controls operate after a genuine gallery selection.
   for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
@@ -1075,6 +1314,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await click("boundaryCancelButton");
   await click("detectCurrentButton");
   await click("processingCancelButton");
+  await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+  finishCancel();
+  await page.evaluate(() => pollJob());
   await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
   await closeDialogs();
   await setupFixture();
@@ -1086,6 +1328,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await click("processingPauseButton");
   await page.waitForFunction(() => state.processing?.state === "running");
   await click("processingCancelButton");
+  await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+  finishCancel();
+  await page.evaluate(() => pollJob());
   await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
   await closeDialogs(); await setupFixture();
 
@@ -1217,7 +1462,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -1227,9 +1472,45 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
-    const settingsFailurePage = await browser.newPage();
+    // A real unsupported-browser bootstrap must stop before any API request or
+    // editor binding. This covers the user-visible File System Access contract.
+    const unsupportedBrowserPage = await newCoveredPage(browser);
+    await unsupportedBrowserPage.addInitScript(() => {
+      delete window.showOpenFilePicker;
+      delete window.showDirectoryPicker;
+    });
+    await unsupportedBrowserPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await unsupportedBrowserPage.waitForFunction(() => document.body.textContent.includes("File System Access API"));
+    assert.match(await unsupportedBrowserPage.locator("body").textContent(), /File System Access API/, "unsupported browsers receive the startup requirement");
+    await stopCoveredPage(unsupportedBrowserPage, true);
+    // Bootstrap tolerates a missing translation payload and an empty root,
+    // while an image-list transport failure remains a visible user error.
+    const degradedBootstrapPage = await newCoveredPage(browser);
+    await degradedBootstrapPage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const url = String(args[0]?.url || args[0]);
+        if (url.includes("/i18n/")) return new Response("unavailable", { status: 503 });
+        if (url.includes("/api/settings?status=0")) {
+          const response = await originalFetch(...args); const body = await response.json();
+          delete body.settings.general.shortcuts_enabled;
+          return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+        }
+        if (url.includes("/api/images")) {
+          const response = await originalFetch(...args); const body = await response.json(); body.root = "";
+          return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+        }
+        return originalFetch(...args);
+      };
+    });
+    await degradedBootstrapPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+    assert.equal(await degradedBootstrapPage.locator("#folderPath").inputValue(), "", "an empty catalogue root remains an empty folder field");
+    await stopCoveredPage(degradedBootstrapPage, true);
+    const settingsFailurePage = await newCoveredPage(browser);
     await settingsFailurePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
@@ -1244,8 +1525,8 @@ async function main() {
     assert.equal(await settingsFailurePage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "initial settings failure does not open an error dialog");
     await settingsFailurePage.locator("#settingsButton").click();
     assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
-    await settingsFailurePage.close();
-    const connectionRecoveryPage = await browser.newPage();
+    await stopCoveredPage(settingsFailurePage, true);
+    const connectionRecoveryPage = await newCoveredPage(browser);
     await connectionRecoveryPage.addInitScript(() => {
       window.__connectionOffline = false;
       const fetchOriginal = window.fetch;
@@ -1274,8 +1555,8 @@ async function main() {
     await connectionRecoveryPage.waitForFunction(() => document.querySelector("#errorDialog").open);
     assert.equal(await connectionRecoveryPage.locator("#connectionStatus").isHidden(), true, "an HTTP error keeps the recovered connection status cleared");
     await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.close());
-    await connectionRecoveryPage.close();
-    const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    await stopCoveredPage(connectionRecoveryPage, true);
+    const initialPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
       const fetchOriginal = window.fetch;
       window.fetch = (...args) => {
@@ -1293,8 +1574,8 @@ async function main() {
     assert.equal(await initialPage.locator("#connectionStatus").isVisible(), true, "setStatus shows the header notice");
     await initialPage.evaluate(() => clearStatus());
     assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
-    await initialPage.close();
-    const page = await browser.newPage();
+    await stopCoveredPage(initialPage, true);
+    const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
       window.showDirectoryPicker = async () => {
@@ -1323,7 +1604,7 @@ async function main() {
     // prove that a user can operate a control, and (worse) used to count hidden
     // or disabled controls as tested.  The behavioural assertions below use
     // Playwright pointer/keyboard actions with their required application state.
-    const inventoryPage = await browser.newPage();
+    const inventoryPage = await newCoveredPage(browser);
     const inventoryErrors = [];
     inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
     for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
@@ -1337,7 +1618,7 @@ async function main() {
       assert.equal(inventory.every((control) => control.present), true, `all manifest controls remain in the ${language}/${width} DOM: ${JSON.stringify(inventory.filter((control) => !control.present))}`);
       await inventoryPage.waitForTimeout(25);
     }
-    await inventoryPage.close();
+    await stopCoveredPage(inventoryPage, true);
     assert.deepEqual(inventoryErrors, [], `inventory loading does not raise page errors: ${inventoryErrors.join("; ")}`);
     assert.equal(uiDynamicControlManifest.every((control) => control.selector && control.action && control.expected), true, "dynamic controls retain explicit action contracts");
     const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
@@ -1773,27 +2054,6 @@ async function main() {
       exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
     });
     assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion erase has its own visible ON/OFF row");
-    const manualBlinkStartsWithSection = await page.evaluate(() => {
-      const candidates = state.candidates; const candidateImages = state.candidateImages;
-      const blinkCandidateIds = state.blinkCandidateIds;
-      const candidateMask = document.createElement("canvas"); candidateMask.width = addCanvas.width; candidateMask.height = addCanvas.height;
-      candidateMask.getContext("2d").fillRect(0, 0, 8, 8);
-      const tool = state.tool;
-      state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
-      state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
-      state.blinkCandidateIds = new Set(); renderCandidates();
-      document.querySelector('[data-candidate-display-toggle="apply"]').click();
-      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
-      const row = document.querySelector(".candidate-row-manual-apply");
-      const result = {
-        manualBlink: state.blinkCandidateIds.has("manual:apply"),
-        rowBlinking: row?.classList.contains("blink-selected"),
-      };
-      state.candidates = candidates; state.candidateImages = candidateImages; state.blinkCandidateIds = blinkCandidateIds; state.tool = tool;
-      deleteManualMask(); renderCandidates();
-      return result;
-    });
-    assert.deepEqual(manualBlinkStartsWithSection, { manualBlink: true, rowBlinking: true }, "a first manual mosaic stroke joins an enabled section blink");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
@@ -2013,10 +2273,15 @@ async function main() {
     await page.locator("#errorDialogClose").click();
     failCancel(false);
     await page.locator("#processingCancelButton").click();
-    await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
+    await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+    assert.equal(await page.locator("#processingCancelButton").isDisabled(), true, "the cancel control stays disabled while the detector finishes its in-flight image");
     assert.match(await page.locator("#connectionStatus").textContent(), /現在の画像は完了する場合があります/, "cancellation is shown immediately with the in-flight image notice");
     await page.locator("#processingCancelButton").evaluate((button) => button.click());
     assert.equal(cancelRequests(), 2, "a processing cancel cannot be sent twice");
+    finishCancel();
+    await page.evaluate(() => pollJob());
+    await page.waitForFunction(() => !document.querySelector("#processingDialog").open);
+    assert.equal(await page.locator("#processingCancelButton").isDisabled(), false, "the cancel control is re-enabled only after the terminal cancellation is observed");
     holdDetection(false);
     resetJob();
     await page.evaluate(async () => { await pollJob(); closeProcessing(); });
@@ -2365,48 +2630,6 @@ async function main() {
       assert.equal(mosaicHelp.oneLine, true, `mosaic guideline links remain on one line at ${width}/${language}`);
       await page.locator("#mosaicHelpCloseButton").click();
     }
-    const candidateDisplaySemantics = await page.evaluate(() => {
-      const candidates = state.candidates; const images = state.candidateImages; const removed = state.removedCandidateIds; const currentId = state.currentId;
-      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
-      state.currentId = "sample"; state.candidates = [{ id: "radio-candidate", role: "apply", enabled: true, className: "Radio" }, { id: "radio-exclusion", role: "exclude", enabled: true, className: "Exclude" }]; state.candidateImages = new Map([["radio-candidate", mask], ["radio-exclusion", mask]]); state.removedCandidateIds = new Set(); renderCandidates();
-      const apply = document.querySelector('.candidate-row-apply'); const exclude = document.querySelector('.candidate-row-exclude'); const applyButtons = [...apply.querySelectorAll('button')]; const excludeButtons = [...exclude.querySelectorAll('button')];
-      window.__candidateDisplayTestState = { candidates, images, removed, currentId };
-      const box = (node) => { const rect = node.getBoundingClientRect(); return { width: rect.width, height: rect.height }; };
-      return { apply: applyButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), exclude: excludeButtons.map((button) => ({ text: button.textContent, pressed: button.getAttribute("aria-pressed") })), rows: [box(apply), box(exclude)] };
-    });
-    assert.deepEqual(candidateDisplaySemantics.apply.map((button) => button.text), ["Show", "Applied", "ON", "×"], "mosaic rows keep their one-line action order");
-    assert.deepEqual(candidateDisplaySemantics.exclude.map((button) => button.text), ["Show", "Force ON", "ON", "×"], `exclusion rows keep their one-line action order: ${JSON.stringify(candidateDisplaySemantics.exclude)}`);
-    assert.ok(Math.abs(candidateDisplaySemantics.rows[0].height - candidateDisplaySemantics.rows[1].height) <= 1 && candidateDisplaySemantics.rows.every((row) => row.height >= 36 && row.height <= 40), `candidate rows share one compact height: ${JSON.stringify(candidateDisplaySemantics.rows)}`);
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus(); await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
-    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "true" && state.blinkModes.get("radio-candidate") === "effective");
-    const candidateDisplayKeyboard = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") }));
-    assert.deepEqual(candidateDisplayKeyboard, { display: "false", effective: "true", mode: "effective" }, "Applied replaces normal display with exclusion-aware display");
-    // The blink timer repaints the canvas while the control remains visible.
-    // Re-focus its current DOM node before the second keyboard activation so
-    // this assertion measures the toggle, rather than a stale focus target.
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').focus();
-    await page.locator('.candidate-row-apply .candidate-effective-toggle').press("Enter");
-    await page.waitForFunction(() => document.querySelector('.candidate-row-apply .candidate-effective-toggle')?.getAttribute("aria-pressed") === "false" && !state.blinkModes.has("radio-candidate"));
-    const candidateDisplayStopped = await page.evaluate(() => ({ display: document.querySelector('.candidate-row-apply .candidate-display-toggle').getAttribute("aria-pressed"), effective: document.querySelector('.candidate-row-apply .candidate-effective-toggle').getAttribute("aria-pressed"), mode: state.blinkModes.get("radio-candidate") || "off" }));
-    assert.deepEqual(candidateDisplayStopped, { display: "false", effective: "false", mode: "off" }, "pressing Applied again stops only that candidate highlight");
-    await page.evaluate(() => { const saved = window.__candidateDisplayTestState; state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.currentId = saved.currentId; delete window.__candidateDisplayTestState; renderCandidates(); });
-    const sharedBlinkColors = await page.evaluate(async () => {
-      const saved = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, ids: state.blinkCandidateIds, modes: state.blinkModes, phase: state.blinkPhase, manual: state.manualMaskPresent };
-      const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 4, 4);
-      addCtx.fillRect(0, 0, 4, 4); exclusionCtx.fillRect(0, 0, 4, 4); state.manualMaskPresent = true;
-      state.candidates = [{ id: "blink-auto-apply", role: "apply", enabled: true, className: "Auto apply" }, { id: "blink-auto-exclude", role: "exclude", enabled: true, className: "Auto exclude" }];
-      state.candidateImages = new Map([["blink-auto-apply", mask], ["blink-auto-exclude", mask]]); state.removedCandidateIds = new Set(); state.blinkCandidateIds = new Set(["blink-auto-apply", "manual:apply", "manual:exclude"]); state.blinkModes = new Map([...state.blinkCandidateIds].map((id) => [id, "normal"])); state.blinkPhase = true;
-      renderCandidates(); syncCandidateDisplayButtons(); await new Promise((resolve) => setTimeout(resolve, 80));
-      state.blinkCandidateIds.add("blink-auto-exclude"); state.blinkModes.set("blink-auto-exclude", "normal"); renderCandidates(); syncCandidateDisplayButtons();
-      const color = (selector) => getComputedStyle(document.querySelector(selector)).backgroundColor;
-      const lit = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
-      state.blinkPhase = false; syncCandidateDisplayButtons(); const dark = { autoApply: color('.candidate-row-apply[data-candidate-blink-id="blink-auto-apply"]'), manualApply: color('.candidate-row-manual-apply'), autoExclude: color('.candidate-row-exclude[data-candidate-blink-id="blink-auto-exclude"]'), manualExclude: color('.candidate-row-manual-exclude') };
-      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
-      state.candidates = saved.candidates; state.candidateImages = saved.images; state.removedCandidateIds = saved.removed; state.blinkCandidateIds = saved.ids; state.blinkModes = saved.modes; state.blinkPhase = saved.phase; state.manualMaskPresent = saved.manual; renderCandidates(); syncCandidateDisplayButtons();
-      return { lit, dark };
-    });
-    assert.deepEqual(sharedBlinkColors.lit, { autoApply: "rgba(238, 78, 78, 0.3)", manualApply: "rgba(238, 78, 78, 0.3)", autoExclude: "rgba(50, 184, 220, 0.28)", manualExclude: "rgba(50, 184, 220, 0.28)" }, "auto and manual candidate highlights share one red/blue blink phase even when enabled at different times");
-    assert.equal(Object.values(sharedBlinkColors.dark).every((color) => !color.includes("238, 78, 78") && !color.includes("50, 184, 220")), true, "all candidate highlight colors turn off together");
     const targetModes = await page.evaluate(async () => {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
       await setReviewed(state.images.find((image) => image.id === "sample"), true);
@@ -2531,7 +2754,7 @@ async function main() {
       await page.mouse.up();
     }
 
-    const ledgerPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const ledgerPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
     setUpdateAvailable(true);
     await ledgerPage.addInitScript(() => {
       window.__ledgerApi = [];
@@ -2549,15 +2772,106 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel);
     } finally {
       holdDetection(false);
-      await ledgerPage.close();
+      await stopCoveredPage(ledgerPage, true);
     }
+
+    // Run the browser-owned save path in a fresh, stateful fixture.  This is
+    // deliberately after the control ledger because remove-after-save changes
+    // the catalogue for real; the fixture is reset instead of faking state in
+    // the page.
+    resetScenario();
+    const browserSavePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+    await browserSavePage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    try {
+      await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await browserSavePage.locator("#pickFolder").click();
+      await browserSavePage.locator("#folderPath").fill("G:\\selected-folder");
+      await browserSavePage.locator("#loadFolderButton").click();
+      await browserSavePage.waitForFunction(() => state.images.length === 2);
+      assert.deepEqual(folderRequests, [{ path: "G:\\selected-folder" }], "folder selection posts the typed path and reloads the catalogue");
+      await browserSavePage.locator('.gallery-item[data-id="sample"]').click();
+      await browserSavePage.waitForFunction(() => state.currentId === "sample" && state.currentImage);
+      await browserSavePage.locator("#brushTool").click();
+      const canvasBox = await browserSavePage.locator("#editorCanvas").boundingBox();
+      assert.ok(canvasBox, "the editor canvas is available for a user brush gesture");
+      await browserSavePage.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 2);
+      await browserSavePage.mouse.down();
+      await browserSavePage.mouse.move(canvasBox.x + canvasBox.width / 2 + 12, canvasBox.y + canvasBox.height / 2 + 8);
+      await browserSavePage.mouse.up();
+      await browserSavePage.waitForFunction(() => !document.querySelector("#saveButton").disabled);
+      await browserSavePage.locator("#saveButton").click();
+      await browserSavePage.locator("#chooseOutputDirectoryButton").click();
+      await browserSavePage.waitForFunction(() => state.settings.saving.default_output_directory === "G:\\fixture-output");
+      assert.equal(await browserSavePage.locator("#applyOutputDirectoryStatus").inputValue(), "G:\\fixture-output", "the output picker updates the visible save destination");
+      await browserSavePage.locator("#applyCopyMode").check();
+      await browserSavePage.locator("#applySuffix").fill("_browser");
+      await browserSavePage.locator("#deleteOriginal").check();
+      await browserSavePage.locator("#removeAfterSave").check();
+      await browserSavePage.locator("#applyStartButton").click();
+      await browserSavePage.locator("#confirmAccept").click();
+      await browserSavePage.waitForFunction(() => !state.applyRunning && state.images.length === 1, null, { timeout: 5000 });
+      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "copy-and-delete drives prepare, render, and commit in order");
+      assert.deepEqual(catalogRemoveRequests, [["sample"]], "remove-after-save deletes only the committed source from the catalogue");
+      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId })), { imageIds: ["sample-two"], currentId: "sample-two" }, "the next catalogue image remains selected after deleting the current source");
+    } finally {
+      await stopCoveredPage(browserSavePage, true);
+    }
+
+    // Navigation and overview selection are user operations, so exercise the
+    // visible controls and keyboard modifiers rather than page-side helpers.
+    resetScenario();
+    const navigationPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+    await navigationPage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    try {
+      await navigationPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await navigationPage.locator('.gallery-item[data-id="sample"]').click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#nextImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two");
+      await navigationPage.locator("#previousImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#reviewAndNextButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.reviewed);
+      await navigationPage.locator("#previousImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#hideAndNextButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.hidden);
+      await navigationPage.locator("#overviewButton").click();
+      await navigationPage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+      // Foldered cards are reached through the rendered overview UI, not a
+      // private renderer call. This proves the folder select has real options.
+      await navigationPage.evaluate(() => {
+        state.images[0].relativePath = "nested/sample.png";
+        state.images[1].relativePath = "nested/deeper/sample-two.png";
+      });
+      await navigationPage.locator("#closeOverviewButton").click();
+      await navigationPage.locator("#overviewButton").click();
+      await navigationPage.waitForFunction(() => document.querySelector("#overviewFolder option[value='nested']"));
+      await navigationPage.locator("#overviewFolder").selectOption("nested");
+      await navigationPage.locator("#batchModeButton").click();
+      await navigationPage.locator('.overview-item[data-id="sample-two"]').click();
+      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control"] });
+      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control", "Shift"] });
+      assert.deepEqual(await navigationPage.evaluate(() => [...state.selectedImageIds].sort()), ["sample", "sample-two"], "overview modifier selection preserves both images");
+    } finally {
+      await stopCoveredPage(navigationPage, true);
+    }
+
+    await runCandidateBlinkScenario(browser);
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
+    await writeBrowserCoverage();
     await browser?.close();
     if (server) await closeServer(server);
   }

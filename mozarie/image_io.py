@@ -159,8 +159,6 @@ def _jpeg_exif_orientation_one_segment(source: bytes) -> bytes:
         exif = source_image.getexif()
     exif[274] = 1
     payload = exif.tobytes()
-    if not payload.startswith(b"Exif\x00\x00"):
-        payload = b"Exif\x00\x00" + payload
     return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
 
 

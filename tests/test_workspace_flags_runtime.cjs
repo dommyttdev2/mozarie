@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const workspaceSource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "workspace.js"), "utf8");
+const workspacePath = path.join(__dirname, "..", "static", "js", "workspace.js");
+const workspaceSource = fs.readFileSync(workspacePath, "utf8");
 const coreSource = fs.readFileSync(path.join(__dirname, "..", "static", "js", "core.js"), "utf8");
 const coreFlags = coreSource.slice(coreSource.indexOf("function normaliseReviewRoot"), coreSource.indexOf("function imageIndex"));
 const requests = [];
@@ -24,7 +25,7 @@ const context = {
   renderCatalogViews() {}, renderGallery() {}, renderOverview() {}, updateNavigationControls() {}, updateActionButtons() {},
   t() { return ""; }, $(selector) { return { setAttribute() {}, hidden: false, textContent: "", disabled: false }; },
 };
-vm.runInNewContext(`${workspaceSource}\n${coreFlags}\nglobalThis.flagsTest = { setHidden, setReviewed, isHidden, isReviewed };`, context);
+vm.runInNewContext(`${workspaceSource}\n${coreFlags}\nglobalThis.flagsTest = { setHidden, setReviewed, isHidden, isReviewed };`, context, { filename: workspacePath });
 
 (async () => {
   const settleQueue = () => new Promise((resolve) => setTimeout(resolve, 0));

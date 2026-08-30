@@ -189,6 +189,159 @@ class RuntimeProfileTests(unittest.TestCase):
                 with self.assertRaises(runtime_profile.ProfileError):
                     runtime_profile.selected_profile(venv)
 
+    def test_validate_cuda_and_directml_runtime_profiles(self) -> None:
+        class Probe:
+            def __add__(self, _value: object) -> "Probe":
+                return self
+
+            def cpu(self) -> "Probe":
+                return self
+
+            def item(self) -> float:
+                return 2.0
+
+        probe = Probe()
+        cuda = SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 2,
+            get_device_name=lambda index: ["RTX A", "RTX B"][index],
+        )
+        fake_torch = SimpleNamespace(version=SimpleNamespace(cuda="13.0"), cuda=cuda, ones=lambda *_args, **_kwargs: probe)
+        fake_ort = SimpleNamespace(get_available_providers=lambda: ["CUDAExecutionProvider"])
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), \
+                patch.object(runtime_profile, "_probe_onnx", return_value="CUDAExecutionProvider"), \
+                patch.dict(sys.modules, {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": fake_ort, "torch": fake_torch}):
+            result = runtime_profile.validate("cuda", 1)
+        self.assertEqual(result["validated_device"], 1)
+        self.assertEqual(result["devices"], ["RTX A", "RTX B"])
+
+        directml = SimpleNamespace(device_count=lambda: 1, device_name=lambda _index: "AMD\0", device=lambda index: ("dml", index))
+        directml_ort = SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider"])
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), \
+                patch.object(runtime_profile, "_probe_onnx", return_value="DmlExecutionProvider"), \
+                patch.dict(sys.modules, {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": directml_ort, "torch": fake_torch, "torch_directml": directml}):
+            result = runtime_profile.validate("directml")
+        self.assertEqual(result["devices"], ["AMD"])
+
+    def test_validate_rejects_unavailable_runtime_devices_and_providers(self) -> None:
+        torch = SimpleNamespace(version=SimpleNamespace(cuda=None), cuda=SimpleNamespace(is_available=lambda: False, device_count=lambda: 0))
+        missing = SimpleNamespace(get_available_providers=lambda: [])
+        modules = {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": missing, "torch": torch}
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "CUDA PyTorch"):
+                runtime_profile.validate("cuda")
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "DmlExecutionProvider"):
+                runtime_profile.validate("directml")
+        with patch.object(runtime_profile, "installed_profile", return_value="cpu"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "CPUExecutionProvider"):
+                runtime_profile.validate("cpu")
+
+    def test_main_validate_writes_marker_and_reports_profile_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory)
+            stdout = io.StringIO()
+            with patch.object(sys, "argv", ["runtime_profile.py", "validate", "cpu", "--venv", str(venv), "--write-marker"]), \
+                    patch.object(runtime_profile, "validate", return_value={"schema": 1, "profile": "cpu"}), redirect_stdout(stdout):
+                self.assertEqual(runtime_profile.main(), 0)
+            self.assertEqual(runtime_profile.read_marker(venv), {"schema": 1, "profile": "cpu"})
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", ["runtime_profile.py", "validate", "cpu"]), \
+                patch.object(runtime_profile, "validate", side_effect=runtime_profile.ProfileError("bad runtime")), redirect_stderr(stderr):
+            self.assertEqual(runtime_profile.main(), 1)
+        self.assertIn("bad runtime", stderr.getvalue())
+
+    def test_runtime_profile_reports_every_device_probe_failure(self) -> None:
+        class BadProbe:
+            def __add__(self, _value: object) -> "BadProbe":
+                return self
+
+            def cpu(self) -> "BadProbe":
+                return self
+
+            def item(self) -> float:
+                return 0.0
+
+        cuda = SimpleNamespace(is_available=lambda: False, device_count=lambda: 1, get_device_name=lambda _index: "GPU")
+        torch = SimpleNamespace(version=SimpleNamespace(cuda="13"), cuda=cuda, ones=lambda *_args, **_kwargs: BadProbe())
+        cuda_ort = SimpleNamespace(get_available_providers=lambda: ["CUDAExecutionProvider"])
+        modules = {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": cuda_ort, "torch": torch}
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "no usable"):
+                runtime_profile.validate("cuda")
+        cuda.is_available = lambda: True
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "device 1"):
+                runtime_profile.validate("cuda", 1)
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), patch.object(runtime_profile, "_probe_onnx", return_value="CUDAExecutionProvider"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "tensor probe"):
+                runtime_profile.validate("cuda")
+
+        directml_ort = SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider"])
+        directml_modules = {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": directml_ort, "torch": torch, "torch_directml": None}
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), patch.dict(sys.modules, directml_modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "cannot be imported"):
+                runtime_profile.validate("directml")
+        directml = SimpleNamespace(device_count=lambda: 0, device_name=lambda _index: "", device=lambda _index: "dml")
+        directml_modules["torch_directml"] = directml
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), patch.dict(sys.modules, directml_modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "did not find"):
+                runtime_profile.validate("directml")
+        directml.device_count = lambda: 1
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), patch.dict(sys.modules, directml_modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "device 1"):
+                runtime_profile.validate("directml", 1)
+        cpu_ort = SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"])
+        with patch.object(runtime_profile, "installed_profile", return_value="cpu"), patch.object(runtime_profile, "_probe_onnx", return_value="CPUExecutionProvider"), patch.dict(sys.modules, {"numpy": SimpleNamespace(), "onnx": SimpleNamespace(), "onnxruntime": cpu_ort, "torch": torch}):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "CPU tensor"):
+                runtime_profile.validate("cpu")
+
+    def test_probe_bad_output_and_module_main_entrypoint(self) -> None:
+        ort, onnx, np = self._probe_dependencies(["CPUExecutionProvider"], output=[[[0.0]]])
+        with self.assertRaisesRegex(runtime_profile.ProfileError, "probe failed"):
+            runtime_profile._probe_onnx(ort, onnx, np, "cpu", 0)
+        import runpy
+        with patch.object(sys, "argv", ["runtime_profile.py", "show"]):
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_module("mozarie.runtime_profile", run_name="__main__")
+        self.assertEqual(raised.exception.code, 0)
+
+    def test_validate_import_mismatch_and_directml_tensor_failures(self) -> None:
+        with patch.object(runtime_profile, "installed_profile", return_value="cpu"), patch.dict(sys.modules, {"numpy": None}):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "cannot be imported"):
+                runtime_profile.validate("cpu")
+        with patch.object(runtime_profile, "installed_profile", return_value="cpu"):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "not cuda"):
+                runtime_profile.validate("cuda")
+        class BadProbe:
+            def __add__(self, _value: object) -> "BadProbe": return self
+            def cpu(self) -> "BadProbe": return self
+            def item(self) -> float: return 0.0
+        directml = SimpleNamespace(device_count=lambda: 1, device_name=lambda _index: "DML", device=lambda _index: "dml")
+        modules = {
+            "numpy": SimpleNamespace(), "onnx": SimpleNamespace(),
+            "onnxruntime": SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider"]),
+            "torch": SimpleNamespace(ones=lambda *_args, **_kwargs: BadProbe()), "torch_directml": directml,
+        }
+        with patch.object(runtime_profile, "installed_profile", return_value="directml"), patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "DirectML tensor"):
+                runtime_profile.validate("directml")
+
+    def test_direct_script_main_entrypoint_is_covered(self) -> None:
+        import runpy
+        source = Path(runtime_profile.__file__)
+        with patch.object(sys, "argv", [str(source), "show"]):
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_path(str(source), run_name="__main__")
+        self.assertEqual(raised.exception.code, 0)
+
+    def test_main_validate_without_marker_prints_result(self) -> None:
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["runtime_profile.py", "validate", "cpu"]), \
+                patch.object(runtime_profile, "validate", return_value={"profile": "cpu"}), redirect_stdout(stdout):
+            self.assertEqual(runtime_profile.main(), 0)
+        self.assertIn('"cpu"', stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

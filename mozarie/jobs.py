@@ -485,7 +485,7 @@ class JobsMixin:
         return sorted(failures, key=lambda failure: failure[0])
 
     def _finish_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        finished = False
+        # The current-job gate makes terminal cleanup unconditional below.
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -498,39 +498,29 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
-            finished = True
-        if finished:
-            self._release_gpu_job_memory()
+            # Capture the final label while the job state is still protected.
+            # Cleanup intentionally happens outside the state lock.
+        self._release_gpu_job_memory()
         LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        unexpected: Exception | None = None
         gpu_oom = self._gpu_oom_client_error(exc)
         if not isinstance(exc, ClientError):
-            message = str(exc).lower()
             if isinstance(exc, sqlite3.DatabaseError):
                 exc = ClientError("作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error")
             elif self.job.kind == "apply" and isinstance(exc, OSError):
                 exc = ClientError("保存先に書き込めませんでした。保存先と空き容量を確認してください。", "output_unavailable")
-            elif self.job.kind == "detect" and isinstance(exc, (ValueError, IndexError)):
-                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
-            elif any(marker in message for marker in (
-                "no kernel image is available", "does not include kernels for this gpu", "not compatible with the current pytorch installation",
-            )):
-                exc = ClientError(
-                    "選択したGPUは、インストール済みのPyTorchでは実行できません。設定で対応状況を確認してください。",
-                    "gpu_unsupported",
-                )
             elif gpu_oom is not None:
                 exc = gpu_oom
-            elif any(marker in message for marker in ("out of memory", "failed to allocate memory", "bfcarena")):
+            elif isinstance(exc, MemoryError):
                 exc = ClientError(
                     "処理用メモリを確保できませんでした。画像サイズを小さくして、もう一度実行してください。",
                     "memory_allocation_failed",
                 )
-            elif any(marker in message for marker in ("onnx", "protobuf", "invalid graph", "load model")):
-                exc = ClientError("検出モデルを読み込めません。モデルファイルを確認して、もう一度実行してください。", "model_load_failed")
-            elif self.job.kind == "detect":
-                exc = ClientError("検出を完了できませんでした。もう一度実行してください。", "internal_error")
+            else:
+                unexpected = exc
+                exc = ClientError("処理を完了できませんでした。もう一度お試しください。", "internal_error")
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -540,8 +530,8 @@ class JobsMixin:
             self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
-            self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""
-            self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}
+            self.job.error_code = exc.error_code
+            self.job.params = dict(exc.params)
             self.job.current = ""
             self.job.active_count = 0
         if gpu_oom is not None:
@@ -551,7 +541,7 @@ class JobsMixin:
             self._discard_gpu_models_after_oom()
         else:
             self._release_gpu_job_memory()
-        if isinstance(exc, ClientError):
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
+        if unexpected is not None:
+            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc, exc_info=unexpected)
         else:
-            LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind), exc_info=(type(exc), exc, exc.__traceback__))
+            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)

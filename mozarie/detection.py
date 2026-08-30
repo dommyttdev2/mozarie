@@ -709,11 +709,13 @@ class DetectionMixin:
                         os.replace(temporary, candidate.mask_path)
                     temporary_paths.clear()
                     with self.lock:
-                        if self.images.get(image_id) is not record:
-                            raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
-                        revision = self._commit_candidate_snapshot(
-                            image_id, [*self.candidates.get(image_id, []), *created], replace=True,
-                        )
+                        catalog_current = self.images.get(image_id) is record
+                        if catalog_current:
+                            revision = self._commit_candidate_snapshot(
+                                image_id, [*self.candidates.get(image_id, []), *created], replace=True,
+                            )
+                    if not catalog_current:
+                        raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)
