@@ -107,12 +107,12 @@ function verifyCoverage(map) {
     }
     const summary = map.fileCoverageFor(file).toSummary().data;
     const incomplete = Object.entries(summary)
-      .filter(([metric, value]) => metric !== "statements" && value.pct !== 100)
+      .filter(([, value]) => value.pct !== 100)
       .map(([metric, value]) => `${metric}=${value.pct}% (${value.covered}/${value.total})`);
     if (incomplete.length) belowTarget.push(`${path.relative(root, file).replaceAll("\\", "/")}: ${incomplete.join(", ")}`);
   }
   assert.deepEqual(missing, [], `unmeasured static JavaScript files:\n${missing.join("\n")}`);
-  assert.deepEqual(belowTarget, [], `static JavaScript must have 100% line, branch, and function coverage:\n${belowTarget.join("\n")}`);
+  assert.deepEqual(belowTarget, [], `static JavaScript must have 100% statement, line, branch, and function coverage:\n${belowTarget.join("\n")}`);
 }
 
 async function main() {

@@ -7,7 +7,9 @@
 *.safetensors binary
 *.pth binary
 /.github export-ignore
+/.coveragerc export-ignore
 /tests export-ignore
+/scripts export-ignore
 /package.json export-ignore
 /package-lock.json export-ignore
 /requirements-test.txt export-ignore
