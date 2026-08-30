@@ -277,7 +277,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             forced_mask = directory / "forced.png"; Image.new("L", (3, 2), 0).save(forced_mask)
             state.candidates[record.image_id] = [Candidate("forced", "penis", .9, forced_mask, role=CandidateRole.EXCLUDE, forced=True)]
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
-                state._issue_browser_save_token_unchecked = lambda *_args: "token"
+                state._issue_browser_save_token_unchecked = lambda *_args, **_kwargs: "token"
                 rendered = state.render_browser_save(record.image_id, 1, 2, {})
             self.assertEqual(rendered.save_token, "token")
             zero_apply = directory / "zero.png"; Image.new("L", (3, 2), 0).save(zero_apply)
@@ -409,7 +409,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state.images[record.image_id] = record
             exclude = directory / "exclude.png"; Image.new("L", (3, 2), 0).save(exclude)
             state.candidates[record.image_id] = [Candidate("exclude", "penis", .9, exclude, role=CandidateRole.EXCLUDE, forced=False)]
-            state.materialize_candidate_mask = lambda *_args: None; state._issue_browser_save_token_unchecked = lambda *_args: "token"
+            state.materialize_candidate_mask = lambda *_args: None; state._issue_browser_save_token_unchecked = lambda *_args, **_kwargs: "token"
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
                 self.assertEqual(state.render_browser_save(record.image_id, 1, 2, {}).save_token, "token")
             state._run_fixed_workers = lambda records, _workers, action, *_args: [action(index, item) for index, item in enumerate(records)] and []

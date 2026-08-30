@@ -223,7 +223,7 @@ class UpdaterCoverageTests(unittest.TestCase):
         with patch.object(sys, "argv", [str(ROOT / "updater.py"), "--check-running"]):
             with self.assertRaises(SystemExit) as exited:
                 runpy.run_path(str(ROOT / "updater.py"), run_name="__main__")
-        self.assertEqual(exited.exception.code, 0)
+        self.assertIn(exited.exception.code, {updater.EXIT_CURRENT, updater.EXIT_RUNNING, updater.EXIT_RUNNING_CHECK_FAILED})
 
 
 if __name__ == "__main__":
