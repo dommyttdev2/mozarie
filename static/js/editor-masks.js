@@ -677,9 +677,7 @@ function rebuildManualMaskFromHistory() {
   state.removedCandidateIds = new Set(state.historyRemovedCandidateIds || []);
   for (const candidate of state.candidates) if (!(state.historyCandidateIds || new Set()).has(candidate.id)) state.removedCandidateIds.add(candidate.id);
   for (const stroke of state.history.slice(0, state.historyIndex)) replayManualStroke(stroke);
-  state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
   markMaskDirty(); markDraftDirty("add", "exclusion", "exclusionErase");
-  flushMaskComposition();
 }
 
 function completeManualStroke() {
@@ -702,11 +700,17 @@ function completeManualStroke() {
 
 function restoreSnapshot(index) {
   if (isBusy() || state.importing || index < 0 || index > state.history.length) return;
+  const restoreToken = ++state.historyRestoreToken;
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
   scheduleManualWorkspaceSave();
   setReviewed(currentRecord(), false);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+  updateHistoryButtons(); renderCandidates(); render();
+  requestAnimationFrame(() => {
+    if (restoreToken !== state.historyRestoreToken) return;
+    state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
+    updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview();
+  });
 }
 
 function buildCombinedMask() {
