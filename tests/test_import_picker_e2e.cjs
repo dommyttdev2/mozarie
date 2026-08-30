@@ -15,6 +15,28 @@ const contentTypes = {
   ".json": "application/json; charset=utf-8",
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
+const browserCoverage = process.env.MOZARIE_JS_COVERAGE === "1" ? [] : null;
+
+async function newCoveredPage(browser, options) {
+  const page = await browser.newPage(options);
+  if (browserCoverage) {
+    await page.coverage.startJSCoverage({ resetOnNavigation: false });
+    browserCoverage.push({ page, entries: null });
+  }
+  return page;
+}
+
+async function stopCoveredPage(page, close = false) {
+  const covered = browserCoverage?.find((item) => item.page === page);
+  if (covered && !covered.entries) covered.entries = await page.coverage.stopJSCoverage();
+  if (close) await page.close();
+}
+
+async function writeBrowserCoverage() {
+  if (!browserCoverage || !process.env.MOZARIE_BROWSER_COVERAGE_FILE) return;
+  await Promise.all(browserCoverage.map(({ page }) => stopCoveredPage(page)));
+  await fs.writeFile(process.env.MOZARIE_BROWSER_COVERAGE_FILE, JSON.stringify(browserCoverage.flatMap(({ entries }) => entries || [])));
+}
 
 // Kept outside the browser fixture so the negative case is a real unit test:
 // a no-op/failed catalog-clear handler cannot satisfy the same predicate that
@@ -238,7 +260,12 @@ function startFixtureServer() {
     if (requestPath === "/api/job/cancel" && request.method === "POST") {
       cancelRequests += 1;
       if (cancelShouldFail) { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: "cancel failed" })); return; }
-      currentJob = { ...currentJob, state: "cancelled", current: "" };
+      // The detection worker keeps its in-flight image until it has observed
+      // the request. Saving remains terminal in this fixture so its dedicated
+      // save-control test can close the completed dialog normally.
+      currentJob = currentJob.kind === "detect"
+        ? { ...currentJob, state: "running", cancelRequested: true }
+        : { ...currentJob, state: "cancelled", current: "" };
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(currentJob));
       return;
     }
@@ -317,7 +344,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -788,7 +815,7 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
 // not by page-side events that production code could synthesize.  Every
 // manifest assertion id must be present at the
 // end of the sweep.
-async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
+async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
@@ -1075,6 +1102,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await click("boundaryCancelButton");
   await click("detectCurrentButton");
   await click("processingCancelButton");
+  await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+  finishCancel();
+  await page.evaluate(() => pollJob());
   await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
   await closeDialogs();
   await setupFixture();
@@ -1086,6 +1116,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts) {
   await click("processingPauseButton");
   await page.waitForFunction(() => state.processing?.state === "running");
   await click("processingCancelButton");
+  await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+  finishCancel();
+  await page.evaluate(() => pollJob());
   await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
   await closeDialogs(); await setupFixture();
 
@@ -1217,7 +1250,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -1227,9 +1260,9 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
-    const settingsFailurePage = await browser.newPage();
+    const settingsFailurePage = await newCoveredPage(browser);
     await settingsFailurePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
@@ -1244,8 +1277,8 @@ async function main() {
     assert.equal(await settingsFailurePage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "initial settings failure does not open an error dialog");
     await settingsFailurePage.locator("#settingsButton").click();
     assert.equal(await settingsFailurePage.locator("#settingsDialog").evaluate((dialog) => dialog.open), false, "the editor is not bound when initial settings are unavailable");
-    await settingsFailurePage.close();
-    const connectionRecoveryPage = await browser.newPage();
+    await stopCoveredPage(settingsFailurePage, true);
+    const connectionRecoveryPage = await newCoveredPage(browser);
     await connectionRecoveryPage.addInitScript(() => {
       window.__connectionOffline = false;
       const fetchOriginal = window.fetch;
@@ -1274,8 +1307,8 @@ async function main() {
     await connectionRecoveryPage.waitForFunction(() => document.querySelector("#errorDialog").open);
     assert.equal(await connectionRecoveryPage.locator("#connectionStatus").isHidden(), true, "an HTTP error keeps the recovered connection status cleared");
     await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.close());
-    await connectionRecoveryPage.close();
-    const initialPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    await stopCoveredPage(connectionRecoveryPage, true);
+    const initialPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 720 } });
     await initialPage.addInitScript(() => {
       const fetchOriginal = window.fetch;
       window.fetch = (...args) => {
@@ -1293,8 +1326,8 @@ async function main() {
     assert.equal(await initialPage.locator("#connectionStatus").isVisible(), true, "setStatus shows the header notice");
     await initialPage.evaluate(() => clearStatus());
     assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
-    await initialPage.close();
-    const page = await browser.newPage();
+    await stopCoveredPage(initialPage, true);
+    const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
       window.showDirectoryPicker = async () => {
@@ -1323,7 +1356,7 @@ async function main() {
     // prove that a user can operate a control, and (worse) used to count hidden
     // or disabled controls as tested.  The behavioural assertions below use
     // Playwright pointer/keyboard actions with their required application state.
-    const inventoryPage = await browser.newPage();
+    const inventoryPage = await newCoveredPage(browser);
     const inventoryErrors = [];
     inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
     for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
@@ -1337,7 +1370,7 @@ async function main() {
       assert.equal(inventory.every((control) => control.present), true, `all manifest controls remain in the ${language}/${width} DOM: ${JSON.stringify(inventory.filter((control) => !control.present))}`);
       await inventoryPage.waitForTimeout(25);
     }
-    await inventoryPage.close();
+    await stopCoveredPage(inventoryPage, true);
     assert.deepEqual(inventoryErrors, [], `inventory loading does not raise page errors: ${inventoryErrors.join("; ")}`);
     assert.equal(uiDynamicControlManifest.every((control) => control.selector && control.action && control.expected), true, "dynamic controls retain explicit action contracts");
     const favicon = await page.request.get(`${fixtureUrl}/favicon.ico`);
@@ -2013,10 +2046,15 @@ async function main() {
     await page.locator("#errorDialogClose").click();
     failCancel(false);
     await page.locator("#processingCancelButton").click();
-    await page.waitForFunction(() => document.querySelector("#processingCancelButton").disabled);
+    await page.waitForFunction(() => state.job?.kind === "detect" && state.job?.state === "running" && state.job?.cancelRequested === true);
+    assert.equal(await page.locator("#processingCancelButton").isDisabled(), true, "the cancel control stays disabled while the detector finishes its in-flight image");
     assert.match(await page.locator("#connectionStatus").textContent(), /現在の画像は完了する場合があります/, "cancellation is shown immediately with the in-flight image notice");
     await page.locator("#processingCancelButton").evaluate((button) => button.click());
     assert.equal(cancelRequests(), 2, "a processing cancel cannot be sent twice");
+    finishCancel();
+    await page.evaluate(() => pollJob());
+    await page.waitForFunction(() => !document.querySelector("#processingDialog").open);
+    assert.equal(await page.locator("#processingCancelButton").isDisabled(), false, "the cancel control is re-enabled only after the terminal cancellation is observed");
     holdDetection(false);
     resetJob();
     await page.evaluate(async () => { await pollJob(); closeProcessing(); });
@@ -2531,7 +2569,7 @@ async function main() {
       await page.mouse.up();
     }
 
-    const ledgerPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const ledgerPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
     setUpdateAvailable(true);
     await ledgerPage.addInitScript(() => {
       window.__ledgerApi = [];
@@ -2549,15 +2587,16 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel);
     } finally {
       holdDetection(false);
-      await ledgerPage.close();
+      await stopCoveredPage(ledgerPage, true);
     }
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
+    await writeBrowserCoverage();
     await browser?.close();
     if (server) await closeServer(server);
   }

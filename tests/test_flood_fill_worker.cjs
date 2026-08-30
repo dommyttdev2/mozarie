@@ -6,7 +6,8 @@ let response;
 let transfer;
 const self = { postMessage(value, transferList) { response = value; transfer = transferList; } };
 const context = vm.createContext({ self, Uint8ClampedArray, Uint8Array, Int32Array, Math });
-vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "static", "js", "flood-fill-worker.js"), "utf8"), context);
+const workerPath = path.join(__dirname, "..", "static", "js", "flood-fill-worker.js");
+vm.runInContext(fs.readFileSync(workerPath, "utf8"), context, { filename: workerPath });
 const pixels = new Uint8ClampedArray([
   10, 10, 10, 255, 11, 11, 11, 255, 200, 200, 200, 255,
   11, 11, 11, 255, 10, 10, 10, 255, 200, 200, 200, 255,

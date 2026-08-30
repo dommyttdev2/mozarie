@@ -19,6 +19,7 @@ __pycache__/
 # Frontend dependencies
 node_modules/
 .playwright-browsers/
+coverage/
 
 # Logs and Windows metadata
 *.log
