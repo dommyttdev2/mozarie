@@ -591,10 +591,10 @@ class UpdaterBranchTests(unittest.TestCase):
             root = Path(directory)
             app = root / "app"; app.mkdir(); (app / "VERSION").write_text("1.0.0", encoding="utf-8")
             release = {"tag_name": "v1.1.0"}
-            with patch("updater.fetch_latest_release", return_value=release), patch("updater.is_mozarie_running", return_value=False), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.0.1"]):
+            with patch("updater.fetch_latest_release", return_value=release), patch("updater.mozarie_running_status", return_value="none"), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.0.1"]):
                 with self.assertRaises(updater.UpdateError):
                     updater._perform_update(app, input_fn=lambda _prompt: "y")
-            with patch("updater.fetch_latest_release", return_value=release), patch("updater.is_mozarie_running", return_value=False), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=True), patch("updater.apply_update", side_effect=updater.UpdateError("copy failed")):
+            with patch("updater.fetch_latest_release", return_value=release), patch("updater.mozarie_running_status", return_value="none"), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=True), patch("updater.apply_update", side_effect=updater.UpdateError("copy failed")):
                 with self.assertRaises(updater.UpdateError):
                     updater._perform_update(app, input_fn=lambda _prompt: "yes")
 
@@ -626,7 +626,7 @@ class UpdaterBranchTests(unittest.TestCase):
         lock.close()
 
     def test_update_request_only_launches_setup_when_the_cli_flag_matches_exactly(self) -> None:
-        with patch("updater.sys.argv", ["updater.py", "--check-running"]), patch("updater.is_mozarie_running", return_value=False):
+        with patch("updater.sys.argv", ["updater.py", "--check-running"]), patch("updater.mozarie_running_status", return_value="none"):
             self.assertEqual(updater.main(), 0)
         with patch("updater.sys.argv", ["updater.py", "--unexpected"]), patch("updater.perform_update", return_value=updater.EXIT_CURRENT) as perform:
             self.assertEqual(updater.main(), updater.EXIT_CURRENT)

@@ -393,7 +393,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 try:
                     self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
                 except ModelDownloadError as exc:
-                    raise ClientError(str(exc), "model_download_invalid") from exc
+                    raise ClientError("モデルのダウンロードを開始できません。設定を確認してもう一度お試しください。", "model_download_invalid") from exc
             elif path == "/api/model-download/cancel":
                 self._json(STATE.model_downloads.cancel())
             elif path == "/api/update/start":

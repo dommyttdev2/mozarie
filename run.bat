@@ -7,8 +7,10 @@ if defined MOZARIE_PYTHON goto :python_selected
 set "PYTHON=%APP_DIR%.venv\Scripts\python.exe"
 
 :python_selected
+if not exist "%PYTHON%" if defined MOZARIE_PYTHON goto :invalid_mozarie_python
 if not exist "%PYTHON%" goto :setup_required
 call :validate_python
+if errorlevel 1 if defined MOZARIE_PYTHON goto :invalid_mozarie_python
 if errorlevel 1 goto :setup_required
 if defined MOZARIE_PYTHON goto :start
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
@@ -33,5 +35,10 @@ exit /b %ERRORLEVEL%
 
 :setup_required
 echo [Mozarie] Initial setup is required. Run setup.bat once, then start with run.bat. / 初回セットアップが必要です。setup.batを一度実行してから、run.batを起動してください。
+pause
+exit /b 1
+
+:invalid_mozarie_python
+echo [Mozarie] MOZARIE_PYTHON is invalid. Set it to a 64-bit Python 3.11 to 3.14 executable. / MOZARIE_PYTHON が正しくありません。64-bit Python 3.11〜3.14 の実行ファイルを設定してください。
 pause
 exit /b 1

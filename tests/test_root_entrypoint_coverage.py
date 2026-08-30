@@ -108,7 +108,8 @@ class UpdaterCoverageTests(unittest.TestCase):
             lock = cache / ".active.lock"
             lock.touch()
             with patch.object(Path, "open", side_effect=OSError("denied")):
-                self.assertTrue(updater.is_mozarie_running(root))
+                self.assertFalse(updater.is_mozarie_running(root))
+                self.assertEqual(updater.mozarie_running_status(root), "check_failed")
 
     def test_extract_rejects_a_path_that_escapes_during_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -201,11 +202,11 @@ class UpdaterCoverageTests(unittest.TestCase):
             app.mkdir()
             (app / "VERSION").write_text("1.0.0", encoding="utf-8")
             release = {"tag_name": "v1.1.0"}
-            with patch("updater.fetch_latest_release", return_value=release), patch("updater.is_mozarie_running", return_value=False), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=False), patch("updater.apply_update", side_effect=updater.UpdateError("copy failed")):
+            with patch("updater.fetch_latest_release", return_value=release), patch("updater.mozarie_running_status", return_value="none"), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=False), patch("updater.apply_update", side_effect=updater.UpdateError("copy failed")):
                 with self.assertRaises(updater.UpdateError):
                     updater._perform_update(app, input_fn=lambda _prompt: "yes")
 
-            with patch("updater.fetch_latest_release", return_value=release), patch("updater.is_mozarie_running", return_value=False), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=True), patch("updater.apply_update"), patch("updater.run_gpu_smoke"):
+            with patch("updater.fetch_latest_release", return_value=release), patch("updater.mozarie_running_status", return_value="none"), patch("updater.release_archive", return_value=("https://example.test/a.zip", "0" * 64, 1)), patch("updater.download_archive"), patch("updater.extract_archive", return_value=app), patch("updater.read_local_version", side_effect=["1.0.0", "1.1.0"]), patch("updater.install_requirements", return_value=True), patch("updater.apply_update"), patch("updater.run_gpu_smoke"):
                 self.assertEqual(updater._perform_update(app, input_fn=lambda _prompt: "yes"), updater.EXIT_UPDATED)
             self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
 

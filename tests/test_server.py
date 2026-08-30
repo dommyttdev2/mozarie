@@ -1270,7 +1270,8 @@ class MozarieTests(unittest.TestCase):
         )
 
     def test_main_reports_bind_error_without_traceback(self):
-        with patch("server.ThreadingHTTPServer", side_effect=OSError("in use")), \
+        bind_error = OSError("in use"); bind_error.winerror = 10048
+        with patch("server.ThreadingHTTPServer", side_effect=bind_error), \
                 patch.object(core_module.LOGGER, "error") as error, \
                 patch.object(core_module.LOGGER, "exception") as exception, \
                 patch.object(state_module.STATE, "shutdown") as shutdown, \
@@ -1280,6 +1281,20 @@ class MozarieTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 1)
         error.assert_called_once_with("Mozarieを起動できません。ポート%sは使用中です。", 9876)
         exception.assert_not_called()
+        shutdown.assert_called_once()
+
+    def test_main_reports_non_port_bind_error_without_calling_it_a_port_conflict(self):
+        bind_error = OSError("access denied"); bind_error.winerror = 5
+        with patch("server.ThreadingHTTPServer", side_effect=bind_error), \
+                patch.object(core_module.LOGGER, "error") as error, \
+                patch.object(core_module.LOGGER, "exception") as exception, \
+                patch.object(state_module.STATE, "shutdown") as shutdown, \
+                patch.object(sys, "argv", ["server.py", "--port", "9876"]):
+            with self.assertRaises(SystemExit) as raised:
+                server_entry.main()
+        self.assertEqual(raised.exception.code, 1)
+        error.assert_not_called()
+        exception.assert_called_once_with("Mozarieを起動できませんでした。")
         shutdown.assert_called_once()
 
     def test_server_suppresses_normal_client_disconnect_tracebacks(self):
@@ -1337,8 +1352,9 @@ class MozarieTests(unittest.TestCase):
         self.assertIn("バックグラウンド処理に失敗", "\n".join(logs.output))
 
     def test_main_logs_bind_failure_and_exits(self):
+        bind_error = OSError("port in use"); bind_error.winerror = 10048
         with patch("server.logging.basicConfig"), \
-              patch("server.ThreadingHTTPServer", side_effect=OSError("port in use")), \
+              patch("server.ThreadingHTTPServer", side_effect=bind_error), \
               patch.object(state_module.STATE, "shutdown") as shutdown, \
               patch.object(state_module.STATE, "cache_dir", self.cache_dir), \
               patch.object(sys, "argv", ["server.py", "--port", "9876"]):

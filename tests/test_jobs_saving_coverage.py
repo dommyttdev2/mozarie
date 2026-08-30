@@ -162,7 +162,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.job = Job(kind="detect", state="running", total=1)
         failures = state._run_fixed_workers([SimpleNamespace(image_id="one")], 1, lambda *_args: (_ for _ in ()).throw(ValueError("bad")), None, 1, 1)
         self.assertEqual(len(failures), 1)
-        for exc, code in ((__import__("sqlite3").DatabaseError("x"), "workspace_database_error"), (ValueError("x"), "model_load_failed"), (RuntimeError("invalid graph"), "model_load_failed")):
+        for exc, code in ((__import__("sqlite3").DatabaseError("x"), "workspace_database_error"), (ValueError("x"), "internal_error"), (RuntimeError("invalid graph"), "internal_error")):
             state.job = Job(kind="detect", state="running")
             with patch.object(state, "_release_gpu_job_memory"):
                 state._fail_job(exc, 1, 1)
