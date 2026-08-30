@@ -3017,10 +3017,8 @@ async function main() {
         }
         await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
         const editorPerf = await page.evaluate(() => {
-          const beforeUndo = performance.now(); for (let index = 0; index < 10; index += 1) restoreSnapshot(Math.max(0, state.historyIndex - 1));
-          const undo = performance.now() - beforeUndo;
-          const beforeRedo = performance.now(); for (let index = 0; index < 10; index += 1) restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1));
-          const redo = performance.now() - beforeRedo;
+          let undo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.max(0, state.historyIndex - 1)); undo = Math.max(undo, performance.now() - start); }
+          let redo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1)); redo = Math.max(redo, performance.now() - start); }
           const value = window.__editorPerf;
           const result = { pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
           const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
