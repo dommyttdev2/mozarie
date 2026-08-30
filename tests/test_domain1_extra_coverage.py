@@ -318,6 +318,8 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         with patch.object(self.state, "_release_gpu_cache") as release:
             self.state.reset_settings()
         release.assert_called_once()
+        self.state.settings["models"]["provider"] = "cpu"
+        self.state.reset_settings()
         with tempfile.TemporaryDirectory() as directory, patch.object(state_module, "CACHE_BASE_DIR", Path(directory)):
             stale = Path(directory) / "process-stale"
             stale.mkdir()
