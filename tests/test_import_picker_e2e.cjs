@@ -1065,6 +1065,22 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   };
   await setupFixture();
 
+  // A configured server path is not a browser-granted directory. Exercise the
+  // visible single-save flow with no handle and require both the disabled
+  // button and the unselected label before any output picker is used.
+  await page.evaluate(() => { state.outputDirectoryHandle = null; renderOutputDirectory(); });
+  await page.locator("#brushTool").click();
+  const unavailableOutputCanvas = await page.locator("#editorCanvas").boundingBox();
+  assert.ok(unavailableOutputCanvas, "the editor canvas is available before testing an unselected save destination");
+  await page.mouse.move(unavailableOutputCanvas.x + unavailableOutputCanvas.width / 2, unavailableOutputCanvas.y + unavailableOutputCanvas.height / 2);
+  await page.mouse.down(); await page.mouse.move(unavailableOutputCanvas.x + unavailableOutputCanvas.width / 2 + 10, unavailableOutputCanvas.y + unavailableOutputCanvas.height / 2 + 6); await page.mouse.up();
+  await page.locator("#saveButton").click();
+  await page.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
+  assert.equal(await page.locator("#singleSaveStartButton").isDisabled(), true, "single save remains disabled until a browser directory handle is selected");
+  assert.equal(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), await page.evaluate(() => t("apply.outputDirectoryUnset")), "single save never presents the configured server path as its browser destination");
+  await page.locator("#singleSaveCloseButton").click();
+  await setupFixture();
+
   // This snapshot intentionally contains only product results that a control
   // is allowed to prove: a particular dialog, value, state transition, canvas
   // hash, or actual request.  Do not replace these predicates with a generic

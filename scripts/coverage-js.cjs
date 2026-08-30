@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const childProcess = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const v8ToIstanbul = require("v8-to-istanbul");
 const { createCoverageMap } = require("istanbul-lib-coverage");
@@ -9,7 +10,8 @@ const reports = require("istanbul-reports");
 
 const root = path.resolve(__dirname, "..");
 const staticRoot = path.join(root, "static", "js");
-const coverageRoot = path.join(root, "coverage", "js");
+const requestedCoverageRoot = process.env.MOZARIE_JS_COVERAGE_DIR;
+const coverageRoot = requestedCoverageRoot ? path.resolve(requestedCoverageRoot) : fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-js-coverage-"));
 const nodeCoverageRoot = path.join(coverageRoot, "node");
 const nodeCoverageTemp = path.join(coverageRoot, "v8");
 const browserCoverageFile = path.join(coverageRoot, "browser-v8.json");
@@ -28,6 +30,7 @@ const testFiles = [
   "tests/test_flood_fill_worker.cjs",
   "tests/test_masked_mosaic_worker.cjs",
   "tests/test_mosaic_preview_runtime.cjs",
+  "tests/test_quiet_runner.cjs",
   "tests/test_resources.cjs",
   "tests/test_settings_runtime.cjs",
   "tests/test_workspace_runtime.cjs",
@@ -133,4 +136,6 @@ async function main() {
 main().catch((error) => {
   console.error(error.stack || error);
   process.exitCode = 1;
+}).finally(() => {
+  if (!requestedCoverageRoot) fs.rmSync(coverageRoot, { recursive: true, force: true });
 });

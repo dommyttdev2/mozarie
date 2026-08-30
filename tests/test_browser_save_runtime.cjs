@@ -144,9 +144,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle } = context.__browserSaveRuntime;
+  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   const outputFiles = new Map();
@@ -171,8 +171,9 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "errorDialog.output_permission_denied.title": "Output permission denied",
     "errorDialog.output_permission_denied.cause": "Write access was denied.",
     "errorDialog.output_permission_denied.action": "Allow output access and try again.",
+    "apply.outputDirectoryUnset": "Save location: not selected",
   };
-  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, state, window: browserWindow };
+  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, window: browserWindow };
 }
 
 async function runOutputDirectoryPermissionCases() {
@@ -285,8 +286,15 @@ async function runExclusiveWritableCases() {
     async createWritable(options) { calls.push(options); if (calls.length === 1) { const error = new TypeError("unsupported"); throw error; } return { async write() {}, async close() {}, async abort() {} }; },
     async getFile() { return { name: "source.png", size: 3, lastModified: 2 }; },
   }};
-  await runtime.writeSourceHandle(access, response);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ keepExistingData: false, mode: "exclusive" }, { keepExistingData: false }], "only an unsupported option falls back");
+  await assert.rejects(runtime.writeSourceHandle(access, response), (error) => error.code === "source_write_unsupported", "an unsupported exclusive write stops with a stable error");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ keepExistingData: false, mode: "exclusive" }], "an unsupported exclusive write never falls back to a non-exclusive stream");
+
+  const restoreCalls = [];
+  const restoreAccess = { fileHandle: {
+    async createWritable(options) { restoreCalls.push(options); throw new TypeError("unsupported"); },
+  }};
+  await assert.rejects(runtime.restoreSourceHandle(restoreAccess, new Uint8Array([1]), false), (error) => error.code === "source_write_unsupported", "restore also stops when exclusive source writes are unsupported");
+  assert.deepEqual(JSON.parse(JSON.stringify(restoreCalls)), [{ keepExistingData: false, mode: "exclusive" }], "restore never retries without exclusive mode");
 
   const locked = { fileHandle: {
     async createWritable() { const error = new DOMException("locked", "InvalidStateError"); throw error; },
@@ -301,6 +309,50 @@ async function runExclusiveWritableCases() {
     }};
     await assert.rejects(runtime.writeSourceHandle(denied, response), (error) => error.name === name && error.code !== "source_busy", `${name} is not mislabeled as a writer conflict`);
   }
+}
+
+async function runPartialOutputCleanupCases() {
+  const runtime = createRuntime({ commit: () => jsonResponse({}) });
+  const removed = [];
+  const output = {
+    async getFileHandle(name, options = {}) {
+      if (!options.create) throw new DOMException("missing", "NotFoundError");
+      return { async createWritable() { throw new DOMException("locked", "InvalidStateError"); } };
+    },
+    async removeEntry(name) { removed.push(name); },
+  };
+  await assert.rejects(runtime.writeSingleOutput(output, "nested/source.png", "_censored", binaryResponse([1])), /locked/, "a newly created output is not left behind when opening its stream fails");
+  assert.deepEqual(removed, ["source_censored.png"], "a failed stream open removes exactly the new output file");
+
+  let aborted = false;
+  const pipedOutput = {
+    async getFileHandle(name, options = {}) {
+      if (!options.create) throw new DOMException("missing", "NotFoundError");
+      return { async createWritable() { return { async abort() { aborted = true; } }; } };
+    },
+    async removeEntry(name) { removed.push(name); },
+  };
+  const brokenResponse = { body: { async pipeTo() { throw new Error("write failed"); } } };
+  await assert.rejects(runtime.writeSingleOutput(pipedOutput, "nested/next.png", "", brokenResponse), /write failed/, "a pipe failure is returned to the caller");
+  assert.equal(aborted, true, "a failed pipe aborts its open stream");
+  assert.deepEqual(removed, ["source_censored.png", "next.png"], "a failed pipe removes the newly created output file");
+
+  const cleanupFailureOutput = {
+    async getFileHandle(name, options = {}) {
+      if (!options.create) throw new DOMException("missing", "NotFoundError");
+      return { async createWritable() { throw new Error("write failed"); } };
+    },
+    async removeEntry() { throw new DOMException("locked", "InvalidStateError"); },
+  };
+  await assert.rejects(runtime.writeSingleOutput(cleanupFailureOutput, "nested/locked.png", "", binaryResponse([1])), (error) => error.code === "output_cleanup_failed" && error.cause?.message === "write failed", "a cleanup failure is visible with a stable error while retaining the original write failure");
+}
+
+function runOutputDirectoryDisplayCase() {
+  const runtime = createRuntime({ commit: () => jsonResponse({}) });
+  runtime.state.outputDirectoryHandle = null;
+  runtime.renderOutputDirectory();
+  assert.equal(runtime.element("#applyOutputDirectoryStatus").value, "Save location: not selected", "a configured path is not presented as an available browser save destination");
+  assert.equal(runtime.element("#singleSaveOutputDirectoryStatus").textContent, "Save location: not selected", "single save describes an absent directory handle as unselected");
 }
 
 async function runSuccessCase() {
@@ -868,5 +920,7 @@ async function runServerCopyRemovalCases() {
   await runNoEffectiveMaskBatchCases();
   await runServerCopyRemovalCases();
   await runExclusiveWritableCases();
+  await runPartialOutputCleanupCases();
+  runOutputDirectoryDisplayCase();
   console.log("test_browser_save_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

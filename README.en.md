@@ -114,10 +114,11 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 ## Development
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 npm ci
-npm test
+node scripts/test-quiet.cjs all
 ```
+
+The command shows details only on failure. To retain coverage for CI, use `node scripts/test-quiet.cjs all --artifacts <directory>`.
 
 ## License
 
