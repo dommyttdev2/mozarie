@@ -445,6 +445,7 @@ function closeServer(server) {
 function startCandidateScenarioServer() {
   const imageId = "candidate-scenario";
   const candidateId = "candidate-blink-apply";
+  const imagePath = path.join(staticRoot, "logo.png");
   const settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "cpu", gpu_device: 0 },
@@ -453,7 +454,7 @@ function startCandidateScenarioServer() {
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 1, targets: ["penis"] },
     shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
   };
-  const image = { id: imageId, relativePath: "candidate.png", sourceKind: "fixture", width: 2, height: 2, candidateCount: 1, enabledCandidateCount: 1, candidateRevision: 7 };
+  const image = { id: imageId, relativePath: "candidate.png", sourceKind: "fixture", width: 409, height: 401, candidateCount: 1, enabledCandidateCount: 1, candidateRevision: 7 };
   const candidate = { id: candidateId, role: "apply", enabled: true, forced: false, className: "Fixture candidate", confidence: 0.91, color: "#ff3d4d" };
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
@@ -466,7 +467,8 @@ function startCandidateScenarioServer() {
     if (requestPath === `/api/workspace/manual/${imageId}`) { json({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 7 } }); return; }
     if (requestPath === `/api/candidates/${imageId}`) { json({ candidates: [candidate], candidateRevision: 7 }); return; }
     if (requestPath === `/api/mask/${imageId}/${candidateId}` || requestPath === `/api/image/${imageId}` || requestPath === `/api/thumbnail/${imageId}`) {
-      response.writeHead(200, { "Content-Type": "image/png", "Content-Length": onePixelPng.length }); response.end(onePixelPng); return;
+      const body = await fs.readFile(imagePath);
+      response.writeHead(200, { "Content-Type": "image/png", "Content-Length": body.length }); response.end(body); return;
     }
     const relativePath = requestPath === "/" ? "index.html" : requestPath.slice(1);
     const filePath = path.resolve(staticRoot, relativePath);
@@ -547,6 +549,7 @@ async function runCandidateBlinkScenario(browser) {
     }, scenario.candidateId);
   } finally {
     await stopCoveredPage(page, true);
+    scenario.server.closeAllConnections();
     await closeServer(scenario.server);
   }
 }
