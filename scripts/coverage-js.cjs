@@ -18,6 +18,7 @@ const testFiles = [
   "tests/test_candidate_bundle.cjs",
   "tests/test_detection_refresh_runtime.cjs",
   "tests/test_editor_canvas_completion_runtime.cjs",
+  "tests/test_editor_canvas_geometry_runtime.cjs",
   "tests/test_editor_masks_behavior.cjs",
   "tests/test_editor_runtime.cjs",
   "tests/test_interaction_coverage.cjs",
