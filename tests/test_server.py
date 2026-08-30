@@ -3170,13 +3170,13 @@ class MozarieTests(unittest.TestCase):
         state._fail_job(RuntimeError("CUDA model input shape is invalid"))
         self.assertNotEqual(state.job.error_code, "gpu_unavailable")
 
-    def test_invalid_active_model_outputs_are_reported_without_decoder_details(self):
+    def test_raw_invalid_model_outputs_are_reported_as_internal_without_decoder_details(self):
         for model_name in ("target", "ntd11", "sensitive", "hand"):
             with self.subTest(model_name=model_name):
                 state = self.new_state()
                 state.job = core_module.Job(kind="detect", state="running", total=1)
                 state._fail_job(ValueError(f"{model_name} private decoder shape"))
-                self.assertEqual(state.job.error_code, "model_load_failed")
+                self.assertEqual(state.job.error_code, "internal_error")
                 self.assertNotIn("private decoder", state.job.error)
 
     def test_active_onnx_model_loads_hide_runtime_details_for_each_model(self):
