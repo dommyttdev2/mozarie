@@ -160,7 +160,7 @@ assert.equal(test.navigationShortcutAction({ binding: "Nope" }), null);
 let prevented = false; assert.equal(test.handleNavigationKeydown({ binding: "ArrowRight", preventDefault() { prevented = true; } }), true); assert.equal(prevented, true);
 test.updateBrushSize(999); assert.equal(element("#brushSize").value, 500);
 test.updateBlockSizeDisplay(); assert.match(element("#blockSizeValue").textContent, /4/);
-test.setTool("bucket"); assert.equal(state.tool, "bucket"); assert.equal(context.canvas.style.cursor, "none", "the custom brush ring owns the canvas cursor");
+test.setTool("bucket"); assert.equal(state.tool, "bucket"); assert.equal(context.canvas.style.cursor, "default", "ordinary tools retain the standard pointer");
 
 async function interactionUserEventWorkflowTest() {
   let contextMenuPrevented = false;

@@ -2931,6 +2931,14 @@ async function main() {
         };
       }, { width, height });
       await page.waitForFunction(() => !state.mosaicWorkerBusy && state.mosaicSourceId && !state.mosaicPreviewRequested, null, { timeout: 15000 });
+      const normalCursors = await page.evaluate(() => ["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary", "polygon", "boundary_brush", "bucket", "exclude_bucket"].map((tool) => {
+        setTool(tool); return getComputedStyle(document.querySelector("#editorCanvas")).cursor;
+      }));
+      assert.deepEqual(normalCursors, Array(9).fill("default"), `${width}x${height} ordinary editor tools never use crosshair, cell, or a hidden cursor`);
+      await page.mouse.move(geometry.x, geometry.y); await page.mouse.down({ button: "middle" });
+      assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "grabbing", `${width}x${height} middle-button panning alone uses grabbing`);
+      await page.mouse.up({ button: "middle" });
+      assert.equal(await page.locator("#editorCanvas").evaluate((node) => getComputedStyle(node).cursor), "default", `${width}x${height} ending a pan restores the standard pointer`);
       await page.mouse.move(geometry.x, geometry.y);
       await page.mouse.down();
       await page.mouse.move(geometry.endX, geometry.endY, { steps: pointerSteps });

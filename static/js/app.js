@@ -412,7 +412,7 @@ function bindEvents() {
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
     state.boundaryStart = null; state.boundaryStartClient = null; state.boundaryPoint = null; state.boundaryDragging = false;
-    canvas.style.cursor = "none";
+    canvas.style.cursor = "default";
     if (manualStrokeStarted) {
       if (cancelled) cancelManualStroke();
       else if (wasDrawing) completeManualStroke();
