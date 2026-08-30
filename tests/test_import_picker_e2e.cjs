@@ -2730,6 +2730,39 @@ async function main() {
       await stopCoveredPage(browserSavePage, true);
     }
 
+    // Navigation and overview selection are user operations, so exercise the
+    // visible controls and keyboard modifiers rather than page-side helpers.
+    resetScenario();
+    const navigationPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+    await navigationPage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+    });
+    try {
+      await navigationPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await navigationPage.locator('.gallery-item[data-id="sample"]').click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#nextImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two");
+      await navigationPage.locator("#previousImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#reviewAndNextButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.reviewed);
+      await navigationPage.locator("#previousImageButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample");
+      await navigationPage.locator("#hideAndNextButton").click();
+      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.hidden);
+      await navigationPage.locator("#overviewButton").click();
+      await navigationPage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+      await navigationPage.locator("#batchModeButton").click();
+      await navigationPage.locator('.overview-item[data-id="sample-two"]').click();
+      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control"] });
+      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control", "Shift"] });
+      assert.deepEqual(await navigationPage.evaluate(() => [...state.selectedImageIds].sort()), ["sample", "sample-two"], "overview modifier selection preserves both images");
+    } finally {
+      await stopCoveredPage(navigationPage, true);
+    }
+
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
   } finally {
