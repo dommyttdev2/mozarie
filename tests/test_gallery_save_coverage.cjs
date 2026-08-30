@@ -93,7 +93,7 @@ function makeGalleryRuntime() {
     async selectImage(id) { selected.push(`image:${id}`); }, async setReviewed(image, value) { image.reviewed = value; return context.reviewResult; }, async setHidden(image, value) { image.hidden = value; return context.hideResult; },
   };
   context.reviewResult = true; context.hideResult = true;
-  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows };`;
+  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows, scrollCatalogImage };`;
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
   return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
@@ -156,6 +156,12 @@ async function galleryInteractions() {
   assert.ok(state.galleryNodes.size < 40, "the fixed-row gallery mounts only a small scroll window");
   runtime.gallery.scrollTop = 152 * 120; runtime.renderGallery(true);
   assert.ok(state.galleryNodes.has("window-360"), "scrolling remounts the logical row at the new position");
+  runtime.gallery.scrollTop = 0; runtime.scrollCatalogImage("gallery", "window-0");
+  assert.equal(runtime.gallery.scrollTop, 0, "selecting the first visible card keeps the gallery at its first row");
+  runtime.scrollCatalogImage("gallery", "window-3");
+  const visibleTop = runtime.gallery.scrollTop;
+  runtime.scrollCatalogImage("gallery", "window-4");
+  assert.equal(runtime.gallery.scrollTop, visibleTop, "selecting another visible card does not recenter the gallery");
   state.images = catalogImages; state.galleryFilter = "all"; runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
 
   runtime.gallery.scrollTop = 999; runtime.overviewGrid.scrollTop = 555;

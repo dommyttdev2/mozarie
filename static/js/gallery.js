@@ -170,7 +170,11 @@ function scrollCatalogImage(scope, imageId, behavior = "auto") {
   const windowState = catalogWindows.get(scope); if (!windowState) return;
   const index = windowState.images.findIndex((image) => image.id === imageId); if (index < 0) return;
   const layout = catalogLayout(windowState); const row = Math.floor(index / layout.columns);
-  const target = Math.max(0, row * layout.rowHeight - Math.max(0, (windowState.container.clientHeight - layout.rowHeight) / 2));
+  const rowTop = windowState.options.padding + row * layout.rowHeight;
+  const rowBottom = rowTop + layout.rowHeight;
+  const viewport = Number(windowState.container.clientHeight) || layout.rowHeight;
+  const current = Number(windowState.container.scrollTop) || 0;
+  const target = row === 0 ? 0 : (rowTop < current ? rowTop : rowBottom > current + viewport ? Math.max(0, rowBottom - viewport) : current);
   windowState.container.scrollTo?.({ top: target, behavior });
   if (!windowState.container.scrollTo) windowState.container.scrollTop = target;
   renderCatalogWindow(windowState);
@@ -302,8 +306,6 @@ function setViewMode(mode, refreshGallery = true) {
   scrollCatalogImage("overview", state.currentId);
   requestAnimationFrame(() => {
     if (state.viewMode !== "overview" || state.viewGeneration !== viewGeneration) return;
-    const current = state.overviewNodes.get(state.currentId);
-    current?.scrollIntoView({ block: "center", behavior: "smooth" });
     focusElement($("#overviewPane"));
   });
 }

@@ -101,8 +101,6 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
     $("#currentFileName").textContent = record.relativePath;
     updateCandidateStatus();
     renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
-    state.galleryNodes.get(imageId)?.scrollIntoView?.({ block: "center", inline: "nearest" });
-    state.overviewNodes.get(imageId)?.scrollIntoView?.({ block: "nearest" });
     prefetchNeighbors(record);
   } catch (error) {
     if (isCurrentGeneration(generation)) {
