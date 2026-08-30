@@ -171,6 +171,16 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     store.save_manual(image_id, payload, lambda value: value)
+            self.assertEqual(store.manual_mask_statuses([]), {})
+            store.save_manual(image_id, {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": [], "hasEffectiveMask": False}, lambda value: value)
+            db = sqlite3.connect(store.path)
+            try:
+                db.execute("UPDATE manual_edits SET removed_candidate_ids='[1]' WHERE image_id=?", (image_id,))
+                db.commit()
+            finally:
+                db.close()
+            with self.assertRaises(ValueError):
+                store.manual(image_id, lambda value: value)
 
 
 class StateCatalogExtraCoverageTests(unittest.TestCase):

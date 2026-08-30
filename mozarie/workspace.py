@@ -525,9 +525,11 @@ class WorkspaceStore:
 
     def save_manual(self, image_id: str, payload: dict[str, Any], decoder: Any) -> None:
         removed = payload.get("removedCandidateIds", [])
-        if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed): raise ValueError("invalid removed candidates")
+        if not isinstance(removed, list) or any(not isinstance(item, str) for item in removed):
+            raise ValueError("invalid removed candidates")
         has_effective_mask = payload.get("hasEffectiveMask")
-        if not isinstance(has_effective_mask, bool): raise ValueError("invalid effective mask")
+        if not isinstance(has_effective_mask, bool):
+            raise ValueError("invalid effective mask")
         add, exclusion, erase = (decoder(payload.get(key)) for key in ("add", "exclusion", "exclusionErase"))
         for mask in (add, exclusion, erase):
             self._require_png_mask(mask)
