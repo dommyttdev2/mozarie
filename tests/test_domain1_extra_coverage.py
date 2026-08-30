@@ -97,6 +97,28 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             store.commit_candidate_state(image_id, 2, [candidate], True, replace=True)
             self.assertEqual(store.candidate_png(image_id, "candidate"), png())
 
+    def test_prune_and_unmaterialized_candidate_failures_roll_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, catalog_id, image_id = self.make_store(root)
+            db = sqlite3.connect(store.path)
+            try:
+                db.execute("CREATE TRIGGER reject_prune BEFORE DELETE ON images BEGIN SELECT RAISE(ABORT, 'no'); END")
+                db.commit()
+            finally:
+                db.close()
+            with self.assertRaises(sqlite3.DatabaseError):
+                store.prune_catalog_images(catalog_id, set())
+            db = sqlite3.connect(store.path)
+            try:
+                db.execute("DROP TRIGGER reject_prune")
+                db.commit()
+            finally:
+                db.close()
+            missing = Candidate("not-stored", "penis", .5, root / "not-stored.png")
+            store.commit_candidate_state(image_id, 1, [missing], True, replace=True)
+            self.assertIsNone(store.candidate_png(image_id, "not-stored"))
+
 
 class StateCatalogExtraCoverageTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -150,6 +172,24 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         detached = self.state._detach_session_unchecked()
         self.state._release_detached_session(detached)
         self.assertFalse(imports.exists())
+
+    def test_settings_status_reports_actual_bad_paths(self) -> None:
+        settings = self.state.settings_store.default_settings()
+        models = settings["models"]
+        models["target_segmentation"] = str(self.root / "wrong.txt")
+        (self.root / "wrong.txt").write_text("x")
+        settings["detection"]["mode"] = "high_precision"
+        checkpoint = self.root / "checkpoint.bin"
+        checkpoint.write_text("x")
+        models["sam_checkpoints"][models["sam_model_type"]] = str(checkpoint)
+        mismatch = self.root / "sam_vit_l_0b3195.pth"
+        mismatch.write_text("x")
+        models["sam_checkpoints"]["vit_b"] = str(mismatch)
+        status = self.state.settings_status(settings)
+        self.assertEqual(status["models"]["target_segmentation"]["reasonCode"], "invalid_format")
+        self.assertEqual(status["models"]["sam_checkpoint"]["reasonCode"], "invalid_format")
+        self.assertEqual(status["samVariants"]["vit_b"]["reasonCode"], "type_mismatch")
+        self.state.end_import_transfer()
 
     def test_catalogue_guards_and_candidate_bulk_state(self) -> None:
         image_id = self.add_image()
