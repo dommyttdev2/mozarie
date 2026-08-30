@@ -12,7 +12,8 @@ assert.match(gallerySource, /onmouseenter = \(\) => \{ schedulePrefetch\(image, 
 assert.doesNotMatch(gallerySource, /onmouseenter[^\n]*loadCandidateBundle/);
 assert.match(canvasSource, /candidateBundleCache\.take\(oldKey\)/, "candidate revisions transfer cache ownership without closing displayed masks");
 const state = { currentId: null, pendingImageId: null, currentImage: null, pendingImageKey: null, pendingCandidateKey: null, candidateImages: new Map(), imageInflight: new Map(), prefetchQueue: [], prefetchTimer: null, prefetchActive: 0, catalogEpoch: 1, catalogLoadControllers: new Set() };
-const context = { state, setTimeout() { return 1; }, clearTimeout() {}, fetch() {}, document: { querySelector() { return null; } }, encodeURIComponent, Promise, Set, Map, Math, AbortController, DOMException, __fetchBitmap: null };
+const responseError = (response, payload) => { const error = new Error(); error.status = response.status; error.code = typeof payload?.error_code === "string" ? payload.error_code : (response.status === 404 ? "api_not_found" : "internal_error"); error.params = payload?.params || {}; return error; };
+const context = { state, setTimeout() { return 1; }, clearTimeout() {}, fetch() {}, document: { querySelector() { return null; } }, encodeURIComponent, Promise, Set, Map, Math, AbortController, DOMException, responseError, __fetchBitmap: null };
 vm.runInNewContext(`${resourcesSource}\nglobalThis.resourceTest = { WeightedLru, drainPrefetchQueue };`, context);
 vm.runInNewContext(canvasSource, context, { filename: canvasPath });
 const closed = []; const cache = new context.resourceTest.WeightedLru(8, (value) => closed.push(value.id), () => false);
@@ -46,6 +47,7 @@ async function runResourceCoverageCases() {
   };
   let response = { ok: true, blob: async () => "image" };
   const context = {
+    responseError,
     state, Map, Math, Promise, Set, Uint8Array, encodeURIComponent,
     document: { querySelector() { return tokenAvailable ? { content: "coverage-token" } : null; } },
     setTimeout(callback) { timers.push(callback); return timers.length; },
@@ -107,7 +109,7 @@ async function runResourceCoverageCases() {
   response = { ok: false, status: 409, json: async () => ({ error_code: "stale_asset", params: { detail: "x" } }) };
   await assert.rejects(api.fetchBitmap("/stale"), (error) => error.status === 409 && error.code === "stale_asset", "failed bitmap responses retain their API error");
   response = { ok: false, status: 500, json: async () => { throw new Error("invalid JSON"); } };
-  await assert.rejects(api.fetchBitmap("/invalid"), (error) => error.status === 500 && error.code === "", "invalid error payloads use the localized fallback");
+  await assert.rejects(api.fetchBitmap("/invalid"), (error) => error.status === 500 && error.code === "internal_error", "invalid error payloads use the stable internal code");
   response = { ok: false, status: 400, json: async () => ({ error_code: "unknown" }) };
   await assert.rejects(api.fetchBitmap("/unknown"), (error) => error.status === 400 && error.code === "unknown", "unknown API errors use the generic image-load message");
 
@@ -143,7 +145,7 @@ async function runResourceCoverageCases() {
   resolveBitmap({ width: 10000, height: 10000, close() { releases += 1; } });
   for (let index = 0; index < 4 && state.prefetchActive; index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(releases, 1, "the exact pending image key keeps a joined foreground image available");
-  const errorContext = { state: {}, fetch: async () => ({ ok: false, status: 400, json: async () => ({ error_code: "stale_asset" }) }), document: { querySelector() { return null; } }, t: () => "load failed", Promise, Set, Map, Math, AbortController, DOMException, encodeURIComponent };
+  const errorContext = { state: {}, fetch: async () => ({ ok: false, status: 400, json: async () => ({ error_code: "stale_asset" }) }), document: { querySelector() { return null; } }, t: () => "load failed", Promise, Set, Map, Math, AbortController, DOMException, encodeURIComponent, responseError };
   vm.runInNewContext(`${fs.readFileSync(path.join(__dirname, "..", "static", "js", "resources.js"), "utf8")}\nglobalThis.fetchBitmapForTest = fetchBitmap;`, errorContext);
   await assert.rejects(errorContext.fetchBitmapForTest("/api/image/stale"), (error) => error.code === "stale_asset" && error.status === 400, "full-image stale response retains its error code");
   await runResourceCoverageCases();
