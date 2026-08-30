@@ -528,8 +528,8 @@ class JobsMixin:
             self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
-            self.job.error_code = exc.error_code if isinstance(exc, ClientError) else ""
-            self.job.params = dict(exc.params) if isinstance(exc, ClientError) else {}
+            self.job.error_code = exc.error_code
+            self.job.params = dict(exc.params)
             self.job.current = ""
             self.job.active_count = 0
         if gpu_oom is not None:
@@ -539,7 +539,4 @@ class JobsMixin:
             self._discard_gpu_models_after_oom()
         else:
             self._release_gpu_job_memory()
-        if isinstance(exc, ClientError):
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
-        else:
-            LOGGER.error("バックグラウンド処理に失敗: %s", JOB_LABELS.get(kind, kind), exc_info=(type(exc), exc, exc.__traceback__))
+        LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)

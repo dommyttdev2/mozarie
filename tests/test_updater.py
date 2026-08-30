@@ -125,6 +125,22 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.parse_version("1.2")
 
+    def test_os_errors_are_reported_without_exposing_path_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "VERSION").mkdir()
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("version_read"))) as raised:
+                updater.read_local_version(root)
+            self.assertNotIn(str(root), str(raised.exception))
+
+            archive = root / "release.zip"
+            write_archive(archive, UPDATE_ARCHIVE_CONTENTS)
+            blocked_destination = root / "blocked"
+            blocked_destination.write_text("not a folder", encoding="utf-8")
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_extract"))) as raised:
+                updater.extract_archive(archive, blocked_destination)
+            self.assertNotIn(str(blocked_destination), str(raised.exception))
+
     def test_release_asset_must_be_the_immutable_mozarie_asset(self):
         release = make_release()
         release["assets"][0]["browser_download_url"] = "https://example.test/asset.zip"

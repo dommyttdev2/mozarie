@@ -2822,8 +2822,8 @@ class MozarieTests(unittest.TestCase):
 
     def test_detection_maps_worker_gpu_memory_errors(self):
         for message, error_code in (
-            ("out of memory", "memory_allocation_failed"),
-            ("failed to allocate memory", "memory_allocation_failed"),
+            ("out of memory", "internal_error"),
+            ("failed to allocate memory", "internal_error"),
             ("bfcarena exhausted", "gpu_out_of_memory"),
             ("cuda out of memory", "gpu_out_of_memory"),
             ("Could not allocate tensor with 1073741824 bytes. There is not enough GPU video memory available!", "gpu_out_of_memory"),
@@ -2882,13 +2882,13 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         self.assertIs(state.sam_lock, state.hand_segmentation_lock)
 
-    def test_detection_reports_an_unsupported_gpu_architecture(self):
+    def test_detection_reports_a_raw_gpu_execution_error_as_internal(self):
         state = self.new_state()
         state.job = core_module.Job(kind="detect", state="running")
         with patch.object(state, "_release_gpu_job_memory") as release:
             state._fail_job(RuntimeError("no kernel image is available for execution on the device"))
-        self.assertEqual(state.job.error_code, "gpu_unsupported")
-        self.assertIn("PyTorch", state.job.error)
+        self.assertEqual(state.job.error_code, "internal_error")
+        self.assertNotIn("kernel image", state.job.error)
         release.assert_called_once_with()
 
     def test_terminal_gpu_job_empties_the_pytorch_cache(self):
@@ -2930,14 +2930,21 @@ class MozarieTests(unittest.TestCase):
         state.hand_segmentation_predictor.reset_image.assert_called_once_with()
         self.assertIsNone(state.hand_segmentation_image_id)
 
-    def test_cpu_memory_allocation_error_does_not_claim_gpu_memory_is_exhausted(self):
+    def test_raw_cpu_memory_runtime_error_is_internal(self):
         state = self.new_state()
         state.settings["models"]["provider"] = "cpu"
         state.job = core_module.Job(kind="detect", state="running")
         with patch.object(state, "_release_gpu_job_memory"):
             state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
-        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertEqual(state.job.error_code, "internal_error")
         self.assertNotIn("GPU", state.job.error)
+
+    def test_explicit_memory_error_has_a_stable_memory_code(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="detect", state="running")
+        state._fail_job(MemoryError("private allocation details"))
+        self.assertEqual(state.job.error_code, "memory_allocation_failed")
+        self.assertNotIn("private", state.job.error)
 
     def test_detection_worker_maps_plain_exception_ort_oom(self):
         with tempfile.TemporaryDirectory() as directory:
