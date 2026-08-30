@@ -568,8 +568,10 @@ async function assertVisibleButtons(page, label) {
   const buttons = await page.evaluate(() => [...document.querySelectorAll("button")].map((element) => {
     const style = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
+    const virtualViewport = element.closest(".catalog-window")?.getBoundingClientRect();
     return {
-      visible: !element.hidden && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0,
+      visible: !element.hidden && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+        && (!virtualViewport || (rect.top >= virtualViewport.top && rect.bottom <= virtualViewport.bottom)),
       id: element.id || element.textContent.trim(), text: element.textContent.trim(), x: rect.x, y: rect.y, width: rect.width, height: rect.height,
       scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, whiteSpace: style.whiteSpace, textOverflow: style.textOverflow,
     };
@@ -586,6 +588,7 @@ async function assertVisibleButtons(page, label) {
 
 async function assertDesktopLayout(page, width, height) {
   await page.setViewportSize({ width, height });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
   if (width === 1024) assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "the 1024px inspector keeps its usable 270px width");
@@ -700,7 +703,7 @@ async function assertConnectionStatusLayout(page, width, height, language) {
     };
   });
   assert.equal(layout.connectionHidden, false, `connection loss is visible in the header at ${width}x${height} (${language})`);
-  assert.equal(layout.connectionText, "Mozarieに接続できません", `connection loss uses the exact Japanese text at ${width}x${height} (${language})`);
+  assert.equal(layout.connectionText, language === "en" ? "Cannot connect to Mozarie." : "Mozarieに接続できません", `connection loss uses the selected-language text at ${width}x${height} (${language})`);
   assert.equal(layout.connectionColor, "rgb(255, 157, 146)", `connection loss is red at ${width}x${height} (${language})`);
   assert.equal(layout.errorDialogOpen, false, `connection loss does not open a dialog at ${width}x${height} (${language})`);
   assert.equal(layout.parentIsAppbar && layout.settingsHit && layout.rightAligned && layout.inAppbar && layout.gap >= 10, true, `connection loss stays left of the clickable settings button at ${width}x${height} (${language})`);
@@ -1684,10 +1687,9 @@ async function main() {
     assert.equal(settingsRequests.filter((search) => search === "").length, fullSettingsBeforeOpen, "opening settings does not start a full status request");
     assert.equal(await page.locator("#settingsStatusButton").count(), 0, "settings has no manual model/GPU status button");
     assert.equal(await page.locator("#settingsStatusResult").count(), 0, "settings has no model/GPU status message");
-    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option"));
-    assert.equal(settingsStatusRequests.length, settingsStatusBeforeOpen + 1, "opening settings refreshes model and GPU status in the background");
-    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
     await page.locator("#settingsTabModels").click();
+    await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option:not(:disabled)"));
+    assert.equal(settingsStatusRequests.length, settingsStatusBeforeOpen + 1, "the Models tab refreshes model and GPU status once");
     for (const selector of ['#settingsSamVariants input', '#settingsSamModel', '[data-model-picker="sam_checkpoint"]', '[data-model-download="sam"]']) {
       assert.equal(await page.locator(selector).first().isDisabled(), true, `standard mode disables ${selector}`);
     }
@@ -2253,6 +2255,7 @@ async function main() {
     resetJob();
     await page.reload({ waitUntil: "networkidle" });
     await page.locator("#settingsButton").click();
+    await page.locator("#settingsTabModels").click();
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option[value='3']"));
     assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the saved GPU choice survives reopening after reload");
     await page.locator("#settingsCloseButton").click();

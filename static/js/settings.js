@@ -300,7 +300,7 @@ function selectSettingsTab(name) {
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
   if (changed) { const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error"); }
-  if (name === "models") void refreshSettingsStatus();
+  if (name === "models" && (!modelStatusLoaded || modelStatusDirty)) void refreshSettingsStatus();
 }
 
 function moveSettingsTab(event) {
@@ -554,6 +554,8 @@ let settingsStatusGeneration = 0;
 let modelStatusDirty = true;
 let modelStatusLoaded = false;
 
+function markModelStatusDirty() { modelStatusDirty = true; }
+
 function setSettingsGpuLoading(loading) {
   $("#settingsGpuLoading").hidden = !loading;
   if (loading) $("#settingsGpuDevice").setAttribute("aria-busy", "true");
@@ -563,7 +565,6 @@ function setSettingsGpuLoading(loading) {
 async function refreshSettingsStatus() {
   const modelsTab = document.querySelector?.('.settings-tab[data-settings-tab="models"]');
   if (modelsTab && (!$("#settingsDialog")?.open || !modelsTab.classList.contains("active"))) { modelStatusDirty = true; return; }
-  if (modelStatusLoaded && !modelStatusDirty) return;
   modelStatusDirty = false;
   const generation = ++settingsStatusGeneration;
   setSettingsGpuLoading(true);

@@ -21,8 +21,7 @@ function catalogWindow(scope, container, nodes, options) {
   let windowState = catalogWindows.get(scope);
   if (windowState) return windowState;
   const spacer = document.createElement("div"); spacer.className = "catalog-window-spacer";
-  if (container.replaceChildren) container.replaceChildren(spacer);
-  else { for (const child of Array.from(container.children || [])) child.remove?.(); container.append(spacer); }
+  container.append(spacer);
   container.classList.add?.("catalog-window");
   windowState = { scope, container, nodes, spacer, options, images: [], frame: 0 };
   const schedule = () => {
@@ -30,7 +29,7 @@ function catalogWindow(scope, container, nodes, options) {
     windowState.frame = requestAnimationFrame(() => { windowState.frame = 0; renderCatalogWindow(windowState); });
   };
   container.addEventListener("scroll", schedule, { passive: true });
-  if (typeof window !== "undefined") window.addEventListener?.("resize", schedule);
+  if (typeof window !== "undefined") window.addEventListener?.("resize", () => renderCatalogWindow(windowState));
   catalogWindows.set(scope, windowState); return windowState;
 }
 
@@ -47,7 +46,7 @@ function setCatalogNode(windowState, image, index, layout) {
   let item = nodes.get(image.id);
   if (!item) { item = document.querySelector(options.template).content.firstElementChild.cloneNode(true); nodes.set(image.id, item); }
   const row = Math.floor(index / layout.columns); const column = index % layout.columns;
-  item.dataset.id = image.id; item.style.width = `${layout.itemWidth}px`; item.style.height = `${layout.rowHeight - options.gap}px`;
+  item.dataset.id = image.id; item.dataset.index = String(index); item.style.width = `${layout.itemWidth}px`; item.style.height = `${layout.rowHeight - options.gap}px`;
   item.style.transform = `translate(${options.padding + column * (layout.itemWidth + options.gap)}px, ${options.padding + row * layout.rowHeight}px)`;
   const current = image.id === state.currentId;
   const batchSelected = scope === "overview" && state.batchMode && state.selectedImageIds.has(image.id);
@@ -76,7 +75,7 @@ function setCatalogNode(windowState, image, index, layout) {
   item.tabIndex = 0; item.setAttribute("role", "button"); item.setAttribute("aria-haspopup", "menu");
   item.onkeydown = (event) => {
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); scope === "gallery" ? selectCatalogImage(image.id) : selectOverviewImage(image.id, event); }
-    else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openCatalogContextMenu(event, image.id);
+    else if (event.key === "ContextMenu" || event.key === "F10") openCatalogContextMenu(event, image.id);
   };
   container.append(item);
 }
@@ -92,6 +91,7 @@ function renderCatalogWindow(windowState) {
   const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
   for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.remove(); nodes.delete(id); }
   for (let index = first; index < last; index += 1) setCatalogNode(windowState, windowState.images[index], index, layout);
+  for (const item of nodes.values()) item.style.visibility = "";
   return layout;
 }
 

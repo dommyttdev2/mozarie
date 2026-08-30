@@ -117,6 +117,10 @@ function bindEvents() {
   $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
   $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
+  document.querySelectorAll('[data-settings-panel="models"] input, [data-settings-panel="models"] select').forEach((control) => {
+    control.addEventListener("input", markModelStatusDirty);
+    control.addEventListener("change", markModelStatusDirty);
+  });
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => radio.addEventListener("change", () => {
     if (radio.checked) selectSamVariant(radio.value, true);
   }));
