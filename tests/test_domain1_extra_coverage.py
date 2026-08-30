@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import sqlite3
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -235,6 +237,106 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         detached = self.state._detach_session_unchecked()
         self.state._release_detached_session(detached)
         self.assertFalse(imports.exists())
+
+    def test_windows_lock_failure_and_stale_cache_boundaries(self) -> None:
+        class Handle:
+            def seek(self, *_args) -> None:
+                return None
+
+            def fileno(self) -> int:
+                return 1
+
+            def close(self) -> None:
+                return None
+
+        lock_dir = self.root / "lock-failure"
+        lock_dir.mkdir()
+        with patch.object(state_module.msvcrt, "locking", side_effect=OSError("locked")):
+            with self.assertRaises(OSError):
+                self.state._lock_directory(lock_dir)
+            self.state._release_directory_lock(Handle())
+            self.state._release_detached_session((self.root / "gone", Handle()))
+        with tempfile.TemporaryDirectory() as directory, patch.object(state_module, "CACHE_BASE_DIR", Path(directory)):
+            cache_base = Path(directory)
+            (cache_base / "process-file").write_text("not a directory")
+            stale = cache_base / "process-stale"
+            stale.mkdir()
+            import os
+            os.utime(stale, (1, 1))
+            locked = cache_base / "process-lock"
+            locked.mkdir()
+            (locked / ".active.lock").write_bytes(b"1")
+            with patch.object(state_module.msvcrt, "locking", side_effect=[None, OSError("unlock")]):
+                self.state._cleanup_stale_process_caches()
+            self.assertFalse(stale.exists())
+            self.assertFalse(locked.exists())
+
+    def test_state_startup_helpers_preserve_error_paths(self) -> None:
+        with patch("mozarie.inference.onnx.diagnose_runtime", side_effect=ClientError("known", "known")):
+            with self.assertRaises(ClientError) as context:
+                self.state.diagnose_gpu_runtime()
+            self.assertEqual(context.exception.error_code, "known")
+        with patch.object(self.state.settings_store, "default_settings", side_effect=state_module.SettingsError("bad")):
+            with self.assertRaises(ClientError) as context:
+                self.state.reset_settings()
+            self.assertEqual(context.exception.error_code, "invalid_settings")
+        with tempfile.TemporaryDirectory() as directory, patch.object(state_module, "CACHE_BASE_DIR", Path(directory) / "absent"):
+            self.state._cleanup_stale_process_caches()
+        sessions = self.root / "sessions-extra"
+        sessions.mkdir()
+        (sessions / "session-file").write_text("not a directory")
+        locked = sessions / "session-lock"
+        locked.mkdir()
+        (locked / ".active.lock").write_bytes(b"1")
+        previous = self.state.session_base_dir
+        self.state.session_base_dir = sessions
+        try:
+            with patch.object(state_module.msvcrt, "locking", side_effect=[None, OSError("unlock")]):
+                self.state._cleanup_stale_sessions()
+            self.assertFalse(locked.exists())
+            with patch.object(state_module.msvcrt, "locking", side_effect=OSError("locked")):
+                with self.assertRaises(OSError):
+                    self.state._ensure_session()
+        finally:
+            self.state.session_base_dir = previous
+
+    def test_import_startup_reports_workspace_open_failure(self) -> None:
+        spec = importlib.util.spec_from_file_location("mozarie.state_coverage_probe", state_module.__file__)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            with patch.object(sqlite3, "connect", side_effect=sqlite3.DatabaseError("unavailable")):
+                spec.loader.exec_module(module)  # type: ignore[union-attr]
+            self.assertIsNone(module.STATE)
+            self.assertIsNotNone(module.STATE_STARTUP_ERROR)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_stale_cleanup_os_errors_are_ignored_and_gpu_reset_releases_once(self) -> None:
+        self.state.settings["models"]["provider"] = "gpu"
+        with patch.object(self.state, "_release_gpu_cache") as release:
+            self.state.reset_settings()
+        release.assert_called_once()
+        with tempfile.TemporaryDirectory() as directory, patch.object(state_module, "CACHE_BASE_DIR", Path(directory)):
+            stale = Path(directory) / "process-stale"
+            stale.mkdir()
+            import os
+            os.utime(stale, (1, 1))
+            with patch.object(state_module.shutil, "rmtree", side_effect=OSError("busy")):
+                self.state._cleanup_stale_process_caches()
+        sessions = self.root / "sessions-errors"
+        stale_session = sessions / "session-stale"
+        stale_session.mkdir(parents=True)
+        import os
+        os.utime(stale_session, (1, 1))
+        previous = self.state.session_base_dir
+        self.state.session_base_dir = sessions
+        try:
+            with patch.object(state_module.shutil, "rmtree", side_effect=OSError("busy")):
+                self.state._cleanup_stale_sessions()
+        finally:
+            self.state.session_base_dir = previous
 
     def test_settings_status_reports_actual_bad_paths(self) -> None:
         settings = self.state.settings_store.default_settings()
