@@ -145,34 +145,52 @@ function singleOutputName(relativePath, suffix, sequence = 0) {
 }
 
 async function writeSingleOutput(handle, relativePath, suffix, response) {
-  let fileHandle; let name; let created = false;
-  for (let sequence = 0; sequence < 10000; sequence += 1) {
-    name = singleOutputName(relativePath, suffix, sequence);
-    try { await handle.getFileHandle(name); }
-    catch (error) {
-      if (error?.name !== "NotFoundError") throw error;
-      fileHandle = await handle.getFileHandle(name, { create: true }); created = true; break;
-    }
-  }
-  if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
-  let stream;
+  if (!navigator.locks || typeof navigator.locks.request !== "function") throw codedError("output_write_unsupported");
+  let entered = false;
   try {
-    stream = await fileHandle.createWritable({ keepExistingData: false });
-    await response.body.pipeTo(stream);
-  } catch (error) {
-    try { await stream?.abort?.(); } catch {}
-    if (created) {
-      try { await handle.removeEntry(name); }
-      catch (cleanupError) {
-        const cleanupFailure = codedError("output_cleanup_failed");
-        cleanupFailure.cause = error;
-        cleanupFailure.cleanupCause = cleanupError;
-        throw cleanupFailure;
+    return await navigator.locks.request("mozarie-output-write", { mode: "exclusive" }, async () => {
+      entered = true;
+      let fileHandle; let name; let created = false;
+      for (let sequence = 0; sequence < 10000; sequence += 1) {
+        name = singleOutputName(relativePath, suffix, sequence);
+        try { await handle.getFileHandle(name); }
+        catch (error) {
+          if (error?.name !== "NotFoundError") throw error;
+          fileHandle = await handle.getFileHandle(name, { create: true }); created = true; break;
+        }
       }
+      if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
+      let stream;
+      try {
+        try { stream = await fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
+        catch (error) {
+          if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("output_write_unsupported");
+          throw error;
+        }
+        await response.body.pipeTo(stream);
+      } catch (error) {
+        try { await stream?.abort?.(); } catch {}
+        if (created) {
+          try { await handle.removeEntry(name); }
+          catch (cleanupError) {
+            const cleanupFailure = codedError("output_cleanup_failed");
+            cleanupFailure.cause = error;
+            cleanupFailure.cleanupCause = cleanupError;
+            throw cleanupFailure;
+          }
+        }
+        throw error;
+      }
+      return { name, fileHandle };
+    });
+  } catch (error) {
+    if (!entered) {
+      const lockFailure = codedError("output_write_unsupported");
+      lockFailure.cause = error;
+      throw lockFailure;
     }
     throw error;
   }
-  return { name, fileHandle };
 }
 
 async function renderSingleSave(payload) {

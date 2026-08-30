@@ -85,7 +85,7 @@ const USER_ERROR_CODES = {
   save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
   source_restore_failed: "source_restore_failed",
   source_permission_denied: "source_permission_denied", source_action_unavailable: "source_action_unavailable",
-  source_busy: "source_busy", source_write_unsupported: "source_write_unsupported", output_cleanup_failed: "output_cleanup_failed",
+  source_busy: "source_busy", source_write_unsupported: "source_write_unsupported", output_write_unsupported: "output_write_unsupported", output_cleanup_failed: "output_cleanup_failed",
   clipboard_write_failed: "clipboard_write_failed",
   workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", workspace_database_error: "workspace_write_failed",
   output_unavailable: "output_folder_unavailable", model_not_configured: "model_not_configured",
