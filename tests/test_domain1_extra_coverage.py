@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import io
 import importlib.util
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
 import mozarie.state as state_module
-from mozarie.core import Candidate, CandidateRole, ClientError, ImageRecord
+from mozarie.core import BrowserSaveReceipt, Candidate, CandidateRole, ClientError, ImageRecord
 from mozarie.state import StudioState, cuda_device_statuses, gpu_device_statuses
 from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
@@ -805,3 +808,183 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(valid)
         images = self.state.set_root(str(self.root))
         self.assertEqual([item["relativePath"] for item in images], ["valid.png"])
+
+
+class FinalCatalogCoverageTests(unittest.TestCase):
+    """Regression tests for the remaining file-backed catalogue boundaries."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        app = self.root / "app"
+        (app / "config").mkdir(parents=True)
+        (app / "config" / "defaults.json").write_bytes(
+            (Path(__file__).resolve().parents[1] / "config" / "defaults.json").read_bytes()
+        )
+        with patch.object(state_module, "APP_DIR", app):
+            self.state = StudioState(self.root / "cache", self.root / "sessions")
+
+    def tearDown(self) -> None:
+        self.state.shutdown()
+        self.temp.cleanup()
+
+    def add_image(self) -> str:
+        image = self.root / "source.png"
+        Image.new("RGB", (4, 4), "white").save(image)
+        return self.state.set_root(str(self.root))[0]["id"]
+
+    def test_catalogue_error_cleanup_and_mask_boundaries(self) -> None:
+        image_id = self.add_image()
+        record = self.state.images[image_id]
+        with self.assertRaises(ClientError):
+            self.state.activate_browser_catalog("a" * 32)
+        with self.assertRaises(ClientError):
+            self.state.remove_images_from_catalog([])
+        with self.assertRaises(ClientError):
+            self.state._import_images([], include_images=False)
+        with self.assertRaises(ClientError):
+            self.state._assert_record_stat_matches(replace(record, path=self.root / "gone.png"))
+        self.state.images[image_id] = replace(record, source_kind="other")
+        with self.assertRaises(ClientError):
+            self.state.image_for_id(image_id)
+        self.state.images[image_id] = record
+
+        for raw in (b"not-a-png", b"\x89PNG\r\n\x1a\ntruncated", png("RGB")):
+            encoded = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+            with self.assertRaises(ClientError):
+                self.state._decode_workspace_mask(encoded)
+        class WrongFormat:
+            format = "JPEG"
+            mode = "L"
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def load(self): return None
+        encoded = "data:image/png;base64," + base64.b64encode(png()).decode("ascii")
+        with patch("mozarie.catalog.Image.open", return_value=WrongFormat()):
+            with self.assertRaises(ClientError):
+                self.state._decode_workspace_mask(encoded)
+
+        payload = {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": []}
+        with patch.object(self.state.workspace_store, "save_manual", side_effect=ValueError("disk failure")):
+            with self.assertRaises(ClientError):
+                self.state.save_manual_workspace(image_id, payload)
+        self.state.delete_manual_workspace(image_id)
+        self.state.workspace_store.delete_images([image_id])
+        self.state.save_manual_workspace(image_id, payload)
+
+    def test_token_expiry_predictor_and_session_directory_cleanup(self) -> None:
+        image_id = self.add_image()
+        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(
+            image_id, 0, "copy", False, False, False, __import__("time").monotonic()
+        )
+        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, 0)
+        self.state.cleanup_expired_browser_save_tokens()
+        self.state.sam_predictor = Mock()
+        self.state.hand_segmentation_predictor = Mock()
+        self.state._invalidate_sam_cache()
+        self.state.sam_predictor.reset_image.assert_called_once()
+        self.state.hand_segmentation_predictor.reset_image.assert_called_once()
+        self.state.sam_image_id = image_id
+        self.state.hand_segmentation_image_id = image_id
+        self.state.sam_predictor = None
+        self.state.hand_segmentation_predictor = None
+        self.state.invalidate_sam_image(image_id)
+
+        staged = self.root / "staged.png"
+        Image.new("RGB", (4, 4), "white").save(staged)
+        _images, imported = self.state.import_image_file_for_api(
+            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="nested"
+        )
+        nested = self.state.images[imported[0]["imageId"]].path.parent
+        (nested / "keep.txt").write_text("keep")
+        self.state.remove_image_from_catalog(imported[0]["imageId"])
+        self.assertTrue(nested.exists())
+
+    def test_model_provider_paths_and_missing_durable_candidate(self) -> None:
+        image_id = self.add_image()
+        record = self.state.images[image_id]
+        checkpoint = self.root / "checkpoint.pth"; checkpoint.write_bytes(b"checkpoint")
+        hand = self.root / "hand.safetensors"; hand.write_bytes(b"checkpoint")
+        self.state.settings["models"]["provider"] = "gpu"
+        self.state.settings["models"]["sam_checkpoints"][self.state.settings["models"]["sam_model_type"]] = str(checkpoint)
+        self.state.settings["models"]["hand_segmentation"] = str(hand)
+
+        class Model:
+            def load_state_dict(self, *_args, **_kwargs): pass
+            def to(self, **_kwargs): pass
+        class Predictor:
+            def __init__(self, _model): pass
+            def set_image(self, _image): pass
+            def reset_image(self): pass
+        class Torch:
+            def device(self, _name): return contextlib.nullcontext()
+            def load(self, *_args, **_kwargs): return {}
+        sam = types.ModuleType("segment_anything")
+        sam.SamPredictor = Predictor
+        sam.sam_model_registry = {"vit_b": lambda checkpoint=None: Model()}
+        safe = types.ModuleType("safetensors.torch")
+        safe.load_file = lambda *_args, **_kwargs: {}
+        old_sam, old_safe = sys.modules.get("segment_anything"), sys.modules.get("safetensors.torch")
+        sys.modules["segment_anything"] = sam
+        sys.modules["safetensors.torch"] = safe
+        try:
+            with patch("mozarie.catalog.torch_module", return_value=Torch()), patch("mozarie.catalog.runtime_backend", return_value="cpu"):
+                with self.assertRaises(ClientError): self.state._sam_predictor_for(record, object())
+                with self.assertRaises(ClientError): self.state._hand_segmentation_predictor_for(record, object())
+            self.state.hand_segmentation_predictor = None
+            sys.modules["safetensors.torch"] = None
+            with patch("mozarie.catalog.torch_module", return_value=Torch()):
+                with self.assertRaises(ClientError): self.state._hand_segmentation_predictor_for(record, object())
+            sys.modules["safetensors.torch"] = safe
+            for backend in ("directml", "cuda"):
+                self.state.sam_predictor = None
+                self.state.hand_segmentation_predictor = None
+                with patch("mozarie.catalog.torch_module", return_value=Torch()), patch("mozarie.catalog.runtime_backend", return_value=backend), patch("mozarie.catalog.torch_device", return_value=backend), patch("mozarie.catalog.patch_directml_sam_prompt_encoder"):
+                    self.state._sam_predictor_for(record, object())
+                    self.state._hand_segmentation_predictor_for(record, object())
+            self.state.hand_segmentation_predictor = None
+            safe.load_file = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad checkpoint"))
+            with patch("mozarie.catalog.torch_module", return_value=Torch()):
+                with self.assertRaises(ClientError): self.state._hand_segmentation_predictor_for(record, object())
+        finally:
+            if old_sam is None: sys.modules.pop("segment_anything", None)
+            else: sys.modules["segment_anything"] = old_sam
+            if old_safe is None: sys.modules.pop("safetensors.torch", None)
+            else: sys.modules["safetensors.torch"] = old_safe
+
+        missing = Candidate("missing", "penis", .5, self.root / "missing.png")
+        self.state.candidates[image_id] = [missing]
+        self.state.candidate_revisions[image_id] = 0
+        with self.assertRaises(Exception):
+            self.state.read_candidate_mask_png(image_id, "missing")
+        self.state.candidates[image_id] = [missing]
+        self.state.candidate_revisions[image_id] = 0
+        revisions = iter((0, 1))
+        with patch.object(self.state, "_candidate_revision", side_effect=lambda _image_id: next(revisions)):
+            with self.assertRaises(Exception):
+                self.state.read_candidate_mask_png(image_id, "missing")
+        self.state.workspace_store.delete_images([image_id])
+        self.assertTrue(self.state.set_image_flags(image_id, {"hidden": True})["hidden"])
+
+    def test_state_and_workspace_error_boundaries(self) -> None:
+        with self.assertRaises(ClientError):
+            self.state.update_settings([])  # type: ignore[arg-type]
+        with patch.object(self.state.settings_store, "validate_update", side_effect=state_module.SettingsError("bad")):
+            with self.assertRaises(ClientError):
+                self.state.update_settings({})
+        with tempfile.TemporaryDirectory() as directory, patch.object(state_module, "CACHE_BASE_DIR", Path(directory)):
+            cache = Path(directory) / "process-locked"; cache.mkdir()
+            (cache / ".active.lock").write_bytes(b"1")
+            import os
+            os.utime(cache, (1, 1))
+            with patch.object(state_module.msvcrt, "locking", side_effect=OSError("locked")):
+                self.state._cleanup_stale_process_caches()
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkspaceStore(Path(directory))
+            with self.assertRaises(ValueError):
+                store.ensure_catalog("not-a-valid-catalog-id")
+            with self.assertRaises(ValueError):
+                store._decode_png_mask(b"\x89PNG\r\n\x1a\ntruncated")

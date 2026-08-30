@@ -21,6 +21,11 @@ function canvas(width = 100, height = 80) {
   return target;
 }
 
+function cache(entries = []) {
+  const items = new Map(entries.map(([key, value]) => [key, { value }]));
+  return { items, has: (key) => items.has(key), get: (key) => items.get(key)?.value, set(key, value) { items.set(key, { value }); return value; }, take(key) { const entry = items.get(key); items.delete(key); return entry?.value; }, delete: (key) => items.delete(key), trim() {} };
+}
+
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, { value: "10", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38 });
@@ -32,29 +37,46 @@ const overlayCanvas = canvas();
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80, alpha: 255 }, candidates: [], candidateImages: new Map(), removedCandidateIds: new Set(),
   maskStatus: new Map(),
+  images: [{ id: "image", assetVersion: "v1", candidateRevision: 1, enabledCandidateCount: 0 }], imageGeneration: 0, candidateBatchPending: new Set(),
+  imageCache: cache(), candidateBundleCache: cache(), imageInflight: new Map(), candidateInflight: new Map(), catalogLoadControllers: new Set(), catalogEpoch: 1,
+  drafts: new Map(), draftLayerDirty: new Set(), draftSaveChains: new Map(), history: [], historyIndex: 0, historyBaseDirty: false, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   boundaryDrafts: [], boundaryActiveId: null, boundaryDragging: false, boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryPromptPoint: null,
   polygonPoints: [], boundaryBrushStroke: null, boundaryDraftSequence: 0, boundaryPending: false, pendingImageId: null, importing: false,
   view: { x: 5, y: 7, scale: 2 }, hover: null, tool: "brush", blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false,
   settings: { display: { apply_color: "#f00", exclude_color: "#0ff", overlay_opacity: 0.5 } },
 };
 let focused = 0;
+let lastWorker;
+class Worker {
+  constructor() { lastWorker = this; }
+  postMessage() {}
+  terminate() { this.terminated = true; }
+}
 const context = {
-  state, Math, Map, Set, Array, Object, Number, Boolean, Uint8ClampedArray,
+  state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
   window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 },
-  requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {},
+  requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
   blinkCanvas: canvas(), blinkCtx: canvas().ctx, combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
-  $: (id) => element(id), isBusy: () => false, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
-  currentRecord: () => ({ enabledCandidateCount: 0 }),
+  $: (id) => element(id), t: (key) => key, isBusy: () => false, isGestureActive: () => false, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
+  currentRecord: () => state.images[0] || { enabledCandidateCount: 0 },
+  imageUrl: (record) => `/image/${record.id}`, maskUrl: (imageId, candidateId) => `/mask/${imageId}/${candidateId}`,
+  decodedImageWeight: () => 1, closeBitmap(image) { image?.close?.(); }, forgetThumbnail() {}, abortCatalogLoads() {}, releaseCandidateBitmapBundle() {}, catalogRecordMatches: () => true, isCurrentGeneration: () => true,
+  clearTimeout() {}, showUserError(error) { context.lastUserError = error; }, queueWorkspaceDraft() {}, closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, clearEditor() {}, updateGalleryCurrent() {}, renderCandidates() {}, updateNavigationControls() {}, updateBlockSizeDisplay() {}, clearStatus() {}, prefetchNeighbors() {}, resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, updateHistoryButtons() {}, calculatedBlockSize: () => 4, flushMaskComposition() {}, prepareOriginalImage() {},
   setCssTransform(target) { target.setTransform(1, 0, 0, 1, 0, 0); },
 };
 context.blinkCtx = context.blinkCanvas.getContext("2d");
 context.combinedCtx = context.combinedCanvas.getContext("2d");
+context.addCtx = context.addCanvas.getContext("2d"); context.exclusionCtx = context.exclusionCanvas.getContext("2d"); context.exclusionEraseCtx = context.exclusionEraseCanvas.getContext("2d");
+context.effectiveExclusionCanvas = canvas(); context.effectiveExclusionCtx = context.effectiveExclusionCanvas.getContext("2d");
+context.originalCanvas = canvas(); context.originalCtx = context.originalCanvas.getContext("2d");
+context.mosaicCanvas = canvas(); context.mosaicCtx = context.mosaicCanvas.getContext("2d");
+context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); context.historyExclusionEraseCanvas = canvas();
 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -149,6 +171,25 @@ assert.match(element("#boundaryActions").style.left, /px$/);
 state.boundaryDrafts = []; state.boundaryActiveId = null; context.document.activeElement = element("#boundaryDetectButton");
 test.updateBoundaryActions(); assert.equal(focused, 1, "closing the action menu returns keyboard focus to the canvas");
 
+const cssProbe = { transforms: [], setTransform(...values) { this.transforms.push(values); } };
+context.window.devicePixelRatio = 0; test.setCssTransform(cssProbe); context.window.devicePixelRatio = 1;
+assert.equal(cssProbe.transforms[0][0], 1, "a missing device scale uses a normal CSS pixel transform");
+state.boundaryDragging = true; state.boundaryStart = { x: 3, y: 3 }; state.boundaryPoint = { x: 12, y: 12 }; state.boundaryPromptPoint = { x: 7, y: 8 };
+assert.deepEqual(JSON.parse(JSON.stringify(test.activeBoundaryShape().point)), { x: 7, y: 8 }, "a click prompt is retained when a rectangle is adjusted");
+state.boundaryPromptPoint = null;
+assert.deepEqual(JSON.parse(JSON.stringify(test.activeBoundaryShape().point)), { x: 8, y: 8 }, "a rectangle without a click prompt uses its ROI centre");
+state.boundaryDragging = false;
+const originalLookup = context.$;
+context.$ = (id) => id === "#boundaryActions" ? null : originalLookup(id);
+test.updateBoundaryActions();
+context.$ = originalLookup;
+state.boundaryDrafts = [{ id: "empty", type: "brush", roi: null, points: [], radius: 4 }]; state.boundaryActiveId = "empty";
+test.updateBoundaryActions();
+state.boundaryDrafts = [{ id: "edge", ...rectangle(2, 30, 12, 38) }]; state.boundaryActiveId = "edge";
+element("#boundaryActions").offsetWidth = 0; element("#boundaryActions").offsetHeight = 0;
+test.updateBoundaryActions();
+element("#boundaryActions").offsetWidth = 142; element("#boundaryActions").offsetHeight = 38;
+
 state.candidates = []; state.removedCandidateIds = new Set(); state.currentId = "image"; state.currentImage = { width: 100, height: 80, alpha: 255 };
 context.combinedCanvas.ctx.alpha = 255; state.maskStatus.set("image", true);
 assert.equal(test.refreshMaskStatus(false), false, "unchanged mask status updates controls without redrawing the catalogue");
@@ -168,4 +209,86 @@ assert.ok(context.blinkCtx.calls.some(([name]) => name === "fillRect"), "candida
 test.renderNow();
 test.render(); test.flushRender();
 
-console.log("test_editor_canvas_geometry_runtime: passed");
+(async () => {
+  // Candidate cache ownership is exercised with decoded images, rather than
+  // calling cache helpers directly.
+  let closed = 0;
+  state.candidateImages = new Map([["visible", { close() { closed += 1; } }]]);
+  test.releaseCandidateBitmap("visible");
+  assert.equal(closed, 1); assert.equal(state.candidateImages.has("visible"), false);
+  const staleMask = { close() { closed += 1; } };
+  const activeMask = { close() { closed += 1; } };
+  state.candidateImages = new Map([["active", activeMask]]);
+  state.candidateBundleCache = cache([
+    ["image:1", { candidateImages: state.candidateImages }],
+    ["image:2", { candidateImages: new Map([["stale", staleMask]]) }],
+  ]);
+  test.invalidateCandidateBundles("image");
+  assert.equal(state.candidateBundleCache.has("image:1"), true, "the currently displayed candidate bundle keeps ownership");
+  assert.equal(state.candidateBundleCache.has("image:2"), false, "old candidate bundles are invalidated");
+  state.images = [{ id: "image", candidateRevision: 1 }];
+  state.candidates = [{ id: "active", enabled: true, role: "apply" }];
+  test.retainCurrentCandidateBundle("image", 3);
+  assert.equal(state.images[0].candidateRevision, 3); assert.equal(state.candidateBundleCache.has("image:3"), true, "current decoded candidate masks move to their new revision without closing");
+
+  context.loadCandidateBundle = async () => ({ candidates: [{ id: "fresh", enabled: true, role: "apply" }], candidateImages: new Map([["fresh", { alpha: 255 }]]), candidateRevision: 4 });
+  state.images = [{ id: "image", candidateRevision: 3, enabledCandidateCount: 0 }]; state.currentId = "image"; state.imageGeneration = 8;
+  state.candidateBundleCache = cache(); state.draftLayerDirty = new Set(); state.maskDirty = false; state.removedCandidateIds = new Set();
+  assert.equal(await test.reconcileCurrentCandidates("image", 8), true, "a current candidate response updates the editor and catalogue record together");
+  assert.equal(state.images[0].candidateRevision, 4);
+
+  state.images = [{ id: "retry", assetVersion: "v1", candidateRevision: 1 }]; state.candidateBundleCache = cache(); state.candidateInflight = new Map(); state.catalogLoadControllers = new Set();
+  context.loadCandidateBundle = test.loadCandidateBundle;
+  let candidateAttempts = 0;
+  context.api = async () => {
+    candidateAttempts += 1;
+    if (candidateAttempts === 1) { const error = new Error("revision changed"); error.status = 404; throw error; }
+    return { candidates: [], candidateRevision: 2 };
+  };
+  assert.equal((await test.loadCandidateBundle("retry", 8)).candidateRevision, 2, "a changed candidate revision retries once against the current server metadata");
+  assert.equal(candidateAttempts, 2);
+
+  // Selection guards leave state clean for absent records and real request
+  // failures are surfaced to the user.
+  state.images = []; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
+  await test.selectImage("absent", true, { saveCurrentDraft: false });
+  assert.equal(state.pendingImageId, null);
+  state.images = [{ id: "broken", assetVersion: "v1", candidateRevision: 1 }]; state.imageCache = cache(); state.candidateBundleCache = cache(); state.drafts = new Map();
+  const loadError = new Error("image decode failed"); context.cachedImage = async () => { throw loadError; }; context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
+  await test.selectImage("broken", true, { saveCurrentDraft: false });
+  assert.equal(context.lastUserError, loadError, "image load failures reach the standard user error path");
+
+  context.Image = class { set src(_source) { this.onerror(); } };
+  await assert.rejects(test.loadImage("bad-image"), /error.imageLoad/);
+  context.FileReader = class { readAsDataURL() { this.error = new Error("encode failed"); this.onerror(); } };
+  const encodeCanvas = canvas(); encodeCanvas.toBlob = (done) => done({});
+  await assert.rejects(test.canvasToDataUrl(encodeCanvas), /encode failed/);
+
+  state.currentId = "image"; state.currentImage = { width: 100, height: 80 }; state.draftDirty = true; state.draftLayerDirty = new Set(); state.historyBaseDirty = false;
+  state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(); state.removedCandidateIds = new Set();
+  state.manualExclusionForced = false; state.settings.detection = { exclude_forced_default: false }; state.drafts = new Map([["image", { add: "" }]]); state.draftSaveChains = new Map();
+  await test.saveDraft();
+  assert.equal(state.drafts.has("image"), false, "an empty draft is removed instead of being persisted as an empty record");
+
+  state.currentImage = { width: 4, height: 3 }; state.mosaicPreviewEnabled = true; state.mosaicWorker = null; state.mosaicWorkerBusy = false; state.mosaicPending = false; state.mosaicPreviewGeneration = 0;
+  context.originalCanvas.width = context.combinedCanvas.width = 4; context.originalCanvas.height = context.combinedCanvas.height = 3;
+  test.rebuildMosaicPreview();
+  lastWorker.onerror();
+  assert.equal(state.mosaicWorker, null, "a preview worker error releases the worker and canvas state");
+
+  state.currentId = "image"; state.currentImage = { close() { closed += 1; } }; state.candidates = [{ id: "apply" }];
+  state.candidateImages = new Map([["apply", { close() { closed += 1; } }]]); state.galleryNodes = new Map(); state.overviewNodes = new Map();
+  state.imageCache = cache([["image:v1", { close() { closed += 1; } }]]);
+  state.candidateBundleCache = cache([["image:4", { candidateImages: new Map([["mask", { close() { closed += 1; } }]]) }]]);
+  test.invalidateStaleAsset("image");
+  assert.equal(state.currentId, null, "a stale current asset clears the editor selection and decoded images");
+
+  state.images = [{ id: "restore", candidateRevision: 2, enabledCandidateCount: 0 }]; state.currentId = "restore"; state.currentImage = { width: 10, height: 10 };
+  state.imageGeneration = 12; state.candidates = [{ id: "new" }]; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+  await test.restoreDraft("restore", 12, {
+    candidateRevision: 1, history: [{ kind: "removeCandidates" }, { kind: "brush", points: [] }], historyIndex: 2,
+    historyBase: { removedCandidateIds: ["old"], candidateIds: ["old"] }, removedCandidateIds: ["old"], manualMaskPresent: false,
+  }, [null, null, null, null, null, null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.history.map((stroke) => stroke.kind))), ["brush"], "a newer candidate revision removes only obsolete candidate-history operations");
+  console.log("test_editor_canvas_geometry_runtime: passed");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
