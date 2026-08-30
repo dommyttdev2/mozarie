@@ -39,7 +39,7 @@ function selectSamVariant(variant, refresh = false) {
   $("#settingsSamType").value = variant;
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => { radio.checked = radio.value === variant; });
   $("#settingsSamModel").value = samCheckpointPaths[variant] || "";
-  if (refresh) void refreshSettingsStatus();
+  if (refresh) { modelStatusDirty = true; void refreshSettingsStatus(); }
 }
 
 function renderSamVariantStatuses() {
@@ -246,7 +246,9 @@ function renderShortcutBindings(bindings, actions) {
 function shortcutFromEvent(event) { return `${event.ctrlKey || event.metaKey ? "Ctrl+" : ""}${event.shiftKey ? "Shift+" : ""}${event.altKey ? "Alt+" : ""}${event.key.length === 1 ? event.key.toUpperCase() : event.key}`; }
 function shortcutBindingsPayload() {
   const bindings = Object.fromEntries([...document.querySelectorAll("[data-shortcut-action]")].map((input) => [input.dataset.shortcutAction, input.value.trim()]));
-  if (!Object.values(bindings).every(Boolean) || new Set(Object.values(bindings)).size !== Object.keys(bindings).length) throw new Error("ショートカットのキーは重複なく設定してください。");
+  if (!Object.values(bindings).every(Boolean) || new Set(Object.values(bindings)).size !== Object.keys(bindings).length) {
+    const error = new Error(); error.code = "input_invalid"; throw error;
+  }
   return bindings;
 }
 function shortcutActionsPayload() { return Object.fromEntries([...document.querySelectorAll("[data-shortcut-enabled]")].map((input) => [input.dataset.shortcutEnabled, input.checked])); }
@@ -298,6 +300,7 @@ function selectSettingsTab(name) {
   });
   document.querySelectorAll("[data-settings-panel]").forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
   if (changed) { const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error"); }
+  if (name === "models" && (!modelStatusLoaded || modelStatusDirty)) void refreshSettingsStatus();
 }
 
 function moveSettingsTab(event) {
@@ -365,10 +368,9 @@ async function resetSettings() {
 
 async function chooseSettingsOutputDirectory() {
   try {
-    const directory = await pickOutputDirectory();
-    if (directory) $("#settingsDefaultOutputDirectory").value = directory;
+    if (await pickOutputDirectory()) renderOutputDirectory();
   } catch (error) {
-    if (error?.name !== "AbortError") showUserError("output_folder_unavailable", $("#settingsChooseOutputDirectory"));
+    if (error?.name !== "AbortError") showUserError(error, $("#settingsChooseOutputDirectory"));
   }
 }
 
@@ -391,7 +393,7 @@ async function chooseSettingsModelFile(button) {
         samCheckpointPaths[variant] = data.path;
         $("#settingsSamModel").value = data.path;
       } else input.value = data.path;
-      void refreshSettingsStatus();
+      modelStatusDirty = true; void refreshSettingsStatus();
     }
   } catch (error) {
     showUserError(error, button);
@@ -444,6 +446,7 @@ function renderModelDownload(job) {
   }
   if (job.state === "complete" && modelDownloadStatusRefreshPending) {
     modelDownloadStatusRefreshPending = false;
+    modelStatusDirty = true;
     void refreshSettingsStatus();
   }
 }
@@ -486,10 +489,7 @@ async function refreshModelDownload() {
 }
 
 function modelPreparationCommand(key) {
-  const english = $("#settingsLanguage")?.value === "en";
-  const path = key === "ntd11"
-    ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
-    : (english ? "path\\to\\downloaded\\Sensitive.pt" : "ダウンロードしたSensitiveの.ptファイルのパス");
+  const path = t(`modelHelp.${key}.conversionPath`);
   return `& ".\\.venv\\Scripts\\yolo.exe" export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
 }
 
@@ -550,6 +550,10 @@ async function cancelModelDownload() {
 }
 
 let settingsStatusGeneration = 0;
+let modelStatusDirty = true;
+let modelStatusLoaded = false;
+
+function markModelStatusDirty() { modelStatusDirty = true; }
 
 function setSettingsGpuLoading(loading) {
   $("#settingsGpuLoading").hidden = !loading;
@@ -558,6 +562,9 @@ function setSettingsGpuLoading(loading) {
 }
 
 async function refreshSettingsStatus() {
+  const modelsTab = document.querySelector?.('.settings-tab[data-settings-tab="models"]');
+  if (modelsTab && (!$("#settingsDialog")?.open || !modelsTab.classList.contains("active"))) { modelStatusDirty = true; return; }
+  modelStatusDirty = false;
   const generation = ++settingsStatusGeneration;
   setSettingsGpuLoading(true);
   try {
@@ -566,9 +573,10 @@ async function refreshSettingsStatus() {
     let currentSnapshot = null;
     try { currentSnapshot = JSON.stringify(settingsPayload()); } catch {}
     if (generation !== settingsStatusGeneration || snapshot !== currentSnapshot) return;
+    modelStatusLoaded = true;
     renderSettingsStatus(data.status);
   } catch (error) {
-    if (generation === settingsStatusGeneration) showUserError(error);
+    if (generation === settingsStatusGeneration) { modelStatusDirty = true; showUserError(error); }
   } finally {
     if (generation === settingsStatusGeneration) setSettingsGpuLoading(false);
   }

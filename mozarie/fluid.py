@@ -19,7 +19,7 @@ _MAX_TOTAL_RATIO = 0.20
 
 
 def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
-    """Find neutral-white fluid regions inside the final penis segment."""
+    """Find neutral-white fluid regions inside one final target segment."""
     penis = np.asarray(penis_mask > 0, dtype=np.uint8)
     penis_area = int(np.count_nonzero(penis))
     empty = np.zeros_like(penis, dtype=np.uint8)

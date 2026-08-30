@@ -8,20 +8,23 @@ const index = fs.readFileSync(path.join(staticRoot, "index.html"), "utf8");
 const appPaths = [...index.matchAll(/<script src="\/js\/([a-z-]+\.js)"><\/script>/g)].map((match) => path.join(staticRoot, "js", match[1]));
 
 function element() {
-  return {
+  const node = {
     disabled: false,
     hidden: false,
     textContent: "",
     value: "",
     style: {},
     dataset: {},
-    classList: { toggle() {} },
+    children: [],
+    classList: { toggle() {}, add() {} },
     setAttribute() {},
-    append() {},
+    append(child) { this.children.push(child); child.parentNode = this; },
+    remove() { const siblings = this.parentNode?.children; const index = siblings?.indexOf(this); if (index >= 0) siblings.splice(index, 1); },
     addEventListener() {},
     showModal() { this.open = true; },
     close() { this.open = false; },
   };
+  return node;
 }
 
 function jsonResponse(body, status = 200) {
@@ -50,7 +53,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   getElement("#applySuffix");
   getElement("#deleteOriginal");
   getElement("#removeAfterSave");
-  getElement('input[name="saveMode"]:checked').value = "copy";
+  getElement('input[name="batchSaveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
   getElement("#canvasStage").clientWidth = 600;
@@ -90,6 +93,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
   const browserWindow = { devicePixelRatio: 1, addEventListener() {} };
   const context = {
+    codedError(code) { const error = new Error(); error.code = code; return error; },
     console,
     document,
     Date,
@@ -140,19 +144,137 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   };
 
   let source = appPaths.map((appPath) => fs.readFileSync(appPath, "utf8")).join("\n");
-  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle };\n");
+  source = source.replace(/\ninitialise\(\);\s*$/, "\nglobalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle };\n");
   vm.runInNewContext(source, context, { filename: "static/js/runtime.js" });
-  const { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
+  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
+  const outputFiles = new Map();
+  state.outputDirectoryHandle = {
+    name: "output",
+    async queryPermission() { return "granted"; },
+    async requestPermission() { return "granted"; },
+    async getFileHandle(name, options = {}) {
+      if (!options.create && !outputFiles.has(name)) throw new DOMException("missing", "NotFoundError");
+      if (!outputFiles.has(name)) outputFiles.set(name, []);
+      return { async createWritable() { return { async write(bytes) { outputFiles.set(name, [...bytes]); }, async close() {}, async abort() {} }; } };
+    },
+    async removeEntry(name) { outputFiles.delete(name); },
+  };
   state.translations = {
     "apply.complete": "complete {completed}",
     "apply.completeWithStale": "stale {completed}/{stale}",
     "apply.cancelled": "cancelled {completed}",
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
+    "errorCode.output_permission_denied": "output permission denied",
+    "errorDialog.output_permission_denied.title": "Output permission denied",
+    "errorDialog.output_permission_denied.cause": "Write access was denied.",
+    "errorDialog.output_permission_denied.action": "Allow output access and try again.",
   };
-  return { elements, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle, state, window: browserWindow };
+  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, state, window: browserWindow };
+}
+
+async function runOutputDirectoryPermissionCases() {
+  const runtime = createRuntime({ commit: () => jsonResponse({}) });
+  const calls = [];
+  runtime.state.outputDirectoryHandle = {
+    async queryPermission(options) { calls.push(["query", options.mode]); return "prompt"; },
+    async requestPermission(options) { calls.push(["request", options.mode]); return "granted"; },
+  };
+  await runtime.ensureOutputDirectoryPermission();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["query", "readwrite"], ["request", "readwrite"]], "a restored output directory requests read/write access from the save click");
+
+  for (const result of ["denied", "prompt"]) {
+    runtime.state.outputDirectoryHandle = {
+      async queryPermission() { return result; },
+      async requestPermission() { return result; },
+    };
+    await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", `${result} output permission stops saving with the dedicated code`);
+  }
+  runtime.state.outputDirectoryHandle = { async queryPermission() { throw new DOMException("denied", "SecurityError"); }, async requestPermission() { throw new Error("unreachable"); } };
+  await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", "a browser permission exception uses the dedicated code");
+}
+
+function deferred() {
+  let resolve;
+  return { promise: new Promise((done) => { resolve = done; }), resolve };
+}
+
+async function runOutputPermissionSubmissionLockCases() {
+  const event = { preventDefault() {} };
+  const runtime = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  runtime.state.applyTargetIds = ["image-1"];
+  runtime.element('input[name="batchSaveMode"]:checked').value = "copy";
+  runtime.element("#applySuffix").value = "_locked";
+  const batchPermission = deferred();
+  let batchQueries = 0;
+  runtime.state.outputDirectoryHandle.queryPermission = async () => { batchQueries += 1; return batchPermission.promise; };
+  const firstBatch = runtime.startApplyFromDialog(event);
+  const secondBatch = runtime.startApplyFromDialog(event);
+  assert.equal(runtime.state.saveStarting, true, "batch locks synchronously before the output permission await");
+  assert.equal(batchQueries, 1, "a second batch submit does not duplicate the permission request");
+  batchPermission.resolve("granted");
+  await Promise.all([firstBatch, secondBatch]);
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending batch permission starts one save loop and one commit");
+  assert.equal(runtime.state.saveStarting, false, "a completed batch releases the preflight lock");
+
+  const retryPermission = deferred();
+  runtime.state.applyTargetIds = ["image-1"];
+  runtime.state.outputDirectoryHandle.queryPermission = async () => retryPermission.promise;
+  const deniedBatch = runtime.startApplyFromDialog(event);
+  retryPermission.resolve("denied");
+  await deniedBatch;
+  assert.equal(runtime.state.saveStarting, false, "a rejected batch permission releases the lock");
+  const commitsBeforeRetry = runtime.requests.filter((request) => request.path === "/api/save/commit").length;
+  runtime.state.outputDirectoryHandle.queryPermission = async () => "granted";
+  await runtime.startApplyFromDialog(event);
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, commitsBeforeRetry + 1, "a rejected batch permission can be retried");
+
+  const lockedImage = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const single = createRuntime({ initialImages: [lockedImage], commit: () => jsonResponse({ cleared: true, stale: false, images: [lockedImage] }) });
+  single.state.singleSave = { imageId: "image-1", divisor: 100, draft: null };
+  single.element('input[name="singleSaveMode"]:checked').value = "copy";
+  single.element("#singleSaveSuffix").value = "_locked";
+  single.element("#singleSaveDeleteOriginal").checked = true;
+  let sourceDeletes = 0;
+  const sourceFile = { name: "source.png", size: 3, lastModified: 2, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+  const sourceHandle = {
+    name: sourceFile.name,
+    async queryPermission() { return "granted"; },
+    async requestPermission() { return "granted"; },
+    async getFile() { return sourceFile; },
+  };
+  single.state.sourceAccess.set("image-1", {
+    fileHandle: sourceHandle,
+    parentHandle: { async removeEntry(name) { assert.equal(name, sourceFile.name); sourceDeletes += 1; } },
+    name: sourceFile.name,
+    size: sourceFile.size,
+    lastModified: sourceFile.lastModified,
+  });
+  const singlePermission = deferred();
+  let singleQueries = 0;
+  single.state.outputDirectoryHandle.queryPermission = async () => { singleQueries += 1; return singlePermission.promise; };
+  const firstSingle = single.startSingleSave(event);
+  const secondSingle = single.startSingleSave(event);
+  assert.equal(single.state.saveStarting, true, "single save locks synchronously before the output permission await");
+  assert.equal(singleQueries, 1, "a second single-save submit does not duplicate the permission request");
+  singlePermission.resolve("granted");
+  await Promise.all([firstSingle, secondSingle]);
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending single-save permission starts one save loop and one commit");
+  assert.equal(sourceDeletes, 1, "a pending single-save permission deletes the source once after its one commit path");
+  assert.equal(single.state.saveStarting, false, "a completed single save releases the preflight lock");
+
+  const singleCommits = single.requests.filter((request) => request.path === "/api/save/commit").length;
+  single.state.outputDirectoryHandle.queryPermission = async () => "denied";
+  await single.startSingleSave(event);
+  assert.equal(single.elements.get("#singleSaveResult").textContent, "output permission denied", "a denied single-save permission uses the localized stable error");
+  assert.equal(single.elements.get("#errorDialog").open, true, "a denied single-save permission is visible through the error dialog");
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits, "a denied single-save permission starts no save");
+  assert.equal(single.state.saveStarting, false, "a denied single-save permission releases the lock");
+  single.state.outputDirectoryHandle.queryPermission = async () => "granted";
+  await single.startSingleSave(event);
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits + 1, "a denied single-save permission can be retried successfully");
 }
 
 async function runExclusiveWritableCases() {
@@ -184,7 +306,7 @@ async function runExclusiveWritableCases() {
 async function runSuccessCase() {
     let copyCompletedWhenCommitted = false;
   const runtime = createRuntime({
-    copy: () => { copyCompletedWhenCommitted = true; return jsonResponse({ output: "G:/output/nested/source_censored.png" }); },
+    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { copyCompletedWhenCommitted = true; }),
     commit: () => {
       assert.equal(copyCompletedWhenCommitted, true, "commit runs after the copied output is saved");
       return jsonResponse({ cleared: true, stale: false, images: [] });
@@ -208,11 +330,11 @@ async function runDraftBarrierBeforeDefaultApplyCase() {
   runtime.state.draftSaveChains.set("image-1", new Promise((resolve) => { releaseDraft = resolve; }));
   const start = runtime.startApplyFromDialog({ preventDefault() {} });
   await Promise.resolve();
-  assert.equal(runtime.requests.some((request) => request.path === "/api/apply"), false, "the server save waits for the draft encoder");
+  assert.equal(runtime.requests.some((request) => request.path === "/api/save/render"), false, "the browser save waits for the draft encoder");
   releaseDraft();
   await start;
-  const apply = runtime.requests.find((request) => request.path === "/api/apply");
-  assert.ok(apply, "the server save starts after the draft encoder settles");
+  const render = runtime.requests.find((request) => request.path === "/api/save/render");
+  assert.ok(render, "the browser save starts after the draft encoder settles");
 }
 
 async function runStaleCommitCase() {
@@ -288,7 +410,7 @@ async function runRemoveAfterSavePartialAndStaleCase() {
 
 async function runCopyFailureCase() {
   let removed = false;
-  const runtime = createRuntime({ deleteOriginal: true, copy: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  const runtime = createRuntime({ deleteOriginal: true, renderBinary: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", {
     fileHandle: {
       name: "source.png",
@@ -403,7 +525,7 @@ async function runRetryableCommitCase() {
 async function runCancelCase() {
   let runtime;
     runtime = createRuntime({
-    copy: () => { runtime.state.browserSave.cancelled = true; return jsonResponse({ output: "G:/output/source_censored.png" }); },
+    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { runtime.state.browserSave.cancelled = true; }),
     commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
     removeCatalog: ({ options }) => {
       assert.deepEqual(JSON.parse(options.body), { imageIds: ["image-1"] });
@@ -544,7 +666,7 @@ async function runQueuedHandleChangeCases() {
     runtime.state.sourceAccess.set(first.id, { fileHandle: firstHandle, parentHandle: parentFor(firstHandle), name: "first.png", size: 12, lastModified: 34 });
     runtime.state.sourceAccess.set(second.id, { fileHandle: secondHandle, parentHandle: parentFor(secondHandle), name: secondFile.name, size: secondFile.size, lastModified: secondFile.lastModified });
     await runtime.ensureSaveSources([first.id, second.id], mode, mode === "copy");
-    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), /sourceChanged|変更/);
+    await assert.rejects(runtime.runBrowserSave([first.id, second.id], "_censored", mode === "copy", mode), (error) => error?.code === "stale_asset");
     assert.equal(secondAction, false, `${mode} does not modify a queued source that changed after preflight`);
   }
 }
@@ -653,7 +775,7 @@ async function runNoEffectiveMaskBatchCases() {
   const second = { id: "image-2", relativePath: "second.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
   const none = createRuntime({
     initialImages: [second],
-    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    renderBinary: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
     commit: () => { throw new Error("an empty mask is never committed"); },
   });
   await none.runBrowserSave([second.id], "_censored", false, "copy", true);
@@ -662,7 +784,7 @@ async function runNoEffectiveMaskBatchCases() {
 
   const noneUnmasked = createRuntime({
     initialImages: [second],
-    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    renderBinary: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
     commit: () => { throw new Error("an empty mask is never committed"); },
   });
   await noneUnmasked.runBrowserSave([second.id], "_censored", false, "copy", true, false);
@@ -672,9 +794,9 @@ async function runNoEffectiveMaskBatchCases() {
   const mixed = createRuntime({
     initialImages: [first, second],
     entries: [{ imageId: first.id, candidateRevision: 1 }, { imageId: second.id, candidateRevision: 1 }],
-    copy: () => {
+    renderBinary: () => {
       renders += 1;
-      return renders === 1 ? jsonResponse({ output: "G:/output/first.png" }) : jsonResponse({ error_code: "no_effective_mask" }, 400);
+      return renders === 1 ? binaryResponse([4, 5, 6]) : jsonResponse({ error_code: "no_effective_mask" }, 400);
     },
     commit: () => jsonResponse({ cleared: true, stale: false, deleted: false }),
     removeCatalog: ({ options }) => {
@@ -721,6 +843,8 @@ async function runServerCopyRemovalCases() {
 }
 
 (async () => {
+  await runOutputDirectoryPermissionCases();
+  await runOutputPermissionSubmissionLockCases();
   await runSuccessCase();
   await runDraftBarrierBeforeDefaultApplyCase();
   await runStaleCommitCase();

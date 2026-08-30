@@ -116,6 +116,7 @@ class SavingMixin:
         draft: Any,
         *,
         copy_to_default: bool = False,
+        copy_to_browser: bool = False,
         suffix: str = "_censored",
     ) -> BrowserSaveRender:
         record = self.image_snapshot(image_id)
@@ -229,6 +230,7 @@ class SavingMixin:
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     save_token = self._issue_browser_save_token_unchecked(
                         record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path, output_fingerprint,
+                        allow_copy_action=copy_to_browser,
                     )
                     rendered_path = None
             return BrowserSaveRender(output, record, current_revision, save_token, output_path)
@@ -256,7 +258,7 @@ class SavingMixin:
             # A copy token is issued only after the server has written the copy;
             # it may keep or remove the source. A streamed render token owns a
             # temporary replacement and may only overwrite the source.
-            return source_action in ({"keep", "deleted"} if details.rendered_path is None else {"overwrite"})
+            return source_action in ({"keep", "deleted"} if details.rendered_path is None or details.allow_copy_action else {"overwrite"})
 
         with self.import_lock, ExitStack() as exit_stack:
             with self.lock:

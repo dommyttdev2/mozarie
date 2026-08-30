@@ -10,12 +10,13 @@ from PIL import Image, ImageOps
 
 from .core import (
     DEFAULT_COLORS, DEFAULT_DETECTION_CONFIDENCE, HAND_CONFIDENCE,
-    DETECTED_TARGET_CLASSES, REFINEMENT_LABELS, SOURCE_LABELS, TARGET_CLASSES, Candidate, CandidateRole,
+    DETECTED_TARGET_CLASSES, TARGET_CLASSES, Candidate, CandidateRole,
     ClientError, ImageRecord, JobControl, accepted_hand_sam_mask,
     accepted_specialist_hand_mask, arbitrate_segment_sources, clip_mask_to_roi,
     confidence_for_source, detection_tiles, materialize_tile_mask,
     merge_tile_segment, padded_hand_box, read_boundary_request,
     read_polygon_boundary_request, sam_refinement_prompts,
+    refine_mask_with_hand,
     select_best_sam_mask, select_semantic_sam_mask,
     torch_module, _read_detection_parallelism, _read_target_classes,
 )
@@ -394,27 +395,42 @@ class DetectionMixin:
 
     def _finalize_exclusions(self, rgb: np.ndarray, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
-        apply_union = np.zeros(np.asarray(rgb).shape[:2], dtype=np.uint8)
-        for segment in segments:
-            if segment.get("class_name") not in DETECTED_TARGET_CLASSES:
-                continue
-            final_mask = np.asarray(segment["mask"] > 0, dtype=np.uint8)
-            apply_union = np.maximum(apply_union, final_mask)
-            exclusions: dict[str, np.ndarray] = {}
-            if segment["class_name"] == "penis" and self.settings["detection"]["fluid_exclusion_enabled"]:
-                fluid_mask = white_fluid_mask(rgb, final_mask)
-                if np.any(fluid_mask):
-                    exclusions["fluid"] = fluid_mask
-            segment["exclusions"] = exclusions
-        # A hand is useful only where there is a final target.  This prevents a
-        # boundary operation from adding a full-image hand exclusion candidate.
-        for segment in segments:
-            if not segment.get("image_exclusions"):
-                continue
-            segment["image_exclusions"] = {
-                kind: np.where(apply_union > 0, np.asarray(mask, dtype=np.uint8), 0).astype(np.uint8)
-                for kind, mask in segment["image_exclusions"].items()
-            }
+        shape = np.asarray(rgb).shape[:2]
+        targets = [segment for segment in segments if segment.get("class_name") in DETECTED_TARGET_CLASSES]
+        if not targets:
+            return segments
+
+        final_masks = [np.asarray(segment["mask"] > 0, dtype=np.uint8) for segment in targets]
+        hand_evidence = np.maximum.reduce([
+            np.asarray(segment.get("image_exclusions", {}).get("hand", np.zeros(shape)) > 0, dtype=np.uint8)
+            for segment in targets
+        ])
+
+        safe_hand = np.zeros(shape, dtype=np.uint8)
+        unsafe_targets = np.zeros(shape, dtype=np.uint8)
+        for final_mask in final_masks:
+            _refined, decision = refine_mask_with_hand(final_mask, hand_evidence)
+            if decision in {"over_cap", "too_small"}:
+                unsafe_targets = np.maximum(unsafe_targets, final_mask)
+            elif decision == "refined":
+                safe_hand = np.maximum(safe_hand, final_mask & hand_evidence)
+        safe_hand = np.where(unsafe_targets > 0, 0, safe_hand).astype(np.uint8) * 255
+
+        fluid_union = np.zeros(shape, dtype=np.uint8)
+        if self.settings["detection"]["fluid_exclusion_enabled"]:
+            for final_mask in final_masks:
+                if np.any(final_mask):
+                    fluid_union = np.maximum(fluid_union, white_fluid_mask(rgb, final_mask))
+
+        # Publish just the reviewable hand and fluid exclusions for final
+        # targets. Other detector segments do not participate in APPLY.
+        for segment in targets:
+            segment["image_exclusions"] = {}
+            segment["exclusions"] = {}
+        if np.any(safe_hand):
+            targets[0]["image_exclusions"]["hand"] = safe_hand
+        if np.any(fluid_union):
+            targets[0]["exclusions"]["fluid"] = fluid_union
         return segments
 
     def _high_precision_segments(
@@ -535,7 +551,7 @@ class DetectionMixin:
                 _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
-                    class_name=SOURCE_LABELS[f"{exclusion_kind}_exclusion"],
+                    label_token=exclusion_kind,
                     confidence=None,
                     mask_path=exclusion_path,
                     color="#4ac3df",
@@ -556,7 +572,7 @@ class DetectionMixin:
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
-                    class_name=segment["class_name"],
+                    label_token=segment["class_name"],
                     confidence=segment["confidence"],
                     mask_path=mask_path,
                     color=DEFAULT_COLORS.get(segment["class_name"], "#5bb6d5"),
@@ -573,7 +589,7 @@ class DetectionMixin:
                 _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
-                    class_name=SOURCE_LABELS[exclusion_source],
+                    label_token=exclusion_kind,
                     confidence=None,
                     mask_path=exclusion_path,
                     color="#4ac3df",
@@ -670,7 +686,7 @@ class DetectionMixin:
             candidate_id = uuid.uuid4().hex
             created = [Candidate(
                 candidate_id=candidate_id,
-                class_name="4点境界" if polygon_mask is not None else "境界",
+                label_token="boundary_polygon" if polygon_mask is not None else "boundary",
                 confidence=confidence,
                 mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
                 color="#ffffff", source="boundary", origin="boundary",
@@ -686,7 +702,7 @@ class DetectionMixin:
                 exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
                 created.append(Candidate(
-                    candidate_id=exclusion_id, class_name=SOURCE_LABELS[exclusion_source], confidence=None,
+                    candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
                     mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
                     source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
                     enabled=True,
@@ -721,9 +737,6 @@ class DetectionMixin:
                     path.unlink(missing_ok=True)
                 raise
         return {
-            "candidates": [
-                item.as_api_dict(SOURCE_LABELS.get(item.source, item.source), REFINEMENT_LABELS.get(item.refinement or "", ""))
-                for item in created
-            ],
+            "candidates": [item.as_api_dict() for item in created],
             "candidateRevision": revision,
         }

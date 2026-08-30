@@ -104,7 +104,7 @@ class LiveHttpEndpointTests(unittest.TestCase):
 
         status, _headers, body = self.request("GET", "/missing-file")
         self.assertEqual(status, 404)
-        self.assertEqual(json.loads(body)["error"], "見つかりません。")
+        self.assertEqual(json.loads(body), {"error_code": "api_not_found", "params": {}})
 
     def test_live_mutations_enforce_session_then_change_catalog(self) -> None:
         status, headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)})

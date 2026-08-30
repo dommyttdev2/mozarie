@@ -68,6 +68,7 @@ const document = {
   },
 };
 const context = {
+  responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = typeof payload?.error_code === "string" ? payload.error_code : (response.status === 404 ? "api_not_found" : "internal_error"); error.params = payload?.params || {}; return error; },
   console, Promise, Set, Map, Array, Object, Math, Number, Boolean, String, Error,
   AbortController, DOMException, setTimeout, clearTimeout, encodeURIComponent, crypto: { randomUUID: () => `key-${++unique}` },
   state, document, window: { innerWidth: 300, innerHeight: 200 }, navigator: { clipboard: { writeText: async (value) => { calls.push(["copy", value]); } } },
@@ -134,6 +135,16 @@ const file = (name) => ({ name, size: 1, lastModified: 1 });
 
   images = [{ id: "one", sourcePath: "C:/one.png" }, { id: "two" }]; state.images = images; state.currentId = "one"; state.currentImage = images[0]; state.selectedImageIds = new Set(["one"]);
   test.positionCatalogContextMenu(element("#catalogContextMenu"), -1, 999);
+  const pointerOrigin = element("#pointer-origin"); const pointerTarget = element("#pointer-target"); document.activeElement = pointerOrigin;
+  test.openCatalogContextMenu({ ...event("", "contextmenu"), currentTarget: pointerTarget }, "two");
+  assert.equal(state.contextMenuOrigin, pointerOrigin, "a pointer context menu restores the previously focused catalog card");
+  assert.equal(document.activeElement, pointerOrigin, "a pointer context menu does not move focus to its target or menu");
+  test.closeCatalogContextMenu(); assert.equal(document.activeElement, pointerOrigin, "closing a pointer context menu preserves its prior focus");
+  const keyboardTarget = element("#keyboard-target");
+  test.openCatalogContextMenu({ ...event("", "keydown"), currentTarget: keyboardTarget }, "one");
+  assert.equal(state.contextMenuOrigin, keyboardTarget, "a keyboard context menu restores its invoking card");
+  assert.equal(document.activeElement, element("#toggleReviewMenuItem"), "a keyboard context menu moves focus into its first action");
+  test.closeCatalogContextMenu(); assert.equal(document.activeElement, keyboardTarget, "closing a keyboard context menu restores its invoking card");
   test.openCatalogContextMenu(event("", "contextmenu"), "one"); await test.copyContextMenuImagePath();
   context.navigator.clipboard.writeText = async () => { throw new Error("denied"); };
   state.contextMenuImageId = "one"; state.contextMenuOrigin = element("#origin"); await test.copyContextMenuImagePath();
@@ -159,8 +170,8 @@ const file = (name) => ({ name, size: 1, lastModified: 1 });
   await test.importFiles([{ file: file("pause.png"), relativePath: "pause.png", fileHandle: null, parentHandle: null }]);
   context.showProcessing = normalProcessing;
   const originalFetch = context.fetch;
-  context.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: "bad" }) });
-  await assert.rejects(test.importSingleFile({ file: file("a.png"), relativePath: "a.png" }, "k"), /bad/);
+  context.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error_code: "input_invalid" }) });
+  await assert.rejects(test.importSingleFile({ file: file("a.png"), relativePath: "a.png" }, "k"), (error) => error?.code === "input_invalid");
   context.fetch = originalFetch;
   const importSession = test.beginImportSession(); assert.ok(importSession); test.finishImportSession(importSession); assert.equal(await test.waitForImportSession({ paused: false, cancelled: false }), false);
   const handles = [{ name: "a.png", getFile: async () => file("a.png") }]; await test.importFileHandles(handles);
@@ -215,7 +226,7 @@ const file = (name) => ({ name, size: 1, lastModified: 1 });
   await test.importSingleFile({ file: file("no-token.png"), relativePath: "no-token.png" }, "k");
   document.querySelector = originalQuery;
   context.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
-  await assert.rejects(test.importSingleFile({ file: file("error.png"), relativePath: "error.png" }, "k"), /error.requestFailed/);
+  await assert.rejects(test.importSingleFile({ file: file("error.png"), relativePath: "error.png" }, "k"), (error) => error?.code === "internal_error");
   context.fetch = originalFetch;
   test.remapImportedImageIds({}); state.currentId = "old"; state.pendingImageId = "old"; test.remapImportedImageIds({ old: "new" });
   assert.equal(await test.waitForImportSession({ paused: false, cancelled: true }), false);

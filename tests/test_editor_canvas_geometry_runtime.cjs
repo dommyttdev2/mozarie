@@ -53,6 +53,7 @@ class Worker {
   terminate() { this.terminated = true; }
 }
 const context = {
+  codedError(code) { const error = new Error(); error.code = code; return error; },
   state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
   window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 },
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
@@ -263,10 +264,10 @@ test.render(); test.flushRender();
   assert.equal(context.lastUserError, loadError, "image load failures reach the standard user error path");
 
   context.Image = class { set src(_source) { this.onerror(); } };
-  await assert.rejects(test.loadImage("bad-image"), /error.imageLoad/);
+  await assert.rejects(test.loadImage("bad-image"), (error) => error?.code === "image_read_failed");
   context.FileReader = class { readAsDataURL() { this.error = new Error("encode failed"); this.onerror(); } };
   const encodeCanvas = canvas(); encodeCanvas.toBlob = (done) => done({});
-  await assert.rejects(test.canvasToDataUrl(encodeCanvas), /encode failed/);
+  await assert.rejects(test.canvasToDataUrl(encodeCanvas), (error) => error?.code === "internal_error");
 
   state.currentId = "image"; state.currentImage = { width: 100, height: 80 }; state.draftDirty = true; state.draftLayerDirty = new Set(); state.historyBaseDirty = false;
   state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(); state.removedCandidateIds = new Set();

@@ -130,6 +130,7 @@ function closeCatalogContextMenu({ restoreFocus = true } = {}) {
   const menu = $("#catalogContextMenu");
   if (menu.matches?.(":popover-open")) menu.hidePopover();
   state.contextMenuImageId = null;
+  state.contextMenuScroll = null;
   const origin = state.contextMenuOrigin;
   state.contextMenuOrigin = null;
   if (restoreFocus) focusElement(origin);
@@ -150,21 +151,21 @@ function openCatalogContextMenu(event, imageId) {
   if (!image) return;
   event.preventDefault();
   state.contextMenuImageId = imageId;
-  state.contextMenuOrigin = event.currentTarget || document.activeElement;
+  const keyboardEvent = event.type === "keydown";
+  state.contextMenuOrigin = keyboardEvent ? event.currentTarget : document.activeElement;
+  state.contextMenuScroll = { gallery: $("#gallery").scrollTop, overview: $("#overviewGrid").scrollTop };
   $("#toggleReviewMenuItem").textContent = t(isReviewed(image) ? "context.unreview" : "context.review");
   $("#copyImagePathMenuItem").hidden = !image.sourcePath;
   $("#removeImageMenuItem").textContent = t(isHidden(image) ? "editor.show" : "editor.hide");
   const menu = $("#catalogContextMenu");
   const cardRect = state.contextMenuOrigin?.getBoundingClientRect?.();
-  const keyboardEvent = event.type === "keydown";
   const clientX = !keyboardEvent && Number.isFinite(event.clientX) ? event.clientX : (cardRect ? cardRect.left + Math.min(24, cardRect.width / 2) : 8);
   const clientY = !keyboardEvent && Number.isFinite(event.clientY) ? event.clientY : (cardRect ? cardRect.top + Math.min(24, cardRect.height / 2) : 8);
   menu.style.left = `${clientX}px`;
   menu.style.top = `${clientY}px`;
   menu.showPopover?.();
   positionCatalogContextMenu(menu, clientX, clientY);
-  focusElement($("#toggleReviewMenuItem"));
-  if (state.currentId !== imageId) void selectImage(imageId);
+  if (keyboardEvent) focusElement($("#toggleReviewMenuItem"));
 }
 
 async function copyContextMenuImagePath() {
@@ -370,11 +371,7 @@ async function importSingleFile(entry, clientKey, catalogId = null) {
     body: entry.file,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(data.error || t("error.requestFailed"));
-    error.status = response.status;
-    throw error;
-  }
+  if (!response.ok) throw responseError(response, data);
   return data;
 }
 

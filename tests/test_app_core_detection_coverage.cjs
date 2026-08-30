@@ -98,7 +98,7 @@ async function testApplicationStartupPaths() {
   };
   for (const name of [
     "saveSettings", "syncProviderSelection", "handleToolRailKeydown", "loadFolder", "saveAll", "saveCurrent",
-    "startDetectionFromDialog", "startApplyFromDialog", "chooseOutputDirectory", "importDroppedFiles", "cancelBoundary",
+    "startDetectionFromDialog", "startApplyFromDialog", "startSingleSave", "chooseSingleOutputDirectory", "syncSingleSaveMode", "rememberedOutputDirectoryHandle", "renderOutputDirectory", "chooseOutputDirectory", "importDroppedFiles", "cancelBoundary",
     "restoreSnapshot", "copyContextMenuImagePath", "modelDownloadPoll", "fitImage", "refreshApplyTargets",
   ]) context[name] = () => {};
   context.toolRailItems = () => [];
@@ -107,8 +107,8 @@ async function testApplicationStartupPaths() {
   vm.runInNewContext(`${source}\nglobalThis.appCoverage={ initialise, bindEvents };`, context, { filename: path.join(jsRoot, "app.js") });
 
   // Initial load without the File System Access API uses the browser guidance.
-  await Promise.resolve();
-  assert.match(document.body.textContent, /File System Access API/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.body.textContent, "error.browserUnsupported");
 
   context.window.showOpenFilePicker = async () => [];
   context.window.showDirectoryPicker = async () => ({});
@@ -163,7 +163,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   Object.assign(coreState, state);
   coreState.workspaceFlagPending = new Map();
 
-  assert.equal(test.t("unknown"), "unknown");
+  assert.equal(test.t("unknown"), "");
   await test.loadTranslations();
   context.fetch = async () => ({ ok: true, json: async () => null });
   await test.loadTranslations();
@@ -176,6 +176,9 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   pendingTranslations.shift()({ ok: true, json: async () => ({ value: "new" }) });
   assert.equal(await currentTranslation, true);
   context.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  coreState.translations = { stale: "old locale" };
+  await test.loadTranslations("en");
+  assert.equal(Object.keys(coreState.translations).length, 0, "a failed locale request does not retain another locale");
   await assert.rejects(test.api("/api/failure"), (error) => error.code === "internal_error");
   test.setStatusKey("error.other", {}, "error");
   test.abortCatalogLoads();
@@ -188,11 +191,25 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   coreState.images.push(reloaded);
   assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "old.png" }, reloaded), true);
   test.clearBoundaryConstruction();
+  coreState.translations = {
+    "duration.hour": "duration hour", "duration.minute": "duration minute", "duration.second": "duration second",
+    "status.progressCount": "status {completed}/{total}", "status.eta": "status {duration}",
+  };
   assert.match(test.formatDuration(3661), /duration/);
   assert.match(test.formatDuration(61), /duration/);
   assert.match(test.formatDuration(1), /duration/);
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3, startedAt: "job", activeElapsed: 3 }), /status/);
   test.updateActionButtons();
+  // The save dialog has a separate restriction and retains its live pause
+  // control while the rest of the UI is locked.
+  coreState.applyTargetIds = ["one"];
+  context.applyRestrictionMessage = () => "restricted";
+  context.document.querySelectorAll = (selector) => selector === "button, input, select, textarea" ? [element("applyPauseButton")] : [];
+  coreState.applyRunning = true; coreState.saving = true;
+  test.updateActionButtons();
+  coreState.applyRunning = false; coreState.saving = false;
+  context.applyRestrictionMessage = () => "";
+  context.document.querySelectorAll = () => [];
   coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenPaths.add("one.png");
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";

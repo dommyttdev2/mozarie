@@ -115,7 +115,7 @@ async function saveCurrent() {
   if (state.candidateUpdateChains.size) await waitForCandidateMutations();
   const record = state.images.find((image) => image.id === imageId);
   if (isBusy() || state.importing || state.currentId !== imageId || !record || !imageHasMask(record)) return;
-  await openApplyDialog({ initialMode: "current" });
+  await openSingleSaveDialog(imageId);
 }
 
 async function saveAll() {

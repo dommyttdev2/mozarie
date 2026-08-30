@@ -20,6 +20,8 @@ __pycache__/
 node_modules/
 .playwright-browsers/
 coverage/
+.coverage
+coverage.xml
 
 # Logs and Windows metadata
 *.log

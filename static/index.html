@@ -45,7 +45,7 @@
         <button id="overviewButton" type="button" data-i18n="navigation.overview">画像一覧</button>
       </div>
       <div class="gallery-viewport">
-        <div id="gallery" class="gallery" data-i18n-aria-label="gallery.drop">
+        <div id="gallery" class="gallery" data-i18n-aria-label="gallery.aria">
           <div id="galleryEmptyState" class="gallery-empty-state" data-i18n="gallery.empty">画像を追加してください</div>
           <div id="galleryFilteredEmptyState" class="gallery-empty-state" hidden data-i18n="gallery.filteredEmpty">該当する画像はありません</div>
         </div>
@@ -171,7 +171,7 @@
         <button id="selectionClearButton" type="button" data-i18n="selection.end">終了</button>
       </div>
       <div class="overview-grid-viewport">
-        <div id="overviewGrid" class="overview-grid"></div>
+        <div id="overviewGrid" class="overview-grid" data-i18n-aria-label="overview.aria"></div>
         <p id="overviewEmptyState" class="overview-empty-state" hidden data-i18n="overview.empty">該当する画像はありません</p>
       </div>
     </section>
@@ -333,12 +333,12 @@
   <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount">
     <form id="applyForm" class="dialog-body">
       <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
-      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="current" data-i18n="apply.targetCurrent">この画像</option><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
+      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
-        <label class="choice-row"><input id="applyCopyMode" type="radio" name="saveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
-        <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="saveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
-        <label id="applySuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored" required></label>
+        <label class="choice-row"><input id="applyCopyMode" type="radio" name="batchSaveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
+        <label id="applyOverwriteRow" class="choice-row"><input id="applyOverwriteMode" type="radio" name="batchSaveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
+        <label id="applySuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="applySuffix" type="text" value="_censored"></label>
         <label id="deleteOriginalRow" class="choice-row"><input id="deleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
         <div id="applyOutputDirectoryRow" class="output-directory-row">
           <input id="applyOutputDirectoryStatus" class="fixed-note" type="text" readonly data-i18n-dynamic data-i18n-aria-label="settings.defaultOutputDirectory" aria-label="既定の保存先">
@@ -361,6 +361,21 @@
         <button id="applyCancelButton" type="button" hidden class="danger" data-i18n="dialog.cancelJob">キャンセル</button>
         <button id="applyStartButton" type="submit" class="primary" data-i18n="apply.start">保存</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="singleSaveDialog" class="modal-dialog apply-dialog" aria-labelledby="singleSaveDialogTitle">
+    <form id="singleSaveForm" class="dialog-body">
+      <h2 id="singleSaveDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
+      <fieldset id="singleSaveSettings">
+        <label class="choice-row"><input id="singleSaveCopyMode" type="radio" name="singleSaveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
+        <label id="singleSaveOverwriteRow" class="choice-row"><input id="singleSaveOverwriteMode" type="radio" name="singleSaveMode" value="overwrite"><span data-i18n="apply.overwrite">元画像を上書き</span></label>
+        <label id="singleSaveSuffixRow" class="form-row"><span data-i18n="apply.suffix">ファイル名の末尾</span><input id="singleSaveSuffix" type="text" value="_censored"></label>
+        <label id="singleSaveDeleteOriginalRow" class="choice-row"><input id="singleSaveDeleteOriginal" type="checkbox"><span data-i18n="apply.deleteOriginal">コピー成功後に元画像を削除</span></label>
+        <div id="singleSaveOutputDirectoryRow" class="output-directory-row"><output id="singleSaveOutputDirectoryStatus" class="fixed-note" aria-live="polite"></output><button id="singleSaveChooseOutputDirectoryButton" type="button" data-i18n="apply.changeOutputDirectory">保存先を変更</button></div>
+      </fieldset>
+      <p id="singleSaveResult" class="dialog-result" aria-live="polite"></p>
+      <div class="dialog-actions"><button id="singleSaveCloseButton" type="button" data-i18n="dialog.close">閉じる</button><button id="singleSaveStartButton" type="submit" class="primary" data-i18n="apply.start">保存</button></div>
     </form>
   </dialog>
 

@@ -7,6 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 
 
+CANDIDATE_LABEL_TOKENS = frozenset({"penis", "pussy", "testicles", "boundary", "boundary_polygon", "hand", "fluid"})
+CANDIDATE_SOURCE_TOKENS = frozenset({"auto", "target", "ntd11", "sensitive", "boundary", "hand_exclusion", "fluid_exclusion"})
+CANDIDATE_REFINEMENT_TOKENS = frozenset({"sam_fallback", "sam_high_precision"})
+
+
 class CandidateRole(StrEnum):
     """How a candidate contributes to the final mosaic mask."""
 
@@ -19,7 +24,7 @@ class Candidate:
     """A cached mask proposed by automatic, boundary or manual editing."""
 
     candidate_id: str
-    class_name: str
+    label_token: str
     confidence: float | None
     mask_path: Path
     enabled: bool = True
@@ -30,18 +35,24 @@ class Candidate:
     role: CandidateRole = CandidateRole.APPLY
     forced: bool = True
 
-    def as_api_dict(self, source_label: str, refinement_label: str = "") -> dict[str, object]:
+    def __post_init__(self) -> None:
+        if self.label_token not in CANDIDATE_LABEL_TOKENS:
+            raise ValueError("candidate label token is invalid")
+        if self.source not in CANDIDATE_SOURCE_TOKENS:
+            raise ValueError("candidate source token is invalid")
+        if self.refinement is not None and self.refinement not in CANDIDATE_REFINEMENT_TOKENS:
+            raise ValueError("candidate refinement token is invalid")
+
+    def as_api_dict(self) -> dict[str, object]:
         return {
             "id": self.candidate_id,
-            "className": self.class_name,
+            "labelToken": self.label_token,
             "confidence": self.confidence,
             "enabled": self.enabled,
             "color": self.color,
             "source": self.source,
             "origin": self.origin,
-            "sourceLabel": source_label,
             "refinement": self.refinement,
-            "refinementLabel": refinement_label,
             "role": self.role.value,
             "forced": self.forced if self.role == CandidateRole.EXCLUDE else False,
         }

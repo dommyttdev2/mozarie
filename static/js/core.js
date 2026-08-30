@@ -14,13 +14,13 @@ const state = {
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null,
-  outputDirectoryPicking: false,
+  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
+  outputDirectoryPicking: false, outputDirectoryHandle: null, singleSave: null,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   manualMaskPresent: false, manualEnabled: true, manualExclusionEnabled: true, manualExclusionForced: true, manualExclusionEraseEnabled: true,
-  galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, browserSave: null, pollInFlight: null, pollFailures: 0,
+  galleryNodes: new Map(), overviewNodes: new Map(), contextMenuImageId: null, contextMenuOrigin: null, contextMenuScroll: null, browserSave: null, pollInFlight: null, pollFailures: 0,
   // Browser file handles never leave this tab. They make imported images real save targets.
   sourceAccess: new Map(),
   processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
@@ -65,14 +65,10 @@ let renderedHeight = 0;
 let translationGeneration = 0;
 
 function t(key, params = {}) {
-  let value = state.translations[key] || key;
+  let value = state.translations[key];
+  if (typeof value !== "string") return "";
   for (const [name, replacement] of Object.entries(params)) value = value.replaceAll(`{${name}}`, replacement);
   return value;
-}
-
-function errorCodeTranslationKey(code, params = {}) {
-  if (code === "gpu_out_of_memory") return `errorCode.gpu_out_of_memory_${Number(params.parallelism) > 1 ? "parallel" : "single"}`;
-  return `errorCode.${code}`;
 }
 
 const USER_ERROR_CODES = {
@@ -82,22 +78,42 @@ const USER_ERROR_CODES = {
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
   sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
   model_picker_busy: "operation_in_progress", model_picker_failed: "model_picker_failed", model_picker_invalid: "model_file_invalid",
-  model_download_invalid: "model_download_failed", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
+  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
   mask_not_found: "mask_not_found", invalid_settings: "input_invalid", invalid_request: "input_invalid",
-  api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", request_failed: "internal_error",
+  api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", output_permission_denied: "output_permission_denied", request_failed: "internal_error",
   image_not_found: "image_not_found", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
   save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
   source_restore_failed: "source_restore_failed",
+  source_permission_denied: "source_permission_denied", source_action_unavailable: "source_action_unavailable",
   source_busy: "source_busy",
   clipboard_write_failed: "clipboard_write_failed",
   workspace_corrupt: "workspace_corrupt", workspace_write_failed: "workspace_write_failed", workspace_database_error: "workspace_write_failed",
   output_unavailable: "output_folder_unavailable", model_not_configured: "model_not_configured",
+  directory_picker_unsupported: "directory_picker_unsupported", output_name_exhausted: "output_name_exhausted",
   model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed", sam_checkpoint_missing: "sam_checkpoint_missing",
   gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
   input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
   model_download_write_failed: "model_download_write_failed", model_download_integrity: "model_download_integrity",
+  mosaic_preview_failed: "mosaic_preview_failed",
   internal_error: "internal_error",
 };
+
+const CANDIDATE_CLASS_TOKENS = new Set(["penis", "pussy", "testicles", "boundary", "boundary_polygon", "hand", "fluid"]);
+const CANDIDATE_SOURCE_TOKENS = new Set(["auto", "target", "ntd11", "sensitive", "boundary", "hand_exclusion", "fluid_exclusion"]);
+const CANDIDATE_REFINEMENT_TOKENS = new Set(["sam_fallback", "sam_high_precision"]);
+
+function validCandidateTokens(candidate) {
+  return CANDIDATE_CLASS_TOKENS.has(candidate?.labelToken)
+    && CANDIDATE_SOURCE_TOKENS.has(candidate.source)
+    && (candidate.refinement === null || CANDIDATE_REFINEMENT_TOKENS.has(candidate.refinement));
+}
+
+function codedError(code, params = {}) {
+  const error = new Error();
+  error.code = code;
+  error.params = params;
+  return error;
+}
 
 function userErrorCode(error) {
   const code = typeof error === "string" ? error : error?.code;
@@ -119,6 +135,12 @@ function showUserError(error, invoker = document.activeElement) {
 async function loadTranslations(languageOverride = null) {
   const generation = ++translationGeneration;
   const language = languageOverride === "en" || (!languageOverride && state.settings?.general?.language === "en") ? "en" : "ja";
+  document.documentElement.lang = language;
+  state.translations = {};
+  document.querySelectorAll("[data-i18n]:not([data-i18n-dynamic]), .candidate-section h3").forEach((element) => { element.textContent = ""; });
+  document.querySelectorAll("[data-i18n-title]").forEach((element) => { element.removeAttribute("title"); });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => { element.removeAttribute("aria-label"); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => { element.removeAttribute("placeholder"); });
   let translations;
   try {
     const response = await fetch(`/i18n/${language}.json`);
@@ -130,7 +152,6 @@ async function loadTranslations(languageOverride = null) {
   }
   if (generation !== translationGeneration) return false;
   state.translations = translations;
-  document.documentElement.lang = language;
   document.querySelectorAll("[data-i18n]:not([data-i18n-dynamic])").forEach((element) => {
     const value = state.translations[element.dataset.i18n]; if (value) element.textContent = value;
   });
@@ -154,6 +175,16 @@ async function loadTranslations(languageOverride = null) {
   return true;
 }
 
+function responseError(response, payload) {
+  const code = typeof payload?.error_code === "string"
+    ? payload.error_code
+    : (response.status === 404 ? "api_not_found" : "internal_error");
+  const params = payload?.params && typeof payload.params === "object" && !Array.isArray(payload.params) ? payload.params : {};
+  const error = codedError(code, params);
+  error.status = response.status;
+  return error;
+}
+
 function api(path, options = {}) {
   const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   return fetch(path, {
@@ -164,26 +195,20 @@ function api(path, options = {}) {
       if (state.status?.connectionFailure) clearStatus();
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const code = data.error_code || (response.status === 404 ? "api_not_found" : "internal_error");
-        const localized = t(errorCodeTranslationKey(code, data.params || {}), data.params || {});
-        const message = localized !== errorCodeTranslationKey(code, data.params || {}) ? localized : t("error.requestFailed");
-        const error = new Error(message);
-        error.status = response.status;
-        error.code = code;
-        throw error;
+        throw responseError(response, data);
       }
       return data;
     })
     .catch((error) => {
       if (error?.code) throw error;
-      const safeError = new Error(t("error.connectionLost"));
+      const safeError = new Error();
       safeError.code = "connection_lost";
       throw safeError;
     });
 }
 
 function showConnectionFailure() {
-  state.status = { message: "Mozarieに接続できません", kind: "error", connectionFailure: true };
+  state.status = { message: t("error.connectionLost"), kind: "error", connectionFailure: true };
   renderStatus();
 }
 
@@ -379,10 +404,17 @@ function saveWorkspaceFlag(image, field, desired, onSaved) {
   state.workspaceFlagPending.set(key, { desired, promise });
   return promise;
 }
+function preserveCatalogScroll(renderCatalogs, positions = null) {
+  const gallery = $("#gallery"); const overview = $("#overviewGrid");
+  const galleryTop = positions?.gallery ?? gallery.scrollTop; const overviewTop = positions?.overview ?? overview.scrollTop;
+  renderCatalogs();
+  gallery.scrollTop = galleryTop; overview.scrollTop = overviewTop;
+}
 function setHidden(image, hidden) {
+  const scroll = state.contextMenuScroll;
   return saveWorkspaceFlag(image, "hidden", hidden, () => {
     if (!state.images.some((item) => item.id === image.id)) return;
-    renderCatalogViews(); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+    preserveCatalogScroll(renderCatalogViews, scroll); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
   });
 }
 function clearStoredCatalogState() { state.reviewedPaths.clear(); state.hiddenPaths.clear(); }
@@ -401,15 +433,15 @@ function selectCatalogImage(imageId) {
   updateSelectionActionBar();
   void selectImage(imageId);
 }
-function refreshReviewViews() {
-  renderGallery(true);
-  if (state.viewMode === "overview") renderOverview();
+function refreshReviewViews(scroll = null) {
+  preserveCatalogScroll(() => { renderGallery(true); if (state.viewMode === "overview") renderOverview(); }, scroll);
   updateNavigationControls();
   updateActionButtons();
 }
 function setReviewed(image, reviewed) {
+  const scroll = state.contextMenuScroll;
   return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
-    if (state.images.some((item) => item.id === image.id)) refreshReviewViews();
+    if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
   });
 }
 async function moveReviewedPathAfterApply(previousImage, reloadedImage) {

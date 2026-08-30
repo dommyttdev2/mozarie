@@ -23,16 +23,13 @@ function trapModalTab(event) {
 
 function modelHelpInfo(key) {
   const source = (label, url) => ({ source: label, url });
-  const english = $("#settingsLanguage")?.value === "en";
   const conversionCommand = (model) => {
-    const path = model === "ntd11"
-      ? (english ? "path\\to\\downloaded\\NTD11.pt" : "ダウンロードしたNTD11の.ptファイルのパス")
-      : (english ? "path\\to\\downloaded\\Sensitive.pt" : "ダウンロードしたSensitiveの.ptファイルのパス");
+    const path = t(`modelHelp.${model}.conversionPath`);
     return `& ".\\.venv\\Scripts\\yolo.exe" export model="${path}" format=onnx imgsz=1024 batch=1 dynamic=False simplify=False opset=17 nms=False end2end=False device=cpu`;
   };
   const models = {
     target: { model: "01miku/anime-nsfw-segm-yolo26", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/01miku/anime-nsfw-segm-yolo26") },
-    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: english ? "NTD11 ZIP → .pt → .onnx" : "NTD11のZIP → .pt → .onnx", ...source("Civitai.com", "https://civitai.com/api/download/models/2350456?fileId=2240838"), command: conversionCommand("ntd11") },
+    ntd11: { model: "Anime NSFW Detection / ADetailer All-in-One", file: t("modelHelp.ntd11.file"), ...source("Civitai.com", "https://civitai.com/api/download/models/2350456?fileId=2240838"), command: conversionCommand("ntd11") },
     sensitive: { model: "sugarknight/sensitive-detect", file: ".pt → .onnx", ...source("Hugging Face", "https://huggingface.co/sugarknight/sensitive-detect"), command: conversionCommand("sensitive") },
     precision: { model: "Meta Segment Anything (SAM)", file: ".pth", ...source("Meta", "https://github.com/facebookresearch/segment-anything#model-checkpoints") },
     hand: { model: "deepghs/anime_hand_detection", file: ".onnx", ...source("Hugging Face", "https://huggingface.co/deepghs/anime_hand_detection") },
@@ -120,6 +117,10 @@ function bindEvents() {
   $("#modelDownloadClose").addEventListener("click", () => $("#modelDownloadDialog").close());
   $("#modelDownloadDialog").addEventListener("cancel", (event) => { if (modelDownloadPoll) event.preventDefault(); else $("#modelDownloadDialog").close(); });
   $("#settingsProvider").addEventListener("change", syncProviderSelection);
+  document.querySelectorAll('[data-settings-panel="models"] input, [data-settings-panel="models"] select').forEach((control) => {
+    control.addEventListener("input", markModelStatusDirty);
+    control.addEventListener("change", markModelStatusDirty);
+  });
   document.querySelectorAll('input[name="settingsSamVariant"]').forEach((radio) => radio.addEventListener("change", () => {
     if (radio.checked) selectSamVariant(radio.value, true);
   }));
@@ -264,7 +265,7 @@ function bindEvents() {
   setPaneCollapsed("inspector", false);
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
-  document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  document.querySelectorAll('input[name="batchSaveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
     showModalFromInvoker($("#mosaicHelpDialog"));
@@ -279,6 +280,12 @@ function bindEvents() {
   $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
   $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
   lightDismiss($("#applyDialog"), () => { if (!state.applyRunning) $("#applyDialog").close(); });
+  $("#singleSaveForm").addEventListener("submit", startSingleSave);
+  $("#singleSaveChooseOutputDirectoryButton").addEventListener("click", () => { void chooseSingleOutputDirectory(); });
+  document.querySelectorAll('input[name="singleSaveMode"]').forEach((input) => input.addEventListener("change", syncSingleSaveMode));
+  $("#singleSaveCloseButton").addEventListener("click", () => $("#singleSaveDialog").close());
+  $("#singleSaveDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.saving) $("#singleSaveDialog").close(); });
+  lightDismiss($("#singleSaveDialog"), () => { if (!state.saving) $("#singleSaveDialog").close(); });
   $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });
   lightDismiss($("#confirmDialog"), () => $("#confirmDialog").close("cancel"));
   $("#processingDialog").addEventListener("cancel", (event) => event.preventDefault());
@@ -482,11 +489,11 @@ function bindEvents() {
 }
 
 async function initialise() {
+  await loadTranslations();
   if (typeof window.showOpenFilePicker !== "function" || typeof window.showDirectoryPicker !== "function") {
-    document.body.textContent = "Mozarie を使うには File System Access API 対応ブラウザーが必要です。";
+    document.body.textContent = t("error.browserUnsupported");
     return;
   }
-  await loadTranslations();
   try {
     const settings = await api("/api/settings?status=0");
     setSettingsForm(settings.settings, settings.status);
@@ -496,6 +503,8 @@ async function initialise() {
     return;
   }
   await loadTranslations(); bindEvents();
+  state.outputDirectoryHandle = await rememberedOutputDirectoryHandle();
+  renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
   document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));

@@ -6,6 +6,9 @@ import re
 import unittest
 from pathlib import Path
 
+from mozarie.domain import CANDIDATE_LABEL_TOKENS, CANDIDATE_REFINEMENT_TOKENS, CANDIDATE_SOURCE_TOKENS, Candidate
+from mozarie.domain import CandidateRole
+
 
 def translation_calls(source: str) -> list[tuple[str, set[str]]]:
     calls: list[tuple[str, set[str]]] = []
@@ -67,6 +70,36 @@ def placeholders(value: str) -> set[str]:
 
 
 class TranslationContractTests(unittest.TestCase):
+    def test_candidate_tokens_and_locales_are_a_bidirectional_contract(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = {
+            "candidateLabel.": CANDIDATE_LABEL_TOKENS,
+            "candidateSource.": CANDIDATE_SOURCE_TOKENS,
+            "candidateRefinement.": CANDIDATE_REFINEMENT_TOKENS,
+        }
+        for language in ("ja", "en"):
+            dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for prefix, tokens in expected.items():
+                self.assertEqual({key.removeprefix(prefix) for key in dictionary if key.startswith(prefix)}, tokens, f"{language}: {prefix}")
+        candidate = Candidate("candidate", "penis", .9, Path("mask.png"), source="target", refinement=None, role=CandidateRole.APPLY)
+        self.assertEqual(
+            set(candidate.as_api_dict()),
+            {"id", "labelToken", "confidence", "enabled", "color", "source", "origin", "refinement", "role", "forced"},
+        )
+        for values in (("unknown", "auto", None), ("penis", "unknown", None), ("penis", "auto", "unknown")):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Candidate("invalid", values[0], .9, Path("mask.png"), source=values[1], refinement=values[2])
+
+    def test_model_download_invalid_has_its_own_error_presentation(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
+        self.assertIn('model_download_invalid: "model_download_invalid"', source)
+        for language in ("ja", "en"):
+            dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            presentation = [dictionary[f"errorDialog.model_download_invalid.{part}"] for part in ("title", "cause", "action")]
+            self.assertTrue(all(presentation), language)
+            self.assertNotEqual(presentation, [dictionary[f"errorDialog.model_download_failed.{part}"] for part in ("title", "cause", "action")])
+
     def test_translation_call_parser_recognizes_shorthand_and_named_properties(self) -> None:
         calls = translation_calls('t("sample", { completed, total: count, current });')
         self.assertEqual(calls, [("sample", {"completed", "total", "current"})])
@@ -101,6 +134,14 @@ class TranslationContractTests(unittest.TestCase):
                 placeholders(dictionaries["en"][key]),
                 key,
             )
+
+    def test_languages_have_the_same_complete_key_set(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dictionaries = {
+            language: json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+            for language in ("ja", "en")
+        }
+        self.assertEqual(set(dictionaries["ja"]), set(dictionaries["en"]))
 
     def test_detect_progress_uses_the_same_complete_contract_in_both_languages(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -155,5 +196,12 @@ class TranslationContractTests(unittest.TestCase):
 
     def test_api_does_not_use_server_error_text_as_user_interface_copy(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        source = (root / "static" / "js" / "core.js").read_text(encoding="utf-8")
-        self.assertNotIn("data.error ||", source)
+        javascript = "\n".join(path.read_text(encoding="utf-8") for path in (root / "static" / "js").glob("*.js"))
+        self.assertNotIn("data.error", javascript)
+        self.assertNotRegex(javascript, r"[\u3040-\u30ff\u3400-\u9fff]")
+
+    def test_http_error_payloads_are_codes_and_allowlisted_params(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "mozarie" / "http.py").read_text(encoding="utf-8")
+        self.assertNotIn('{"error":', source)
+        self.assertIn('"error_code": code, "params": public_error_params(code, params)', source)

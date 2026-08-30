@@ -1,3 +1,10 @@
+function candidateLabel(candidate) {
+  const className = t(`candidateLabel.${candidate.labelToken}`);
+  const source = t(`candidateSource.${candidate.source}`);
+  const refinement = candidate.refinement ? ` · ${t(`candidateRefinement.${candidate.refinement}`)}` : "";
+  return t("candidates.label", { className, source, refinement });
+}
+
 function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
@@ -84,7 +91,8 @@ function renderCandidates() {
     const role = candidate.role === "exclude" ? "exclude" : "apply";
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-${role}`;
     row.classList.toggle("enabled", candidate.enabled);
-    const enabled = makeToggle(candidate.enabled, t("candidates.toggle", { label: candidate.className }), async () => {
+    const labelText = candidateLabel(candidate);
+    const enabled = makeToggle(candidate.enabled, t("candidates.toggle", { label: labelText }), async () => {
       if (isBusy() || state.importing) return;
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
@@ -96,12 +104,12 @@ function renderCandidates() {
     const blink = makeDisplay(candidate.id);
     row.dataset.candidateBlinkId = candidate.id; row.dataset.candidateBlinkRole = role;
     const label = document.createElement("span"); label.className = "candidate-label";
-    const name = document.createElement("span"); name.className = "candidate-class"; name.textContent = candidate.className;
+    const name = document.createElement("span"); name.className = "candidate-class"; name.textContent = labelText;
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
     confidence.textContent = Number.isFinite(candidate.confidence) ? `${Math.round(candidate.confidence * 100)}%` : "";
     label.append(name, confidence);
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting || state.candidateBatchPending.has(state.currentId);
-    const deleteLabel = t("candidates.delete", { label: candidate.className });
+    const deleteLabel = t("candidates.delete", { label: labelText });
     remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
     remove.addEventListener("click", () => deleteCandidate(candidate));
     if (role === "exclude") {
@@ -160,6 +168,7 @@ function syncCandidateDisplayButtons() {
 function clearCandidateBlink() {
   state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkPhase = false;
   if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
+  if (typeof releaseBlinkCanvas === "function") releaseBlinkCanvas();
   $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
 }
 
@@ -488,6 +497,7 @@ function updateHistoryButtons() {
 
 function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
+  if (typeof ensureHistoryCanvases === "function") ensureHistoryCanvases();
   copyCanvas(addCanvas, historyAddCanvas); copyCanvas(exclusionCanvas, historyExclusionCanvas); copyCanvas(exclusionEraseCanvas, historyExclusionEraseCanvas);
   state.historyRemovedCandidateIds = new Set(state.removedCandidateIds || []);
   state.historyCandidateIds = new Set(state.candidates.map((candidate) => candidate.id));

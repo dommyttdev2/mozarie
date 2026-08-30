@@ -13,7 +13,7 @@ function isTerminalApply(job) {
   return state.applyRunning || (job.startedAt != null && state.handledApplyStartedAt !== job.startedAt);
 }
 
-function selectedSaveMode() { return document.querySelector('input[name="saveMode"]:checked').value; }
+function selectedSaveMode() { return document.querySelector('input[name="batchSaveMode"]:checked').value; }
 function sourceAccessFor(imageId) { return state.sourceAccess.get(imageId) || null; }
 function sourceCanOverwrite(image) { return image?.sourceKind === "filesystem" || Boolean(sourceAccessFor(image?.id)?.fileHandle); }
 function sourceCanDelete(image) {
@@ -57,7 +57,7 @@ function syncApplyMode() {
     : (!canDelete ? t("apply.deleteUnavailable", { count: state.applyTargetIds.filter((imageId) => !sourceCanDelete(state.images.find((image) => image.id === imageId))).length }) : "");
   $("#applyTemporarySourceNote").textContent = restriction || capabilityNote || t("apply.handleSource");
   $("#applyTemporarySourceNote").hidden = !restriction && !capabilityNote;
-  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning || state.saveStarting || state.applyTargetIds.length === 0;
+  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning || state.saveStarting || state.applyTargetIds.length === 0 || (copying && !state.outputDirectoryHandle);
 }
 
 function refreshApplyTargets() {
@@ -90,6 +90,148 @@ async function openApplyDialog(options = {}) {
   showModalFromInvoker($("#applyDialog"), invoker);
 }
 
+function selectedSingleSaveMode() { return document.querySelector('input[name="singleSaveMode"]:checked').value; }
+function setSingleSaveResult(message, error = false) {
+  const result = $("#singleSaveResult"); result.textContent = message; result.classList.toggle("error", error);
+}
+function syncSingleSaveMode() {
+  const save = state.singleSave;
+  const image = state.images.find((entry) => entry.id === save?.imageId);
+  const copying = selectedSingleSaveMode() === "copy";
+  const canOverwrite = sourceCanOverwrite(image);
+  const canDelete = sourceCanDelete(image);
+  $("#singleSaveSuffixRow").hidden = !copying;
+  $("#singleSaveDeleteOriginalRow").hidden = !copying;
+  $("#singleSaveOutputDirectoryRow").hidden = !copying;
+  $("#singleSaveOverwriteMode").disabled = !canOverwrite || state.saving || state.saveStarting;
+  $("#singleSaveOverwriteRow").classList.toggle("muted", !canOverwrite);
+  $("#singleSaveDeleteOriginal").disabled = !canDelete || state.saving || state.saveStarting;
+  if (!canDelete) $("#singleSaveDeleteOriginal").checked = false;
+  $("#singleSaveChooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
+  $("#singleSaveStartButton").disabled = state.saving || state.saveStarting || !image || (copying && !state.outputDirectoryHandle) || (!copying && !canOverwrite);
+  $("#singleSaveSettings").disabled = state.saving || state.saveStarting;
+  renderOutputDirectory();
+}
+
+async function openSingleSaveDialog(imageId = state.currentId) {
+  const invoker = document.activeElement;
+  if (!imageId || isBusy() || state.importing) return;
+  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+  try { await flushDraftSaves([imageId]); }
+  catch (error) { showUserError(error, invoker); return; }
+  const image = state.images.find((entry) => entry.id === imageId);
+  if (!image || isBusy() || state.importing) return;
+  state.singleSave = { imageId, divisor: Number($("#divisor").value), draft: draftPayload([imageId])[imageId] || null, invoker };
+  $("#singleSaveCopyMode").checked = true;
+  $("#singleSaveDeleteOriginal").checked = false;
+  setSingleSaveResult("");
+  syncSingleSaveMode();
+  showModalFromInvoker($("#singleSaveDialog"), invoker);
+}
+
+async function chooseSingleOutputDirectory() {
+  if (state.saving || state.saveStarting) return;
+  try { await pickOutputDirectory(); setSingleSaveResult(""); }
+  catch (error) { if (error?.name !== "AbortError") { setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveChooseOutputDirectoryButton")); } }
+  syncSingleSaveMode();
+}
+
+function singleOutputName(relativePath, suffix, sequence = 0) {
+  const name = String(relativePath).split("/").at(-1) || "image";
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  return `${stem}${suffix}${sequence ? `_${sequence}` : ""}${extension}`;
+}
+
+async function writeSingleOutput(handle, relativePath, suffix, response) {
+  let fileHandle; let name;
+  for (let sequence = 0; sequence < 10000; sequence += 1) {
+    name = singleOutputName(relativePath, suffix, sequence);
+    try { await handle.getFileHandle(name); }
+    catch (error) {
+      if (error?.name !== "NotFoundError") throw error;
+      fileHandle = await handle.getFileHandle(name, { create: true }); break;
+    }
+  }
+  if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
+  const stream = await fileHandle.createWritable({ keepExistingData: false });
+  try { await response.body.pipeTo(stream); }
+  catch (error) { try { await stream.abort?.(); } catch {} throw error; }
+  return { name, fileHandle };
+}
+
+async function renderSingleSave(payload) {
+  const response = await fetch("/api/save/render", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+    body: JSON.stringify(payload),
+  });
+  if (response.ok) return response;
+  const body = await response.json().catch(() => ({})); const error = new Error("save_render_failed"); error.code = body.error_code || "internal_error"; error.status = response.status; throw error;
+}
+
+async function startSingleSave(event) {
+  event.preventDefault();
+  const save = state.singleSave;
+  const image = state.images.find((entry) => entry.id === save?.imageId);
+  if (!save || !image || state.saving || state.saveStarting || isBusy() || state.importing) return;
+  const mode = selectedSingleSaveMode(); const copying = mode === "copy";
+  const deleteOriginal = copying && $("#singleSaveDeleteOriginal").checked;
+  const suffix = $("#singleSaveSuffix").value;
+  if (copying && !state.outputDirectoryHandle) return syncSingleSaveMode();
+  state.saveStarting = true;
+  syncSingleSaveMode();
+  try {
+    if (copying) await ensureOutputDirectoryPermission();
+    if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
+    if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
+    state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
+    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let sourceChanged = false;
+    try {
+    const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false }) });
+    entry = prepared.entries?.[0]; if (!entry) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
+    const access = sourceAccessFor(save.imageId);
+    if (!copying) await ensureSaveSources([save.imageId], "overwrite", false);
+    const response = await renderSingleSave({ imageId: save.imageId, candidateRevision: entry.candidateRevision, divisor: save.divisor, draft: save.draft, copyToBrowser: copying, suffix });
+    saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
+    if (!saveToken) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
+    let sourceAction = "overwrite";
+    if (copying) {
+      output = await writeSingleOutput(state.outputDirectoryHandle, entry.relativePath, suffix, response);
+      sourceAction = deleteOriginal ? "deleted" : "keep";
+      if (deleteOriginal && access?.fileHandle) { await ensureHandlePermission(access, true); sourceSnapshot = await snapshotSourceHandle(access); await removeSourceHandle(access); sourceChanged = true; }
+    } else if (access?.fileHandle) {
+      sourceSnapshot = await snapshotSourceHandle(access); await writeSourceHandle(access, response); sourceChanged = true;
+    }
+    let committed;
+    try { committed = await commitBrowserSaveWithRetry({ imageId: save.imageId, candidateRevision: entry.candidateRevision, saveToken, sourceAction }); }
+    catch (error) {
+      if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
+      if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) await restoreSourceHandle(access, sourceSnapshot, deleteOriginal);
+      if (output) await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
+      throw error;
+    }
+    const latest = await api("/api/images"); state.images = latest.images;
+    const savedImage = state.images.find((item) => item.id === save.imageId);
+    if (savedImage) await setReviewed(savedImage, true);
+    state.drafts.delete(save.imageId); state.maskStatus.delete(save.imageId); pruneSourceAccess();
+    if (savedImage && state.currentId === save.imageId) await selectImage(save.imageId, true, { saveCurrentDraft: false });
+    renderCatalogViews();
+    setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${state.outputDirectoryHandle.name}/${output.name}` : t("apply.complete", { completed: 1 }));
+    } catch (error) {
+      if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
+      setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveStartButton"));
+    } finally {
+      state.saving = false; updateActionButtons(); syncSingleSaveMode();
+    }
+  } catch (error) {
+    setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true);
+    showUserError(error, $("#singleSaveStartButton"));
+  } finally {
+    state.saveStarting = false; updateActionButtons(); syncSingleSaveMode();
+  }
+}
+
 function draftPayload(imageIds) {
   const drafts = {};
   for (const imageId of imageIds) {
@@ -106,9 +248,11 @@ function draftPayload(imageIds) {
 }
 
 function renderOutputDirectory() {
-  const directory = state.settings?.saving?.default_output_directory || "";
-  $("#settingsDefaultOutputDirectory").value = directory;
+  const configuredDirectory = state.settings?.saving?.default_output_directory || "";
+  const directory = state.outputDirectoryHandle?.name || configuredDirectory;
+  $("#settingsDefaultOutputDirectory").value = configuredDirectory;
   $("#applyOutputDirectoryStatus").value = directory;
+  $("#singleSaveOutputDirectoryStatus").textContent = directory ? t("apply.outputDirectorySelected", { name: directory }) : t("apply.outputDirectoryUnset");
   syncApplyMode();
 }
 
@@ -123,8 +267,19 @@ function setOutputDirectoryPickerBusy(picking) {
 async function pickOutputDirectory() {
   if (!outputDirectoryPickRequest) {
     setOutputDirectoryPickerBusy(true);
-    outputDirectoryPickRequest = api("/api/output-directory/pick", { method: "POST", body: JSON.stringify({}) })
-      .then((selected) => selected.path || null)
+    if (typeof window.showDirectoryPicker !== "function") {
+      const error = new Error("directory_picker_unsupported"); error.code = "directory_picker_unsupported";
+      setOutputDirectoryPickerBusy(false);
+      throw error;
+    }
+    outputDirectoryPickRequest = window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" })
+      .then(async (handle) => {
+        await ensureOutputDirectoryPermission(handle);
+        state.outputDirectoryHandle = handle;
+        await rememberOutputDirectoryHandle(handle);
+        renderOutputDirectory();
+        return handle;
+      })
       .finally(() => {
         outputDirectoryPickRequest = null;
         setOutputDirectoryPickerBusy(false);
@@ -133,16 +288,23 @@ async function pickOutputDirectory() {
   return outputDirectoryPickRequest;
 }
 
+async function ensureOutputDirectoryPermission(handle = state.outputDirectoryHandle) {
+  if (!handle) throw codedError("output_permission_denied");
+  try {
+    const options = { mode: "readwrite" };
+    let permission = await handle.queryPermission(options);
+    if (permission === "prompt") permission = await handle.requestPermission(options);
+    if (permission === "granted") return handle;
+  } catch {}
+  throw codedError("output_permission_denied");
+}
+
 async function chooseOutputDirectory() {
   if (state.applyRunning || state.saveStarting) return;
   try {
-    const directory = await pickOutputDirectory();
-    if (!directory) return;
-    const settings = await api("/api/settings?status=0", {
-      method: "POST", body: JSON.stringify({ saving: { ...state.settings.saving, default_output_directory: directory } }),
-    });
-    setSettingsForm(settings.settings); setApplyResult("");
-  } catch (error) { showApplyError("output_folder_unavailable", $("#chooseOutputDirectoryButton")); }
+    if (!await pickOutputDirectory()) return;
+    setApplyResult("");
+  } catch (error) { if (error?.name !== "AbortError") showApplyError(error, $("#chooseOutputDirectoryButton")); }
 }
 
 async function waitForBrowserSave(save) {
@@ -197,10 +359,10 @@ async function ensureHandlePermission(access, requireWrite = true) {
   const options = requireWrite ? { mode: "readwrite" } : { mode: "read" };
   let permission = await handle.queryPermission?.(options);
   if (permission !== "granted") permission = await handle.requestPermission?.(options);
-  if (permission && permission !== "granted") throw new Error(t("error.sourcePermissionDenied", { name: handle.name || access.name || "" }));
+  if (permission && permission !== "granted") throw codedError("source_permission_denied");
   const file = await handle.getFile();
   if (access.size != null && (file.size !== access.size || file.lastModified !== access.lastModified)) {
-    throw new Error(t("error.sourceChanged", { name: file.name || handle.name }));
+    throw codedError("stale_asset");
   }
 }
 
@@ -208,8 +370,8 @@ async function ensureSaveSources(imageIds, mode, deleteOriginal) {
   for (const imageId of imageIds) {
     const image = state.images.find((entry) => entry.id === imageId);
     const access = sourceAccessFor(imageId);
-    if (mode === "overwrite" && !sourceCanOverwrite(image)) throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
-    if (mode === "copy" && deleteOriginal && !sourceCanDelete(image)) throw new Error(t("apply.deleteUnavailable", { count: 1 }));
+    if (mode === "overwrite" && !sourceCanOverwrite(image)) throw codedError("source_action_unavailable");
+    if (mode === "copy" && deleteOriginal && !sourceCanDelete(image)) throw codedError("source_action_unavailable");
     if (access?.fileHandle) await ensureHandlePermission(access, mode === "overwrite" || deleteOriginal);
   }
 }
@@ -222,9 +384,7 @@ async function writeSourceHandle(access, response) {
     // Older File System Access implementations reject the new option. Only
     // actual exclusive-writer conflicts become the retryable busy guidance.
     if (["NoModificationAllowedError", "InvalidStateError"].includes(error?.name)) {
-      const busy = new Error("source_busy");
-      busy.code = "source_busy";
-      throw busy;
+      throw codedError("source_busy");
     }
     if (!["TypeError", "NotSupportedError"].includes(error?.name)) throw error;
     stream = await access.fileHandle.createWritable({ keepExistingData: false });
@@ -244,7 +404,7 @@ async function removeSourceHandle(access) {
     await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
     return;
   }
-  throw new Error(t("error.sourceDeleteUnavailable", { name: access.fileHandle.name || access.name || "" }));
+  throw codedError("source_action_unavailable");
 }
 
 async function snapshotSourceHandle(access) {
@@ -323,7 +483,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
   });
   const save = {
     entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
-    removableImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
+    removableImageIds: new Set(), reviewedImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
     catalogEpoch: state.catalogEpoch,
   };
   state.browserSave = save;
@@ -347,10 +507,11 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         let sourceSnapshot = null;
         let sourceChanged = false;
         if (mode === "copy") {
-          const response = await api("/api/save/render", {
-            method: "POST", body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
-              divisor: Number($("#applyDivisor").value), draft, copyToDefault: true, suffix }),
-          });
+          const response = await renderSingleSave({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
+            divisor: Number($("#applyDivisor").value), draft, copyToBrowser: true, suffix });
+          const output = await writeSingleOutput(state.outputDirectoryHandle, entry.relativePath, suffix, response);
+          const saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
+          if (!saveToken) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
           if (deleteOriginal) {
             if (access?.fileHandle) {
               await ensureHandlePermission(access, true);
@@ -362,11 +523,12 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           }
           let committed;
           try { committed = await commitBrowserSaveWithRetry({
-            imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken: response.saveToken,
+            imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken,
           }); }
           catch (error) {
-            if (error.saveState === "pending") await cancelBrowserSave(entry, response.saveToken);
-            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, true); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
+            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, true); } catch { throw codedError("source_restore_failed"); }
+            await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -375,7 +537,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
+          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           await ensureHandlePermission(access, true);
           sourceSnapshot = await snapshotSourceHandle(access);
@@ -386,7 +548,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
           catch (error) {
             if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
-            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error("snapshot unavailable"); await restoreSourceHandle(access, sourceSnapshot, false); } catch { const restoreError = new Error("source_restore_failed"); restoreError.code = "source_restore_failed"; throw restoreError; }
+            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, false); } catch { throw codedError("source_restore_failed"); }
             throw error;
           }
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
@@ -395,13 +557,13 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
           });
-          if (!binary.ok) { const body = await binary.json().catch(() => ({})); const error = new Error(t("error.requestFailed")); error.code = body.error_code || "internal_error"; throw error; }
+          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else {
-          throw new Error(t("apply.overwriteUnavailable", { count: 1 }));
+          throw codedError("source_action_unavailable");
         }
       };
       const finishBrowserSaveEntry = (committed, entry, save, sourceAction) => {
@@ -416,6 +578,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
           }
         }
         if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
+        if (!committed.deleted) save.reviewedImageIds.add(entry.imageId);
         if (committed.stale) save.stale += 1;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
         pruneSourceAccess();
@@ -423,7 +586,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         showBrowserSaveProgress(save, entry);
       };
       let nextEntry = 0;
-      const parallelism = Math.min(save.entries.length, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 1)));
+      const parallelism = mode === "copy" ? 1 : Math.min(save.entries.length, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 1)));
       const settled = await Promise.allSettled(Array.from({ length: parallelism }, async () => {
         while (true) {
           // Cancellation is observed only before an entry starts. Once an output or source has
@@ -460,6 +623,10 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
         showApplyError(error);
       }
       if (catalogCurrent) {
+        await Promise.all([...save.reviewedImageIds].map(async (imageId) => {
+          const image = state.images.find((entry) => entry.id === imageId);
+          if (image) await setReviewed(image, true);
+        }));
         try {
           await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
         } catch (error) {
@@ -516,50 +683,40 @@ function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.sta
 async function startApplyFromDialog(event) {
   event.preventDefault();
   const imageIds = [...state.applyTargetIds];
-  if (!imageIds.length || isBusy() || state.importing) return;
+  if (!imageIds.length || state.saveStarting || isBusy() || state.importing) return;
   const mode = selectedSaveMode();
   const copy = mode === "copy";
-  const suffix = $("#applySuffix").value.trim();
-  if (copy && !suffix) return showApplyError("input_invalid");
-  if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
-  if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
-  // This lock is intentionally set before the first await. A second submit must never create
-  // another browser save loop while permissions or the output-directory picker are pending.
+  const suffix = $("#applySuffix").value;
   state.saveStarting = true;
-  state.saving = true;
-  state.applyRunning = true;
-  state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
-  updateActionButtons();
-  if (copy && !$("#deleteOriginal").checked) {
-    try {
-      await flushDraftSaves(imageIds);
-      await api("/api/apply", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, drafts: draftPayload(imageIds), removeAfterSave: $("#removeAfterSave").checked, copyToDefault: true }) });
-      state.saveStarting = false; state.job = { kind: "apply", state: "running", total: imageIds.length, completed: 0, current: "" }; showRunningApply(state.job); return;
-    } catch (error) { showApplyError(error); return finishSaveStart(); }
-  }
+  syncApplyMode();
   try {
-    // Permission requests must begin while this submit is still a user action.
+    if (copy) await ensureOutputDirectoryPermission();
+    if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
+    if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
+    state.saving = true;
+    state.applyRunning = true;
+    state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
+    updateActionButtons();
     await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
-  } catch (error) {
-    showApplyError(error);
-    return finishSaveStart();
-  }
-  if (state.candidateUpdateChains.size) await waitForCandidateMutations();
-  if (state.importing) return finishSaveStart();
-  try {
+    if (state.candidateUpdateChains.size) await waitForCandidateMutations();
+    if (state.importing) return;
     await flushDraftSaves(imageIds);
     state.saveStarting = false;
     await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
   } catch (error) {
     showApplyError(error);
-    state.saving = false;
-    state.applyRunning = false;
-    state.applyCatalogSnapshot = null;
-    state.browserSave = null;
-    $("#applyPauseButton").hidden = true;
-    $("#applyCancelButton").hidden = true;
-    $("#applyCloseButton").hidden = false;
-    updateActionButtons();
+    if (!state.saveStarting) {
+      state.saving = false;
+      state.applyRunning = false;
+      state.applyCatalogSnapshot = null;
+      state.browserSave = null;
+      $("#applyPauseButton").hidden = true;
+      $("#applyCancelButton").hidden = true;
+      $("#applyCloseButton").hidden = false;
+      updateActionButtons();
+    }
+  } finally {
+    if (state.saveStarting) finishSaveStart();
   }
 }
 

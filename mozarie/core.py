@@ -44,7 +44,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
-from mozarie.domain import Candidate, CandidateRole
+from mozarie.domain import Candidate, CandidateRole, CANDIDATE_LABEL_TOKENS, CANDIDATE_REFINEMENT_TOKENS, CANDIDATE_SOURCE_TOKENS
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
@@ -74,19 +74,8 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
-SOURCE_LABELS = {
-    "target": "対象セグメンテーションモデル",
-    "ntd11": "NTD11補助モデル",
-    "sensitive": "Sensitive補助モデル",
-    "boundary": "境界選択",
-    "hand_exclusion": "手",
-    "fluid_exclusion": "白い液",
-}
-REFINEMENT_LABELS = {
-    "hand": "手の重なりを除外",
-    "fluid": "白い液を検出",
-    "hand_fluid": "手の重なりを除外・白い液を検出",
-}
+# Candidate metadata crosses the API as stable tokens.  The browser owns every
+# user-facing label, so successful API payloads never carry localized copy.
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
     "penis": "#e6b450",
@@ -101,6 +90,15 @@ IO_CHUNK_BYTES = 1024 * 1024
 THUMBNAIL_WORKERS = 4
 SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
+PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
+    "gpu_out_of_memory": frozenset({"parallelism"}),
+}
+
+
+def public_error_params(error_code: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Return the small, documented parameter set that may cross the HTTP boundary."""
+    allowed = PUBLIC_ERROR_PARAMS.get(error_code, frozenset())
+    return {name: params[name] for name in allowed if name in params}
 
 
 def torch_module() -> Any:
@@ -182,6 +180,7 @@ class BrowserSaveToken:
     # are never represented here.
     output_path: Path | None = None
     output_fingerprint: tuple[int, int] | None = None
+    allow_copy_action: bool = False
 
 
 @dataclass(frozen=True)
@@ -247,9 +246,8 @@ class Job:
             "total": self.total,
             "completed": self.completed,
             "current": self.current,
-            "error": self.error,
             "errorCode": self.error_code,
-            "params": self.params,
+            "params": public_error_params(self.error_code, self.params),
             "startedAt": self.started_at,
             "activeElapsed": active_elapsed,
             "outputs": self.outputs,
@@ -762,8 +760,8 @@ def _read_detection_parallelism(value: Any) -> int:
 
 
 def _read_save_suffix(value: Any) -> str:
-    if not isinstance(value, str) or not value or Path(value).name != value:
-        raise ClientError("ファイル名の末尾は空でない名前として指定してください。", "input_invalid")
+    if not isinstance(value, str) or any(ord(character) < 32 or character in '<>:"/\\|?*' for character in value):
+        raise ClientError("ファイル名の末尾に使えない文字があります。", "input_invalid")
     return value
 
 

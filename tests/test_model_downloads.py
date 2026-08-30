@@ -206,7 +206,7 @@ class ModelDownloadTests(unittest.TestCase):
                 job = manager.snapshot()
                 self.assertEqual(job["state"], "failed")
                 self.assertEqual(job["errorCode"], error_code)
-                self.assertEqual(job["error"], "")
+                self.assertNotIn("error", job)
 
     def test_only_manifest_keys_can_start_a_download(self) -> None:
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))

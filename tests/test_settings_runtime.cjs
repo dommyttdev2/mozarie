@@ -34,6 +34,8 @@ const modelPickers = ["sam_checkpoint", "target_segmentation"].map((key) => {
   const button = element(`picker-${key}`); button.dataset.modelPicker = key; button.dataset.modelInput = key === "sam_checkpoint" ? "settingsSamModel" : "settingsTargetModel";
   return button;
 });
+const shortcutBindings = [];
+const shortcutEnabled = [];
 const state = { settings: null, settingsStatus: { models: {} } };
 const errors = [];
 const context = {
@@ -45,6 +47,8 @@ const context = {
       if (selector === "[data-settings-panel]") return panels;
       if (selector === "[data-sam-status]") return samOutputs;
       if (selector === "[data-model-picker]") return modelPickers;
+      if (selector === "[data-shortcut-action]") return shortcutBindings;
+      if (selector === "[data-shortcut-enabled]") return shortcutEnabled;
       return [];
     },
     createElement() { return element(`generated-${elements.size}`); },
@@ -58,13 +62,15 @@ const context = {
   focusElement(item) { context.focused = item; },
   renderSamVariantStatuses() {}, renderSettingsStatus() {}, syncProviderSelection() {},
   setNavigationShortcutsEnabled() {}, setMosaicPreviewEnabled() {}, loadTranslations: async () => {},
-  validateDetectionTargets: () => true, detectionTargets: () => ["penis"], settingsPayload: () => ({ ok: true }),
+  validateDetectionTargets: () => true, detectionTargets: () => ["penis"], detectionParallelism: () => 2, normaliseDetectionConfidence: Number, normaliseImportParallelism: Number, settingsPayload: () => ({ ok: true }),
   pickOutputDirectory: async () => "", api: async () => ({ settings: { general: { language: "ja", shortcuts_enabled: true }, display: { mosaic_preview: true } }, version: "v1" }), clearInterval() {}, setInterval() { return 1; },
   confirmAction: async () => true,
 };
-vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectSettingsTab,moveSettingsTab,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,startModelDownload,beginModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath};`, context, { filename: settingsPath });
+vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectSettingsTab,moveSettingsTab,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,startModelDownload,beginModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent};`, context, { filename: settingsPath });
 
 (async () => {
+  assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: true, metaKey: false, shiftKey: true, altKey: true, key: "a" }), "Ctrl+Shift+Alt+A", "shortcut capture normalizes modifiers and single letters");
+  assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: false, metaKey: true, shiftKey: false, altKey: false, key: "ArrowLeft" }), "Ctrl+ArrowLeft", "shortcut capture accepts the platform modifier for named keys");
   state.settingsStatus = { models: { unknown: { required: true, reasonCode: "missing" }, ntd11: { enabled: true, reasonCode: "missing" } }, gpuDeviceReasonCode: "unsupported" };
   context.settingsTest.renderModelStatus();
   assert.match(element("#settingsModelStatus").textContent, /settings\.ntd11Model/, "a known invalid model identifies its setting in the status summary");
@@ -99,16 +105,25 @@ vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,render
   await context.settingsTest.saveSettings({ preventDefault() {} });
   assert.equal(element("#settingsResult").classList.contains("error"), true, "saving with no detection target leaves a visible inline validation error");
 
-  context.pickOutputDirectory = async () => "G:\\output";
+  state.settings = { general: {}, models: { gpu_device: 0 }, display: {} };
+  context.validateDetectionTargets = () => true;
+  shortcutBindings.push(
+    { dataset: { shortcutAction: "previous" }, value: "Ctrl+P" },
+    { dataset: { shortcutAction: "next" }, value: "Ctrl+P" },
+  );
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(errors.at(-1)[0].code, "input_invalid", "saving rejects duplicate shortcut bindings before sending settings");
+
+  context.pickOutputDirectory = async () => { state.outputDirectoryHandle = { name: "output" }; return state.outputDirectoryHandle; };
   await context.settingsTest.chooseSettingsOutputDirectory();
-  assert.equal(element("#settingsDefaultOutputDirectory").value, "G:\\output", "choosing an output directory writes the selected path");
+  assert.equal(element("#settingsDefaultOutputDirectory").value, "", "choosing an output directory keeps the configured path separate from its browser-only handle");
   context.pickOutputDirectory = async () => { throw Object.assign(new Error("cancel"), { name: "AbortError" }); };
   const errorsBeforeCancel = errors.length;
   await context.settingsTest.chooseSettingsOutputDirectory();
   assert.equal(errors.length, errorsBeforeCancel, "cancelling the native picker is silent");
   context.pickOutputDirectory = async () => { throw new Error("unavailable"); };
   await context.settingsTest.chooseSettingsOutputDirectory();
-  assert.equal(errors.at(-1)[0], "output_folder_unavailable", "a real output picker failure uses the localized folder error");
+  assert.equal(errors.at(-1)[0].message, "unavailable", "a real output picker failure reaches the shared localized error presenter");
 
   const railEvent = { target: element("#brushTool"), key: "ArrowRight", preventDefault() { this.prevented = true; } };
   context.settingsTest.handleToolRailKeydown(railEvent);

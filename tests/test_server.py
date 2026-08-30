@@ -263,7 +263,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.new("L", (16, 16), value).save(mask_path)
-                candidates.append(Candidate(candidate_id, candidate_id, 0.9, mask_path))
+                candidates.append(Candidate(candidate_id, "penis", 0.9, mask_path))
             state.candidates[image_id] = candidates
             self.commit_candidates(state, image_id)
 
@@ -415,7 +415,7 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(exclude_path)
             state.candidates[image_id] = [
                 Candidate("apply", "penis", 0.9, apply_path),
-                Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
+                Candidate("exclude", "hand", None, exclude_path, source="hand_exclusion", role=CandidateRole.EXCLUDE),
             ]
             self.commit_candidates(state, image_id)
             state.set_candidate_state(image_id, "apply", {"enabled": True})
@@ -656,44 +656,8 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(live_record.asset_revision, asset_revision + 1)
             self.assertNotEqual(state.asset_version(live_record), asset_version)
 
-    def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-            selected = root / "保存先"; selected.mkdir()
-            completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
-            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
-                 patch.object(http_module.subprocess, "run", return_value=completed) as run:
-                self.assertEqual(http_module._pick_output_directory(state), str(selected.resolve()))
-            command = run.call_args.args[0]
-            self.assertEqual(command[:-1], [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand"])
-            script = base64.b64decode(command[-1]).decode("utf-16le")
-            self.assertIn("FolderBrowserDialog", script)
-            self.assertIn("FormStartPosition]::CenterScreen", script)
-            self.assertIn("ShowDialog($owner)", script)
-            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
-            self.assertNotIn("-32000", script)
-            self.assertFalse(run.call_args.kwargs["shell"])
-            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
-            self.assertEqual(
-                run.call_args.kwargs["env"]["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"],
-                state.settings["saving"]["default_output_directory"],
-            )
-        self.assertTrue(state.native_picker_lock.acquire(blocking=False))
-        state.native_picker_lock.release()
-        self.assertTrue(state.import_lock.acquire(blocking=False))
-        state.import_lock.release()
-
-    def test_output_directory_picker_rejects_an_active_import_before_launch(self):
-        state = self.new_state()
-        with state.lock:
-            state.active_import_count = 1
-        with patch.object(http_module.subprocess, "run") as run, self.assertRaisesRegex(ClientError, "処理中"):
-            http_module._pick_output_directory(state)
-        run.assert_not_called()
+    def test_output_directory_picker_is_not_a_server_api(self):
+        self.assertFalse(hasattr(http_module, "_pick_output_directory"))
 
     def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
         state = self.new_state()
@@ -1047,54 +1011,6 @@ class MozarieTests(unittest.TestCase):
         finally:
             connection.close()
             httpd.shutdown(); httpd.server_close()
-
-    def test_output_directory_picker_allows_folder_reload_while_open(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-            images_directory = root / "images"
-            images_directory.mkdir()
-            Image.new("RGB", (8, 8), "white").save(images_directory / "source.png")
-            picker_started = threading.Event()
-            release_picker = threading.Event()
-            picker_result: dict[str, object] = {}
-            reload_result: dict[str, object] = {}
-            reload_done = threading.Event()
-
-            def picker_run(*_args, **_kwargs):
-                picker_started.set()
-                self.assertTrue(release_picker.wait(2))
-                return types.SimpleNamespace(returncode=0, stdout=b"")
-
-            def reload_catalog() -> None:
-                try:
-                    reload_result["entries"] = state.set_root(str(images_directory))
-                except BaseException as exc:
-                    reload_result["error"] = exc
-                finally:
-                    reload_done.set()
-
-            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
-                 patch.object(http_module.subprocess, "run", side_effect=picker_run):
-                picker = threading.Thread(
-                    target=lambda: picker_result.setdefault("value", http_module._pick_output_directory(state)),
-                )
-                picker.start()
-                self.assertTrue(picker_started.wait(2))
-                reload = threading.Thread(target=reload_catalog)
-                reload.start()
-                self.assertTrue(reload_done.wait(1), "folder reload must finish while the picker remains open")
-                self.assertNotIn("error", reload_result)
-                self.assertEqual(len(reload_result["entries"]), 1)
-                release_picker.set()
-                reload.join(2)
-                picker.join(2)
-            self.assertFalse(reload.is_alive())
-            self.assertFalse(picker.is_alive())
-            self.assertIsNone(picker_result["value"])
 
     @staticmethod
     def _record(path: Path, width: int, height: int) -> ImageRecord:
@@ -2571,7 +2487,7 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(apply).save(apply_path); Image.fromarray(exclude).save(exclude_path)
             state.candidates[image_id] = [
                 Candidate("apply", "penis", 0.9, apply_path),
-                Candidate("exclude", "手を除外", None, exclude_path, role=domain_module.CandidateRole.EXCLUDE),
+                Candidate("exclude", "hand", None, exclude_path, source="hand_exclusion", role=domain_module.CandidateRole.EXCLUDE),
             ]
             combined = state.combined_candidate_mask(image_id)
             self.assertEqual(combined[4, 4], 0)
@@ -2836,13 +2752,13 @@ class MozarieTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "out of memory"):
                     state._sam_predictor_for(record, np.zeros((8, 8, 3), dtype=np.uint8))
 
-    def test_job_error_response_preserves_client_error_code_and_params(self):
+    def test_job_error_response_exposes_only_public_error_code_and_params(self):
         state = self.new_state(); state.job = core_module.Job(kind="detect", state="running")
         state._fail_job(ClientError("out of memory: invalid checkpoint", "sam_checkpoint_invalid", {"model": "vit_b"}))
         data = state.job.as_dict()
-        self.assertEqual(data["error"], "out of memory: invalid checkpoint")
         self.assertEqual(data["errorCode"], "sam_checkpoint_invalid")
-        self.assertEqual(data["params"], {"model": "vit_b"})
+        self.assertEqual(data["params"], {})
+        self.assertNotIn("error", data)
 
     def test_detection_model_preparation_phase_tracks_real_loading_only(self):
         state = self.new_state(); state.job = core_module.Job(kind="detect", state="running")
@@ -3648,6 +3564,62 @@ class MozarieTests(unittest.TestCase):
         fluid_mask.assert_not_called()
         self.assertNotIn("refinement", result[0])
 
+    def test_finalization_applies_fluid_to_every_nonempty_target_once(self):
+        state = self.new_state()
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+        penis = np.zeros((40, 40), dtype=np.uint8); penis[2:18, 2:18] = 255
+        pussy = np.zeros((40, 40), dtype=np.uint8); pussy[22:38, 22:38] = 255
+        segments = [
+            {"class_name": "penis", "mask": penis, "confidence": .8, "source": "target"},
+            {"class_name": "pussy", "mask": pussy, "confidence": .8, "source": "target"},
+        ]
+        with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, mask: mask) as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, segments)
+        self.assertEqual(fluid_mask.call_count, 2)
+        self.assertTrue(np.array_equal(finalized[0]["exclusions"]["fluid"] > 0, (penis > 0) | (pussy > 0)))
+        self.assertEqual(finalized[1]["exclusions"], {})
+
+    def test_finalization_skips_fluid_search_for_empty_apply_masks_and_when_disabled(self):
+        state = self.new_state()
+        rgb = np.zeros((16, 16, 3), dtype=np.uint8)
+        empty = {"class_name": "penis", "mask": np.zeros((16, 16), dtype=np.uint8), "confidence": .8, "source": "target"}
+        with patch.object(detection_module, "white_fluid_mask") as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, [empty])
+        fluid_mask.assert_not_called()
+        self.assertEqual(finalized[0]["exclusions"], {})
+
+        state.settings["detection"]["fluid_exclusion_enabled"] = False
+        nonempty = {"class_name": "pussy", "mask": np.ones((16, 16), dtype=np.uint8), "confidence": .8, "source": "target"}
+        with patch.object(detection_module, "white_fluid_mask") as fluid_mask:
+            finalized = state._finalize_exclusions(rgb, [nonempty])
+        fluid_mask.assert_not_called()
+        self.assertEqual(finalized[0]["exclusions"], {})
+
+    def test_hand_exclusion_is_not_published_when_it_would_remove_most_of_a_target(self):
+        state = self.new_state()
+        mask = np.ones((20, 20), dtype=np.uint8)
+        hand = np.zeros_like(mask); hand[:16, :] = 255
+        segment = {"class_name": "penis", "mask": mask, "confidence": .8, "source": "target", "image_exclusions": {"hand": hand}}
+        finalized = state._finalize_exclusions(np.zeros((20, 20, 3), dtype=np.uint8), [segment])
+        self.assertFalse(np.any(finalized[0]["image_exclusions"].get("hand", np.zeros_like(mask))))
+        self.assertTrue(np.array_equal(finalized[0]["mask"], mask))
+
+    def test_hand_exclusion_does_not_reenter_an_unsafe_target_via_an_overlap(self):
+        state = self.new_state()
+        unsafe = np.zeros((30, 30), dtype=np.uint8); unsafe[:20, :20] = 255
+        safe = np.zeros((30, 30), dtype=np.uint8); safe[14:30, 14:30] = 255
+        hand = np.zeros((30, 30), dtype=np.uint8)
+        hand[:16, :20] = 255
+        hand[22:24, 14:20] = 255
+        segments = [
+            {"class_name": "penis", "mask": unsafe, "confidence": .8, "source": "target", "image_exclusions": {"hand": hand}},
+            {"class_name": "pussy", "mask": safe, "confidence": .8, "source": "target"},
+        ]
+        finalized = state._finalize_exclusions(np.zeros((30, 30, 3), dtype=np.uint8), segments)
+        published = finalized[0]["image_exclusions"]["hand"]
+        self.assertFalse(np.any(published[unsafe > 0]))
+        self.assertTrue(np.all(published[22:24, 14:20] == 255))
+
     def test_hand_and_fluid_refinement_metadata(self):
         state = self.new_state()
         penis = np.zeros((24, 24), dtype=np.uint8)
@@ -3826,7 +3798,7 @@ class MozarieTests(unittest.TestCase):
                 )
 
             self.assertEqual(created["candidates"][0]["source"], "boundary")
-            self.assertEqual(created["candidates"][0]["className"], "境界")
+            self.assertEqual(created["candidates"][0]["labelToken"], "boundary")
             self.assertEqual(created["candidateRevision"], 1)
             self.assertEqual(state.list_candidates(record.image_id), created["candidates"])
             combined = state.combined_candidate_mask(record.image_id)
@@ -3982,7 +3954,7 @@ class MozarieTests(unittest.TestCase):
                 state, "_sam_predictor_for", return_value=FakePredictor()
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
-            self.assertEqual([candidate.class_name for candidate in candidates], ["penis", "pussy"])
+            self.assertEqual([candidate.label_token for candidate in candidates], ["penis", "pussy"])
             self.assertEqual([candidate.refinement for candidate in candidates], ["sam_fallback", "sam_fallback"])
 
     def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
@@ -4067,11 +4039,10 @@ class MozarieTests(unittest.TestCase):
             ), patch.object(state, "_sam_predictor_for") as sam:
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="standard")
             sam.assert_not_called()
-            self.assertEqual([candidate.source for candidate in candidates], ["hand_exclusion", "target"])
+            self.assertEqual([candidate.source for candidate in candidates], ["target"])
             with Image.open(candidates[0].mask_path) as mask_file:
                 mask = np.asarray(mask_file)
-            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
-            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+            self.assertTrue(np.array_equal(mask > 0, apply > 0))
 
     def test_high_precision_rejected_hand_sam_uses_the_constrained_box(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4090,10 +4061,10 @@ class MozarieTests(unittest.TestCase):
                 state, "_high_precision_segments_with_predictor", side_effect=lambda _rgb, values, _predictor: values,
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
+            self.assertEqual([candidate.source for candidate in candidates], ["target"])
             with Image.open(candidates[0].mask_path) as mask_file:
                 mask = np.asarray(mask_file)
-            expected = np.zeros((12, 12), dtype=bool); expected[2:7, 2:7] = True
-            self.assertTrue(np.array_equal(mask > 0, (apply > 0) & expected))
+            self.assertTrue(np.array_equal(mask > 0, apply > 0))
 
     def test_gpu_diagnostic_uses_a_disposable_session_without_model_cache_changes(self):
         state = self.new_state()
@@ -4164,8 +4135,8 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(self._mask(12, 12)).save(boundary_hand_path)
             Image.fromarray(self._mask(12, 12)).save(old_auto_path)
             Image.fromarray(self._mask(12, 12)).save(new_auto_path)
-            boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary", origin="boundary")
-            boundary_hand = Candidate("boundary-hand", "手を除外", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=domain_module.CandidateRole.EXCLUDE)
+            boundary = Candidate("boundary", "boundary", 0.9, boundary_path, source="boundary", origin="boundary")
+            boundary_hand = Candidate("boundary-hand", "hand", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=domain_module.CandidateRole.EXCLUDE)
             old_auto = Candidate("old-auto", "penis", 0.8, old_auto_path)
             new_auto = Candidate("new-auto", "penis", 0.7, new_auto_path)
             state = self.new_state()
@@ -4185,7 +4156,7 @@ class MozarieTests(unittest.TestCase):
     def test_boundary_api_returns_the_created_candidate(self):
         from http.server import ThreadingHTTPServer
 
-        expected = {"candidates": [{"id": "boundary", "className": "境界", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary", "role": "apply"}], "candidateRevision": 4}
+        expected = {"candidates": [{"id": "boundary", "labelToken": "boundary", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary", "origin": "boundary", "refinement": None, "role": "apply", "forced": False}], "candidateRevision": 4}
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -5133,7 +5104,7 @@ class MozarieTests(unittest.TestCase):
                     response = connection.getresponse()
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(response.status, 404)
-                self.assertIn("検出候補", payload["error"])
+                self.assertEqual(payload, {"error_code": "mask_not_found", "params": {}})
                 logged.assert_not_called()
                 revision_after_read = state._candidate_revision(image_id)
                 self.assertEqual(revision_after_read, revision_before_read + 1)
@@ -5400,8 +5371,7 @@ class MozarieTests(unittest.TestCase):
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
-            self.assertEqual(payload["error"], "Windowsフォルダを入力してください。")
-            self.assertEqual(payload["error_code"], "input_invalid")
+            self.assertEqual(payload, {"error_code": "input_invalid", "params": {}})
         finally:
             if connection is not None:
                 connection.close()
@@ -5427,7 +5397,7 @@ class MozarieTests(unittest.TestCase):
             payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(response.status, 400)
             self.assertEqual(payload["error_code"], "input_invalid")
-            self.assertNotIn("ValueError", payload["error"])
+            self.assertNotIn("error", payload)
         finally:
             if connection is not None:
                 connection.close()
@@ -5441,7 +5411,7 @@ class MozarieTests(unittest.TestCase):
         payload, status = handler._json.call_args.args
         self.assertEqual(status, http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
         self.assertEqual(payload["error_code"], "internal_error")
-        self.assertNotIn("sqlite", payload["error"])
+        self.assertNotIn("error", payload)
 
     def test_database_http_error_has_a_stable_general_code(self):
         handler = object.__new__(MosaicHandler)
@@ -5449,7 +5419,17 @@ class MozarieTests(unittest.TestCase):
         handler._client_error(sqlite3.DatabaseError("database disk image is malformed"), http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
         payload, _status = handler._json.call_args.args
         self.assertEqual(payload["error_code"], "workspace_database_error")
-        self.assertNotIn("malformed", payload["error"])
+        self.assertNotIn("error", payload)
+
+    def test_http_error_params_are_allowlisted(self):
+        handler = object.__new__(MosaicHandler)
+        handler._json = Mock()
+        handler._client_error(
+            ClientError("private details", "gpu_out_of_memory", {"parallelism": 2, "path": "C:/private"}),
+            http_module.HTTPStatus.BAD_REQUEST,
+        )
+        payload, _status = handler._json.call_args.args
+        self.assertEqual(payload, {"error_code": "gpu_out_of_memory", "params": {"parallelism": 2}})
 
     def test_apply_output_error_has_a_stable_general_code(self):
         state = self.new_state()
@@ -6945,7 +6925,10 @@ class MozarieTests(unittest.TestCase):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)
         destination = image_io_module._default_output_destination(record, "_mosaic")
         self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
-        with self.assertRaises(ClientError): core_module._read_save_suffix("../bad")
+        self.assertEqual(core_module._read_save_suffix(""), "")
+        self.assertEqual(core_module._read_save_suffix("_モザイク"), "_モザイク")
+        for suffix in ("../bad", "bad/name", "bad\x00name", "bad:name"):
+            with self.subTest(suffix=suffix), self.assertRaises(ClientError): core_module._read_save_suffix(suffix)
 
     def test_folder_scan_uses_import_parallelism_and_sorts_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7395,7 +7378,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         state.settings["detection"]["fluid_exclusion_enabled"] = False
         finalized = state._finalize_exclusions(rgb, [segment])
         self.assertEqual(finalized[0]["exclusions"], {})
-        self.assertEqual(int(finalized[0]["image_exclusions"]["hand"].sum()), 9)
+        self.assertFalse(np.any(finalized[0]["image_exclusions"].get("hand", np.zeros((6, 6), dtype=np.uint8))))
 
     def test_detection_start_passes_explicit_target_subset(self):
         state = self.new_state()

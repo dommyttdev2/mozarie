@@ -32,6 +32,23 @@ async function directoryCatalogStore() {
     request.onerror = () => resolve(null);
   });
 }
+async function rememberedOutputDirectoryHandle() {
+  const db = await directoryCatalogStore();
+  if (!db) return null;
+  const handle = await new Promise((resolve) => {
+    const request = db.transaction("directories").objectStore("directories").get("output-directory");
+    request.onsuccess = () => resolve(request.result?.handle || null); request.onerror = () => resolve(null);
+  });
+  db.close();
+  return handle;
+}
+async function rememberOutputDirectoryHandle(handle) {
+  const db = await directoryCatalogStore();
+  if (!db) return;
+  try { db.transaction("directories", "readwrite").objectStore("directories").put({ catalogId: "output-directory", handle }); }
+  catch { /* Directory selection remains usable without persistence. */ }
+  db.close();
+}
 async function catalogForDirectoryHandle(handle) {
   const db = await directoryCatalogStore();
   if (db) {

@@ -1,7 +1,7 @@
 function canvasSizeForImage(image) {
   releaseMosaicPreview();
-  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) { target.width = image.width; target.height = image.height; }
-  blinkCanvas.width = image.width; blinkCanvas.height = image.height;
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
+  releaseHistoryCanvases(); releaseBlinkCanvas();
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
   exclusionEraseCtx.clearRect(0, 0, image.width, image.height);
@@ -15,6 +15,22 @@ function canvasSizeForImage(image) {
   state.manualExclusionEraseEnabled = true;
 }
 
+function ensureHistoryCanvases() {
+  if (!state.currentImage) return;
+  for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) {
+    if (target.width !== state.currentImage.width || target.height !== state.currentImage.height) { target.width = state.currentImage.width; target.height = state.currentImage.height; }
+  }
+}
+function releaseHistoryCanvases() {
+  for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) { target.width = 1; target.height = 1; }
+}
+function ensureBlinkCanvas() {
+  if (!state.currentImage) return false;
+  if (blinkCanvas.width !== state.currentImage.width || blinkCanvas.height !== state.currentImage.height) { blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height; }
+  return true;
+}
+function releaseBlinkCanvas() { blinkCanvas.width = 1; blinkCanvas.height = 1; }
+
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
@@ -25,8 +41,9 @@ function clearEditor() {
   state.draftDirty = false;
   state.draftLayerDirty.clear();
   state.historyBaseDirty = false;
-  addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = historyAddCanvas.width = historyExclusionCanvas.width = historyExclusionEraseCanvas.width = 1;
-  addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = historyAddCanvas.height = historyExclusionCanvas.height = historyExclusionEraseCanvas.height = 1;
+  addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
+  addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
+  releaseHistoryCanvases(); releaseBlinkCanvas();
   $("#emptyState").hidden = false;
   $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
@@ -99,7 +116,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
 
 function loadImage(source) {
   return new Promise((resolve, reject) => {
-    const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(t("error.imageLoad"))); image.src = source;
+    const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(codedError("image_read_failed")); image.src = source;
   });
 }
 
@@ -222,8 +239,10 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     let candidateImages;
     try {
       const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
-      if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string") || !Number.isInteger(candidateData.candidateRevision)
-        || controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
+      if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string" && validCandidateTokens(candidate)) || !Number.isInteger(candidateData.candidateRevision)) {
+        throw codedError("response_invalid");
+      }
+      if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
       const revision = Number(candidateData.candidateRevision);
       const cacheKey = candidateCacheKey(imageId, revision);
       if (state.pendingImageId === imageId) state.pendingCandidateKey = cacheKey;
@@ -331,10 +350,10 @@ function updateCandidateStatus() {
 
 function canvasToDataUrl(target) {
   return new Promise((resolve, reject) => target.toBlob((blob) => {
-    if (!blob) return reject(new Error(t("error.requestFailed")));
+    if (!blob) return reject(codedError("internal_error"));
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error(t("error.requestFailed")));
+    reader.onerror = () => reject(codedError("internal_error"));
     reader.readAsDataURL(blob);
   }, "image/png"));
 }
@@ -440,6 +459,7 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
     if (exclusionEraseImage) exclusionEraseCtx.drawImage(exclusionEraseImage, 0, 0);
     state.manualMaskPresent = draft.manualMaskPresent ?? canvasHasPixels(addCtx, addCanvas);
     if (Array.isArray(draft.history) && draft.historyBase) {
+      ensureHistoryCanvases();
       historyAddCanvas.getContext("2d").clearRect(0, 0, historyAddCanvas.width, historyAddCanvas.height);
       historyExclusionCanvas.getContext("2d").clearRect(0, 0, historyExclusionCanvas.width, historyExclusionCanvas.height);
       historyExclusionEraseCanvas.getContext("2d").clearRect(0, 0, historyExclusionEraseCanvas.width, historyExclusionEraseCanvas.height);
@@ -488,10 +508,16 @@ function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; co
 
 function releaseMosaicPreview() {
   state.mosaicPreviewGeneration += 1;
+  state.mosaicWorker?.postMessage?.({ type: "release" });
   state.mosaicWorker?.terminate?.();
   state.mosaicWorker = null;
   state.mosaicWorkerBusy = false;
   state.mosaicPending = null;
+  state.mosaicInFlightSourceId = "";
+  state.mosaicInFlightGeneration = 0;
+  state.mosaicSourceImage = null;
+  state.mosaicSourceId = "";
+  state.mosaicSourcePromise = null;
   mosaicCanvas.width = mosaicCanvas.height = 1;
 }
 
@@ -501,47 +527,111 @@ function prepareOriginalImage() {
   originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height); originalCtx.drawImage(state.currentImage, 0, 0);
 }
 
-function postMosaicPreview(payload) {
-  const worker = state.mosaicWorker;
-  if (!worker) return;
-  state.mosaicWorkerBusy = true;
-  worker.postMessage(payload, [payload.source, payload.mask]);
+function mosaicPreviewFailed() {
+  if (!state.mosaicPreviewFailureReported) {
+    state.mosaicPreviewFailureReported = true;
+    if (typeof showUserError === "function") showUserError({ code: "mosaic_preview_failed" }, $("#mosaicPreviewButton"));
+  }
+  state.mosaicPreviewEnabled = false;
+  const button = $("#mosaicPreviewButton"); button?.classList?.remove?.("active"); button?.setAttribute?.("aria-pressed", "false");
+  releaseMosaicPreview();
+  render();
 }
 
-function rebuildMosaicPreview() {
-  if (!state.mosaicPreviewEnabled || !state.currentImage || typeof Worker !== "function") return;
-  if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
-  prepareOriginalImage();
-  flushMaskComposition();
-  const generation = ++state.mosaicPreviewGeneration;
-  const source = originalCtx.getImageData(0, 0, originalCanvas.width, originalCanvas.height);
-  const maskPixels = combinedCtx.getImageData(0, 0, combinedCanvas.width, combinedCanvas.height).data;
-  const mask = new Uint8Array(originalCanvas.width * originalCanvas.height);
-  for (let index = 0; index < mask.length; index += 1) mask[index] = maskPixels[index * 4 + 3];
-  const payload = { source: source.data.buffer, mask: mask.buffer, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation };
-  if (!state.mosaicWorker) {
+function createMosaicWorker() {
+  if (state.mosaicWorker) return state.mosaicWorker;
+  try {
     const worker = state.mosaicWorker = new Worker("/js/masked-mosaic-worker.js");
     worker.onmessage = ({ data }) => {
-      if (state.mosaicWorker !== worker) return;
-      state.mosaicWorkerBusy = false;
-      // Always paint the last completed frame.  On large images a new pointer
-      // event arrives before every worker response; requiring an exact newest
-      // generation starved the preview until pointerup.
-      if (state.currentImage) {
-        mosaicCtx.putImageData(new ImageData(new Uint8ClampedArray(data.output), originalCanvas.width, originalCanvas.height), 0, 0);
-        render();
+      if (state.mosaicWorker !== worker) { data.output?.close?.(); return; }
+      const activeFrame = data.sourceId === state.mosaicInFlightSourceId && data.generation === state.mosaicInFlightGeneration;
+      if (data.type === "error") {
+        if (activeFrame || (state.mosaicWorkerBusy && !state.mosaicInFlightGeneration)) mosaicPreviewFailed();
+        return;
       }
-      const pending = state.mosaicPending;
+      if (data.type !== "frame") return;
+      if (!activeFrame) { data.output?.close?.(); return; }
+      const hasPending = Boolean(state.mosaicPending);
+      state.mosaicWorkerBusy = false;
       state.mosaicPending = false;
-      if (pending) rebuildMosaicPreview();
+      state.mosaicInFlightSourceId = "";
+      state.mosaicInFlightGeneration = 0;
+      let paintFailed = false;
+      try {
+        if (!hasPending && state.currentImage && data.sourceId === state.mosaicSourceId && data.generation === state.mosaicPreviewGeneration) {
+          mosaicCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+          mosaicCtx.drawImage(data.output, 0, 0);
+          render();
+        }
+      } catch { paintFailed = true; } finally { data.output?.close?.(); }
+      if (paintFailed) return mosaicPreviewFailed();
+      if (hasPending) void rebuildMosaicPreview();
     };
-    worker.onerror = () => { if (state.mosaicWorker === worker) releaseMosaicPreview(); };
+    worker.onerror = () => { if (state.mosaicWorker === worker) mosaicPreviewFailed(); };
+    return worker;
+  } catch {
+    mosaicPreviewFailed(); return null;
   }
-  postMosaicPreview(payload);
+}
+
+async function ensureMosaicPreviewSource(worker) {
+  if (state.mosaicSourceImage === state.currentImage && state.mosaicSourceId) return state.mosaicSourceId;
+  if (state.mosaicSourcePromise) return state.mosaicSourcePromise;
+  const image = state.currentImage;
+  const sourceGeneration = ++state.mosaicPreviewGeneration;
+  const sourceId = `${state.imageGeneration}:${state.currentId}:${sourceGeneration}`;
+  let sourcePromise;
+  sourcePromise = (async () => {
+    let source = null;
+    try {
+      if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") throw new Error("preview APIs unavailable");
+      source = await createImageBitmap(image);
+      if (state.currentImage !== image || state.mosaicWorker !== worker) { source.close?.(); return ""; }
+      worker.postMessage({ type: "source", sourceId, source, generation: sourceGeneration }, [source]);
+      source = null;
+      state.mosaicSourceImage = image; state.mosaicSourceId = sourceId;
+      return sourceId;
+    } catch {
+      source?.close?.();
+      if (state.currentImage === image && state.mosaicWorker === worker) mosaicPreviewFailed();
+      return "";
+    } finally { if (state.mosaicSourcePromise === sourcePromise) state.mosaicSourcePromise = null; }
+  })();
+  state.mosaicSourcePromise = sourcePromise;
+  return sourcePromise;
+}
+
+async function rebuildMosaicPreview() {
+  if (!state.mosaicPreviewEnabled || !state.currentImage) return;
+  if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
+  const worker = createMosaicWorker(); if (!worker) return;
+  state.mosaicWorkerBusy = true;
+  const sourceId = await ensureMosaicPreviewSource(worker);
+  if (!sourceId || !state.mosaicPreviewEnabled || state.mosaicWorker !== worker) { state.mosaicWorkerBusy = false; return; }
+  // Requests received while the source bitmap was being prepared are already
+  // represented by the mask below, so one current render is sufficient.
+  state.mosaicPending = false;
+  flushMaskComposition();
+  const generation = ++state.mosaicPreviewGeneration;
+  state.mosaicInFlightSourceId = sourceId;
+  state.mosaicInFlightGeneration = generation;
+  let mask = null;
+  try {
+    mask = await createImageBitmap(combinedCanvas);
+    if (state.mosaicWorker !== worker || !state.mosaicPreviewEnabled) { mask.close?.(); state.mosaicWorkerBusy = false; state.mosaicInFlightSourceId = ""; state.mosaicInFlightGeneration = 0; return; }
+    if (state.mosaicPending) {
+      mask.close?.(); state.mosaicWorkerBusy = false; state.mosaicInFlightSourceId = ""; state.mosaicInFlightGeneration = 0;
+      state.mosaicPending = false; void rebuildMosaicPreview(); return;
+    }
+    worker.postMessage({ type: "render", sourceId, mask, width: originalCanvas.width, height: originalCanvas.height, blockSize: calculatedBlockSize(), generation }, [mask]);
+    mask = null;
+  } catch { mask?.close?.(); state.mosaicWorkerBusy = false; state.mosaicInFlightSourceId = ""; state.mosaicInFlightGeneration = 0; mosaicPreviewFailed(); }
 }
 
 function requestMosaicPreview() {
-  if (!state.mosaicPreviewEnabled || !state.currentImage || state.mosaicPreviewRequested) return;
+  if (!state.mosaicPreviewEnabled || !state.currentImage) return;
+  if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
+  if (state.mosaicPreviewRequested) return;
   state.mosaicPreviewRequested = true;
   requestAnimationFrame(() => { state.mosaicPreviewRequested = false; rebuildMosaicPreview(); });
 }
@@ -883,6 +973,7 @@ function drawPolygonBoundary() {
 
 function drawCandidateBlinkOverlay() {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
+  if (!ensureBlinkCanvas()) return;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
   const paintMask = (image, color, effective = false) => {
