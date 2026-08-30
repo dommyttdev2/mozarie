@@ -224,6 +224,9 @@ async function startSingleSave(event) {
     } finally {
       state.saving = false; updateActionButtons(); syncSingleSaveMode();
     }
+  } catch (error) {
+    setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true);
+    showUserError(error, $("#singleSaveStartButton"));
   } finally {
     state.saveStarting = false; updateActionButtons(); syncSingleSaveMode();
   }

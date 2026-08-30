@@ -167,6 +167,10 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.cancelled": "cancelled {completed}",
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
+    "errorCode.output_permission_denied": "output permission denied",
+    "errorDialog.output_permission_denied.title": "Output permission denied",
+    "errorDialog.output_permission_denied.cause": "Write access was denied.",
+    "errorDialog.output_permission_denied.action": "Allow output access and try again.",
   };
   return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, state, window: browserWindow };
 }
@@ -227,7 +231,8 @@ async function runOutputPermissionSubmissionLockCases() {
   await runtime.startApplyFromDialog(event);
   assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, commitsBeforeRetry + 1, "a rejected batch permission can be retried");
 
-  const single = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  const lockedImage = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const single = createRuntime({ initialImages: [lockedImage], commit: () => jsonResponse({ cleared: true, stale: false, images: [lockedImage] }) });
   single.state.singleSave = { imageId: "image-1", divisor: 100, draft: null };
   single.element('input[name="singleSaveMode"]:checked').value = "copy";
   single.element("#singleSaveSuffix").value = "_locked";
@@ -259,6 +264,17 @@ async function runOutputPermissionSubmissionLockCases() {
   assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending single-save permission starts one save loop and one commit");
   assert.equal(sourceDeletes, 1, "a pending single-save permission deletes the source once after its one commit path");
   assert.equal(single.state.saveStarting, false, "a completed single save releases the preflight lock");
+
+  const singleCommits = single.requests.filter((request) => request.path === "/api/save/commit").length;
+  single.state.outputDirectoryHandle.queryPermission = async () => "denied";
+  await single.startSingleSave(event);
+  assert.equal(single.elements.get("#singleSaveResult").textContent, "output permission denied", "a denied single-save permission uses the localized stable error");
+  assert.equal(single.elements.get("#errorDialog").open, true, "a denied single-save permission is visible through the error dialog");
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits, "a denied single-save permission starts no save");
+  assert.equal(single.state.saveStarting, false, "a denied single-save permission releases the lock");
+  single.state.outputDirectoryHandle.queryPermission = async () => "granted";
+  await single.startSingleSave(event);
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits + 1, "a denied single-save permission can be retried successfully");
 }
 
 async function runExclusiveWritableCases() {
