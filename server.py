@@ -98,8 +98,8 @@ def main() -> None:
                 state.shutdown()
                 LOGGER.info("Mozarieを終了しました")
             launch_update = bool(getattr(http_server, "mozarie_update_requested", False))
-    except UpdateError:
-        LOGGER.error("Mozarie is busy with setup or update. / setupまたは更新が完了してから起動してください。")
+    except UpdateError as exc:
+        LOGGER.error("%s", str(exc))
         raise SystemExit(1) from None
     if launch_update:
         import subprocess

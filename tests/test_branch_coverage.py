@@ -649,7 +649,7 @@ class UpdaterBranchTests(unittest.TestCase):
                 updater.extract_archive(multi_root, root / "out2")
             cache = root / "app" / ".mozarie-cache" / "process-test"
             cache.mkdir(parents=True)
-            self.assertFalse(updater.is_mozarie_running(root / "app"))
+            self.assertEqual(updater.mozarie_running_status(root / "app"), "none")
             source = root / "source"; source.mkdir(); (source / "requirements.txt").write_text("Pillow\n", encoding="utf-8")
             with self.assertRaises(updater.UpdateError):
                 updater.install_requirements(source, root / "app")

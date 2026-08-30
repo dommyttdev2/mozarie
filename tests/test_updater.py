@@ -633,7 +633,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "static/app.js").read_text(encoding="utf-8"), "new app")
             self.assertTrue(backup.is_dir())
 
-    def test_running_lock_is_detected(self):
+    def test_running_status_detects_an_active_lock_and_no_active_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory)
             process = app / ".mozarie-cache/process-test"
@@ -645,11 +645,11 @@ class UpdaterTests(unittest.TestCase):
                 handle.seek(0)
                 updater.msvcrt.locking(handle.fileno(), updater.msvcrt.LK_NBLCK, 1)
                 try:
-                    self.assertTrue(updater.is_mozarie_running(app))
+                    self.assertEqual(updater.mozarie_running_status(app), "active")
                 finally:
                     handle.seek(0)
                     updater.msvcrt.locking(handle.fileno(), updater.msvcrt.LK_UNLCK, 1)
-            self.assertFalse(updater.is_mozarie_running(app))
+            self.assertEqual(updater.mozarie_running_status(app), "none")
 
     def test_check_running_cli_returns_30_only_for_an_active_process(self):
         with tempfile.TemporaryDirectory() as directory:

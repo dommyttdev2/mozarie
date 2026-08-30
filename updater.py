@@ -396,10 +396,6 @@ def mozarie_running_status(app_dir: Path = APP_DIR) -> str:
     return "none"
 
 
-def is_mozarie_running(app_dir: Path = APP_DIR) -> bool:
-    return mozarie_running_status(app_dir) == "active"
-
-
 def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     if not any((source_root / name).is_file() for name in ("requirements.txt", "mozarie/requirements-directml.txt", "mozarie/requirements-cpu.txt")):
         return False

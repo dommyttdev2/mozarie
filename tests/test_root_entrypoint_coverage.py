@@ -108,7 +108,6 @@ class UpdaterCoverageTests(unittest.TestCase):
             lock = cache / ".active.lock"
             lock.touch()
             with patch.object(Path, "open", side_effect=OSError("denied")):
-                self.assertFalse(updater.is_mozarie_running(root))
                 self.assertEqual(updater.mozarie_running_status(root), "check_failed")
 
     def test_extract_rejects_a_path_that_escapes_during_resolution(self) -> None:

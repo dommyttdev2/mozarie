@@ -1269,6 +1269,18 @@ class MozarieTests(unittest.TestCase):
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
 
+    def test_main_reports_the_specific_maintenance_lock_failure(self):
+        for message_key in ("update_in_progress", "maintenance_lock_access"):
+            with self.subTest(message_key=message_key):
+                message = updater.tr(message_key)
+                with patch("server.MaintenanceLock", side_effect=updater.UpdateError(message)), \
+                        patch.object(core_module.LOGGER, "error") as error, \
+                        patch.object(sys, "argv", ["server.py"]):
+                    with self.assertRaises(SystemExit) as raised:
+                        server_entry.main()
+                self.assertEqual(raised.exception.code, 1)
+                error.assert_called_once_with("%s", message)
+
     def test_main_reports_bind_error_without_traceback(self):
         bind_error = OSError("in use"); bind_error.winerror = 10048
         with patch("server.ThreadingHTTPServer", side_effect=bind_error), \
@@ -1350,6 +1362,41 @@ class MozarieTests(unittest.TestCase):
             with self.assertLogs(jobs_module.LOGGER, "ERROR") as logs:
                 state._fail_job(exc)
         self.assertIn("バックグラウンド処理に失敗", "\n".join(logs.output))
+
+    def test_unknown_job_failure_hides_details_and_logs_the_original_traceback(self):
+        state = self.new_state()
+        state.job = core_module.Job(kind="detect", state="running")
+        original = None
+        try:
+            raise RuntimeError("private worker details")
+        except RuntimeError as raised:
+            original = raised
+            with patch.object(jobs_module.LOGGER, "error") as error:
+                state._fail_job(raised)
+
+        self.assertIsNotNone(original)
+        self.assertEqual(state.job.error_code, "internal_error")
+        self.assertNotIn("private worker details", state.job.error)
+        self.assertIs(error.call_args.kwargs["exc_info"], original)
+        self.assertNotIn("private worker details", " ".join(map(str, error.call_args.args)))
+        self.assertIsNotNone(original.__traceback__)
+
+    def test_known_job_failures_do_not_log_tracebacks(self):
+        cases = (
+            ("client", "detect", ClientError("safe", "safe_code"), "safe_code"),
+            ("database", "detect", sqlite3.DatabaseError("private database details"), "workspace_database_error"),
+            ("output", "apply", PermissionError("private output path"), "output_unavailable"),
+            ("memory", "detect", MemoryError("private allocation details"), "memory_allocation_failed"),
+            ("gpu_oom", "detect", RuntimeError("cuda out of memory"), "gpu_out_of_memory"),
+        )
+        for name, kind, failure, error_code in cases:
+            with self.subTest(name=name):
+                state = self.new_state()
+                state.job = core_module.Job(kind=kind, state="running")
+                with patch.object(jobs_module.LOGGER, "error") as error:
+                    state._fail_job(failure)
+                self.assertEqual(state.job.error_code, error_code)
+                self.assertNotIn("exc_info", error.call_args.kwargs)
 
     def test_main_logs_bind_failure_and_exits(self):
         bind_error = OSError("port in use"); bind_error.winerror = 10048

@@ -504,6 +504,7 @@ class JobsMixin:
         LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
+        unexpected: Exception | None = None
         gpu_oom = self._gpu_oom_client_error(exc)
         if not isinstance(exc, ClientError):
             if isinstance(exc, sqlite3.DatabaseError):
@@ -518,6 +519,7 @@ class JobsMixin:
                     "memory_allocation_failed",
                 )
             else:
+                unexpected = exc
                 exc = ClientError("処理を完了できませんでした。もう一度お試しください。", "internal_error")
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
@@ -539,4 +541,7 @@ class JobsMixin:
             self._discard_gpu_models_after_oom()
         else:
             self._release_gpu_job_memory()
-        LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
+        if unexpected is not None:
+            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc, exc_info=unexpected)
+        else:
+            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
