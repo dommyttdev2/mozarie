@@ -263,7 +263,7 @@ class MozarieTests(unittest.TestCase):
                 mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.new("L", (16, 16), value).save(mask_path)
-                candidates.append(Candidate(candidate_id, candidate_id, 0.9, mask_path))
+                candidates.append(Candidate(candidate_id, "penis", 0.9, mask_path))
             state.candidates[image_id] = candidates
             self.commit_candidates(state, image_id)
 
@@ -415,7 +415,7 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(np.full((12, 12), 255, dtype=np.uint8)).save(exclude_path)
             state.candidates[image_id] = [
                 Candidate("apply", "penis", 0.9, apply_path),
-                Candidate("exclude", "手", None, exclude_path, role=CandidateRole.EXCLUDE),
+                Candidate("exclude", "hand", None, exclude_path, source="hand_exclusion", role=CandidateRole.EXCLUDE),
             ]
             self.commit_candidates(state, image_id)
             state.set_candidate_state(image_id, "apply", {"enabled": True})
@@ -2571,7 +2571,7 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(apply).save(apply_path); Image.fromarray(exclude).save(exclude_path)
             state.candidates[image_id] = [
                 Candidate("apply", "penis", 0.9, apply_path),
-                Candidate("exclude", "手を除外", None, exclude_path, role=domain_module.CandidateRole.EXCLUDE),
+                Candidate("exclude", "hand", None, exclude_path, source="hand_exclusion", role=domain_module.CandidateRole.EXCLUDE),
             ]
             combined = state.combined_candidate_mask(image_id)
             self.assertEqual(combined[4, 4], 0)
@@ -3826,7 +3826,7 @@ class MozarieTests(unittest.TestCase):
                 )
 
             self.assertEqual(created["candidates"][0]["source"], "boundary")
-            self.assertEqual(created["candidates"][0]["className"], "境界")
+            self.assertEqual(created["candidates"][0]["labelToken"], "boundary")
             self.assertEqual(created["candidateRevision"], 1)
             self.assertEqual(state.list_candidates(record.image_id), created["candidates"])
             combined = state.combined_candidate_mask(record.image_id)
@@ -3982,7 +3982,7 @@ class MozarieTests(unittest.TestCase):
                 state, "_sam_predictor_for", return_value=FakePredictor()
             ):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
-            self.assertEqual([candidate.class_name for candidate in candidates], ["penis", "pussy"])
+            self.assertEqual([candidate.label_token for candidate in candidates], ["penis", "pussy"])
             self.assertEqual([candidate.refinement for candidate in candidates], ["sam_fallback", "sam_fallback"])
 
     def test_high_precision_refinement_forwards_prompts_and_only_keeps_improved_retry(self):
@@ -4164,8 +4164,8 @@ class MozarieTests(unittest.TestCase):
             Image.fromarray(self._mask(12, 12)).save(boundary_hand_path)
             Image.fromarray(self._mask(12, 12)).save(old_auto_path)
             Image.fromarray(self._mask(12, 12)).save(new_auto_path)
-            boundary = Candidate("boundary", "境界", 0.9, boundary_path, source="boundary", origin="boundary")
-            boundary_hand = Candidate("boundary-hand", "手を除外", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=domain_module.CandidateRole.EXCLUDE)
+            boundary = Candidate("boundary", "boundary", 0.9, boundary_path, source="boundary", origin="boundary")
+            boundary_hand = Candidate("boundary-hand", "hand", None, boundary_hand_path, source="hand_exclusion", origin="boundary", role=domain_module.CandidateRole.EXCLUDE)
             old_auto = Candidate("old-auto", "penis", 0.8, old_auto_path)
             new_auto = Candidate("new-auto", "penis", 0.7, new_auto_path)
             state = self.new_state()
@@ -4185,7 +4185,7 @@ class MozarieTests(unittest.TestCase):
     def test_boundary_api_returns_the_created_candidate(self):
         from http.server import ThreadingHTTPServer
 
-        expected = {"candidates": [{"id": "boundary", "className": "境界", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary", "role": "apply"}], "candidateRevision": 4}
+        expected = {"candidates": [{"id": "boundary", "labelToken": "boundary", "confidence": 0.87, "enabled": True, "color": "#ffffff", "source": "boundary", "origin": "boundary", "refinement": None, "role": "apply", "forced": False}], "candidateRevision": 4}
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()

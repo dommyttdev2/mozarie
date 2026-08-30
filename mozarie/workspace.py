@@ -41,7 +41,7 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class WorkspaceStore:
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "workspaces.sqlite3"
@@ -72,7 +72,7 @@ class WorkspaceStore:
                 );
                 CREATE TABLE IF NOT EXISTS candidates (
                     image_id TEXT NOT NULL REFERENCES images(image_id) ON DELETE CASCADE,
-                    candidate_id TEXT NOT NULL, class_name TEXT NOT NULL, confidence REAL,
+                    candidate_id TEXT NOT NULL, label_token TEXT NOT NULL, confidence REAL,
                     mask_png BLOB NOT NULL, enabled INTEGER NOT NULL, color TEXT NOT NULL,
                     source TEXT NOT NULL, origin TEXT NOT NULL, refinement TEXT,
                     role TEXT NOT NULL, forced INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
@@ -127,7 +127,7 @@ class WorkspaceStore:
             "meta": (("key", "TEXT", 0, None, 1), ("value", "TEXT", 1, None, 0)),
             "catalogs": (("catalog_id", "TEXT", 0, None, 1), ("identity_hash", "TEXT", 1, None, 0), ("created_at", "INTEGER", 1, None, 0), ("updated_at", "INTEGER", 1, None, 0)),
             "images": (("catalog_id", "TEXT", 1, None, 1), ("relative_path", "TEXT", 1, None, 2), ("image_id", "TEXT", 1, None, 0), ("size_bytes", "INTEGER", 1, None, 0), ("mtime_ns", "INTEGER", 1, None, 0), ("source_hash", "TEXT", 1, "''", 0), ("hidden", "INTEGER", 1, "0", 0), ("reviewed", "INTEGER", 1, "0", 0), ("candidate_revision", "INTEGER", 1, "0", 0), ("updated_at", "INTEGER", 1, None, 0)),
-            "candidates": (("image_id", "TEXT", 1, None, 1), ("candidate_id", "TEXT", 1, None, 2), ("class_name", "TEXT", 1, None, 0), ("confidence", "REAL", 0, None, 0), ("mask_png", "BLOB", 1, None, 0), ("enabled", "INTEGER", 1, None, 0), ("color", "TEXT", 1, None, 0), ("source", "TEXT", 1, None, 0), ("origin", "TEXT", 1, None, 0), ("refinement", "TEXT", 0, None, 0), ("role", "TEXT", 1, None, 0), ("forced", "INTEGER", 1, None, 0), ("deleted", "INTEGER", 1, "0", 0)),
+            "candidates": (("image_id", "TEXT", 1, None, 1), ("candidate_id", "TEXT", 1, None, 2), ("label_token", "TEXT", 1, None, 0), ("confidence", "REAL", 0, None, 0), ("mask_png", "BLOB", 1, None, 0), ("enabled", "INTEGER", 1, None, 0), ("color", "TEXT", 1, None, 0), ("source", "TEXT", 1, None, 0), ("origin", "TEXT", 1, None, 0), ("refinement", "TEXT", 0, None, 0), ("role", "TEXT", 1, None, 0), ("forced", "INTEGER", 1, None, 0), ("deleted", "INTEGER", 1, "0", 0)),
             "manual_edits": (("image_id", "TEXT", 0, None, 1), ("add_png", "BLOB", 0, None, 0), ("exclusion_png", "BLOB", 0, None, 0), ("exclusion_erase_png", "BLOB", 0, None, 0), ("manual_enabled", "INTEGER", 1, "1", 0), ("exclusion_enabled", "INTEGER", 1, "1", 0), ("exclusion_erase_enabled", "INTEGER", 1, "1", 0), ("exclusion_forced", "INTEGER", 1, "1", 0), ("removed_candidate_ids", "TEXT", 1, "'[]'", 0), ("candidate_revision", "INTEGER", 1, "0", 0), ("has_effective_mask", "INTEGER", 1, "0", 0), ("updated_at", "INTEGER", 1, None, 0)),
         }
         if tables != set(expected_columns):
@@ -460,10 +460,10 @@ class WorkspaceStore:
                             if not isinstance(mask, bytes):
                                 continue
                         self._require_png_mask(mask)
-                        db.execute("""INSERT INTO candidates(image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
+                        db.execute("""INSERT INTO candidates(image_id,candidate_id,label_token,confidence,mask_png,enabled,color,source,origin,refinement,role,forced,deleted)
                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)
-                            ON CONFLICT(image_id,candidate_id) DO UPDATE SET class_name=excluded.class_name,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
-                            (image_id,candidate.candidate_id,candidate.class_name,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
+                            ON CONFLICT(image_id,candidate_id) DO UPDATE SET label_token=excluded.label_token,confidence=excluded.confidence,mask_png=excluded.mask_png,enabled=excluded.enabled,color=excluded.color,source=excluded.source,origin=excluded.origin,refinement=excluded.refinement,role=excluded.role,forced=excluded.forced,deleted=0""",
+                            (image_id,candidate.candidate_id,candidate.label_token,candidate.confidence,mask,int(candidate.enabled),candidate.color,candidate.source,candidate.origin,candidate.refinement,candidate.role.value,int(candidate.forced)))
                     db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
                 else:
                     for candidate in candidates:
@@ -477,7 +477,7 @@ class WorkspaceStore:
     def hydrate_candidates(self, image_id: str, directory: Path, candidate_factory: Any) -> tuple[int, list[Any]]:
         with self._connect() as db:
             image = db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()
-            rows = db.execute("""SELECT candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
+            rows = db.execute("""SELECT candidate_id,label_token,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
                 FROM candidates WHERE image_id=? AND deleted=0""", (image_id,)).fetchall()
         if not image: return 0, []
         if not rows: return int(image["candidate_revision"]), []
@@ -500,7 +500,7 @@ class WorkspaceStore:
                 placeholders = ",".join("?" for _ in chunk)
                 for row in db.execute(f"SELECT image_id,candidate_revision FROM images WHERE image_id IN ({placeholders})", chunk):
                     images[str(row["image_id"])] = int(row["candidate_revision"])
-                for row in db.execute(f"""SELECT image_id,candidate_id,class_name,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
+                for row in db.execute(f"""SELECT image_id,candidate_id,label_token,confidence,mask_png,enabled,color,source,origin,refinement,role,forced
                     FROM candidates WHERE image_id IN ({placeholders}) AND deleted=0""", chunk):
                     mask = row["mask_png"]
                     if not isinstance(mask, bytes):

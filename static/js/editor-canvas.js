@@ -239,8 +239,10 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
     let candidateImages;
     try {
       const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
-      if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string") || !Number.isInteger(candidateData.candidateRevision)
-        || controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
+      if (!Array.isArray(candidateData.candidates) || !candidateData.candidates.every((candidate) => typeof candidate?.id === "string" && validCandidateTokens(candidate)) || !Number.isInteger(candidateData.candidateRevision)) {
+        throw codedError("response_invalid");
+      }
+      if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
       const revision = Number(candidateData.candidateRevision);
       const cacheKey = candidateCacheKey(imageId, revision);
       if (state.pendingImageId === imageId) state.pendingCandidateKey = cacheKey;

@@ -138,10 +138,10 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state.materialize_candidate_mask = Mock()
             self.assertIsNone(state.combined_candidate_mask(record.image_id))
             mask_path = directory / "bad.png"; Image.new("L", (1, 1), 255).save(mask_path)
-            state.candidates[record.image_id] = [Candidate("bad", "x", .9, mask_path, role=CandidateRole.APPLY)]
+            state.candidates[record.image_id] = [Candidate("bad", "penis", .9, mask_path, role=CandidateRole.APPLY)]
             with self.assertRaises(RuntimeError): state.combined_candidate_mask(record.image_id)
             Image.new("L", (3, 2), 255).save(mask_path)
-            state.candidates[record.image_id] = [Candidate("exclude", "x", .9, mask_path, role=CandidateRole.EXCLUDE, forced=True)]
+            state.candidates[record.image_id] = [Candidate("exclude", "penis", .9, mask_path, role=CandidateRole.EXCLUDE, forced=True)]
             add = np.zeros((2, 3), dtype=np.uint8); add[0, 0] = 255
             self.assertIsNotNone(state.combined_candidate_mask(record.image_id, (add, None, None), lock_image=False))
         state.job = Job(kind="detect", state="running", total=1, image_ids=("one",), completed_image_ids=("one",), completed=1, active_count=1)
@@ -207,7 +207,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             with self.assertRaises(ClientError): state._records_for_ids_with_catalog([record.image_id])
             state._allowed_root_for_record = lambda *_args: directory
             mask = directory / "mask.png"; Image.new("L", (3, 2), 255).save(mask)
-            state.candidates = {record.image_id: [Candidate("exclude", "x", .9, mask, role=CandidateRole.EXCLUDE, forced=False)]}
+            state.candidates = {record.image_id: [Candidate("exclude", "penis", .9, mask, role=CandidateRole.EXCLUDE, forced=False)]}
             state.materialize_candidate_mask = lambda *_args: None
             add = np.zeros((2, 3), dtype=np.uint8); add[0, 0] = 255
             self.assertIsNotNone(state.combined_candidate_mask(record.image_id, (add, None, None)))
@@ -249,12 +249,12 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state.images[record.image_id] = record
             with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
-            state.candidates[record.image_id] = [Candidate("missing", "x", .9, directory / "missing.png")]
+            state.candidates[record.image_id] = [Candidate("missing", "penis", .9, directory / "missing.png")]
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
             self.assertEqual(state.candidates[record.image_id], [])
             bad_mask = directory / "bad-mask.png"; Image.new("L", (1, 1), 255).save(bad_mask)
-            state.candidates[record.image_id] = [Candidate("bad", "x", .9, bad_mask)]
+            state.candidates[record.image_id] = [Candidate("bad", "penis", .9, bad_mask)]
             state.materialize_candidate_mask = lambda *_args: None
             with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
                 with self.assertRaises(RuntimeError): state.render_browser_save(record.image_id, 1, 2, {})
@@ -275,13 +275,13 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._has_active_worker = lambda: False
             with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 0, 2, {})
             forced_mask = directory / "forced.png"; Image.new("L", (3, 2), 0).save(forced_mask)
-            state.candidates[record.image_id] = [Candidate("forced", "x", .9, forced_mask, role=CandidateRole.EXCLUDE, forced=True)]
+            state.candidates[record.image_id] = [Candidate("forced", "penis", .9, forced_mask, role=CandidateRole.EXCLUDE, forced=True)]
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
                 state._issue_browser_save_token_unchecked = lambda *_args: "token"
                 rendered = state.render_browser_save(record.image_id, 1, 2, {})
             self.assertEqual(rendered.save_token, "token")
             zero_apply = directory / "zero.png"; Image.new("L", (3, 2), 0).save(zero_apply)
-            state.candidates[record.image_id] = [Candidate("zero", "x", .9, zero_apply)]
+            state.candidates[record.image_id] = [Candidate("zero", "penis", .9, zero_apply)]
             with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
             state.candidates[record.image_id] = []
@@ -402,13 +402,13 @@ class JobsSavingCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            missing = directory / "missing.png"; state.candidates[record.image_id] = [Candidate("missing", "x", .9, missing)]
+            missing = directory / "missing.png"; state.candidates[record.image_id] = [Candidate("missing", "penis", .9, missing)]
             state.materialize_candidate_mask = lambda *_args: state.images.pop(record.image_id)
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
             state.images[record.image_id] = record
             exclude = directory / "exclude.png"; Image.new("L", (3, 2), 0).save(exclude)
-            state.candidates[record.image_id] = [Candidate("exclude", "x", .9, exclude, role=CandidateRole.EXCLUDE, forced=False)]
+            state.candidates[record.image_id] = [Candidate("exclude", "penis", .9, exclude, role=CandidateRole.EXCLUDE, forced=False)]
             state.materialize_candidate_mask = lambda *_args: None; state._issue_browser_save_token_unchecked = lambda *_args: "token"
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
                 self.assertEqual(state.render_browser_save(record.image_id, 1, 2, {}).save_token, "token")

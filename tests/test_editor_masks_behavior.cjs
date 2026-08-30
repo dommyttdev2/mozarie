@@ -41,8 +41,8 @@ const events = [];
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80 }, imageGeneration: 2, catalogEpoch: 3,
   candidates: [
-    { id: "apply", role: "apply", enabled: true, className: "target", color: "#fff" },
-    { id: "exclude", role: "exclude", enabled: true, forced: true, className: "keep", color: "#000" },
+    { id: "apply", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" },
+    { id: "exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" },
   ],
   removedCandidateIds: new Set(), blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
   manualMaskPresent: true, manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: false,
@@ -73,6 +73,7 @@ const context = {
   isBusy: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
+  CANDIDATE_CLASS_TOKENS: new Set(["penis", "hand"]), CANDIDATE_SOURCE_TOKENS: new Set(["target", "hand_exclusion"]), CANDIDATE_REFINEMENT_TOKENS: new Set(),
   t: (key) => key, confirmationRequired: () => false, confirmAction: async () => true,
   markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`),
   flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
@@ -150,8 +151,8 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   const resetCandidateState = () => {
     state.currentId = "image"; state.imageGeneration = 2; state.importing = false;
     state.candidates = [
-      { id: "apply", role: "apply", enabled: true, confidence: 0.8, className: "target", color: "#fff" },
-      { id: "exclude", role: "exclude", enabled: true, forced: true, className: "keep", color: "#000" },
+      { id: "apply", role: "apply", enabled: true, confidence: 0.8, labelToken: "penis", source: "target", refinement: null, color: "#fff" },
+      { id: "exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" },
     ];
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);

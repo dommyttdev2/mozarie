@@ -21,7 +21,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .core import (
     IMAGE_SUFFIXES, IO_CHUNK_BYTES, MAX_BODY_BYTES, PNG_SIGNATURE,
-    REFINEMENT_LABELS, SAVE_TOKEN_TTL_SECONDS, SOURCE_LABELS,
+    SAVE_TOKEN_TTL_SECONDS,
     BrowserSaveToken, ClientError, ImageRecord, Job, LOGGER, StaleMaskError,
     safe_import_relative_path, torch_module,
 )
@@ -53,7 +53,7 @@ class CatalogMixin:
     @staticmethod
     def _candidate_from_workspace(row: Any, path: Path) -> Candidate:
         return Candidate(
-            candidate_id=str(row["candidate_id"]), class_name=str(row["class_name"]), confidence=row["confidence"], mask_path=path,
+            candidate_id=str(row["candidate_id"]), label_token=str(row["label_token"]), confidence=row["confidence"], mask_path=path,
             enabled=bool(row["enabled"]), color=str(row["color"]), source=str(row["source"]), origin=str(row["origin"]),
             refinement=row["refinement"], role=CandidateRole(str(row["role"])), forced=bool(row["forced"]),
         )
@@ -1039,13 +1039,7 @@ class CatalogMixin:
                     if len(candidates) != len(stored_candidates):
                         self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     return {
-                        "candidates": [
-                            candidate.as_api_dict(
-                                SOURCE_LABELS.get(candidate.source, candidate.source),
-                                REFINEMENT_LABELS.get(candidate.refinement or "", ""),
-                            )
-                            for candidate in candidates
-                        ],
+                        "candidates": [candidate.as_api_dict() for candidate in candidates],
                         "candidateRevision": self._candidate_revision(image_id),
                     }
         raise ClientError("検出候補が更新されました。もう一度読み込んでください。", "catalog_changed")

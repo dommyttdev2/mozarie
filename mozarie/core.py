@@ -44,7 +44,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
-from mozarie.domain import Candidate, CandidateRole
+from mozarie.domain import Candidate, CandidateRole, CANDIDATE_LABEL_TOKENS, CANDIDATE_REFINEMENT_TOKENS, CANDIDATE_SOURCE_TOKENS
 from mozarie.masks import compose_masks
 from mozarie.boundary import polygon_roi_and_point
 from mozarie.config import SettingsError, SettingsStore
@@ -74,19 +74,8 @@ HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
 HAND_BOX_PADDING_MIN = 2
 HAND_BOX_PADDING_MAX = 16
-SOURCE_LABELS = {
-    "target": "対象セグメンテーションモデル",
-    "ntd11": "NTD11補助モデル",
-    "sensitive": "Sensitive補助モデル",
-    "boundary": "境界選択",
-    "hand_exclusion": "手",
-    "fluid_exclusion": "白い液",
-}
-REFINEMENT_LABELS = {
-    "hand": "手の重なりを除外",
-    "fluid": "白い液を検出",
-    "hand_fluid": "手の重なりを除外・白い液を検出",
-}
+# Candidate metadata crosses the API as stable tokens.  The browser owns every
+# user-facing label, so successful API payloads never carry localized copy.
 DEFAULT_COLORS = {
     "pussy": "#ed6a5a",
     "penis": "#e6b450",

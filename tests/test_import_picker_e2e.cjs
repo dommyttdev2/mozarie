@@ -455,7 +455,7 @@ function startCandidateScenarioServer() {
     shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: {},
   };
   const image = { id: imageId, relativePath: "candidate.png", sourceKind: "fixture", width: 409, height: 401, candidateCount: 1, enabledCandidateCount: 1, candidateRevision: 7 };
-  const candidate = { id: candidateId, role: "apply", enabled: true, forced: false, className: "Fixture candidate", confidence: 0.91, color: "#ff3d4d" };
+  const candidate = { id: candidateId, role: "apply", enabled: true, forced: false, labelToken: "penis", source: "target", refinement: null, confidence: 0.91, color: "#ff3d4d" };
   const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
     const requestPath = requestUrl.pathname;
@@ -504,7 +504,13 @@ async function runCandidateBlinkScenario(browser) {
     const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
     await row.waitFor();
     assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
-    assert.equal(await row.locator(".candidate-class").textContent(), "Fixture candidate", "the rendered row belongs to the fixture candidate");
+    for (const [locale, label, toggle] of [["ja", "ペニス · 基本モデル", "ペニス · 基本モデルを使用"], ["en", "Penis · Base model", "Enable Penis · Base model"]]) {
+      await page.evaluate((language) => loadTranslations(language), locale);
+      assert.equal(await row.locator(".candidate-class").textContent(), label, `the candidate label is localized in ${locale}`);
+      assert.equal(await row.locator(".candidate-toggle").getAttribute("aria-label"), toggle, `the candidate toggle names the same localized candidate in ${locale}`);
+      assert.ok((await row.locator(".candidate-delete").getAttribute("aria-label")).includes(label), `the candidate delete control names the same localized candidate in ${locale}`);
+    }
+    await page.evaluate(() => loadTranslations("ja"));
 
     const sectionDisplay = page.locator('[data-candidate-display-toggle="apply"]');
     await sectionDisplay.click();
@@ -1408,6 +1414,12 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   assertCatalogClearResult({ api: catalogAfter.api.slice(catalogBefore.api.length) }, { imageIds: catalogAfter.state.imageIds });
   await page.evaluate(() => showUserError(new Error("ledger fixture error")));
   await click("errorDialogClose");
+  for (const [locale, expected] of [["ja", ["モデルをダウンロードできません", "選択中のモデルはダウンロード対象として登録されていません。", "設定の検出タブで対象のモデルを選び直してから、もう一度実行してください。"]], ["en", ["Model download is unavailable", "The selected model is not registered for download.", "Choose a listed model in Settings > Detection, then try again."]]]) {
+    await page.evaluate(async (language) => { await loadTranslations(language); showUserError(codedError("model_download_invalid")); }, locale);
+    assert.deepEqual(await page.evaluate(() => [document.querySelector("#errorDialogTitle").textContent, document.querySelector("#errorDialogCause").textContent, document.querySelector("#errorDialogAction").textContent]), expected, `model_download_invalid has an exact ${locale} presentation`);
+    await page.locator("#errorDialogClose").click();
+  }
+  await page.evaluate(() => loadTranslations("ja"));
 
   // Settings covers all tabs and every model toggle/file field.  The values
   // are changed through the form and saved, so the result is a POST payload,
@@ -2072,7 +2084,7 @@ async function main() {
     const mosaicEraserHistory = await page.evaluate(() => {
       const candidates = state.candidates; const candidateImages = state.candidateImages; const tool = state.tool;
       const automatic = document.createElement("canvas"); automatic.width = addCanvas.width; automatic.height = addCanvas.height; automatic.getContext("2d").fillRect(2, 2, 8, 8);
-      state.candidates = [{ id: "automatic-range", role: "apply", enabled: true, className: "Automatic" }]; state.candidateImages = new Map([["automatic-range", automatic]]);
+      state.candidates = [{ id: "automatic-range", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null }]; state.candidateImages = new Map([["automatic-range", automatic]]);
       const manual = document.createElement("canvas"); manual.width = manual.height = 64;
       const exclusion = document.createElement("canvas"); exclusion.width = exclusion.height = 64;
       const exclusionErase = document.createElement("canvas"); exclusionErase.width = exclusionErase.height = 64;
@@ -2687,7 +2699,7 @@ async function main() {
     const editorHistoryAndDisplay = await page.evaluate(async () => {
       const original = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, history: state.history, index: state.historyIndex, baseRemoved: state.historyRemovedCandidateIds, baseCandidates: state.historyCandidateIds, settings: state.settings.confirmations.candidateDelete };
       const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 16, 16);
-      const candidate = { id: "history-candidate", role: "apply", enabled: true, className: "History", color: "#fff" };
+      const candidate = { id: "history-candidate", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" };
       state.candidates = [candidate]; state.candidateImages = new Map([[candidate.id, mask]]); state.removedCandidateIds = new Set(); state.settings.confirmations.candidateDelete = false; resetHistoryToCurrentManualMask();
       await deleteCandidate(candidate); const afterDelete = state.removedCandidateIds.has(candidate.id) && state.history.length === 1 && currentRecord().candidateCount === 0;
       restoreSnapshot(0); const undo = !state.removedCandidateIds.has(candidate.id); restoreSnapshot(1); const redo = state.removedCandidateIds.has(candidate.id);

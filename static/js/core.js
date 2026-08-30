@@ -78,7 +78,7 @@ const USER_ERROR_CODES = {
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
   sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
   model_picker_busy: "operation_in_progress", model_picker_failed: "model_picker_failed", model_picker_invalid: "model_file_invalid",
-  model_download_invalid: "model_download_failed", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
+  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
   mask_not_found: "mask_not_found", invalid_settings: "input_invalid", invalid_request: "input_invalid",
   api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", request_failed: "internal_error",
   image_not_found: "image_not_found", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
@@ -96,6 +96,16 @@ const USER_ERROR_CODES = {
   mosaic_preview_failed: "mosaic_preview_failed",
   internal_error: "internal_error",
 };
+
+const CANDIDATE_CLASS_TOKENS = new Set(["penis", "pussy", "testicles", "boundary", "boundary_polygon", "hand", "fluid"]);
+const CANDIDATE_SOURCE_TOKENS = new Set(["auto", "target", "ntd11", "sensitive", "boundary", "hand_exclusion", "fluid_exclusion"]);
+const CANDIDATE_REFINEMENT_TOKENS = new Set(["sam_fallback", "sam_high_precision"]);
+
+function validCandidateTokens(candidate) {
+  return CANDIDATE_CLASS_TOKENS.has(candidate?.labelToken)
+    && CANDIDATE_SOURCE_TOKENS.has(candidate.source)
+    && (candidate.refinement === null || CANDIDATE_REFINEMENT_TOKENS.has(candidate.refinement));
+}
 
 function codedError(code, params = {}) {
   const error = new Error();

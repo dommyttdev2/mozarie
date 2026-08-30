@@ -10,7 +10,7 @@ from PIL import Image, ImageOps
 
 from .core import (
     DEFAULT_COLORS, DEFAULT_DETECTION_CONFIDENCE, HAND_CONFIDENCE,
-    DETECTED_TARGET_CLASSES, REFINEMENT_LABELS, SOURCE_LABELS, TARGET_CLASSES, Candidate, CandidateRole,
+    DETECTED_TARGET_CLASSES, TARGET_CLASSES, Candidate, CandidateRole,
     ClientError, ImageRecord, JobControl, accepted_hand_sam_mask,
     accepted_specialist_hand_mask, arbitrate_segment_sources, clip_mask_to_roi,
     confidence_for_source, detection_tiles, materialize_tile_mask,
@@ -535,7 +535,7 @@ class DetectionMixin:
                 _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
-                    class_name=SOURCE_LABELS[f"{exclusion_kind}_exclusion"],
+                    label_token=exclusion_kind,
                     confidence=None,
                     mask_path=exclusion_path,
                     color="#4ac3df",
@@ -556,7 +556,7 @@ class DetectionMixin:
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
-                    class_name=segment["class_name"],
+                    label_token=segment["class_name"],
                     confidence=segment["confidence"],
                     mask_path=mask_path,
                     color=DEFAULT_COLORS.get(segment["class_name"], "#5bb6d5"),
@@ -573,7 +573,7 @@ class DetectionMixin:
                 _save_binary_mask(exclusion_mask, exclusion_path)
                 candidates.append(Candidate(
                     candidate_id=exclusion_id,
-                    class_name=SOURCE_LABELS[exclusion_source],
+                    label_token=exclusion_kind,
                     confidence=None,
                     mask_path=exclusion_path,
                     color="#4ac3df",
@@ -670,7 +670,7 @@ class DetectionMixin:
             candidate_id = uuid.uuid4().hex
             created = [Candidate(
                 candidate_id=candidate_id,
-                class_name="4点境界" if polygon_mask is not None else "境界",
+                label_token="boundary_polygon" if polygon_mask is not None else "boundary",
                 confidence=confidence,
                 mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
                 color="#ffffff", source="boundary", origin="boundary",
@@ -686,7 +686,7 @@ class DetectionMixin:
                 exclusion_source = f"{exclusion_kind}_exclusion"
                 exclusion_id = uuid.uuid4().hex
                 created.append(Candidate(
-                    candidate_id=exclusion_id, class_name=SOURCE_LABELS[exclusion_source], confidence=None,
+                    candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
                     mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
                     source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
                     enabled=True,
@@ -721,9 +721,6 @@ class DetectionMixin:
                     path.unlink(missing_ok=True)
                 raise
         return {
-            "candidates": [
-                item.as_api_dict(SOURCE_LABELS.get(item.source, item.source), REFINEMENT_LABELS.get(item.refinement or "", ""))
-                for item in created
-            ],
+            "candidates": [item.as_api_dict() for item in created],
             "candidateRevision": revision,
         }
