@@ -231,7 +231,22 @@ async function runOutputPermissionSubmissionLockCases() {
   single.state.singleSave = { imageId: "image-1", divisor: 100, draft: null };
   single.element('input[name="singleSaveMode"]:checked').value = "copy";
   single.element("#singleSaveSuffix").value = "_locked";
-  single.element("#singleSaveDeleteOriginal").checked = false;
+  single.element("#singleSaveDeleteOriginal").checked = true;
+  let sourceDeletes = 0;
+  const sourceFile = { name: "source.png", size: 3, lastModified: 2, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+  const sourceHandle = {
+    name: sourceFile.name,
+    async queryPermission() { return "granted"; },
+    async requestPermission() { return "granted"; },
+    async getFile() { return sourceFile; },
+  };
+  single.state.sourceAccess.set("image-1", {
+    fileHandle: sourceHandle,
+    parentHandle: { async removeEntry(name) { assert.equal(name, sourceFile.name); sourceDeletes += 1; } },
+    name: sourceFile.name,
+    size: sourceFile.size,
+    lastModified: sourceFile.lastModified,
+  });
   const singlePermission = deferred();
   let singleQueries = 0;
   single.state.outputDirectoryHandle.queryPermission = async () => { singleQueries += 1; return singlePermission.promise; };
@@ -242,6 +257,7 @@ async function runOutputPermissionSubmissionLockCases() {
   singlePermission.resolve("granted");
   await Promise.all([firstSingle, secondSingle]);
   assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending single-save permission starts one save loop and one commit");
+  assert.equal(sourceDeletes, 1, "a pending single-save permission deletes the source once after its one commit path");
   assert.equal(single.state.saveStarting, false, "a completed single save releases the preflight lock");
 }
 
