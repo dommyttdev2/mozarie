@@ -54,3 +54,9 @@ jobs:
       - run: npx playwright install --with-deps chromium --only-shell
       - run: npm test
       - run: npm run coverage:js
+      - if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: frontend-coverage
+          path: coverage/js/report/coverage-final.json
+          if-no-files-found: error
