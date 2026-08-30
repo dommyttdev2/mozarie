@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -179,6 +180,27 @@ class SetupGpuCheckTests(unittest.TestCase):
         runtime_modules.assert_not_called()
         store.save.assert_not_called()
         self.assertIn("selected runtime could not be identified", output.getvalue())
+
+    def test_gpu_probe_rejects_a_negative_device_before_creating_a_tensor(self):
+        torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True, device_count=lambda: 1),
+            ones=Mock(),
+        )
+        ort = SimpleNamespace(get_available_providers=lambda: ["CUDAExecutionProvider"])
+        self.assertFalse(setup_gpu_check._gpu_is_ready(object(), ort, torch, object(), -1))
+        torch.ones.assert_not_called()
+
+    def test_runtime_module_loader_returns_the_installed_runtime_modules(self):
+        fake_numpy = object()
+        fake_ort = SimpleNamespace(datasets=object())
+        fake_torch = object()
+        with patch.dict(sys.modules, {"numpy": fake_numpy, "onnxruntime": fake_ort, "torch": fake_torch}):
+            self.assertEqual(setup_gpu_check._runtime_modules(), (fake_numpy, fake_ort, fake_torch, fake_ort.datasets))
+
+    def test_script_entrypoint_exits_with_the_same_failure_status_as_main(self):
+        with self.assertRaises(SystemExit) as exited, contextlib.redirect_stdout(io.StringIO()):
+            runpy.run_path(str(Path(__file__).resolve().parents[1] / "setup_gpu_check.py"), run_name="__main__")
+        self.assertEqual(exited.exception.code, 1)
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_fresh_venv_pip_dry_run_keeps_resolver_output_visible(self) -> None:
