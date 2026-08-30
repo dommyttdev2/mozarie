@@ -5,10 +5,12 @@ const vm = require("node:vm");
 
 let response;
 let transfer;
+let contextFailure = 0;
+let contextCalls = 0;
 const self = { postMessage(value, transferList) { response = value; transfer = transferList; } };
 class OffscreenCanvas {
   constructor(width, height) { this.width = width; this.height = height; this.pixels = new Uint8ClampedArray(width * height * 4); }
-  getContext() { return { clearRect: () => this.pixels.fill(0), drawImage: (image) => this.pixels.set(image.pixels), getImageData: () => ({ data: this.pixels.slice() }), putImageData: (image) => this.pixels.set(image.data) }; }
+  getContext() { contextCalls += 1; if (contextFailure === contextCalls) return null; return { clearRect: () => this.pixels.fill(0), drawImage: (image) => this.pixels.set(image.pixels), getImageData: () => ({ data: this.pixels.slice() }), putImageData: (image) => this.pixels.set(image.data) }; }
   transferToImageBitmap() { return { width: this.width, height: this.height, pixels: this.pixels.slice(), close() { this.closed = true; } }; }
 }
 const context = vm.createContext({ self, Uint8ClampedArray, Math, OffscreenCanvas, ImageData: class { constructor(data) { this.data = data; } } });
@@ -47,5 +49,41 @@ assert.equal(response.generation, 8, "each render returns its own generation");
 
 const untouched = render([1, 2, 3, 255, 4, 5, 6, 255], [0, 0], 2, 1, 2, 9);
 assert.deepEqual([...untouched], [1, 2, 3, 255, 4, 5, 6, 255], "an unmasked block remains unchanged");
+
+const releasable = { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]), close() { this.closed = true; } };
+self.onmessage({ data: { type: "source", sourceId: "releasable", source: releasable, generation: 10 } });
+self.onmessage({ data: { type: "release" } });
+assert.equal(releasable.closed, true, "releasing a preview closes its retained source bitmap");
+
+response = undefined;
+self.onmessage({ data: { type: "render", sourceId: "", mask: {}, width: 1, height: 1, blockSize: 1, generation: 11 } });
+assert.equal(response.type, "error", "a render without a retained source reports the preview failure");
+
+response = undefined;
+self.onmessage({ data: { type: "render", sourceId: "different", mask: {}, width: 1, height: 1, blockSize: 1, generation: 12 } });
+assert.equal(response, undefined, "a frame for another source is ignored");
+
+contextCalls = 0; contextFailure = 1;
+const rejectedSource = { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]), close() { this.closed = true; } };
+self.onmessage({ data: { type: "source", sourceId: "bad-context", source: rejectedSource, generation: 13 } });
+assert.equal(response.type, "error", "a source without a 2D context reports the preview failure");
+assert.equal(rejectedSource.closed, true, "a rejected source bitmap is closed");
+contextFailure = 0;
+
+const badMask = { width: 1, height: 1, close() { this.closed = true; } };
+self.onmessage({ data: { type: "source", sourceId: "render-failure", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 14 } });
+self.onmessage({ data: { type: "render", sourceId: "render-failure", mask: badMask, width: 1, height: 1, blockSize: 1, generation: 14 } });
+assert.equal(response.type, "error", "a malformed mask reports the preview failure");
+assert.equal(badMask.closed, true, "a failed render still closes its transferred mask bitmap");
+
+contextCalls = 0; contextFailure = 3;
+self.onmessage({ data: { type: "source", sourceId: "missing-output-context", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 15 } });
+self.onmessage({ data: { type: "render", sourceId: "missing-output-context", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation: 15 } });
+assert.equal(response.type, "error", "a missing output context reports the preview failure");
+
+contextCalls = 0; contextFailure = 0;
+self.onmessage({ data: { type: "source", sourceId: "reused", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 16 } });
+for (const generation of [16, 17]) self.onmessage({ data: { type: "render", sourceId: "reused", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation } });
+assert.equal(response.generation, 17, "a retained source reuses its worker canvases for subsequent frames");
 
 console.log("test_masked_mosaic_worker: passed");

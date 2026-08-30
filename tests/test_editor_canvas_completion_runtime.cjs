@@ -156,9 +156,16 @@ const test = context.canvasCompletion;
   assert.deepEqual([originalCanvas.width, originalCanvas.height], [4, 3]);
   await test.rebuildMosaicPreview();
   assert.equal(workerCreated, 1); assert.equal(state.mosaicWorker.posted.length, 2, "preview worker receives one source bitmap and one mask buffer");
-  state.mosaicWorker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: { close() {} } } });
+  const completedFrame = { close() { this.closed = true; } };
+  state.mosaicWorker.onmessage({ data: { type: "frame", sourceId: state.mosaicSourceId, generation: state.mosaicPreviewGeneration, output: completedFrame } });
   assert.ok(mosaicCanvas.ctx.calls.some(([name]) => name === "image"));
+  assert.equal(completedFrame.closed, true, "painting a completed worker frame releases its bitmap");
   state.mosaicPreviewRequested = false; test.requestMosaicPreview(); assert.equal(state.mosaicPreviewRequested, false, "preview coalescing resets after the animation frame");
+
+  context.Worker = class { constructor() { throw new Error("worker unavailable"); } };
+  state.mosaicWorker = null; state.mosaicSourceImage = null; state.mosaicSourceId = ""; state.mosaicPreviewEnabled = true;
+  await test.rebuildMosaicPreview();
+  assert.equal(state.mosaicPreviewEnabled, false, "an unavailable worker disables the preview instead of leaving it pending");
 
   test.paintMosaicPreview();
   assert.ok(layerCtx.calls.some(([name]) => name === "image"), "preview is clipped through the composed mask before painting");

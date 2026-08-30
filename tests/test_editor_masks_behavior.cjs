@@ -165,6 +165,25 @@ assert.equal(state.manualExclusionEraseEnabled, true);
 
   resetCandidateState();
   test.renderCandidateRows();
+  const eraseRow = [...elements.values()].find((node) => node.className === "candidate-row candidate-row-manual candidate-row-manual-exclude-erase");
+  const eraseToggle = eraseRow.children.find((node) => node.className === "candidate-toggle");
+  state.importing = true;
+  eraseToggle.listeners.get("click")();
+  assert.equal(state.manualExclusionEraseEnabled, true, "the manual exclusion-erase toggle ignores input while importing");
+  state.importing = false;
+  eraseToggle.listeners.get("click")();
+  assert.equal(state.manualExclusionEraseEnabled, false, "the manual exclusion-erase toggle persists a user click after importing finishes");
+
+  const excludeRow = [...elements.values()].find((node) => node.className === "candidate-row candidate-row-exclude");
+  const forcedToggle = excludeRow.children.find((node) => node.className === "candidate-forced");
+  state.importing = true;
+  forcedToggle.listeners.get("click")();
+  assert.equal(state.candidates[1].forced, true, "the exclusion force toggle ignores input while importing");
+  state.importing = false;
+  state.maskStatus.clear();
+  context.api = async () => ({ candidateRevision: 5 });
+  await forcedToggle.listeners.get("click")();
+  assert.equal(state.candidates[1].forced, false, "the exclusion force toggle sends the user-selected forced state");
   const candidateCalls = [];
   let retainedRevision = null;
   context.retainCurrentCandidateBundle = (_imageId, revision) => { retainedRevision = revision; };
