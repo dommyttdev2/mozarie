@@ -118,9 +118,6 @@ function setFluidExclusionEnabled(enabled) {
   if (stateLabel) stateLabel.textContent = t(enabled ? "settings.on" : "settings.off");
 }
 
-const TOOL_POSITIONS = new Set(["left", "top", "right", "bottom"]);
-
-function normaliseToolPosition(position) { return TOOL_POSITIONS.has(position) ? position : "left"; }
 function toolRailItems() { return ["#brushTool", "#eraserTool", "#excludeEraserTool", "#boundaryTool", "#fitButton", "#undoButton", "#redoButton", "#mosaicPreviewButton"].map($); }
 
 function setToolRailTabStop(activeItem = null) {
@@ -130,7 +127,7 @@ function setToolRailTabStop(activeItem = null) {
   items.forEach((item) => { item.tabIndex = item === selected ? 0 : -1; });
 }
 
-function applyToolPosition(position) {
+function applyToolPosition() {
   closeBoundaryModeMenu();
   delete stage.dataset.toolPosition;
   toolRail.setAttribute("aria-orientation", "horizontal");
@@ -217,7 +214,7 @@ function setSettingsForm(settings, status = null) {
   $("#settingsExcludeColor").value = settings.display.exclude_color;
   $("#settingsOpacity").value = settings.display.overlay_opacity;
   $("#settingsMosaicPreview").checked = settings.display.mosaic_preview;
-  applyToolPosition(settings.display.tool_position);
+  applyToolPosition();
   state.mosaicPreviewEnabled = settings.display.mosaic_preview;
   $("#mosaicPreviewButton").classList.toggle("active", state.mosaicPreviewEnabled);
   $("#mosaicPreviewButton").setAttribute("aria-pressed", String(state.mosaicPreviewEnabled));
