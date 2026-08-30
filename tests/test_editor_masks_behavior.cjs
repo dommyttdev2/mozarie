@@ -67,7 +67,7 @@ const context = {
   imageAssetVersion: (record) => record?.assetVersion || "", canvasHasPixels: (ctx) => ctx.pixels,
   t: (key) => key, confirmationRequired: () => false, confirmAction: async () => true,
   markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`),
-  flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"),
+  flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
   setReviewed: () => events.push("review"), updateHistoryButtons() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, refreshMaskStatus() {},
   renderCandidates: () => events.push("candidates"), render: () => events.push("render"), renderCatalogViews: () => events.push("catalog"), updateActionButtons() {},
   updateCandidateBatchButtons() {},
@@ -81,7 +81,7 @@ const context = {
 
 const masksPath = path.join(__dirname, "..", "static", "js", "editor-masks.js");
 const source = fs.readFileSync(masksPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.masksTest = { candidateDisplayMode, candidateDisplayIdsForRole, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, paintStrokeOnContexts, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, restoreSnapshot, buildCombinedMask, addBoundaryCandidate };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
+vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
 const test = context.masksTest;
 
 assert.deepEqual([...test.candidateDisplayIdsForRole("apply")], ["apply", "manual:apply"]);
@@ -136,5 +136,123 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   await test.addBoundaryCandidate();
   assert.equal(state.boundaryDrafts.length, 1, "failed boundary detection preserves the draft for retry");
   assert.ok(events.some((event) => event.startsWith("error:")));
+
+  // Candidate mutations are optimistic, ordered per image, and must restore the
+  // visible aggregate when the server cannot accept the change.
+  const resetCandidateState = () => {
+    state.currentId = "image"; state.imageGeneration = 2; state.importing = false;
+    state.candidates = [
+      { id: "apply", role: "apply", enabled: true, confidence: 0.8, className: "target", color: "#fff" },
+      { id: "exclude", role: "exclude", enabled: true, forced: true, className: "keep", color: "#000" },
+    ];
+    state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
+    state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
+    state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+    addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
+    state.images = [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
+    state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(["apply", "exclude"]);
+    context.confirmationRequired = () => false; context.confirmAction = async () => true;
+    context.isBusy = () => false; context.reconcileCurrentCandidates = async () => false;
+  };
+
+  resetCandidateState();
+  test.renderCandidateRows();
+  const candidateCalls = [];
+  let retainedRevision = null;
+  context.retainCurrentCandidateBundle = (_imageId, revision) => { retainedRevision = revision; };
+  context.api = async (path, options) => {
+    candidateCalls.push({ path, body: JSON.parse(options.body) });
+    return { candidateRevision: 9 };
+  };
+  state.candidates[0].enabled = false;
+  await test.updateCandidate(state.candidates[0], true, true);
+  assert.deepEqual(candidateCalls, [{ path: "/api/candidate/image/apply", body: { enabled: false, color: "#fff" } }], "a candidate toggle persists its requested enabled state");
+  assert.equal(retainedRevision, 9, "a successful mutation retains the returned candidate revision");
+
+  resetCandidateState();
+  let staleRefreshes = 0;
+  context.refreshCandidateRecord = async () => { staleRefreshes += 1; };
+  context.api = async () => { state.currentId = "other"; return { candidateRevision: 10 }; };
+  state.candidates[0].enabled = false;
+  await test.updateCandidate(state.candidates[0], true, true);
+  assert.equal(staleRefreshes, 1, "a completed mutation for an image left behind refreshes only its catalog record");
+
+  resetCandidateState();
+  let rollback = null;
+  context.syncCandidateRecord = (imageId, candidates) => { rollback = { imageId, enabled: candidates[0].enabled }; };
+  context.api = async () => { throw new Error("candidate unavailable"); };
+  state.candidates[0].enabled = false;
+  await test.updateCandidate(state.candidates[0], true, false);
+  assert.deepEqual(rollback, { imageId: "image", enabled: true }, "a rejected mutation restores the optimistic candidate state");
+  assert.equal(state.maskStatus.get("image"), false, "a rejected mutation restores the prior mask aggregate");
+
+  resetCandidateState();
+  context.confirmationRequired = (key) => key === "candidateDelete";
+  await test.deleteCandidate(state.candidates[0]);
+  assert.equal(state.removedCandidateIds.has("apply"), true, "a confirmed candidate removal is stored in undo history");
+  await test.deleteManualMask(); await test.deleteManualExclusion(); await test.deleteManualExclusionErase();
+  assert.deepEqual([state.manualMaskPresent, addCtx.pixels, exclusionCtx.pixels, exclusionEraseCtx.pixels], [false, false, false, false], "manual add and exclusion layers are cleared independently");
+
+  resetCandidateState();
+  const batchCalls = [];
+  context.api = async (path, options) => {
+    batchCalls.push({ path, body: JSON.parse(options.body) });
+    return { candidateRevision: 11 };
+  };
+  await test.batchCandidateOperation("apply:toggle");
+  await test.batchCandidateOperation("exclude:toggle");
+  assert.deepEqual(batchCalls.map(({ path, body }) => ({ path, operation: body.operation })), [
+    { path: "/api/candidates/batch", operation: "disable" },
+    { path: "/api/candidates/batch", operation: "disable" },
+  ], "batch toggles derive a disable operation only when every affected layer is enabled");
+  assert.deepEqual([state.candidates[0].enabled, state.candidates[1].enabled, state.manualEnabled, state.manualExclusionEnabled, state.manualExclusionEraseEnabled], [false, false, false, false, false], "batch toggles keep automatic and manual layers in sync");
+
+  resetCandidateState();
+  context.confirmationRequired = (key) => key === "candidateRoleDelete";
+  await test.batchCandidateOperation("exclude:delete");
+  assert.equal(state.removedCandidateIds.has("exclude"), true, "a confirmed role deletion is local and undoable");
+  resetCandidateState();
+  context.api = async () => { throw new Error("batch unavailable"); };
+  await test.batchCandidateOperation("apply:enable");
+  assert.equal(state.candidateBatchPending.size, 0, "a failed batch mutation always clears its pending state");
+
+  resetCandidateState();
+  const boundaryBodies = [];
+  state.boundaryDrafts = [
+    { id: "polygon", type: "polygon", points: [{ x: 1, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 4 }] },
+    { id: "point", type: "point", roi: { left: 2, top: 2, right: 6, bottom: 6 }, point: { x: 3, y: 3 } },
+  ];
+  context.boundaryRequests = () => [
+    { draft: state.boundaryDrafts[0], draftIds: ["polygon"] },
+    { draft: state.boundaryDrafts[1], draftIds: ["point"] },
+  ];
+  context.api = async (_path, options) => {
+    boundaryBodies.push(JSON.parse(options.body));
+    return boundaryBodies.length === 1 ? { candidates: [{ id: "polygon-result", enabled: true, role: "apply" }], candidateRevision: 12 } : { candidates: [], candidateRevision: 13 };
+  };
+  await test.addBoundaryCandidate();
+  assert.deepEqual(boundaryBodies[0], { imageId: "image", points: [{ x: 1, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 4 }] }, "polygon boundary detection sends immutable point coordinates");
+  assert.deepEqual(boundaryBodies[1], { imageId: "image", roi: { left: 2, top: 2, right: 6, bottom: 6 }, point: { x: 3, y: 3 } }, "point boundary detection sends its explicit prompt");
+  assert.equal(state.boundaryDrafts.length, 1, "an invalid boundary response keeps only the failed draft for retry");
+
+  resetCandidateState();
+  state.currentImage = null; test.resetHistoryToCurrentManualMask();
+  assert.equal(state.history.length, 0, "history reset is a no-op without an active image");
+  state.currentImage = { width: 100, height: 80 }; test.resetHistoryToCurrentManualMask();
+  test.replayManualStroke({ kind: "restoreCandidates", ids: ["apply"] });
+  test.replayManualStroke({ kind: "addCandidates", ids: ["exclude"] });
+  test.replayManualStroke({ kind: "clearManual", role: "excludeErase" });
+  test.replayManualStroke({ tool: "brush", size: 3, points: [] });
+  for (const operation of [
+    { kind: "removeCandidates", ids: ["apply"] },
+    { kind: "restoreCandidates", ids: ["apply"] },
+    { kind: "addCandidates", ids: ["new"] },
+  ]) {
+    for (let index = 0; index < 5; index += 1) test.recordHistoryOperation(operation);
+  }
+  assert.equal(state.history.length, 12, "history trimming retains the newest twelve operations");
+  assert.equal(state.historyBaseDirty, true, "trimmed operations become part of the immutable history base");
+  state.importing = true; test.restoreSnapshot(0); assert.equal(state.historyIndex, 12, "history restoration is blocked while importing");
+  state.importing = false; test.restoreSnapshot(0); assert.equal(state.historyIndex, 0, "history restoration rebuilds the active image state");
   console.log("test_editor_masks_behavior: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
