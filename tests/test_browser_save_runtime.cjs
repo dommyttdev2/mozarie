@@ -53,7 +53,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   getElement("#applySuffix");
   getElement("#deleteOriginal");
   getElement("#removeAfterSave");
-  getElement('input[name="saveMode"]:checked').value = "copy";
+  getElement('input[name="batchSaveMode"]:checked').value = "copy";
   const canvas = getElement("#editorCanvas");
   canvas.getContext = () => ({ clearRect() {}, drawImage() {}, setTransform() {}, save() {}, restore() {}, translate() {}, scale() {} });
   getElement("#canvasStage").clientWidth = 600;
@@ -149,6 +149,16 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
   const { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, writeSourceHandle } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
+  const outputFiles = new Map();
+  state.outputDirectoryHandle = {
+    name: "output",
+    async getFileHandle(name, options = {}) {
+      if (!options.create && !outputFiles.has(name)) throw new DOMException("missing", "NotFoundError");
+      if (!outputFiles.has(name)) outputFiles.set(name, []);
+      return { async createWritable() { return { async write(bytes) { outputFiles.set(name, [...bytes]); }, async close() {}, async abort() {} }; } };
+    },
+    async removeEntry(name) { outputFiles.delete(name); },
+  };
   state.translations = {
     "apply.complete": "complete {completed}",
     "apply.completeWithStale": "stale {completed}/{stale}",
@@ -188,7 +198,7 @@ async function runExclusiveWritableCases() {
 async function runSuccessCase() {
     let copyCompletedWhenCommitted = false;
   const runtime = createRuntime({
-    copy: () => { copyCompletedWhenCommitted = true; return jsonResponse({ output: "G:/output/nested/source_censored.png" }); },
+    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { copyCompletedWhenCommitted = true; }),
     commit: () => {
       assert.equal(copyCompletedWhenCommitted, true, "commit runs after the copied output is saved");
       return jsonResponse({ cleared: true, stale: false, images: [] });
@@ -212,11 +222,11 @@ async function runDraftBarrierBeforeDefaultApplyCase() {
   runtime.state.draftSaveChains.set("image-1", new Promise((resolve) => { releaseDraft = resolve; }));
   const start = runtime.startApplyFromDialog({ preventDefault() {} });
   await Promise.resolve();
-  assert.equal(runtime.requests.some((request) => request.path === "/api/apply"), false, "the server save waits for the draft encoder");
+  assert.equal(runtime.requests.some((request) => request.path === "/api/save/render"), false, "the browser save waits for the draft encoder");
   releaseDraft();
   await start;
-  const apply = runtime.requests.find((request) => request.path === "/api/apply");
-  assert.ok(apply, "the server save starts after the draft encoder settles");
+  const render = runtime.requests.find((request) => request.path === "/api/save/render");
+  assert.ok(render, "the browser save starts after the draft encoder settles");
 }
 
 async function runStaleCommitCase() {
@@ -292,7 +302,7 @@ async function runRemoveAfterSavePartialAndStaleCase() {
 
 async function runCopyFailureCase() {
   let removed = false;
-  const runtime = createRuntime({ deleteOriginal: true, copy: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  const runtime = createRuntime({ deleteOriginal: true, renderBinary: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", {
     fileHandle: {
       name: "source.png",
@@ -407,7 +417,7 @@ async function runRetryableCommitCase() {
 async function runCancelCase() {
   let runtime;
     runtime = createRuntime({
-    copy: () => { runtime.state.browserSave.cancelled = true; return jsonResponse({ output: "G:/output/source_censored.png" }); },
+    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { runtime.state.browserSave.cancelled = true; }),
     commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
     removeCatalog: ({ options }) => {
       assert.deepEqual(JSON.parse(options.body), { imageIds: ["image-1"] });
@@ -657,7 +667,7 @@ async function runNoEffectiveMaskBatchCases() {
   const second = { id: "image-2", relativePath: "second.png", width: 32, height: 32, candidateCount: 0, enabledCandidateCount: 0 };
   const none = createRuntime({
     initialImages: [second],
-    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    renderBinary: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
     commit: () => { throw new Error("an empty mask is never committed"); },
   });
   await none.runBrowserSave([second.id], "_censored", false, "copy", true);
@@ -666,7 +676,7 @@ async function runNoEffectiveMaskBatchCases() {
 
   const noneUnmasked = createRuntime({
     initialImages: [second],
-    copy: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
+    renderBinary: () => jsonResponse({ error_code: "no_effective_mask" }, 400),
     commit: () => { throw new Error("an empty mask is never committed"); },
   });
   await noneUnmasked.runBrowserSave([second.id], "_censored", false, "copy", true, false);
@@ -676,9 +686,9 @@ async function runNoEffectiveMaskBatchCases() {
   const mixed = createRuntime({
     initialImages: [first, second],
     entries: [{ imageId: first.id, candidateRevision: 1 }, { imageId: second.id, candidateRevision: 1 }],
-    copy: () => {
+    renderBinary: () => {
       renders += 1;
-      return renders === 1 ? jsonResponse({ output: "G:/output/first.png" }) : jsonResponse({ error_code: "no_effective_mask" }, 400);
+      return renders === 1 ? binaryResponse([4, 5, 6]) : jsonResponse({ error_code: "no_effective_mask" }, 400);
     },
     commit: () => jsonResponse({ cleared: true, stale: false, deleted: false }),
     removeCatalog: ({ options }) => {

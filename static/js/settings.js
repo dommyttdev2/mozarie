@@ -368,10 +368,9 @@ async function resetSettings() {
 
 async function chooseSettingsOutputDirectory() {
   try {
-    const directory = await pickOutputDirectory();
-    if (directory) $("#settingsDefaultOutputDirectory").value = directory;
+    if (await pickOutputDirectory()) renderOutputDirectory();
   } catch (error) {
-    if (error?.name !== "AbortError") showUserError("output_folder_unavailable", $("#settingsChooseOutputDirectory"));
+    if (error?.name !== "AbortError") showUserError(error, $("#settingsChooseOutputDirectory"));
   }
 }
 

@@ -180,6 +180,7 @@ class BrowserSaveToken:
     # are never represented here.
     output_path: Path | None = None
     output_fingerprint: tuple[int, int] | None = None
+    allow_copy_action: bool = False
 
 
 @dataclass(frozen=True)
@@ -759,8 +760,8 @@ def _read_detection_parallelism(value: Any) -> int:
 
 
 def _read_save_suffix(value: Any) -> str:
-    if not isinstance(value, str) or not value or Path(value).name != value:
-        raise ClientError("ファイル名の末尾は空でない名前として指定してください。", "input_invalid")
+    if not isinstance(value, str) or any(ord(character) < 32 or character in '<>:"/\\|?*' for character in value):
+        raise ClientError("ファイル名の末尾に使えない文字があります。", "input_invalid")
     return value
 
 

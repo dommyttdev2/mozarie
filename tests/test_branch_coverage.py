@@ -397,7 +397,6 @@ class HttpBranchTests(unittest.TestCase):
             ("/api/candidates/batch", {"imageId": "image"}),
             ("/api/settings/status", {}),
             ("/api/settings/gpu-diagnostic", {}),
-            ("/api/output-directory/pick", {}),
             ("/api/model-file/pick", {"modelKey": "target_segmentation"}),
             ("/api/model-download/cancel", {}),
             ("/api/boundary", {"imageId": "image"}),
@@ -411,7 +410,7 @@ class HttpBranchTests(unittest.TestCase):
             ("/api/job/cancel", {}),
             ("/api/candidate/image/candidate", {}),
         )
-        with patch.object(http_module, "STATE", state), patch("mozarie.http._local_version", return_value="v1.0.0"), patch("mozarie.http._pick_output_directory", return_value=None), patch("mozarie.http._pick_model_file", return_value=None):
+        with patch.object(http_module, "STATE", state), patch("mozarie.http._local_version", return_value="v1.0.0"), patch("mozarie.http._pick_model_file", return_value=None):
             for path, payload in routes:
                 with self.subTest(path=path):
                     handler.path = path
@@ -515,15 +514,12 @@ class HttpBranchTests(unittest.TestCase):
 
     def test_picker_wrappers_validate_busy_unknown_and_unusable_selections(self) -> None:
         lock = __import__("threading").RLock()
-        state = SimpleNamespace(lock=lock, active_import_count=0, job=SimpleNamespace(state="idle"), _has_active_worker=lambda: False, settings={"saving": {"default_output_directory": ""}})
+        state = SimpleNamespace(lock=lock, active_import_count=0, job=SimpleNamespace(state="idle"), _has_active_worker=lambda: False)
         with self.assertRaises(ClientError):
             http_module._pick_model_file("unknown", state)
         busy_state = SimpleNamespace(lock=__import__("threading").RLock(), active_import_count=1, job=SimpleNamespace(state="idle"), _has_active_worker=lambda: False)
         with self.assertRaises(ClientError):
             http_module._pick_model_file("target_segmentation", busy_state)
-        with patch("mozarie.http._run_native_picker", return_value="relative"):
-            with self.assertRaises(ClientError):
-                http_module._pick_output_directory(state)
         with tempfile.TemporaryDirectory() as directory:
             bad = str(Path(directory) / "wrong.txt")
             Path(bad).write_text("x", encoding="utf-8")

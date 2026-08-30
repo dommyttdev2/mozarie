@@ -91,40 +91,6 @@ def _run_native_picker(script: str, environment: dict[str, str], *, failed_messa
         state.native_picker_lock.release()
 
 
-def _pick_output_directory(state: StudioState = STATE) -> str | None:
-    with state.lock:
-        default_output_directory = state.settings["saving"]["default_output_directory"]
-        if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
-            raise ClientError("処理中は保存先を変更できません。", "operation_in_progress")
-    script = """
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$owner = New-Object System.Windows.Forms.Form
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-try {
-  $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
-  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-  $owner.Size = New-Object System.Drawing.Size(1, 1)
-  $owner.Show(); $owner.Activate(); $owner.BringToFront()
-  $dialog.Description = 'Mozarie の保存先を選択'
-  $initial = $env:MOZARIE_DEFAULT_OUTPUT_DIRECTORY
-  if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
-  if ($dialog.ShowDialog($owner) -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
-  [Console]::Out.Write([Convert]::ToBase64String($bytes))
-} finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }
-"""
-    picker_environment = os.environ.copy()
-    picker_environment["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"] = str(default_output_directory)
-    selected = _run_native_picker(script, picker_environment, failed_message="保存先の選択を開けませんでした。", busy_message="保存先の選択を開いています。", state=state)
-    if selected is None:
-        return None
-    path = Path(selected)
-    if not path.is_absolute() or not path.is_dir():
-        raise ClientError("保存先は存在する絶対パスで選択してください。", "output_folder_unavailable")
-    return str(path.resolve())
-
-
 _MODEL_PICKER_SUFFIXES = {
     "target_segmentation": {".onnx"}, "ntd11": {".onnx"}, "sensitive": {".onnx"}, "hand_detection": {".onnx"},
     "hand_segmentation": {".safetensors"}, "sam_checkpoint": {".pth", ".pt", ".ckpt"},
@@ -383,9 +349,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if parse_qs(parsed.query).get("status", ["1"])[0] != "0":
                     response["status"] = STATE.settings_status()
                 self._json(response)
-            elif path == "/api/output-directory/pick":
-                selected = _pick_output_directory()
-                self._json({"path": selected} if selected else {"cancelled": True})
             elif path == "/api/model-file/pick":
                 selected = _pick_model_file(str(payload.get("modelKey", "")), current_path=str(payload.get("currentPath", "")))
                 self._json({"path": selected} if selected else {"cancelled": True})
@@ -414,12 +377,14 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"entries": entries})
             elif path == "/api/save/render":
                 copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
+                copy_to_browser = _read_bool(payload.get("copyToBrowser", False), "ブラウザ保存")
                 rendered = STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     _read_mosaic_divisor(payload.get("divisor")),
                     payload.get("draft"),
                     copy_to_default=copy_to_default,
+                    copy_to_browser=copy_to_browser,
                     suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                 )
                 output, record, revision, save_token = rendered

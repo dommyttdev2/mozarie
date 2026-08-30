@@ -8,7 +8,7 @@ previousImageButton nextImageButton removeAndNextButton hideAndNextButton review
 closeOverviewButton batchModeButton overviewQuery overviewFolder selectionActionsButton selectionClearButton toggleReviewMenuItem copyImagePathMenuItem removeImageMenuItem confirmNeverShow confirmAccept errorDialogClose
 detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCancelButton detectStartButton
 settingsCloseButton settingsTabGeneral settingsTabModels settingsTabDisplay settingsTabShortcuts settingsTabConfirm settingsTabInfo settingsLanguage settingsPort settingsDefaultOutputDirectory settingsChooseOutputDirectory settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsTargetModel settingsNtd11Toggle settingsNtd11Model settingsSensitiveToggle settingsSensitiveModel settingsPrecisionToggle settingsSamType settingsSamModel settingsHandToggle settingsHandModel settingsHandSegmentationToggle settingsHandSegmentationModel settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy checkUpdateButton settingsResetButton settingsSaveButton
-modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel applyTargetMode applyCopyMode applyOverwriteMode applySuffix deleteOriginal applyOutputDirectoryStatus chooseOutputDirectoryButton removeAfterSave applyDivisor applyCloseButton applyPauseButton applyCancelButton applyStartButton mosaicHelpCloseButton processingPauseButton processingCancelButton modelHelpCloseButton modelHelpCopy
+modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel applyTargetMode applyCopyMode applyOverwriteMode applySuffix deleteOriginal applyOutputDirectoryStatus chooseOutputDirectoryButton removeAfterSave applyDivisor applyCloseButton applyPauseButton applyCancelButton applyStartButton singleSaveCopyMode singleSaveOverwriteMode singleSaveSuffix singleSaveDeleteOriginal singleSaveChooseOutputDirectoryButton singleSaveCloseButton singleSaveStartButton mosaicHelpCloseButton processingPauseButton processingCancelButton modelHelpCloseButton modelHelpCopy
 `.trim().split(/\s+/);
 
 // Text-entry controls are exercised with a real keyboard event.  Selects,
@@ -16,7 +16,7 @@ modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel appl
 // id is a button-style activation.  The separate list keeps a new control from
 // silently bypassing the interaction sweep.
 const keyboardIds = new Set(`
-folderPath overviewQuery settingsDefaultOutputDirectory settingsTargetModel settingsNtd11Model settingsSensitiveModel settingsSamModel settingsHandModel settingsHandSegmentationModel applySuffix applyOutputDirectoryStatus
+folderPath overviewQuery settingsDefaultOutputDirectory settingsTargetModel settingsNtd11Model settingsSensitiveModel settingsSamModel settingsHandModel settingsHandSegmentationModel applySuffix applyOutputDirectoryStatus singleSaveSuffix
 `.trim().split(/\s+/));
 const changeIds = new Set(`
 galleryFilter brushSize divisor bucketTolerance confidence detectTargetPenis detectTargetPussy detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber overviewFolder confirmNeverShow settingsLanguage settingsPort settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsNtd11Toggle settingsSensitiveToggle settingsPrecisionToggle settingsSamType settingsHandToggle settingsHandSegmentationToggle settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy applyTargetMode applyCopyMode applyOverwriteMode deleteOriginal removeAfterSave applyDivisor
@@ -50,7 +50,7 @@ function interactionFor(id) {
     resultKind = "dialog"; scenario = "import";
   } else if (/^(detect|confidence|boundaryDetectButton|boundaryCancelButton)/.test(id)) {
     resultKind = "api"; scenario = "detection";
-  } else if (/^(save|apply|deleteOriginal|removeAfterSave|chooseOutputDirectoryButton)/.test(id)) {
+  } else if (/^(save|apply|deleteOriginal|removeAfterSave|chooseOutputDirectoryButton|singleSave)/.test(id)) {
     resultKind = "api"; scenario = "save";
   } else if (/^(settings|modelDownload|modelHelp)/.test(id)) {
     resultKind = /^settings(?:Language|Port|DefaultOutputDirectory|ImportParallelism|SaveParallelism|OpenBrowser|Provider|GpuDevice|TargetModel|Ntd11|Sensitive|Precision|Sam|Hand|Fluid|ApplyColor|ExcludeColor|Opacity|MosaicPreview|ExcludeForcedDefault|ShortcutsEnabled)/.test(id) ? "value" : "dialog";

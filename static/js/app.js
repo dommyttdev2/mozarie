@@ -265,7 +265,7 @@ function bindEvents() {
   setPaneCollapsed("inspector", false);
   $("#applyForm").addEventListener("submit", startApplyFromDialog);
   $("#chooseOutputDirectoryButton").addEventListener("click", chooseOutputDirectory);
-  document.querySelectorAll('input[name="saveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
+  document.querySelectorAll('input[name="batchSaveMode"]').forEach((input) => input.addEventListener("change", syncApplyMode));
   $("#applyTargetMode").addEventListener("change", refreshApplyTargets);
   $("#mosaicHelpButton").addEventListener("click", () => {
     showModalFromInvoker($("#mosaicHelpDialog"));
@@ -280,6 +280,12 @@ function bindEvents() {
   $("#applyCancelButton").addEventListener("click", () => controlApply("cancel"));
   $("#applyDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.applyRunning) $("#applyDialog").close(); });
   lightDismiss($("#applyDialog"), () => { if (!state.applyRunning) $("#applyDialog").close(); });
+  $("#singleSaveForm").addEventListener("submit", startSingleSave);
+  $("#singleSaveChooseOutputDirectoryButton").addEventListener("click", () => { void chooseSingleOutputDirectory(); });
+  document.querySelectorAll('input[name="singleSaveMode"]').forEach((input) => input.addEventListener("change", syncSingleSaveMode));
+  $("#singleSaveCloseButton").addEventListener("click", () => $("#singleSaveDialog").close());
+  $("#singleSaveDialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!state.saving) $("#singleSaveDialog").close(); });
+  lightDismiss($("#singleSaveDialog"), () => { if (!state.saving) $("#singleSaveDialog").close(); });
   $("#confirmDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#confirmDialog").close("cancel"); });
   lightDismiss($("#confirmDialog"), () => $("#confirmDialog").close("cancel"));
   $("#processingDialog").addEventListener("cancel", (event) => event.preventDefault());
@@ -497,6 +503,8 @@ async function initialise() {
     return;
   }
   await loadTranslations(); bindEvents();
+  state.outputDirectoryHandle = await rememberedOutputDirectoryHandle();
+  renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
   document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));

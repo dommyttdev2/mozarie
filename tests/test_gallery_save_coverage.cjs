@@ -184,7 +184,7 @@ async function galleryInteractions() {
 
 function makeSaveRuntime() {
   const nodes = new Map();
-  const ids = ["#applyResult", "#applyStartButton", "#deleteOriginal", "#removeAfterSave", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog"];
+  const ids = ["#applyResult", "#applyStartButton", "#deleteOriginal", "#removeAfterSave", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog", "#singleSaveOutputDirectoryStatus"];
   for (const id of ids) nodes.set(id, element());
   nodes.get("#applyTargetMode").value = "masked"; nodes.get("#applyDivisor").value = "16"; nodes.get("#divisor").value = "16"; nodes.get("#applySuffix").value = "_m";
   const saveMode = element(); saveMode.value = "copy";
@@ -192,7 +192,7 @@ function makeSaveRuntime() {
   const state = {
     sourceAccess: new Map(), applyTargetIds: ["file"], images: [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }, { id: "session", sourceKind: "session", relativePath: "session.png" }],
     settings: { saving: { default_output_directory: "G:/out", parallelism: 1 }, detection: { exclude_forced_default: true } }, drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(), candidateUpdateChains: new Map(),
-    applyRunning: false, saveStarting: false, outputDirectoryPicking: false, importing: false, saving: false, currentId: null, candidates: [], catalogEpoch: 1, imageGeneration: 0, pageLoadedAt: 1, job: { kind: "idle", state: "idle" },
+    applyRunning: false, saveStarting: false, outputDirectoryPicking: false, outputDirectoryHandle: null, importing: false, saving: false, currentId: null, candidates: [], catalogEpoch: 1, imageGeneration: 0, pageLoadedAt: 1, job: { kind: "idle", state: "idle" },
   };
   let handler = async (url) => {
     if (url === "/api/images") return { images: state.images };
@@ -202,14 +202,14 @@ function makeSaveRuntime() {
   };
   const context = {
     codedError(code) { const error = new Error(); error.code = code; return error; },
-    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="saveMode"]:checked') return saveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
+    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, window: { showDirectoryPicker: async () => ({ name: "picked", async queryPermission() { return "granted"; } }) }, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
     state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
     fetch(url, options) { return handler(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
-    showUserError(error) { errors.push(error); }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; },
+    showUserError(error) { errors.push(error); }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; }, async rememberOutputDirectoryHandle() {},
     saveTargets() { return state.applyTargetIds; }, isBusy() { return Boolean(context.busy); }, async flushDraftSaves() { if (context.flushError) throw context.flushError; }, async waitForCandidateMutations() { calls.push("wait-candidates"); }, updateBlockSizeDisplay() { calls.push("block-size"); },
     updateActionButtons() { calls.push("actions"); }, releaseCandidateBundles(id) { calls.push(`release:${id}`); }, resetCurrentDraft() { calls.push("reset-draft"); }, pruneSourceAccess() { calls.push("prune"); },
     releaseImageCaches(id) { calls.push(`cache:${id}`); }, clearCandidateMutationState(id) { calls.push(`mutation:${id}`); }, clearReviewForRemovedImage() { calls.push("clear-review"); }, clearBatchSelection() { calls.push("clear-batch"); }, clearEditor() { calls.push("clear-editor"); }, renderCatalogViews() { calls.push("catalog"); }, updateSelectionActionBar() { calls.push("selection"); },
-    async selectImage(id) { calls.push(`select:${id}`); }, updateNavigationControls() { calls.push("navigation"); }, refreshMaskStatus() { calls.push("mask-status"); }, renderCandidates() { calls.push("candidates"); }, render() { calls.push("render"); },
+    async selectImage(id) { calls.push(`select:${id}`); }, async setReviewed() { calls.push("reviewed"); return true; }, updateNavigationControls() { calls.push("navigation"); }, refreshMaskStatus() { calls.push("mask-status"); }, renderCandidates() { calls.push("candidates"); }, render() { calls.push("render"); },
     isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }, isCurrentGeneration(generation) { return state.imageGeneration === generation; }, async moveReviewedPathAfterApply() { calls.push("review-path"); },
     async confirmAction() { return context.confirmed; }, async ensureSaveSources() {}, async runBrowserSave() { calls.push("run-browser"); }, closeProcessing() { calls.push("close-processing"); }, markImagesUnreviewed() { calls.push("unreview"); },
     modalInvokers: new Map(), updateProgress() { calls.push("progress"); }, setStatusKey(key) { calls.push(`status:${key}`); }, scheduleJobPoll() { calls.push("schedule"); },
@@ -235,10 +235,7 @@ async function saveInteractions() {
   state.drafts.set("file", { add: "add", exclusion: "x", exclusionErase: "erase", manualEnabled: false, manualExclusionEnabled: false, manualExclusionEraseEnabled: false, removedCandidateIds: ["old"] }); assert.deepEqual(JSON.parse(JSON.stringify(runtime.draftPayload(["file", "missing"]))), { file: { add: "", exclusion: "", exclusionErase: "", manualExclusionForced: true, removedCandidateIds: ["old"] } });
   runtime.renderOutputDirectory(); assert.equal(runtime.nodes.get("#settingsDefaultOutputDirectory").value, "G:/out"); runtime.setOutputDirectoryPickerBusy(true); assert.equal(state.outputDirectoryPicking, true); runtime.setOutputDirectoryPickerBusy(false);
 
-  let pickerCalls = 0; runtime.setHandler(async (url) => { if (url === "/api/output-directory/pick") { pickerCalls += 1; return { path: "G:/picked" }; } if (url.startsWith("/api/settings")) return { settings: state.settings }; return { images: state.images }; });
-  assert.equal(await runtime.pickOutputDirectory(), "G:/picked"); assert.equal(pickerCalls, 1); await runtime.chooseOutputDirectory();
-  runtime.setHandler(async (url) => { if (url === "/api/output-directory/pick") return { path: "" }; return { settings: state.settings }; }); await runtime.chooseOutputDirectory();
-  runtime.setHandler(async () => { throw new Error("picker down"); }); await runtime.chooseOutputDirectory();
+  const picked = await runtime.pickOutputDirectory(); assert.equal(picked.name, "picked"); assert.equal(state.outputDirectoryHandle.name, "picked"); await runtime.chooseOutputDirectory();
 
   assert.equal(await runtime.waitForBrowserSave({ paused: false, cancelled: false, failed: false }), true); assert.equal(await runtime.waitForBrowserSave({ paused: false, cancelled: true, failed: false }), false); runtime.showBrowserSaveProgress({ paused: true, entries: [{}], completed: 0 }, { relativePath: "file.png" }); assert.equal(state.job.state, "paused");
   state.images = [{ id: "file" }, { id: "kept" }]; state.drafts = new Map([["file", { hasEffectiveMask: true }], ["gone", { hasEffectiveMask: true }]]); state.maskStatus = new Map([["file", false], ["gone", true]]); runtime.reconcileStoredMaskStatuses(); assert.deepEqual([...state.maskStatus], [["file", true]]);

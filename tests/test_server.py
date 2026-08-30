@@ -656,44 +656,8 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(live_record.asset_revision, asset_revision + 1)
             self.assertNotEqual(state.asset_version(live_record), asset_version)
 
-    def test_output_directory_picker_uses_fixed_powershell_and_releases_locks(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-            selected = root / "保存先"; selected.mkdir()
-            completed = types.SimpleNamespace(returncode=0, stdout=base64.b64encode(str(selected).encode("utf-8")))
-            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
-                 patch.object(http_module.subprocess, "run", return_value=completed) as run:
-                self.assertEqual(http_module._pick_output_directory(state), str(selected.resolve()))
-            command = run.call_args.args[0]
-            self.assertEqual(command[:-1], [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand"])
-            script = base64.b64decode(command[-1]).decode("utf-16le")
-            self.assertIn("FolderBrowserDialog", script)
-            self.assertIn("FormStartPosition]::CenterScreen", script)
-            self.assertIn("ShowDialog($owner)", script)
-            self.assertIn("$dialog.Dispose(); $owner.Close(); $owner.Dispose()", script)
-            self.assertNotIn("-32000", script)
-            self.assertFalse(run.call_args.kwargs["shell"])
-            self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
-            self.assertEqual(
-                run.call_args.kwargs["env"]["MOZARIE_DEFAULT_OUTPUT_DIRECTORY"],
-                state.settings["saving"]["default_output_directory"],
-            )
-        self.assertTrue(state.native_picker_lock.acquire(blocking=False))
-        state.native_picker_lock.release()
-        self.assertTrue(state.import_lock.acquire(blocking=False))
-        state.import_lock.release()
-
-    def test_output_directory_picker_rejects_an_active_import_before_launch(self):
-        state = self.new_state()
-        with state.lock:
-            state.active_import_count = 1
-        with patch.object(http_module.subprocess, "run") as run, self.assertRaisesRegex(ClientError, "処理中"):
-            http_module._pick_output_directory(state)
-        run.assert_not_called()
+    def test_output_directory_picker_is_not_a_server_api(self):
+        self.assertFalse(hasattr(http_module, "_pick_output_directory"))
 
     def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
         state = self.new_state()
@@ -1047,54 +1011,6 @@ class MozarieTests(unittest.TestCase):
         finally:
             connection.close()
             httpd.shutdown(); httpd.server_close()
-
-    def test_output_directory_picker_allows_folder_reload_while_open(self):
-        state = self.new_state()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-            images_directory = root / "images"
-            images_directory.mkdir()
-            Image.new("RGB", (8, 8), "white").save(images_directory / "source.png")
-            picker_started = threading.Event()
-            release_picker = threading.Event()
-            picker_result: dict[str, object] = {}
-            reload_result: dict[str, object] = {}
-            reload_done = threading.Event()
-
-            def picker_run(*_args, **_kwargs):
-                picker_started.set()
-                self.assertTrue(release_picker.wait(2))
-                return types.SimpleNamespace(returncode=0, stdout=b"")
-
-            def reload_catalog() -> None:
-                try:
-                    reload_result["entries"] = state.set_root(str(images_directory))
-                except BaseException as exc:
-                    reload_result["error"] = exc
-                finally:
-                    reload_done.set()
-
-            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
-                 patch.object(http_module.subprocess, "run", side_effect=picker_run):
-                picker = threading.Thread(
-                    target=lambda: picker_result.setdefault("value", http_module._pick_output_directory(state)),
-                )
-                picker.start()
-                self.assertTrue(picker_started.wait(2))
-                reload = threading.Thread(target=reload_catalog)
-                reload.start()
-                self.assertTrue(reload_done.wait(1), "folder reload must finish while the picker remains open")
-                self.assertNotIn("error", reload_result)
-                self.assertEqual(len(reload_result["entries"]), 1)
-                release_picker.set()
-                reload.join(2)
-                picker.join(2)
-            self.assertFalse(reload.is_alive())
-            self.assertFalse(picker.is_alive())
-            self.assertIsNone(picker_result["value"])
 
     @staticmethod
     def _record(path: Path, width: int, height: int) -> ImageRecord:
@@ -6954,7 +6870,10 @@ class MozarieTests(unittest.TestCase):
         record = ImageRecord(image_id="id", path=Path("C:/source.png"), relative_path="nested/source.png", width=1, height=1, mtime_ns=0, size_bytes=0)
         destination = image_io_module._default_output_destination(record, "_mosaic")
         self.assertTrue(str(destination).endswith("output\\nested\\source_mosaic.png"))
-        with self.assertRaises(ClientError): core_module._read_save_suffix("../bad")
+        self.assertEqual(core_module._read_save_suffix(""), "")
+        self.assertEqual(core_module._read_save_suffix("_モザイク"), "_モザイク")
+        for suffix in ("../bad", "bad/name", "bad\x00name", "bad:name"):
+            with self.subTest(suffix=suffix), self.assertRaises(ClientError): core_module._read_save_suffix(suffix)
 
     def test_folder_scan_uses_import_parallelism_and_sorts_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
