@@ -69,7 +69,7 @@ const context = {
   combinedCanvas: { toDataURL: () => "data:image/png;base64,mask" }, originalCanvas: { width: 100, height: 80 }, originalCtx: addCtx,
   canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
   $: element, document: { querySelectorAll: () => [], createElement: () => element(`node-${elements.size}`) },
-  setInterval: () => 1, clearInterval() {},
+  setInterval: () => 1, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
   isBusy: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
