@@ -1354,6 +1354,17 @@ async function main() {
   try {
     ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
+    // A real unsupported-browser bootstrap must stop before any API request or
+    // editor binding. This covers the user-visible File System Access contract.
+    const unsupportedBrowserPage = await newCoveredPage(browser);
+    await unsupportedBrowserPage.addInitScript(() => {
+      delete window.showOpenFilePicker;
+      delete window.showDirectoryPicker;
+    });
+    await unsupportedBrowserPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await unsupportedBrowserPage.waitForFunction(() => document.body.textContent.includes("File System Access API"));
+    assert.match(await unsupportedBrowserPage.locator("body").textContent(), /File System Access API/, "unsupported browsers receive the startup requirement");
+    await stopCoveredPage(unsupportedBrowserPage, true);
     const settingsFailurePage = await newCoveredPage(browser);
     await settingsFailurePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
@@ -2754,6 +2765,16 @@ async function main() {
       await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.hidden);
       await navigationPage.locator("#overviewButton").click();
       await navigationPage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
+      // Foldered cards are reached through the rendered overview UI, not a
+      // private renderer call. This proves the folder select has real options.
+      await navigationPage.evaluate(() => {
+        state.images[0].relativePath = "nested/sample.png";
+        state.images[1].relativePath = "nested/deeper/sample-two.png";
+      });
+      await navigationPage.locator("#closeOverviewButton").click();
+      await navigationPage.locator("#overviewButton").click();
+      await navigationPage.waitForFunction(() => document.querySelector("#overviewFolder option[value='nested']"));
+      await navigationPage.locator("#overviewFolder").selectOption("nested");
       await navigationPage.locator("#batchModeButton").click();
       await navigationPage.locator('.overview-item[data-id="sample-two"]').click();
       await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control"] });
