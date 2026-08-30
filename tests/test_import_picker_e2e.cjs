@@ -2979,9 +2979,9 @@ async function main() {
 
         await page.evaluate(() => {
           const samples = []; let started = 0; let pendingMax = 0; const canvas = document.querySelector("#editorCanvas");
-          const begin = (event) => { if (event.buttons & 1) started = performance.now(); };
-          const end = () => { if (started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
-          window.__editorPerf = { samples, pendingMax, begin, end, heapBefore: performance.memory?.usedJSHeapSize ?? null };
+          const begin = (event) => { if (window.__editorPerf.recording && (event.buttons & 1)) started = performance.now(); };
+          const end = () => { if (window.__editorPerf.recording && started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
+          window.__editorPerf = { samples, pendingMax, recording: false, begin, end, heapBefore: performance.memory?.usedJSHeapSize ?? null };
           canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
         });
         const toolPixels = [
@@ -2990,9 +2990,17 @@ async function main() {
           ["#eraserTool", "exclusion", (value) => value > 0],
           ["#excludeEraserTool", "exclusionErase", (value) => value > 0],
         ];
+        const toolMetrics = [];
         for (const [tool, layer, accepts] of toolPixels) {
           await page.locator(tool).click();
+          await page.evaluate(() => { window.__editorPerf.samples.length = 0; window.__editorPerf.recording = true; });
           await page.mouse.move(geometry.x, geometry.y); await page.mouse.down(); await page.mouse.move(geometry.endX, geometry.endY, { steps: 100 }); await page.mouse.up();
+          const toolMetric = await page.evaluate(() => {
+            const value = window.__editorPerf; value.recording = false;
+            const samples = [...value.samples].sort((left, right) => left - right);
+            return { drag: samples.reduce((total, duration) => total + duration, 0), p95: samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0 };
+          });
+          toolMetrics.push(toolMetric);
           await page.waitForFunction(() => !state.activeStroke);
           const pixels = await page.evaluate(({ layer, logical }) => ({
             add: addCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
@@ -3012,15 +3020,15 @@ async function main() {
           const undo = performance.now() - beforeUndo;
           const beforeRedo = performance.now(); for (let index = 0; index < 10; index += 1) restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1));
           const redo = performance.now() - beforeRedo;
-          const value = window.__editorPerf; const samples = [...value.samples].sort((left, right) => left - right);
-          const p95 = samples[Math.max(0, Math.ceil(samples.length * .95) - 1)] || 0;
-          const drag = samples.reduce((total, duration) => total + duration, 0);
-          const result = { drag, p95, pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
+          const value = window.__editorPerf;
+          const result = { pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
           const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
           return result;
         });
-        assert.ok(editorPerf.drag < 250, `4K 100-point drag completes within 250ms (actual ${editorPerf.drag.toFixed(1)}ms)`);
-        assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual ${editorPerf.p95.toFixed(2)}ms)`);
+        editorPerf.drag = Math.max(...toolMetrics.map((metric) => metric.drag));
+        editorPerf.p95 = Math.max(...toolMetrics.map((metric) => metric.p95));
+        assert.ok(editorPerf.drag < 250, `each 4K 100-point drag completes within 250ms (actual max ${editorPerf.drag.toFixed(1)}ms)`);
+        assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual max ${editorPerf.p95.toFixed(2)}ms)`);
         assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
         assert.equal(editorPerf.pendingMax <= 1, true, "4K preview keeps at most one pending worker frame");
         if (editorPerf.heapDelta != null) assert.ok(editorPerf.heapDelta < 100 * 1024 * 1024, `50 4K strokes keep JS heap growth below 100MB (actual ${(editorPerf.heapDelta / 1024 / 1024).toFixed(1)}MB)`);
