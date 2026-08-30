@@ -232,14 +232,8 @@ def validate_output_directory_ready(value: str | Path) -> Path:
     if not path.is_absolute() or not path.is_dir():
         raise SettingsError("saving.default_output_directory must be an existing directory")
     path = path.resolve()
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="xb", dir=path, prefix=".mozarie-output-check-", delete=False) as handle:
-            temporary_path = Path(handle.name)
-            handle.write(b"ok")
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+    with tempfile.NamedTemporaryFile(mode="xb", dir=path, prefix=".mozarie-output-check-") as handle:
+        handle.write(b"ok")
     return path
 
 

@@ -72,6 +72,21 @@ class FluidTests(unittest.TestCase):
         self.assertTrue(np.all(fluid[50:70, 20:52] == 255))
         self.assertFalse(np.any(fluid[40:44, 70:74]))
 
+    def test_white_fluid_mask_does_not_expand_when_a_separate_strict_component_uses_the_remaining_cap(self):
+        rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+        penis = np.zeros((100, 100), dtype=np.uint8)
+        penis[10:90, 10:90] = 255
+        rgb[15:35, 15:55] = 255  # 800 strict pixels in a separate component.
+        rgb[50:75, 55:80] = (210, 205, 200)
+        rgb[60:64, 65:69] = 255  # The accepted anchor would otherwise expand by 609 pixels.
+
+        fluid = white_fluid_mask(rgb, penis)
+
+        self.assertEqual(np.count_nonzero(fluid), 816)
+        pale_deposit = fluid[50:75, 55:80].copy()
+        pale_deposit[10:14, 10:14] = 0
+        self.assertFalse(np.any(pale_deposit))
+
     def test_white_fluid_mask_accepts_small_lines_and_drops(self):
         rgb = np.zeros((32, 32, 3), dtype=np.uint8)
         penis = np.zeros((32, 32), dtype=np.uint8)

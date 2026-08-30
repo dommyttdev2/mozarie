@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runpy
 import unittest
 import sys
 from pathlib import Path
@@ -8,11 +9,22 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mozarie.boundary import polygon_roi_and_point, validate_polygon
+import mozarie.core as core_module
 from mozarie.domain import CandidateRole
 from mozarie.masks import compose_masks
 
 
 class MozarieDomainTests(unittest.TestCase):
+    def test_core_import_adds_the_application_root_when_only_the_current_directory_is_available(self) -> None:
+        app_dir = Path(core_module.__file__).resolve().parents[1]
+        original_path = list(sys.path)
+        try:
+            sys.path[:] = ["", *(entry for entry in sys.path if entry and Path(entry).resolve() != app_dir)]
+            runpy.run_path(str(app_dir / "mozarie" / "core.py"), run_name="core_import_path_probe")
+            self.assertEqual(sys.path[0], str(app_dir))
+        finally:
+            sys.path[:] = original_path
+
     def test_apply_union_minus_exclude_and_manual_masks(self) -> None:
         apply = np.zeros((4, 4), dtype=np.uint8); apply[:3, :3] = 255
         extra = np.zeros((4, 4), dtype=np.uint8); extra[3, 3] = 255
