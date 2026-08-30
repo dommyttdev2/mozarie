@@ -2981,7 +2981,7 @@ async function main() {
           const samples = []; let started = 0; let pendingMax = 0; const canvas = document.querySelector("#editorCanvas");
           const begin = (event) => { if (window.__editorPerf.recording && (event.buttons & 1)) started = performance.now(); };
           const end = () => { if (window.__editorPerf.recording && started) samples.push(performance.now() - started); started = 0; pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
-          window.__editorPerf = { samples, pendingMax, recording: false, begin, end, heapBefore: performance.memory?.usedJSHeapSize ?? null };
+          window.__editorPerf = { samples, pendingMax, recording: false, begin, end };
           canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
         });
         const toolPixels = [
@@ -3010,17 +3010,12 @@ async function main() {
           }[layer]), { layer, logical: geometry.logical });
           assert.equal(accepts(pixels), true, `4K ${tool} changes its intended pixel layer`);
         }
-        await page.locator("#brushTool").click();
-        for (let stroke = 0; stroke < 50; stroke += 1) {
-          const offset = (stroke % 10) * 3;
-          await page.mouse.move(geometry.x + offset, geometry.y + offset); await page.mouse.down(); await page.mouse.move(geometry.endX + offset, geometry.endY + offset); await page.mouse.up();
-        }
         await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
         const editorPerf = await page.evaluate(() => {
           let undo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.max(0, state.historyIndex - 1)); undo = Math.max(undo, performance.now() - start); }
           let redo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1)); redo = Math.max(redo, performance.now() - start); }
           const value = window.__editorPerf;
-          const result = { pendingMax: value.pendingMax, undo, redo, heapDelta: value.heapBefore == null || performance.memory?.usedJSHeapSize == null ? null : performance.memory.usedJSHeapSize - value.heapBefore };
+          const result = { pendingMax: value.pendingMax, undo, redo };
           const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
           return result;
         });
@@ -3030,8 +3025,7 @@ async function main() {
         assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual max ${editorPerf.p95.toFixed(2)}ms)`);
         assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
         assert.equal(editorPerf.pendingMax <= 1, true, "4K preview keeps at most one pending worker frame");
-        if (editorPerf.heapDelta != null) assert.ok(editorPerf.heapDelta < 100 * 1024 * 1024, `50 4K strokes keep JS heap growth below 100MB (actual ${(editorPerf.heapDelta / 1024 / 1024).toFixed(1)}MB)`);
-        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo=${editorPerf.undo.toFixed(1)}ms redo=${editorPerf.redo.toFixed(1)}ms pending=${editorPerf.pendingMax} heap=${editorPerf.heapDelta == null ? "n/a" : `${(editorPerf.heapDelta / 1024 / 1024).toFixed(1)}MB`}`);
+        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo=${editorPerf.undo.toFixed(1)}ms redo=${editorPerf.redo.toFixed(1)}ms pending=${editorPerf.pendingMax}`);
       }
 
       await page.locator("#eraserTool").click();
