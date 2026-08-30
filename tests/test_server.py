@@ -7496,17 +7496,21 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
 
         state, image_id, predictor = make_state()
         record = state.image_for_id(image_id)
+        changed = threading.Event()
         class ChangesDuringPublication(dict):
             def __init__(self):
                 super().__init__({image_id: record})
 
             def get(self, key, default=None):
-                from inspect import currentframe
-                caller = currentframe().f_back
-                return None if caller is not None and caller.f_lineno == 712 else record
+                return None if changed.is_set() else record
         state.images = ChangesDuringPublication()
+        original_replace = detection_module.os.replace
+        def move_then_mark_changed(source, destination):
+            original_replace(source, destination)
+            changed.set()
         with patch.object(state, "_sam_predictor_for", return_value=predictor), \
-                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)):
+                patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
+                patch.object(detection_module.os, "replace", side_effect=move_then_mark_changed):
             with self.assertRaisesRegex(ClientError, "再読み込み"):
                 state.add_boundary_candidate(image_id, payload)
 
