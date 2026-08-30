@@ -21,6 +21,7 @@ const testFiles = [
   "tests/test_editor_canvas_geometry_runtime.cjs",
   "tests/test_editor_masks_behavior.cjs",
   "tests/test_editor_runtime.cjs",
+  "tests/test_gallery_save_coverage.cjs",
   "tests/test_interaction_coverage.cjs",
   "tests/test_import_picker_e2e.cjs",
   "tests/test_flood_fill_worker.cjs",
