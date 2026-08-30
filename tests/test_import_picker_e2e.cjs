@@ -2980,7 +2980,7 @@ async function main() {
         await page.evaluate(() => {
           const samples = []; let started = 0; let pendingMax = 0; let dragStarted = 0; const canvas = document.querySelector("#editorCanvas");
           const begin = (event) => { if (event.buttons & 1) { started = performance.now(); dragStarted ||= started; } };
-          const end = () => { if (started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); };
+          const end = () => { if (started) samples.push(performance.now() - started); pendingMax = Math.max(pendingMax, state.mosaicPending ? 1 : 0); window.__editorPerf.pendingMax = pendingMax; };
           const finish = () => { window.__editorPerf.drag = performance.now() - dragStarted; dragStarted = 0; };
           window.__editorPerf = { samples, pendingMax, begin, end, finish, heapBefore: performance.memory?.usedJSHeapSize ?? null };
           canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end); canvas.addEventListener("pointerup", finish);
