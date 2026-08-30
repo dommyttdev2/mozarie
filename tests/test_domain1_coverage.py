@@ -182,7 +182,7 @@ class StateAndCatalogCoverageTests(unittest.TestCase):
 
     def test_catalog_request_and_mask_validation_paths(self) -> None:
         image_id = self.add_image()
-        for value in (None, 3, "data:image/jpeg;base64,AAAA", "data:image/png;base64,%%%"): 
+        for value in (None, 3, "data:image/jpeg;base64,AAAA", "data:image/png;base64,%%%"):
             with self.subTest(value=value):
                 if value is None:
                     self.assertIsNone(self.state._decode_workspace_mask(value))
