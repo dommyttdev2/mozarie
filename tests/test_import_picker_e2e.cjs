@@ -468,6 +468,10 @@ async function assertCompactNavigationLayout(page, language) {
 async function assertConnectionStatusLayout(page, width, height, language) {
   await page.setViewportSize({ width, height });
   await page.evaluate(async (selected) => {
+    // This layout assertion supplies an artificial connection loss. A pending
+    // successful background poll is a real recovery signal and would clear it
+    // concurrently, so keep recovery testing separate from the viewport check.
+    clearTimeout(state.jobPollTimer); state.jobPollTimer = null;
     await loadTranslations(selected);
     setStatusKey("error.connectionLost", {}, "error");
   }, language);
