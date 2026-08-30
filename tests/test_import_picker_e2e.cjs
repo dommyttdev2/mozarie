@@ -500,17 +500,32 @@ async function runCandidateBlinkScenario(browser) {
     assert.equal(await row.getAttribute("data-candidate-blink-role"), "apply", "the candidate fixture renders its concrete apply row");
     assert.equal(await row.locator(".candidate-class").textContent(), "Fixture candidate", "the rendered row belongs to the fixture candidate");
 
-    const display = row.locator(".candidate-display-toggle");
-    const displayBox = await display.boundingBox();
-    assert.ok(displayBox, "the fixture candidate has a visible display button");
-    await page.mouse.click(displayBox.x + displayBox.width / 2, displayBox.y + displayBox.height / 2);
+    const sectionDisplay = page.locator('[data-candidate-display-toggle="apply"]');
+    await sectionDisplay.click();
     await page.waitForFunction((id) => {
       const candidateRow = document.querySelector(`[data-candidate-blink-id="${id}"]`);
       return candidateRow?.classList.contains("blink-selected")
         && document.querySelector("#candidatePane")?.classList.contains("blink-active")
         && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
     }, scenario.candidateId);
-    assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "pointer activation visibly highlights the selected apply candidate");
+    assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
+
+    await page.locator("#brushTool").click();
+    const canvas = await page.locator("#editorCanvas").boundingBox();
+    assert.ok(canvas, "the candidate scenario has a real editor canvas");
+    await page.mouse.move(canvas.x + canvas.width / 2, canvas.y + canvas.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(canvas.x + canvas.width / 2 + 1, canvas.y + canvas.height / 2 + 1);
+    await page.mouse.up();
+    const manualRow = page.locator('[data-candidate-blink-id="manual:apply"]');
+    await page.waitForFunction(() => {
+      const row = document.querySelector('[data-candidate-blink-id="manual:apply"]');
+      return row?.classList.contains("blink-selected")
+        && row.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
+    });
+    assert.equal(await manualRow.getAttribute("data-candidate-blink-role"), "apply", "a real brush stroke adds the manual apply row to the enabled section blink");
+    await manualRow.locator(".candidate-display-toggle").click();
+    await page.waitForFunction(() => !document.querySelector('[data-candidate-blink-id="manual:apply"]')?.classList.contains("blink-selected"));
 
     const effective = row.locator(".candidate-effective-toggle");
     await effective.focus();
@@ -2032,27 +2047,6 @@ async function main() {
       exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
     });
     assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion erase has its own visible ON/OFF row");
-    const manualBlinkStartsWithSection = await page.evaluate(() => {
-      const candidates = state.candidates; const candidateImages = state.candidateImages;
-      const blinkCandidateIds = state.blinkCandidateIds;
-      const candidateMask = document.createElement("canvas"); candidateMask.width = addCanvas.width; candidateMask.height = addCanvas.height;
-      candidateMask.getContext("2d").fillRect(0, 0, 8, 8);
-      const tool = state.tool;
-      state.candidates = [{ id: "blink-apply", role: "apply", enabled: true, className: "test", color: "#fff" }];
-      state.candidateImages = new Map([["blink-apply", candidateMask]]); state.tool = "brush";
-      state.blinkCandidateIds = new Set(); renderCandidates();
-      document.querySelector('[data-candidate-display-toggle="apply"]').click();
-      beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); renderCandidates();
-      const row = document.querySelector(".candidate-row-manual-apply");
-      const result = {
-        manualBlink: state.blinkCandidateIds.has("manual:apply"),
-        rowBlinking: row?.classList.contains("blink-selected"),
-      };
-      state.candidates = candidates; state.candidateImages = candidateImages; state.blinkCandidateIds = blinkCandidateIds; state.tool = tool;
-      deleteManualMask(); renderCandidates();
-      return result;
-    });
-    assert.deepEqual(manualBlinkStartsWithSection, { manualBlink: true, rowBlinking: true }, "a first manual mosaic stroke joins an enabled section blink");
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
