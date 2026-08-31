@@ -45,13 +45,13 @@ const state = {
   maskStatus: new Map([['gone', true]]), selectedImageIds: new Set(['gone']), candidates: [], removedCandidateIds: new Set(),
   history: [], historyIndex: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   settings: { shortcuts: { bindings: { previous: "ArrowLeft", next: "ArrowRight", toggleOverview: "G" }, actions: {} }, confirmations: {} },
-  tool: "brush", viewMode: "edit", navigationShortcutsEnabled: true,
+  tool: "brush", viewMode: "edit", displayMode: "single", compareSplit: .5, gestureDisplaySide: null, hoverDisplaySide: "left", boundaryDisplaySide: "left", navigationShortcutsEnabled: true,
 };
 const userErrors = [];
 const navigationActions = [];
 const context = {
   state, Math, Map, Set, Promise, Object, Array, Number, String, Boolean, JSON, Uint8ClampedArray, requestAnimationFrame: () => 1,
-  canvas: { style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) }, addCtx, exclusionCtx, exclusionEraseCtx,
+  canvas: { style: {}, getBoundingClientRect: () => ({ left: 0, top: 0 }) }, stage: { clientWidth: 100, clientHeight: 80 }, addCtx, exclusionCtx, exclusionEraseCtx,
   addCanvas: addCtx.canvas, exclusionCanvas: exclusionCtx.canvas, exclusionEraseCanvas: exclusionEraseCtx.canvas,
   historyAddCanvas: drawingContext().canvas, historyExclusionCanvas: drawingContext().canvas, historyExclusionEraseCanvas: drawingContext().canvas,
   $: (selector) => element(selector), document: { activeElement: null, documentElement: { clientWidth: 320, clientHeight: 240 } },

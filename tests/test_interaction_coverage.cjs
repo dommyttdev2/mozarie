@@ -55,7 +55,7 @@ const state = {
   reviewedPaths: new Set(), candidateImages: new Map(), batchMode: false, contextMenuImageId: null,
   contextMenuOrigin: null, importSession: null, navigationShortcutsEnabled: true, viewMode: "edit",
   historyIndex: 1, manualMaskPresent: true, manualEnabled: false, manualExclusionEnabled: false,
-  manualExclusionEraseEnabled: false,
+  manualExclusionEraseEnabled: false, maskDirty: false,
 };
 let apiMode = "ok";
 let unique = 0;
@@ -78,7 +78,7 @@ const context = {
   t: (key, data = {}) => `${key}${data.value ?? data.count ?? ""}`,
   isBusy: () => busy, closeBoundaryModeMenu: undefined,
   clearBoundaryInteraction: () => calls.push(["clearBoundaryInteraction"]), clearBoundaryConstruction: () => calls.push(["clearBoundaryConstruction"]),
-  updateBoundaryActions: () => calls.push(["boundaryActions"]), updateBrushCursor: () => {}, render: () => calls.push(["render"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
+  updateBoundaryActions: () => calls.push(["boundaryActions"]), updateBrushCursor: () => {}, render: () => calls.push(["render"]), flushRender: () => calls.push(["flushRender"]), flushMaskComposition: () => calls.push(["flushMaskComposition"]), clearCandidateBlink: () => calls.push(["clearCandidateBlink"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
   calculatedBlockSize: () => 7, currentRecord: () => images[0], mosaicDivisor: () => 3, normaliseDivisor: (value) => Number(value),
   showModalFromInvoker: (dialog) => queueMicrotask(() => dialog.close(dialog.returnValue)),
   api: async (url, options = {}) => {
@@ -131,7 +131,12 @@ const file = (name) => ({ name, size: 1, lastModified: 1 });
   state.settings.confirmations.candidateDelete = true; element("#confirmNeverShow").checked = false; element("#confirmDialog").returnValue = "";
   assert.equal(await test.confirmAction("title", "message", "candidateDelete"), false);
   element("#confirmDialog").returnValue = "confirm";
-  test.resetCurrentDraft(); await test.clearMasks(["one"], "a", "b"); await test.clearCatalog();
+  test.resetCurrentDraft(); await test.clearMasks(["one"], "a", "b");
+  assert.equal(state.maskDirty, true, "resetting the current draft marks composed masks dirty before recomposition");
+  assert.ok(calls.some(([name]) => name === "flushMaskComposition"), "resetting the current draft recomposes masks before its render");
+  assert.ok(calls.some(([name]) => name === "clearCandidateBlink"), "clearing the current image ends candidate blinking before candidate state is reset");
+  assert.ok(calls.some(([name]) => name === "flushRender"), "clearing the current image immediately redraws the candidate range");
+  await test.clearCatalog();
 
   images = [{ id: "one", sourcePath: "C:/one.png" }, { id: "two" }]; state.images = images; state.currentId = "one"; state.currentImage = images[0]; state.selectedImageIds = new Set(["one"]);
   test.positionCatalogContextMenu(element("#catalogContextMenu"), -1, 999);

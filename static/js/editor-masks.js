@@ -458,7 +458,7 @@ async function addBoundaryCandidate() {
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
-function pointFromEvent(event) { const rect = canvas.getBoundingClientRect(); const offset = state.gestureDisplayOffset ?? compareEventOffset(event, rect); return { x: (event.clientX - rect.left - offset - state.view.x) / state.view.scale, y: (event.clientY - rect.top - state.view.y) / state.view.scale }; }
+function pointFromEvent(event) { const rect = canvas.getBoundingClientRect(); const side = state.gestureDisplaySide ?? compareEventSide(event, rect); const offset = compareSideOffset(side, rect.width); return { x: (event.clientX - rect.left - offset - state.view.x) / state.view.scale, y: (event.clientY - rect.top - state.view.y) / state.view.scale }; }
 function clampPoint(point) {
   if (!state.currentImage) return point;
   return {

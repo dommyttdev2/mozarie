@@ -2,13 +2,13 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
-  viewMode: "edit", displayMode: "single", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
+  viewMode: "edit", displayMode: "single", compareSplit: .5, overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
   selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   draftSaveChains: new Map(),
-  tool: "brush", panning: false, drawing: false, gestureDisplayOffset: null, hoverDisplayOffset: 0, boundaryPending: false,
-  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplayOffset: 0,
+  tool: "brush", panning: false, drawing: false, gestureDisplaySide: null, hoverDisplaySide: "left", boundaryPending: false,
+  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplaySide: "left",
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
@@ -577,7 +577,7 @@ function clearBoundaryInteraction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
-  state.boundaryDisplayOffset = 0;
+  state.boundaryDisplaySide = "left";
   state.boundaryDrafts = [];
   state.boundaryActiveId = null;
   state.boundaryBrushStroke = null;
@@ -594,7 +594,6 @@ function clearBoundaryConstruction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
-  state.boundaryDisplayOffset = 0;
   state.boundaryBrushStroke = null;
   state.polygonPoints = [];
   state.polygonDragIndex = -1;

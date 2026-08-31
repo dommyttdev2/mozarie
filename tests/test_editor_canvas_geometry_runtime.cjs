@@ -32,7 +32,7 @@ function element(id) {
   if (!elements.has(id)) {
     const attributes = new Map();
     elements.set(id, {
-      value: "10", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38,
+      value: "10", hidden: false, disabled: false, style: { setProperty() {} }, offsetWidth: 142, offsetHeight: 38,
       classList: { classes: new Set(), toggle(name, enabled) { if (enabled) this.classes.add(name); else this.classes.delete(name); }, contains(name) { return this.classes.has(name); } }, setAttribute(name, value) { attributes.set(name, String(value)); }, getAttribute(name) { return attributes.get(name) || null; },
     });
   }
@@ -50,7 +50,7 @@ const state = {
   drafts: new Map(), draftLayerDirty: new Set(), draftSaveChains: new Map(), history: [], historyIndex: 0, historyBaseDirty: false, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   boundaryDrafts: [], boundaryActiveId: null, boundaryDragging: false, boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryPromptPoint: null,
   polygonPoints: [], boundaryBrushStroke: null, boundaryDraftSequence: 0, boundaryPending: false, pendingImageId: null, importing: false,
-  view: { x: 5, y: 7, scale: 2 }, displayMode: "single", hover: null, hoverDisplayOffset: 0, gestureDisplayOffset: null, boundaryDisplayOffset: 0, tool: "brush", blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, mosaicPreviewEnabled: false,
+  view: { x: 5, y: 7, scale: 2 }, displayMode: "single", compareSplit: .5, hover: null, hoverDisplaySide: "left", gestureDisplaySide: null, boundaryDisplaySide: "left", tool: "brush", blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, mosaicPreviewEnabled: false,
   manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: true,
   settings: { display: { apply_color: "#f00", exclude_color: "#0ff", overlay_opacity: 0.5 } },
 };
@@ -64,7 +64,7 @@ class Worker {
 const context = {
   codedError(code) { const error = new Error(); error.code = code; return error; },
   state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
-  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 }, toolRail: { offsetHeight: 30 },
+  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90, dataset: {} }, toolRail: { offsetHeight: 30 },
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
   combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
@@ -85,7 +85,7 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, updateBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareSplitX, comparePaneBounds, compareSideOffset, compareEventSide, compareEventOffset, updateCompareSplitter, setDisplayMode, fitImage, updateBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -96,6 +96,15 @@ assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "false")
 assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "true");
 assert.equal(test.compareEventOffset({ clientX: 20 }, { left: 0, width: 120 }), 0, "the left compare pane uses the shared image origin");
 assert.equal(test.compareEventOffset({ clientX: 100 }, { left: 0, width: 120 }), 60, "the right compare pane uses its own screen offset with the shared image origin");
+state.compareSplit = .3;
+assert.equal(test.compareSplitX(120), 36, "compare split uses the persisted viewport ratio");
+assert.deepEqual(JSON.parse(JSON.stringify(test.comparePaneBounds(120))), [{ offset: 0, width: 36 }, { offset: 36, width: 84 }], "compare panes use one shared split boundary");
+assert.equal(test.compareEventOffset({ clientX: 40 }, { left: 0, width: 120 }), 36, "the right pane event origin follows the chosen split");
+assert.equal(test.compareEventSide({ clientX: 40 }, { left: 0, width: 120 }), "right", "the event remembers which compare pane was edited");
+assert.equal(test.compareSideOffset("right", 120), 36, "a right-side editor coordinate resolves from the current split");
+state.compareSplit = .7;
+assert.equal(test.compareSideOffset("right", 120), 84, "the stored right side follows a moved split without retaining the old pixel offset");
+state.compareSplit = .5;
 state.blinkCandidateIds.clear(); state.mosaicPreviewEnabled = false; test.renderNow();
 assert.ok(displayCanvas.ctx.calls.some(([name]) => name === "fillRect"), "compare mode paints the right confirmation pane background without a second render canvas");
 state.mosaicPreviewEnabled = true; test.renderNow();
@@ -190,6 +199,14 @@ assert.equal(test.canDetectBoundary(), true);
 state.boundaryPending = true; assert.equal(test.canDetectBoundary(), false); state.boundaryPending = false;
 state.importing = true; assert.equal(test.canDetectBoundary(), false); state.importing = false;
 assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryActionAnchor())), { left: 9, right: 29, top: 11, bottom: 31 });
+state.displayMode = "compare"; state.compareSplit = .3; state.boundaryDisplaySide = "right";
+assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryActionAnchor())), { left: 45, right: 65, top: 11, bottom: 31 }, "a right-side boundary anchor uses the live compare split");
+state.compareSplit = .7;
+assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryActionAnchor())), { left: 93, right: 113, top: 11, bottom: 31 }, "moving the split relocates the right-side boundary anchor without stale pixels");
+state.hover = { x: 3, y: 4 }; state.hoverDisplaySide = "right"; state.tool = "brush"; test.updateBrushCursor();
+assert.match(element("#brushCursor").style.transform, /85px/, "a right-side brush cursor follows the moved split");
+state.displayMode = "single";
+assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryActionAnchor())), { left: 9, right: 29, top: 11, bottom: 31 }, "single view resolves the same boundary without a compare offset");
 test.updateBoundaryActions();
 assert.equal(element("#boundaryActions").hidden, false);
 assert.match(element("#boundaryActions").style.left, /px$/);
