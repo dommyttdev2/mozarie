@@ -327,8 +327,12 @@ class JobsCoverageTests(unittest.TestCase):
         jobs.sam_predictor = None; jobs.sam_image_id = None
         jobs.hand_segmentation_predictor = None; jobs.hand_segmentation_image_id = None
         jobs.models = object(); jobs.hand_model = object()
-        with patch.object(jobs, "_release_gpu_cache") as release:
-            error = jobs.recover_gpu_oom_for_request(RuntimeError("CUDA out of memory"))
+        try:
+            raise RuntimeError("CUDA out of memory")
+        except RuntimeError as exc:
+            with patch.object(jobs, "_release_gpu_cache") as release:
+                error = jobs.recover_gpu_oom_for_request(exc)
+            self.assertIsNone(exc.__traceback__)
         self.assertEqual(error.error_code, "gpu_out_of_memory")
         release.assert_called_once()
         jobs._job_is_current = lambda *_args: False
