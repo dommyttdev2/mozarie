@@ -689,6 +689,9 @@ function composeCurrentMask() {
   combinedCtx.globalCompositeOperation = "destination-out";
   drawEffectiveExclusions(combinedCtx, true);
   combinedCtx.globalCompositeOperation = "source-over";
+  // Keep the full enabled exclusion union available for display.  The forced
+  // pass above is only for final mask composition and must not leak into UI.
+  composeEnabledExclusionMask();
   state.maskDirty = false;
 }
 function markDraftDirty(...layers) {
@@ -1022,7 +1025,7 @@ function drawCandidateBlinkOverlay(offset = 0) {
   if (!ensureBlinkCanvas()) return;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
-  const exclusionMask = composeEnabledExclusionMask();
+  const exclusionMask = effectiveExclusionCanvas;
   const paintSelected = (id, role, enabled, mask) => {
     if (!state.blinkCandidateIds.has(id)) return;
     const selected = selectedCandidateMask(id, role, enabled, mask, state.blinkModes.get(id) || "normal", exclusionMask);
@@ -1045,27 +1048,27 @@ function drawCandidateBlinkOverlay(offset = 0) {
 function drawCompareRangeOverlay(offset) {
   if (state.blinkCandidateIds.size) { drawCandidateBlinkOverlay(offset); return; }
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
-  setCssTransform(layerCtx); layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  setCssTransform(layerCtx);
   const paint = (mask, color) => {
+    layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
     layerCtx.save(); layerCtx.translate(offset + state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
     layerCtx.drawImage(mask, 0, 0); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
     layerCtx.fillRect(0, 0, originalCanvas.width, originalCanvas.height); layerCtx.restore();
   };
-  paint(combinedCanvas, settings.apply_color);
-  paint(composeEnabledExclusionMask(), settings.exclude_color);
-  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.rect(offset, 0, stage.clientWidth - offset, stage.clientHeight); ctx.clip(); ctx.globalAlpha = settings.overlay_opacity;
+  paint(combinedCanvas, settings.apply_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
+  paint(effectiveExclusionCanvas, settings.exclude_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
 function renderNow() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) return;
-  ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
+  ctx.save(); if (state.displayMode === "compare") { ctx.beginPath(); ctx.rect(0, 0, width / 2, height); ctx.clip(); } ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
   if (state.displayMode === "compare") {
     const offset = width / 2;
     if (state.mosaicPreviewEnabled) paintMosaicPreview();
     ctx.fillStyle = "#000"; ctx.fillRect(offset, 0, width - offset, height);
-    ctx.save(); ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
     drawCompareRangeOverlay(offset);
   } else {
     if (state.mosaicPreviewEnabled) paintMosaicPreview();
