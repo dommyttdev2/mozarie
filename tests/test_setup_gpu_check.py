@@ -198,7 +198,8 @@ class SetupGpuCheckTests(unittest.TestCase):
             self.assertEqual(setup_gpu_check._runtime_modules(), (fake_numpy, fake_ort, fake_torch, fake_ort.datasets))
 
     def test_script_entrypoint_exits_with_the_same_failure_status_as_main(self):
-        with self.assertRaises(SystemExit) as exited, contextlib.redirect_stdout(io.StringIO()):
+        with patch("mozarie.runtime_profile.selected_profile", return_value=None), \
+             self.assertRaises(SystemExit) as exited, contextlib.redirect_stdout(io.StringIO()):
             runpy.run_path(str(Path(__file__).resolve().parents[1] / "setup_gpu_check.py"), run_name="__main__")
         self.assertEqual(exited.exception.code, 1)
 

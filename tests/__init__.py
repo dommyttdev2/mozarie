@@ -18,6 +18,7 @@ warnings.filterwarnings(
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 TEST_APP_DIR = Path(tempfile.mkdtemp(prefix="mozarie-tests-"))
 shutil.copytree(_SOURCE_ROOT / "config", TEST_APP_DIR / "config")
+(TEST_APP_DIR / "config" / "local.json").unlink(missing_ok=True)
 atexit.register(shutil.rmtree, TEST_APP_DIR, ignore_errors=True)
 
 import mozarie.core as _core  # noqa: E402

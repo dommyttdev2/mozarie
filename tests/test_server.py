@@ -3890,14 +3890,14 @@ class MozarieTests(unittest.TestCase):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
-                masks[0, 2:10, 2:10] = True
+                masks[0, 1:11, 1:11] = True
                 return masks, np.asarray([0.9]), None
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "image.png")
             state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
             state.settings["models"].update({"hand_detection_enabled": True, "hand_segmentation_enabled": True})
-            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:6, 4:8] = True
+            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 4:12] = True
             specialist = Mock(); specialist.predict.return_value = hand_mask, np.asarray([0.9]), None
             original_fromarray = detection_module.Image.fromarray
             calls = 0
@@ -3914,7 +3914,7 @@ class MozarieTests(unittest.TestCase):
                  patch.object(state, "_hand_segmentation_predictor_for", return_value=specialist), \
                  patch.object(detection_module.Image, "fromarray", side_effect=fail_second_mask):
                 with self.assertRaisesRegex(OSError, "second mask"):
-                    state.add_boundary_candidate(image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
+                    state.add_boundary_candidate(image_id, {"roi": {"left": 1, "top": 1, "right": 11, "bottom": 11}, "point": {"x": 5, "y": 5}})
 
             self.assertEqual(state.candidates.get(image_id, []), [])
             self.assertEqual(list((state.cache_dir / image_id).glob("*.png")), [])
