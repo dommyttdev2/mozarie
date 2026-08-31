@@ -675,6 +675,13 @@ function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = ""
   return effectiveExclusionCanvas;
 }
 
+function composePreEraseExclusionMask() {
+  effectiveExclusionCtx.clearRect(0, 0, effectiveExclusionCanvas.width, effectiveExclusionCanvas.height);
+  for (const candidate of state.candidates) if (!state.removedCandidateIds.has(candidate.id) && candidate.enabled && candidate.role === "exclude") effectiveExclusionCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  if (state.manualExclusionEnabled) effectiveExclusionCtx.drawImage(exclusionCanvas, 0, 0);
+  return effectiveExclusionCanvas;
+}
+
 function composeCurrentMask() {
   if (!state.currentImage) return;
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
@@ -1039,12 +1046,16 @@ function drawCandidateBlinkOverlay(offset = 0) {
   paintSelected("manual:apply", "apply", state.manualEnabled, addCanvas);
   paintSelected("manual:exclude", "exclude", state.manualExclusionEnabled, exclusionCanvas);
   // Erasing an exclusion restores mosaic, so its review color follows APPLY.
-  paintSelected("manual:excludeErase", "apply", state.manualExclusionEraseEnabled, exclusionEraseCanvas);
+  if (state.blinkCandidateIds.has("manual:excludeErase")) {
+    const mode = state.blinkModes.get("manual:excludeErase") || "normal";
+    if (mode !== "effective" || state.manualExclusionEraseEnabled) paintTintedMask(exclusionEraseCanvas, settings.apply_color, mode === "effective" ? composePreEraseExclusionMask() : null);
+  }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
     paintSelected(candidate.id, candidate.role === "exclude" ? "exclude" : "apply", candidate.enabled, state.candidateImages.get(candidate.id));
   }
+  composeEnabledExclusionMask();
   ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
 }
