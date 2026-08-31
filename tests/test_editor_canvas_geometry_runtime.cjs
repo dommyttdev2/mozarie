@@ -99,6 +99,7 @@ assert.equal(test.compareEventOffset({ clientX: 20 }, { left: 0, width: 120 }), 
 assert.equal(test.compareEventOffset({ clientX: 100 }, { left: 0, width: 120 }), 60, "the right compare pane uses its own screen offset with the shared image origin");
 state.blinkCandidateIds.clear(); state.mosaicPreviewEnabled = false; test.renderNow();
 assert.ok(displayCanvas.ctx.calls.some(([name]) => name === "fillRect"), "compare mode paints the right confirmation pane background without a second render canvas");
+state.mosaicPreviewEnabled = true; test.renderNow();
 test.setDisplayMode("single");
 assert.equal(state.displayMode, "single");
 assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "true");
