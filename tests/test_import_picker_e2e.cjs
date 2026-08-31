@@ -2947,6 +2947,43 @@ async function main() {
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
     assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    const candidateDisplayLifecycle = await page.evaluate(async () => {
+      const original = {
+        candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds,
+        tool: state.tool, confirmation: state.settings.confirmations.candidateRoleDelete,
+      };
+      const candidate = { id: "display-exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" };
+      const resetLayers = () => {
+        exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+        exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+        state.activeStroke = null; state.mosaicPending = false;
+      };
+      state.candidates = [candidate]; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+      state.settings.confirmations.candidateRoleDelete = false; state.tool = "exclude_eraser";
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4);
+      clearCandidateBlink(); setCandidateDisplayMode([candidate.id, "manual:exclude"], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const joinsNormal = candidateDisplayMode("manual:excludeErase") === "normal";
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4); state.candidates = [];
+      clearCandidateBlink(); setCandidateDisplayMode(["manual:exclude"], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const joinsManualOnly = candidateDisplayMode("manual:excludeErase") === "normal";
+      state.candidates = [candidate];
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4); clearCandidateBlink(); setCandidateDisplayMode([candidate.id], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const skipsHiddenManual = candidateDisplayMode("manual:excludeErase") === "off";
+      resetLayers(); clearCandidateBlink(); setCandidateDisplayMode([candidate.id], "normal");
+      await batchCandidateOperation("exclude:delete");
+      const roleDeleteClearsDisplay = state.removedCandidateIds.has(candidate.id)
+        && state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0 && state.blinkTimer === null
+        && !document.querySelector("#candidatePane").classList.contains("blink-active");
+      clearCandidateBlink(); state.candidates = original.candidates; state.candidateImages = original.images;
+      state.removedCandidateIds = original.removed; state.tool = original.tool;
+      state.settings.confirmations.candidateRoleDelete = original.confirmation;
+      renderCandidates(); render();
+      return { joinsNormal, joinsManualOnly, skipsHiddenManual, roleDeleteClearsDisplay };
+    });
+    assert.deepEqual(candidateDisplayLifecycle, { joinsNormal: true, joinsManualOnly: true, skipsHiddenManual: true, roleDeleteClearsDisplay: true }, `browser candidate display lifecycle clears deleted ranges and only adds an exclusion erase to a fully normal existing range: ${JSON.stringify(candidateDisplayLifecycle)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
       const draft = (label) => ({
         add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",

@@ -157,6 +157,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     ];
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
+    state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
     state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
     state.images = [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
@@ -249,12 +250,40 @@ assert.equal(state.manualExclusionEraseEnabled, true);
 
   resetCandidateState();
   context.confirmationRequired = (key) => key === "candidateRoleDelete";
+  test.setCandidateDisplayMode(["exclude"], "normal");
   await test.batchCandidateOperation("exclude:delete");
   assert.equal(state.removedCandidateIds.has("exclude"), true, "a confirmed role deletion is local and undoable");
+  assert.deepEqual([...state.blinkCandidateIds], [], "role deletion clears display selections for its removed candidates");
+  assert.deepEqual([...state.blinkModes], [], "role deletion clears display modes for its removed candidates");
+  assert.equal(state.blinkTimer, null, "role deletion stops a now-empty display timer");
   resetCandidateState();
   context.api = async () => { throw new Error("batch unavailable"); };
   await test.batchCandidateOperation("apply:enable");
   assert.equal(state.candidateBatchPending.size, 0, "a failed batch mutation always clears its pending state");
+
+  // A new manual exclusion-erase joins the range animation only when every
+  // already-visible exclusion layer is in its ordinary display mode.  Check
+  // before painting, because the new erase layer is not yet a member of that
+  // set at stroke start.
+  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["exclude", "manual:exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins when automatic and manual exclusions are normally displayed");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not join when an existing manual exclusion is hidden");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["manual:exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins a normally displayed manual exclusion without automatic candidates");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  test.clearCandidateBlink();
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not start an animation when no existing exclusion layer is displayed");
 
   resetCandidateState();
   const boundaryBodies = [];

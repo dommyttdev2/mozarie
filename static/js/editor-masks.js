@@ -354,6 +354,7 @@ async function batchCandidateOperation(spec) {
   const changed = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id));
   if (operation === "delete") {
     const ids = changed.map((item) => item.id);
+    setCandidateDisplayMode(ids, "off");
     ids.forEach((id) => state.removedCandidateIds.add(id));
     if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids });
     markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
@@ -611,7 +612,8 @@ function beginManualStroke(point) {
   state.mosaicPending = true;
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
-  if (state.tool === "exclude_eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:excludeErase"], "normal");
+  const excludeDisplayIds = state.tool === "exclude_eraser" ? candidateDisplayIdsForRole("exclude") : [];
+  if (state.tool === "exclude_eraser" && excludeDisplayIds.length && excludeDisplayIds.every((id) => candidateDisplayMode(id) === "normal")) setCandidateDisplayMode(["manual:excludeErase"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 
