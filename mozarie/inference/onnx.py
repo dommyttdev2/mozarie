@@ -14,7 +14,13 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..runtime import _log_gpu_diagnostics, runtime_backend
+from ..runtime import (
+    _dxgi_adapter_names,
+    _log_gpu_diagnostics,
+    _normalize_device_name,
+    directml_module,
+    runtime_backend,
+)
 
 
 _dll_directory_handles: list[object] = []
@@ -78,6 +84,40 @@ class Letterbox:
     source_height: int
 
 
+def _directml_onnx_device_id(logical_device_id: int) -> int:
+    """Map the UI/torch-directml GPU id to ONNX Runtime's DXGI adapter id.
+
+    torch-directml and ONNX Runtime DirectML enumerate adapters differently on
+    some AMD multi-GPU systems.  The UI id therefore identifies the physical
+    GPU by torch-directml name; ONNX receives the first DXGI adapter with that
+    same name.  DXGI can expose duplicate aliases for one AMD adapter, so the
+    lowest matching DXGI index is used deterministically.
+    """
+    logical = int(logical_device_id)
+    try:
+        directml = directml_module()
+        count = int(directml.device_count())
+        if logical < 0 or logical >= count:
+            raise RuntimeError(f"Invalid DirectML logical device id: {logical}")
+        selected_name = str(directml.device_name(logical)).rstrip("\0")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return logical
+
+    target = _normalize_device_name(selected_name)
+    matches = [
+        adapter.index
+        for adapter in _dxgi_adapter_names()
+        if _normalize_device_name(adapter.name) == target
+    ]
+    resolved = min(matches) if matches else logical
+    print(
+        f"[Mozarie GPU] stage=onnx-map logical={logical} selected_name={selected_name!r} "
+        f"dxgi_matches={matches} resolved_dml_index={resolved} pid={os.getpid()}",
+        flush=True,
+    )
+    return resolved
+
+
 def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
@@ -86,12 +126,15 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
+        logical_device_id = int(gpu_device)
+        directml_index = _directml_onnx_device_id(logical_device_id)
         _log_gpu_diagnostics(
             "onnx-provider",
-            logical_device_id=int(gpu_device),
-            directml_index=int(gpu_device),
+            logical_device_id=logical_device_id,
+            torch_index=logical_device_id,
+            directml_index=directml_index,
         )
-        return [("DmlExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        return [("DmlExecutionProvider", {"device_id": directml_index}), "CPUExecutionProvider"]
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {
@@ -247,13 +290,16 @@ class BaseOnnxModel:
             self.run_options = ort.RunOptions()
             self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{self.gpu_device}")
         if provider == "DmlExecutionProvider":
+            resolved_dml_index = _directml_onnx_device_id(self.gpu_device)
             _log_gpu_diagnostics(
                 "onnx-model",
                 logical_device_id=self.gpu_device,
-                directml_index=self.gpu_device,
+                torch_index=self.gpu_device,
+                directml_index=resolved_dml_index,
             )
             print(
-                f"[Mozarie GPU] stage=onnx-model model={str(self.path)!r} provider={provider} requested_dml_index={self.gpu_device} pid={os.getpid()}",
+                f"[Mozarie GPU] stage=onnx-model model={str(self.path)!r} provider={provider} "
+                f"logical_device_id={self.gpu_device} resolved_dml_index={resolved_dml_index} pid={os.getpid()}",
                 flush=True,
             )
 
