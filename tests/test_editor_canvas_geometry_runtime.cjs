@@ -86,7 +86,7 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, composePreEraseExclusionMask, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -106,6 +106,7 @@ assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "true");
 assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "false");
 state.mosaicPreviewEnabled = true; test.renderNow();
 state.view = { x: 5, y: 7, scale: 2 };
+test.composePreEraseExclusionMask();
 
 // The tools users can actually manipulate all produce image-space geometry.
 assert.equal(test.roiFromPoints({ x: 1.2, y: 3.4 }, { x: 1.9, y: 4.1 }), null, "a sub-two-pixel drag does not create a detector ROI");
