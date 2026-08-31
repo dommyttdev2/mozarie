@@ -147,7 +147,7 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
                         ctypes.c_long,
                         ctypes.c_void_p,
                         ctypes.POINTER(_AdapterDesc),
-                    )(adapter_vtable[7])
+                    )(adapter_vtable[8])
                     desc = _AdapterDesc()
                     if get_desc(adapter, ctypes.byref(desc)) >= 0:
                         devices.append(DxgiDevice(index=index, name=desc.Description.rstrip("\0")))
