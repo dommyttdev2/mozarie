@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
 import importlib
 import os
 from types import MethodType
@@ -63,6 +64,167 @@ def directml_module() -> Any:
     return importlib.import_module("torch_directml")
 
 
+def _normalize_device_name(value: str) -> str:
+    return " ".join(str(value).strip().casefold().split())
+
+
+@dataclass(frozen=True)
+class DxgiDevice:
+    """A physical Windows graphics adapter in DXGI enumeration order."""
+
+    index: int
+    name: str
+
+
+def _dxgi_adapter_names() -> list[DxgiDevice]:
+    """Enumerate physical adapters in the same order used by DirectML device_id."""
+    if os.name != "nt":
+        return []
+
+    class _Guid(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_uint32),
+            ("Data2", ctypes.c_uint16),
+            ("Data3", ctypes.c_uint16),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class _Luid(ctypes.Structure):
+        _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+    class _AdapterDesc(ctypes.Structure):
+        _fields_ = [
+            ("Description", ctypes.c_wchar * 128),
+            ("VendorId", ctypes.c_uint32),
+            ("DeviceId", ctypes.c_uint32),
+            ("SubSysId", ctypes.c_uint32),
+            ("Revision", ctypes.c_uint32),
+            ("DedicatedVideoMemory", ctypes.c_size_t),
+            ("DedicatedSystemMemory", ctypes.c_size_t),
+            ("SharedSystemMemory", ctypes.c_size_t),
+            ("AdapterLuid", _Luid),
+        ]
+
+    try:
+        dxgi = ctypes.WinDLL("dxgi.dll")
+        create_factory = dxgi.CreateDXGIFactory1
+        create_factory.argtypes = [ctypes.POINTER(_Guid), ctypes.POINTER(ctypes.c_void_p)]
+        create_factory.restype = ctypes.c_long
+
+        # IID_IDXGIFactory = 7b7166ec-21c7-44ae-b21a-c9ae321ae369
+        iid_factory = _Guid(
+            0x7B7166EC,
+            0x21C7,
+            0x44AE,
+            (0xB2, 0x1A, 0xC9, 0xAE, 0x32, 0x1A, 0xE3, 0x69),
+        )
+        factory = ctypes.c_void_p()
+        if create_factory(ctypes.byref(iid_factory), ctypes.byref(factory)) < 0 or not factory:
+            return []
+
+        factory_vtable = ctypes.cast(factory, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        enum_adapters = ctypes.WINFUNCTYPE(
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_void_p),
+        )(factory_vtable[7])
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(factory_vtable[2])
+
+        devices: list[DxgiDevice] = []
+        index = 0
+        try:
+            while True:
+                adapter = ctypes.c_void_p()
+                hr = enum_adapters(factory, index, ctypes.byref(adapter))
+                if hr < 0 or not adapter:
+                    break
+                try:
+                    adapter_vtable = ctypes.cast(
+                        adapter,
+                        ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
+                    ).contents
+                    get_desc = ctypes.WINFUNCTYPE(
+                        ctypes.c_long,
+                        ctypes.c_void_p,
+                        ctypes.POINTER(_AdapterDesc),
+                    )(adapter_vtable[7])
+                    desc = _AdapterDesc()
+                    if get_desc(adapter, ctypes.byref(desc)) >= 0:
+                        devices.append(DxgiDevice(index=index, name=desc.Description.rstrip("\0")))
+                finally:
+                    adapter_release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
+                        ctypes.cast(
+                            adapter,
+                            ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
+                        ).contents[2]
+                    )
+                    adapter_release(adapter)
+                index += 1
+        finally:
+            release(factory)
+        return devices
+    except (AttributeError, OSError, TypeError, ValueError):
+        return []
+
+
+def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
+    """Expose DirectML GPUs using DXGI's physical adapter order.
+
+    ONNX Runtime's DirectML ``device_id`` is a DXGI adapter ordinal.  Using
+    this order for the UI makes the configured logical GPU match ONNX Runtime;
+    PyTorch DirectML is translated by name in ``torch_device`` below.
+    """
+    directml = module or directml_module()
+    dxgi_devices = _dxgi_adapter_names()
+    if dxgi_devices:
+        torch_names = [
+            str(directml.device_name(index)).rstrip("\0")
+            for index in range(int(directml.device_count()))
+        ]
+        devices: list[dict[str, object]] = []
+        for adapter in dxgi_devices:
+            matched = [
+                name for name in torch_names
+                if _normalize_device_name(name) == _normalize_device_name(adapter.name)
+            ]
+            if not matched:
+                continue
+            devices.append(RuntimeDevice(
+                id=adapter.index,
+                name=adapter.name,
+                backend="directml",
+            ).payload())
+        if devices:
+            return devices
+    return [
+        RuntimeDevice(
+            id=index,
+            name=str(directml.device_name(index)).rstrip("\0"),
+            backend="directml",
+        ).payload()
+        for index in range(int(directml.device_count()))
+    ]
+
+
+def _resolve_directml_torch_index(logical_device_id: int, directml: Any) -> int:
+    """Translate a DXGI/logical DirectML adapter id to torch-directml's index."""
+    dxgi_devices = _dxgi_adapter_names()
+    if not dxgi_devices:
+        return int(logical_device_id)
+    selected = next((device for device in dxgi_devices if device.index == int(logical_device_id)), None)
+    if selected is None:
+        return int(logical_device_id)
+    target_name = _normalize_device_name(selected.name)
+    torch_count = int(directml.device_count())
+    matches = [
+        index
+        for index in range(torch_count)
+        if _normalize_device_name(str(directml.device_name(index)).rstrip("\0")) == target_name
+    ]
+    return matches[0] if len(matches) == 1 else int(logical_device_id)
+
+
 def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str | None = None) -> Any:
     if provider.lower() == "cpu":
         return "cpu"
@@ -70,20 +232,10 @@ def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str 
     if selected == "cuda":
         return f"cuda:{int(device_id)}"
     if selected == "directml":
-        return directml_module().device(int(device_id))
+        directml = directml_module()
+        torch_index = _resolve_directml_torch_index(int(device_id), directml)
+        return directml.device(torch_index)
     raise RuntimeError("No GPU runtime is available")
-
-
-def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
-    directml = module or directml_module()
-    devices = []
-    for index in range(int(directml.device_count())):
-        devices.append(RuntimeDevice(
-            id=index,
-            name=str(directml.device_name(index)).rstrip("\0"),
-            backend="directml",
-        ).payload())
-    return devices
 
 
 def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
