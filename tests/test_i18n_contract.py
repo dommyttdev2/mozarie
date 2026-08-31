@@ -6,7 +6,7 @@ import re
 import unittest
 from pathlib import Path
 
-from mozarie.domain import CANDIDATE_LABEL_TOKENS, CANDIDATE_REFINEMENT_TOKENS, CANDIDATE_SOURCE_TOKENS, Candidate
+from mozarie.domain import CANDIDATE_LABEL_TOKENS, Candidate
 from mozarie.domain import CandidateRole
 
 
@@ -74,13 +74,13 @@ class TranslationContractTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         expected = {
             "candidateLabel.": CANDIDATE_LABEL_TOKENS,
-            "candidateSource.": CANDIDATE_SOURCE_TOKENS,
-            "candidateRefinement.": CANDIDATE_REFINEMENT_TOKENS,
         }
         for language in ("ja", "en"):
             dictionary = json.loads((root / "static" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
             for prefix, tokens in expected.items():
                 self.assertEqual({key.removeprefix(prefix) for key in dictionary if key.startswith(prefix)}, tokens, f"{language}: {prefix}")
+            self.assertNotIn("candidates.label", dictionary, language)
+            self.assertFalse(any(key.startswith("candidateSource.") or key.startswith("candidateRefinement.") for key in dictionary), language)
         candidate = Candidate("candidate", "penis", .9, Path("mask.png"), source="target", refinement=None, role=CandidateRole.APPLY)
         self.assertEqual(
             set(candidate.as_api_dict()),

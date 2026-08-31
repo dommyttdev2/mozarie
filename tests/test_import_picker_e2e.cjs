@@ -520,6 +520,80 @@ async function runCandidateBlinkScenario(browser) {
     }
     await page.evaluate(() => loadTranslations("ja"));
 
+    const candidateLabelPresentation = await page.evaluate(async () => {
+      const candidates = state.candidates;
+      const manual = {
+        maskPresent: state.manualMaskPresent, enabled: state.manualEnabled,
+        exclusionEnabled: state.manualExclusionEnabled, exclusionEraseEnabled: state.manualExclusionEraseEnabled,
+        exclusionForced: state.manualExclusionForced,
+      };
+      const layers = [addCtx, exclusionCtx, exclusionEraseCtx].map((context) => context.getImageData(0, 0, context.canvas.width, context.canvas.height));
+      const metadataCandidates = [
+        { id: "metadata-penis", labelToken: "penis", source: "target", refinement: "sam_high_precision", role: "apply", origin: "basic-model-penis" },
+        { id: "metadata-pussy", labelToken: "pussy", source: "auto", refinement: "sam_fallback", role: "apply", origin: "automatic-pussy" },
+        { id: "metadata-testicles", labelToken: "testicles", source: "ntd11", refinement: "sam_high_precision", role: "apply", origin: "ntd11-testicles" },
+        { id: "metadata-boundary", labelToken: "boundary", source: "boundary", refinement: "sam_fallback", role: "apply", origin: "boundary-origin" },
+        { id: "metadata-polygon", labelToken: "boundary_polygon", source: "boundary", refinement: "sam_high_precision", role: "apply", origin: "polygon-origin" },
+        { id: "metadata-hand", labelToken: "hand", source: "hand_exclusion", refinement: "sam_fallback", role: "exclude", origin: "hand-exclusion-origin" },
+        { id: "metadata-fluid", labelToken: "fluid", source: "fluid_exclusion", refinement: "sam_high_precision", role: "exclude", origin: "fluid-exclusion-origin" },
+      ].map((candidate) => ({ ...candidate, enabled: true, forced: candidate.role === "exclude", confidence: .9, color: "#fff" }));
+      const snapshot = () => ({
+        automatic: metadataCandidates.map((candidate) => {
+          const row = document.querySelector(`[data-candidate-blink-id="${candidate.id}"]`);
+          return {
+            label: row?.querySelector(".candidate-class")?.textContent,
+            role: row?.dataset.candidateBlinkRole,
+            names: [row?.querySelector(".candidate-toggle")?.getAttribute("aria-label"), row?.querySelector(".candidate-delete")?.getAttribute("aria-label")],
+            text: row?.textContent,
+          };
+        }),
+        manual: [".candidate-row-manual-apply", ".candidate-row-manual-exclude", ".candidate-row-manual-exclude-erase"].map((selector) => {
+          const row = document.querySelector(selector);
+          return {
+            label: row?.querySelector(".candidate-label")?.textContent,
+            role: row?.dataset.candidateBlinkRole,
+            names: [row?.querySelector(".candidate-toggle")?.getAttribute("aria-label"), row?.querySelector(".candidate-delete")?.getAttribute("aria-label")],
+          };
+        }),
+        sections: [...document.querySelectorAll(".candidate-section h3")].map((heading) => heading.textContent),
+      });
+      state.candidates = metadataCandidates;
+      state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
+      addCtx.fillRect(0, 0, 1, 1); exclusionCtx.fillRect(0, 0, 1, 1); exclusionEraseCtx.fillRect(0, 0, 1, 1);
+      renderCandidates();
+      const ja = snapshot();
+      await loadTranslations("en");
+      const en = snapshot();
+      await loadTranslations("ja");
+      state.candidates = candidates;
+      state.manualMaskPresent = manual.maskPresent; state.manualEnabled = manual.enabled;
+      state.manualExclusionEnabled = manual.exclusionEnabled; state.manualExclusionEraseEnabled = manual.exclusionEraseEnabled; state.manualExclusionForced = manual.exclusionForced;
+      [addCtx, exclusionCtx, exclusionEraseCtx].forEach((context, index) => context.putImageData(layers[index], 0, 0));
+      renderCandidates();
+      return { ja, en };
+    });
+    assert.deepEqual(candidateLabelPresentation.ja.automatic.map((row) => row.label), ["penis", "pussy", "testicles", "境界", "4点境界", "手", "白い液"], "real Chromium candidate rows show only their localized class labels");
+    assert.deepEqual(candidateLabelPresentation.en.automatic.map((row) => row.label), ["Penis", "Vulva", "Testicles", "Boundary", "Four-point boundary", "Hand", "Fluid"], "real Chromium candidate labels localize every supported token");
+    for (const locale of ["ja", "en"]) {
+      for (const row of candidateLabelPresentation[locale].automatic) {
+        assert.ok(row.names.every((name) => name.includes(row.label)), `candidate actions retain their localized visible label in ${locale}`);
+      }
+      const presentedText = candidateLabelPresentation[locale].automatic.flatMap((row) => [row.text, ...row.names]).join("\n");
+      for (const metadata of ["target", "ntd11", "hand_exclusion", "fluid_exclusion", "sam_fallback", "sam_high_precision", "basic-model-penis", "automatic-pussy", "ntd11-testicles", "polygon-origin", "hand-exclusion-origin", "fluid-exclusion-origin", "apply", "exclude"]) {
+        assert.equal(presentedText.includes(metadata), false, `candidate row text and action names do not leak ${metadata} in ${locale}`);
+      }
+    }
+    assert.deepEqual(candidateLabelPresentation.ja.automatic.map((row) => row.role), ["apply", "apply", "apply", "apply", "apply", "exclude", "exclude"], "candidate row roles still choose the apply and exclusion sections");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.label), ["手書き", "手書き", "手書き"], "all manual rows have the same role-neutral Japanese label");
+    assert.deepEqual(candidateLabelPresentation.en.manual.map((row) => row.label), ["Manual", "Manual", "Manual"], "all manual rows have the same role-neutral English label");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.role), ["apply", "exclude", "exclude"], "manual rows preserve their apply and exclusion roles");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.names), [
+      ["手書きモザイクを使用", "手書きを削除"],
+      ["手描き除外を使用", "手描き除外を削除"],
+      ["手描き除外削除を使用", "手描き除外削除を削除"],
+    ], "manual actions retain role-specific Japanese names");
+    assert.deepEqual(candidateLabelPresentation.en.sections, ["Mosaic ranges", "Exclusion ranges"], "section headings retain the apply and exclusion distinction in English");
+
     const sectionDisplay = page.locator('[data-candidate-display-toggle="apply"]');
     await sectionDisplay.click();
     await page.waitForFunction((id) => {

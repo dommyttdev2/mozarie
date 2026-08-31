@@ -1,5 +1,5 @@
-function candidateLabel(candidate) {
-  return t(`candidateLabel.${candidate.labelToken}`);
+function candidateLabel({ labelToken }) {
+  return t(`candidateLabel.${labelToken}`);
 }
 
 function manualLayerPresence() {
@@ -52,7 +52,7 @@ function renderCandidates() {
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = role;
-    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
     remove.setAttribute("aria-label", remove.title);
@@ -81,7 +81,7 @@ function renderCandidates() {
     });
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = "exclude";
-    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
