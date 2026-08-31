@@ -485,8 +485,6 @@ function compareEventOffset(event, rect = canvas.getBoundingClientRect()) {
   return state.displayMode === "compare" && event.clientX - rect.left >= rect.width / 2 ? rect.width / 2 : 0;
 }
 
-function compareEventOnRight(event) { return compareEventOffset(event) > 0; }
-
 function setDisplayMode(mode) {
   const displayMode = mode === "compare" ? "compare" : "single";
   if (state.displayMode === displayMode) return;
@@ -659,6 +657,11 @@ function requestMosaicPreview() {
 }
 
 function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId = "") {
+  composeEnabledExclusionMask(forcedOnly, omittedCandidateId);
+  target.drawImage(effectiveExclusionCanvas, 0, 0);
+}
+
+function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = "") {
   effectiveExclusionCtx.clearRect(0, 0, effectiveExclusionCanvas.width, effectiveExclusionCanvas.height);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -669,7 +672,7 @@ function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId 
     effectiveExclusionCtx.save(); effectiveExclusionCtx.globalCompositeOperation = "destination-out";
     effectiveExclusionCtx.drawImage(exclusionEraseCanvas, 0, 0); effectiveExclusionCtx.restore();
   }
-  target.drawImage(effectiveExclusionCanvas, 0, 0);
+  return effectiveExclusionCanvas;
 }
 
 function composeCurrentMask() {
@@ -747,7 +750,7 @@ function paintMosaicPreviewAt(offset) {
 function drawBrushCursor() {
   if (!state.hover || !state.currentImage || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
-  const x = state.view.x + state.hover.x * state.view.scale;
+  const x = state.hoverDisplayOffset + state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
   ctx.save();
   if (["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool)) ctx.setLineDash([6, 4]);
@@ -869,11 +872,11 @@ function boundaryRequests() {
   return requests.sort((first, second) => first.firstIndex - second.firstIndex).map(({ draftIds, draft }) => ({ draftIds, draft }));
 }
 
-function boundaryPath(shape, context = ctx) {
+function boundaryPath(shape, context = ctx, offset = state.boundaryDisplayOffset || 0) {
   const roi = boundaryDraftBounds(shape);
   if (shape.type === "polygon" && shape.points?.length) {
     shape.points.forEach((point, index) => {
-      const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+      const x = offset + state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
       if (index) context.lineTo(x, y); else context.moveTo(x, y);
     });
     if (shape.points.length === 4) context.closePath();
@@ -882,24 +885,24 @@ function boundaryPath(shape, context = ctx) {
   if (shape.type === "brush" && shape.points?.length) {
     const points = shape.points;
     const first = points[0];
-    context.moveTo(state.view.x + first.x * state.view.scale, state.view.y + first.y * state.view.scale);
-    for (const point of points.slice(1)) context.lineTo(state.view.x + point.x * state.view.scale, state.view.y + point.y * state.view.scale);
-    if (points.length === 1) context.lineTo(state.view.x + first.x * state.view.scale + 0.01, state.view.y + first.y * state.view.scale + 0.01);
+    context.moveTo(offset + state.view.x + first.x * state.view.scale, state.view.y + first.y * state.view.scale);
+    for (const point of points.slice(1)) context.lineTo(offset + state.view.x + point.x * state.view.scale, state.view.y + point.y * state.view.scale);
+    if (points.length === 1) context.lineTo(offset + state.view.x + first.x * state.view.scale + 0.01, state.view.y + first.y * state.view.scale + 0.01);
     return;
   }
-  if (roi) context.rect(state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
+  if (roi) context.rect(offset + state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
 }
 
-function drawBoundaryScrim(shapes) {
+function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
   if (!shapes.length || !state.currentImage) return;
   setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
   boundaryOverlayCtx.save();
-  boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
-  boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
+  boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
+  boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
   boundaryOverlayCtx.globalCompositeOperation = "destination-out";
   for (const shape of shapes) {
     boundaryOverlayCtx.beginPath();
-    boundaryPath(shape, boundaryOverlayCtx);
+    boundaryPath(shape, boundaryOverlayCtx, offset);
     if (shape.type === "brush") {
       boundaryOverlayCtx.lineWidth = Math.max(1, shape.radius * state.view.scale); boundaryOverlayCtx.lineCap = "round"; boundaryOverlayCtx.lineJoin = "round"; boundaryOverlayCtx.stroke();
     } else boundaryOverlayCtx.fill();
@@ -907,14 +910,14 @@ function drawBoundaryScrim(shapes) {
   boundaryOverlayCtx.restore(); setCssTransform(ctx); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
 }
 
-function drawBoundaryShape(shape) {
+function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
   const ready = shape.type !== "polygon" || polygonPointsValid(shape.points || []);
   ctx.save(); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
-  ctx.beginPath(); boundaryPath(shape);
+  ctx.beginPath(); boundaryPath(shape, ctx, offset);
   if (shape.type === "brush") { ctx.lineWidth = Math.max(2, shape.radius * state.view.scale); ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke(); }
   else ctx.stroke();
   if (shape.type === "polygon") for (const point of shape.points) {
-    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+    const x = offset + state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
   }
   ctx.restore();
@@ -924,7 +927,7 @@ function drawBoundaryRoi() {
   const shapes = boundaryShapes();
   if (!shapes.length) return;
   drawBoundaryScrim(shapes);
-  shapes.forEach(drawBoundaryShape);
+  shapes.forEach((shape) => drawBoundaryShape(shape));
 }
 
 function polygonArea(points) {
@@ -964,7 +967,7 @@ function boundaryActionAnchor() {
   const roi = boundaryDraftBounds(active);
   if (!roi) return null;
   return {
-    left: state.view.x + roi.left * state.view.scale, right: state.view.x + roi.right * state.view.scale,
+    left: (state.boundaryDisplayOffset || 0) + state.view.x + roi.left * state.view.scale, right: (state.boundaryDisplayOffset || 0) + state.view.x + roi.right * state.view.scale,
     top: state.view.y + roi.top * state.view.scale, bottom: state.view.y + roi.bottom * state.view.scale,
   };
 }
@@ -997,33 +1000,60 @@ function drawPolygonBoundary() {
   // Polygon drawing is handled together with every selected boundary shape.
 }
 
+function paintTintedMask(mask, color, clipMask = null) {
+  if (!mask) return;
+  blinkCtx.save();
+  blinkCtx.drawImage(mask, 0, 0);
+  if (clipMask) { blinkCtx.globalCompositeOperation = "destination-in"; blinkCtx.drawImage(clipMask, 0, 0); }
+  blinkCtx.globalCompositeOperation = "source-in";
+  blinkCtx.fillStyle = color;
+  blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
+  blinkCtx.restore();
+}
+
+function selectedCandidateMask(id, role, enabled, mask, mode, exclusionMask) {
+  if (!mask || mode !== "effective") return mask;
+  if (!enabled) return null;
+  return { mask, clip: role === "apply" ? combinedCanvas : exclusionMask };
+}
+
 function drawCandidateBlinkOverlay(offset = 0) {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
   if (!ensureBlinkCanvas()) return;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
-  const paintMask = (image, color, effective = false) => {
-    if (!image) return;
-    blinkCtx.save();
-    blinkCtx.drawImage(image, 0, 0);
-    if (effective) { blinkCtx.globalCompositeOperation = "destination-in"; blinkCtx.drawImage(combinedCanvas, 0, 0); }
-    blinkCtx.globalCompositeOperation = "source-in";
-    blinkCtx.fillStyle = color;
-    blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
-    blinkCtx.restore();
+  const exclusionMask = composeEnabledExclusionMask();
+  const paintSelected = (id, role, enabled, mask) => {
+    if (!state.blinkCandidateIds.has(id)) return;
+    const selected = selectedCandidateMask(id, role, enabled, mask, state.blinkModes.get(id) || "normal", exclusionMask);
+    if (!selected) return;
+    if (selected.mask) paintTintedMask(selected.mask, role === "apply" ? settings.apply_color : settings.exclude_color, selected.clip);
+    else paintTintedMask(selected, role === "apply" ? settings.apply_color : settings.exclude_color);
   };
-  if (state.blinkCandidateIds.has("manual:apply")) paintMask(addCanvas, settings.apply_color, state.blinkModes.get("manual:apply") === "effective");
-  if (state.blinkCandidateIds.has("manual:exclude")) paintMask(exclusionCanvas, settings.exclude_color);
-  if (state.blinkCandidateIds.has("manual:excludeErase")) paintMask(exclusionEraseCanvas, settings.apply_color);
+  paintSelected("manual:apply", "apply", state.manualEnabled, addCanvas);
+  paintSelected("manual:exclude", "exclude", state.manualExclusionEnabled, exclusionCanvas);
+  paintSelected("manual:excludeErase", "exclude", state.manualExclusionEraseEnabled, exclusionEraseCanvas);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
-    const image = state.candidateImages.get(candidate.id);
-    if (!image) continue;
-    paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color, state.blinkModes.get(candidate.id) === "effective");
+    paintSelected(candidate.id, candidate.role === "exclude" ? "exclude" : "apply", candidate.enabled, state.candidateImages.get(candidate.id));
   }
   ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
+}
+
+function drawCompareRangeOverlay(offset) {
+  if (state.blinkCandidateIds.size) { drawCandidateBlinkOverlay(offset); return; }
+  const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
+  setCssTransform(layerCtx); layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  const paint = (mask, color) => {
+    layerCtx.save(); layerCtx.translate(offset + state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
+    layerCtx.drawImage(mask, 0, 0); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
+    layerCtx.fillRect(0, 0, originalCanvas.width, originalCanvas.height); layerCtx.restore();
+  };
+  paint(combinedCanvas, settings.apply_color);
+  paint(composeEnabledExclusionMask(), settings.exclude_color);
+  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
 function renderNow() {
@@ -1033,10 +1063,10 @@ function renderNow() {
   ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
   if (state.displayMode === "compare") {
     const offset = width / 2;
+    if (state.mosaicPreviewEnabled) paintMosaicPreview();
     ctx.fillStyle = "#000"; ctx.fillRect(offset, 0, width - offset, height);
     ctx.save(); ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
-    if (state.mosaicPreviewEnabled) paintMosaicPreviewAt(offset);
-    drawCandidateBlinkOverlay(offset);
+    drawCompareRangeOverlay(offset);
   } else {
     if (state.mosaicPreviewEnabled) paintMosaicPreview();
     drawCandidateBlinkOverlay();

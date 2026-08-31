@@ -1117,7 +1117,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
         applyPauseHidden: document.querySelector("#applyPauseButton")?.hidden,
       },
       state: {
-        tool: state.tool, view: state.viewMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
+        tool: state.tool, view: state.viewMode, displayMode: state.displayMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
         galleryCollapsed: state.galleryCollapsed, inspectorCollapsed: state.inspectorCollapsed, mosaicPreview: state.mosaicPreviewEnabled,
         current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
         galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenPaths.size,
@@ -1181,6 +1181,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     collapseGalleryButton: (before, after) => changed(before, after, (item) => item.state.galleryCollapsed, "collapseGalleryButton"),
     collapseInspectorButton: (before, after) => changed(before, after, (item) => item.state.inspectorCollapsed, "collapseInspectorButton"),
     boundaryTool: (before, after) => changed(before, after, (item) => item.controls.boundaryTool.expanded, "boundaryTool"),
+    singleViewButton: (before, after) => assert.equal(after.state.displayMode, "single", "singleViewButton must select the single editor view"),
+    compareViewButton: (before, after) => assert.equal(after.state.displayMode, "compare", "compareViewButton must select the compare editor view"),
     fitButton: () => assertFitPostcondition(),
     undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
     redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
@@ -1316,11 +1318,30 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   // Gallery/editor controls operate after a genuine gallery selection.
   for (const id of ["brushTool", "bucketTool", "mosaicEraserTool", "eraserTool", "excludeBucketTool", "excludeEraserTool"]) await click(id);
   for (const id of ["rectangleTool", "polygonTool", "boundaryBrushTool"]) { await click("boundaryTool"); await click(id); }
-  for (const id of ["fitButton", "mosaicPreviewButton"]) await click(id);
+  for (const id of ["singleViewButton", "compareViewButton", "singleViewButton", "fitButton", "mosaicPreviewButton"]) await click(id);
   await click("collapseGalleryButton"); await click("collapseGalleryButton");
   await click("collapseInspectorButton"); await click("collapseInspectorButton");
   await input("brushSize", "50"); await input("divisor", "101"); await input("bucketTolerance", "21");
   await click("mosaicHelpButton"); await click("mosaicHelpCloseButton");
+  await page.locator("#compareViewButton").click();
+  const compareCanvas = await page.locator("#editorCanvas").boundingBox();
+  const compareBefore = await page.evaluate(() => ({ history: state.history.length, scale: state.view.scale, x: state.view.x, y: state.view.y, right: state.view.x + stage.clientWidth / 2, singlePressed: $("#singleViewButton").getAttribute("aria-pressed"), comparePressed: $("#compareViewButton").getAttribute("aria-pressed") }));
+  assert.deepEqual({ singlePressed: compareBefore.singlePressed, comparePressed: compareBefore.comparePressed }, { singlePressed: "false", comparePressed: "true" }, "compare buttons are an exclusive accessible toggle");
+  await click("brushTool");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5);
+  await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .49, compareCanvas.y + compareCanvas.height * .5); await page.mouse.up();
+  await page.waitForFunction((history) => state.history.length > history, compareBefore.history);
+  const rightEdit = await page.evaluate(() => ({ history: state.history.length, points: state.history.at(-1)?.points || [], width: state.currentImage.width, scale: state.view.scale, x: state.view.x, right: state.view.x + stage.clientWidth / 2 }));
+  const rightSpan = Math.max(...rightEdit.points.map((point) => point.x)) - Math.min(...rightEdit.points.map((point) => point.x));
+  assert.ok(rightEdit.points.length > 1 && rightSpan <= rightEdit.width && rightEdit.points.at(-1).x < rightEdit.points[0].x, "a right-pane stroke remains one shared-image stroke when it crosses the centre line");
+  assert.equal(rightEdit.right - rightEdit.x, (await page.locator("#canvasStage").evaluate((node) => node.clientWidth)) / 2, "both compare panes retain one shared view transform");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5); await page.mouse.wheel(0, -120);
+  const rightZoom = await page.evaluate(() => ({ scale: state.view.scale, x: state.view.x, y: state.view.y }));
+  assert.ok(rightZoom.scale > rightEdit.scale, "wheel zoom from the right pane updates the shared transform");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .25, compareCanvas.y + compareCanvas.height * .5); await page.mouse.down({ button: "middle" }); await page.mouse.move(compareCanvas.x + compareCanvas.width * .25 + 12, compareCanvas.y + compareCanvas.height * .5 + 8); await page.mouse.up({ button: "middle" });
+  const leftPan = await page.evaluate(() => ({ x: state.view.x, y: state.view.y, scale: state.view.scale }));
+  assert.deepEqual({ x: Math.round(leftPan.x - rightZoom.x), y: Math.round(leftPan.y - rightZoom.y), scale: leftPan.scale }, { x: 12, y: 8, scale: rightZoom.scale }, "middle pan from either pane keeps the shared compare transform synchronized");
+  await page.locator("#singleViewButton").click();
   await page.evaluate(() => { state.manualMaskPresent = true; renderCandidates(); });
   for (const selector of ["[data-candidate-batch]", "[data-candidate-display-toggle]", "[data-candidate-effective-toggle]"]) {
     const before = await snapshot(); await page.locator(selector).first().click();

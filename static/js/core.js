@@ -7,8 +7,8 @@ const state = {
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   draftSaveChains: new Map(),
-  tool: "brush", panning: false, drawing: false, boundaryPending: false,
-  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
+  tool: "brush", panning: false, drawing: false, gestureDisplayOffset: null, hoverDisplayOffset: 0, boundaryPending: false,
+  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplayOffset: 0,
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
@@ -569,6 +569,7 @@ function clearBoundaryInteraction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
+  state.boundaryDisplayOffset = 0;
   state.boundaryDrafts = [];
   state.boundaryActiveId = null;
   state.boundaryBrushStroke = null;
@@ -585,6 +586,7 @@ function clearBoundaryConstruction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
+  state.boundaryDisplayOffset = 0;
   state.boundaryBrushStroke = null;
   state.polygonPoints = [];
   state.polygonDragIndex = -1;

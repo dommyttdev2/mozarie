@@ -94,6 +94,7 @@ async function testApplicationStartupPaths() {
     setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, render() {},
     t: (key) => key, requestAnimationFrame(callback) { callback(); },
     isBusy: () => false,
+    compareEventOffset: () => 0,
     toolRail: element("#canvasToolRail"),
   };
   for (const name of [

@@ -18,6 +18,7 @@ function canvas(width = 100, height = 80) {
     setLineDash(args) { this.calls.push(["dash", ...args]); },
   };
   target.getContext = () => target.ctx;
+  target.getBoundingClientRect = () => ({ left: 0, width: 120 });
   return target;
 }
 
@@ -28,12 +29,19 @@ function cache(entries = []) {
 
 const elements = new Map();
 function element(id) {
-  if (!elements.has(id)) elements.set(id, { value: "10", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38 });
+  if (!elements.has(id)) {
+    const attributes = new Map();
+    elements.set(id, {
+      value: "10", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38,
+      classList: { toggle() {} }, setAttribute(name, value) { attributes.set(name, String(value)); }, getAttribute(name) { return attributes.get(name) || null; },
+    });
+  }
   return elements.get(id);
 }
 
 const displayCanvas = canvas();
 const overlayCanvas = canvas();
+const layerCanvas = canvas();
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80, alpha: 255 }, candidates: [], candidateImages: new Map(), removedCandidateIds: new Set(),
   maskStatus: new Map(),
@@ -42,7 +50,8 @@ const state = {
   drafts: new Map(), draftLayerDirty: new Set(), draftSaveChains: new Map(), history: [], historyIndex: 0, historyBaseDirty: false, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   boundaryDrafts: [], boundaryActiveId: null, boundaryDragging: false, boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryPromptPoint: null,
   polygonPoints: [], boundaryBrushStroke: null, boundaryDraftSequence: 0, boundaryPending: false, pendingImageId: null, importing: false,
-  view: { x: 5, y: 7, scale: 2 }, hover: null, tool: "brush", blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false,
+  view: { x: 5, y: 7, scale: 2 }, displayMode: "single", hover: null, hoverDisplayOffset: 0, gestureDisplayOffset: null, boundaryDisplayOffset: 0, tool: "brush", blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, mosaicPreviewEnabled: false,
+  manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: true,
   settings: { display: { apply_color: "#f00", exclude_color: "#0ff", overlay_opacity: 0.5 } },
 };
 let focused = 0;
@@ -55,9 +64,9 @@ class Worker {
 const context = {
   codedError(code) { const error = new Error(); error.code = code; return error; },
   state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
-  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 },
+  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 }, toolRail: { offsetHeight: 30 },
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
-  canvas: displayCanvas, ctx: displayCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
+  canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
   blinkCanvas: canvas(), blinkCtx: canvas().ctx, combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
   $: (id) => element(id), t: (key) => key, isBusy: () => false, isGestureActive: () => false, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
   currentRecord: () => state.images[0] || { enabledCandidateCount: 0 },
@@ -77,10 +86,24 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
+
+test.setDisplayMode("compare");
+assert.equal(state.displayMode, "compare", "compare mode is an in-memory editor display choice");
+assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "false");
+assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "true");
+assert.equal(test.compareEventOffset({ clientX: 20 }, { left: 0, width: 120 }), 0, "the left compare pane uses the shared image origin");
+assert.equal(test.compareEventOffset({ clientX: 100 }, { left: 0, width: 120 }), 60, "the right compare pane uses its own screen offset with the shared image origin");
+state.blinkCandidateIds.clear(); state.mosaicPreviewEnabled = false; test.renderNow();
+assert.ok(displayCanvas.ctx.calls.some(([name]) => name === "fillRect"), "compare mode paints the right confirmation pane background without a second render canvas");
+test.setDisplayMode("single");
+assert.equal(state.displayMode, "single");
+assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "true");
+assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "false");
+state.view = { x: 5, y: 7, scale: 2 };
 
 // The tools users can actually manipulate all produce image-space geometry.
 assert.equal(test.roiFromPoints({ x: 1.2, y: 3.4 }, { x: 1.9, y: 4.1 }), null, "a sub-two-pixel drag does not create a detector ROI");

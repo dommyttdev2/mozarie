@@ -338,11 +338,11 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
-    if (compareEventOnRight(event)) return;
     canvas.setPointerCapture(event.pointerId);
+    state.gestureDisplayOffset = compareEventOffset(event);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
-    state.drawing = true; state.pointer = point; state.hover = rawPoint;
-    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplayOffset = state.gestureDisplayOffset;
+    if (state.tool === "boundary") { state.boundaryDisplayOffset = state.gestureDisplayOffset; state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
       if (vertex >= 0) {
@@ -363,7 +363,7 @@ function bindEvents() {
       }
       updateBoundaryActions(); render(); return;
     }
-    if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
+    if (state.tool === "boundary_brush") { state.boundaryDisplayOffset = state.gestureDisplayOffset; beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
     beginManualStroke(rawPoint); render();
   });
@@ -372,8 +372,8 @@ function bindEvents() {
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
-    if (compareEventOnRight(event)) { state.hover = null; return; }
     state.hover = pointFromEvent(event);
+    state.hoverDisplayOffset = state.gestureDisplayOffset ?? compareEventOffset(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
       if (state.tool === "boundary") {
@@ -399,7 +399,6 @@ function bindEvents() {
     render();
   });
   function finishCanvasGesture(event, cancelled = false) {
-    if (event && compareEventOnRight(event)) cancelled = true;
     const wasDrawing = state.drawing;
     const manualStrokeStarted = Boolean(state.activeStroke);
     const boundaryStarted = Boolean(state.boundaryStart);
@@ -410,7 +409,7 @@ function bindEvents() {
         addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
         state.polygonPoints = [];
       }
-      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
+      state.polygonDragIndex = -1; state.polygonDraftDrag = null; state.gestureDisplayOffset = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
@@ -436,6 +435,7 @@ function bindEvents() {
         }
       }
     }
+    state.gestureDisplayOffset = null;
     flushRender();
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
