@@ -57,8 +57,8 @@ function renderCandidates() {
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       });
-      row.append(label, blink, forced, enabled, remove);
-    } else row.append(label, blink, candidateEffectiveToggle(blinkId), enabled, remove);
+      row.append(label, enabled, blink, forced, remove);
+    } else row.append(label, enabled, blink, candidateEffectiveToggle(blinkId), remove);
     list.append(row);
   };
   appendManual(applyList, "apply");
@@ -79,7 +79,7 @@ function renderCandidates() {
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
-    row.append(label, blink, enabled, remove); excludeList.append(row);
+    row.append(label, enabled, blink, remove); excludeList.append(row);
   }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -119,8 +119,8 @@ function renderCandidates() {
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
-      row.append(label, blink, forced, enabled, remove);
-    } else row.append(label, blink, candidateEffectiveToggle(candidate.id), enabled, remove);
+      row.append(label, enabled, blink, forced, remove);
+    } else row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), remove);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);

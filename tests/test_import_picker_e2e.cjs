@@ -2803,7 +2803,7 @@ async function main() {
       assert.equal(editor.help.followsLabel && editor.help.fitsHeading, true, `mosaic help sits immediately after the block-size label at ${width}/${language}`);
       assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
       assert.ok(editor.controls.every((control) => control.width > 0 && control.height >= 25 && control.height <= 28), `candidate section controls use compact buttons at ${width}/${language}`);
-      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "表示" : "Show")).length, 2, `both candidate sections expose a display button at ${width}/${language}`);
+      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "検出範囲" : "Detection range")).length, 2, `both candidate sections expose a detection-range button at ${width}/${language}`);
       assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
       assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
       assert.equal(editor.targets.count === 2 && editor.targets.native && editor.targets.oneLine && editor.targets.centered && editor.targets.withinPane && editor.targets.compact && editor.targets.selected && editor.targets.tracksAbsent, true, `target label and chips stay compact and aligned at ${width}/${language}`);

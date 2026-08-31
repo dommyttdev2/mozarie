@@ -241,7 +241,6 @@ function formatDuration(seconds) {
 }
 
 function progressText(job) {
-  if (job.kind === "detect" && job.state === "running" && job.phase === "preparing_models") return t("status.preparingModels");
   const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
   if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
   const key = `${job.kind}:${job.startedAt || ""}`;
@@ -258,7 +257,6 @@ function progressText(job) {
 
 function processingCurrentPath(job) {
   if (job?.kind !== "detect") return job?.current || "";
-  if (job.phase === "preparing_models") return "";
   const imageIds = job.imageIds || [];
   const completedIds = new Set(job.completedImageIds || []);
   const targetIds = new Set(imageIds);

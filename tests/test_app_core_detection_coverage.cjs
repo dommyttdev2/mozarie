@@ -157,7 +157,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     forgetThumbnail() {},
   };
   const source = fs.readFileSync(path.join(jsRoot, "core.js"), "utf8");
-  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, markImagesUnreviewed, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
+  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, processingCurrentPath, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, markImagesUnreviewed, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
   const test = context.coreCoverage;
   const coreState = test.state;
   Object.assign(coreState, state);
@@ -223,6 +223,11 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.match(test.formatDuration(61), /duration/);
   assert.match(test.formatDuration(1), /duration/);
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3, startedAt: "job", activeElapsed: 3 }), /status/);
+  coreState.images = [{ id: "one", relativePath: "one.png" }, { id: "two", relativePath: "two.png" }];
+  const preparing = { kind: "detect", state: "running", phase: "preparing_models", completed: 0, total: 2, imageIds: ["one", "two"], completedImageIds: [] };
+  assert.match(test.progressText(preparing), /0/, "model preparation keeps the stable progress count");
+  assert.equal(test.processingCurrentPath(preparing), "one.png", "model preparation keeps the first unfinished filename visible");
+  assert.equal(test.processingCurrentPath({ ...preparing, phase: "detecting", completedImageIds: ["one"] }), "two.png", "phase changes do not clear the next filename");
   test.updateActionButtons();
   // The save dialog has a separate restriction and retains its live pause
   // control while the rest of the UI is locked.

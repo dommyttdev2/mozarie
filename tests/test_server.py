@@ -2618,11 +2618,22 @@ class MozarieTests(unittest.TestCase):
         genital = np.zeros((30, 30), dtype=np.uint8)
         genital[5:25, 5:25] = 255
         hand = np.zeros_like(genital)
-        hand[5:8, 10:20] = 255
+        hand[5:8, 10:21] = 255
         refined, decision = refine_mask_with_hand(genital, hand)
         self.assertEqual(decision, "refined")
-        self.assertTrue(np.all(refined[5:8, 10:20] == 0))
+        self.assertTrue(np.all(refined[5:8, 10:21] == 0))
         self.assertLess(np.count_nonzero(refined), np.count_nonzero(genital))
+
+    def test_hand_refinement_ignores_31_pixels_and_accepts_32_pixels(self):
+        genital = np.full((20, 20), 255, dtype=np.uint8)
+        overlap_31 = np.zeros_like(genital); overlap_31.flat[:31] = 255
+        unchanged, decision = refine_mask_with_hand(genital, overlap_31)
+        self.assertEqual(decision, "unchanged")
+        self.assertTrue(np.array_equal(unchanged, genital))
+        overlap_32 = np.zeros_like(genital); overlap_32.flat[:32] = 255
+        refined, decision = refine_mask_with_hand(genital, overlap_32)
+        self.assertEqual(decision, "refined")
+        self.assertEqual(np.count_nonzero(refined), np.count_nonzero(genital) - 32)
 
     def test_hand_refinement_skips_over_cap(self):
         genital = np.zeros((30, 30), dtype=np.uint8)

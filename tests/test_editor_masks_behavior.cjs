@@ -199,6 +199,17 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.equal(retainedRevision, 9, "a successful mutation retains the returned candidate revision");
 
   resetCandidateState();
+  test.renderCandidateRows();
+  const lastRow = (className) => [...elements.values()].filter((node) => node.className === className).at(-1);
+  const controlOrder = (row) => row.children.slice(1).map((node) => node.className);
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "apply rows order ON/OFF, detection range, applied range, delete");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-forced", "candidate-delete"], "exclusion rows order ON/OFF, detection range, force, delete");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "manual apply rows retain the same keyboard tab order");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-forced", "candidate-delete"], "manual exclusion rows retain the same keyboard tab order");
+  for (const row of [lastRow("candidate-row candidate-row-apply"), lastRow("candidate-row candidate-row-exclude")]) {
+    for (const button of row.children.slice(1)) assert.equal(typeof button.listeners.get("click"), "function", "each ordered candidate control remains keyboard-operable");
+  }
+  resetCandidateState();
   let staleRefreshes = 0;
   context.refreshCandidateRecord = async () => { staleRefreshes += 1; };
   context.api = async () => { state.currentId = "other"; return { candidateRevision: 10 }; };
