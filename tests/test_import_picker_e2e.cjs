@@ -1321,7 +1321,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   for (const id of ["singleViewButton", "compareViewButton", "singleViewButton", "fitButton", "mosaicPreviewButton"]) await click(id);
   await click("collapseGalleryButton"); await click("collapseGalleryButton");
   await click("collapseInspectorButton"); await click("collapseInspectorButton");
-  await input("brushSize", "50"); await input("divisor", "101"); await input("bucketTolerance", "21");
+  await input("brushSize", "50"); await input("divisor", "101"); await click("bucketTool"); await input("bucketTolerance", "21");
   await click("mosaicHelpButton"); await click("mosaicHelpCloseButton");
   await page.locator("#compareViewButton").click();
   const compareCanvas = await page.locator("#editorCanvas").boundingBox();
