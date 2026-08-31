@@ -70,27 +70,12 @@ def _normalize_device_name(value: str) -> str:
 
 @dataclass(frozen=True)
 class DxgiDevice:
-    """A physical Windows graphics adapter in DXGI enumeration order."""
-
     index: int
     name: str
-    vendor_id: int
-    device_id: int
-    subsys_id: int
-    revision: int
-    dedicated_video_memory: int
-    dedicated_system_memory: int
-    shared_system_memory: int
-    luid_low: int
-    luid_high: int
-
-    @property
-    def luid(self) -> str:
-        return f"{self.luid_high & 0xFFFFFFFF:08X}{self.luid_low & 0xFFFFFFFF:08X}"
 
 
 def _dxgi_adapter_names() -> list[DxgiDevice]:
-    """Enumerate Windows DXGI adapters for diagnostics only."""
+    """Enumerate Windows DXGI adapters in ONNX Runtime DirectML order."""
     if os.name != "nt":
         return []
 
@@ -163,21 +148,7 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
                     )(adapter_vtable[8])
                     desc = _AdapterDesc()
                     if get_desc(adapter, ctypes.byref(desc)) >= 0:
-                        devices.append(
-                            DxgiDevice(
-                                index=index,
-                                name=desc.Description.rstrip("\0"),
-                                vendor_id=int(desc.VendorId),
-                                device_id=int(desc.DeviceId),
-                                subsys_id=int(desc.SubSysId),
-                                revision=int(desc.Revision),
-                                dedicated_video_memory=int(desc.DedicatedVideoMemory),
-                                dedicated_system_memory=int(desc.DedicatedSystemMemory),
-                                shared_system_memory=int(desc.SharedSystemMemory),
-                                luid_low=int(desc.AdapterLuid.LowPart),
-                                luid_high=int(desc.AdapterLuid.HighPart),
-                            )
-                        )
+                        devices.append(DxgiDevice(index=index, name=desc.Description.rstrip("\0")))
                 finally:
                     adapter_release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
                         ctypes.cast(
@@ -194,64 +165,10 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
         return []
 
 
-def _log_gpu_diagnostics(stage: str, *, logical_device_id: int | None = None, torch_index: int | None = None, directml_index: int | None = None) -> None:
-    """Print detailed DirectML GPU mapping information for live troubleshooting."""
-    try:
-        directml = directml_module()
-        torch_count = int(directml.device_count())
-        torch_devices = [
-            str(directml.device_name(index)).rstrip("\0")
-            for index in range(torch_count)
-        ]
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        print(f"[Mozarie GPU] stage={stage} DirectML enumeration failed: {exc!r}", flush=True)
-        return
-
-    dxgi_devices = _dxgi_adapter_names()
-    pid = os.getpid()
-    print(
-        f"[Mozarie GPU] stage={stage} pid={pid} backend=directml "
-        f"logical={logical_device_id} torch_index={torch_index} dml_index={directml_index}",
-        flush=True,
-    )
-    if dxgi_devices:
-        for device in dxgi_devices:
-            print(
-                f"[Mozarie GPU] DXGI index={device.index} name={device.name!r} "
-                f"vendor_id=0x{device.vendor_id:04X} device_id=0x{device.device_id:04X} "
-                f"subsys_id=0x{device.subsys_id:08X} revision=0x{device.revision:02X} "
-                f"dedicated_video_memory={device.dedicated_video_memory} "
-                f"shared_system_memory={device.shared_system_memory} luid={device.luid}",
-                flush=True,
-            )
-    else:
-        print("[Mozarie GPU] DXGI enumeration unavailable", flush=True)
-    for index, name in enumerate(torch_devices):
-        print(f"[Mozarie GPU] torch-directml index={index} name={name!r}", flush=True)
-
-    if dxgi_devices and torch_devices:
-        for dxgi_device in dxgi_devices:
-            matches = [
-                index
-                for index, name in enumerate(torch_devices)
-                if _normalize_device_name(name) == _normalize_device_name(dxgi_device.name)
-            ]
-            print(
-                f"[Mozarie GPU] NAME-MATCH DXGI index={dxgi_device.index} "
-                f"name={dxgi_device.name!r} torch_indices={matches}",
-                flush=True,
-            )
-
-
 def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
-    """Expose only the DirectML devices torch-directml can actually address.
-
-    The UI and both inference backends now share this same logical device id.
-    DXGI enumeration is intentionally diagnostic-only because Windows can expose
-    duplicate aliases for the same AMD adapter.
-    """
+    """Expose physical GPU choices using torch-directml's stable device list."""
     directml = module or directml_module()
-    devices = [
+    return [
         RuntimeDevice(
             id=index,
             name=str(directml.device_name(index)).rstrip("\0"),
@@ -259,8 +176,6 @@ def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
         ).payload()
         for index in range(int(directml.device_count()))
     ]
-    _log_gpu_diagnostics("device-list")
-    return devices
 
 
 def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str | None = None) -> Any:
@@ -268,20 +183,12 @@ def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str 
         return "cpu"
     selected = backend or runtime_backend(torch_module=torch)
     if selected == "cuda":
-        resolved = int(device_id)
-        print(f"[Mozarie GPU] stage=torch-device backend=cuda logical={int(device_id)} resolved={resolved} pid={os.getpid()}", flush=True)
-        return f"cuda:{resolved}"
+        return f"cuda:{int(device_id)}"
     if selected == "directml":
         directml = directml_module()
         directml_index = int(device_id)
         if directml_index < 0 or directml_index >= int(directml.device_count()):
             raise RuntimeError(f"Invalid DirectML device id: {directml_index}")
-        _log_gpu_diagnostics(
-            "torch-device",
-            logical_device_id=directml_index,
-            torch_index=directml_index,
-            directml_index=directml_index,
-        )
         return directml.device(directml_index)
     raise RuntimeError("No GPU runtime is available")
 
