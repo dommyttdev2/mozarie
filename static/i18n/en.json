@@ -117,6 +117,8 @@
   "editor.exclusionTools": "Exclusion editing",
   "editor.excludeFill": "Exclude fill",
   "editor.fit": "Fit",
+  "editor.singleView": "Single view",
+  "editor.compareView": "Compare view",
   "editor.mosaicPreview": "Mosaic display",
   "editor.mosaicPreviewHelp": "Show mosaic in the editor only. This does not affect saved data.",
   "editor.none": "No image selected",

@@ -164,7 +164,7 @@ function bindEvents() {
   $("#detectAllButton").addEventListener("click", detectAll);
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, detectionTargets()));
-  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#singleViewButton").addEventListener("click", () => setDisplayMode("single")); $("#compareViewButton").addEventListener("click", () => setDisplayMode("compare")); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) void setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -338,6 +338,7 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
     }
     if (event.button !== 0) return;
+    if (compareEventOnRight(event)) return;
     canvas.setPointerCapture(event.pointerId);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
     state.drawing = true; state.pointer = point; state.hover = rawPoint;
@@ -371,6 +372,7 @@ function bindEvents() {
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
+    if (compareEventOnRight(event)) { state.hover = null; return; }
     state.hover = pointFromEvent(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
@@ -397,6 +399,7 @@ function bindEvents() {
     render();
   });
   function finishCanvasGesture(event, cancelled = false) {
+    if (event && compareEventOnRight(event)) cancelled = true;
     const wasDrawing = state.drawing;
     const manualStrokeStarted = Boolean(state.activeStroke);
     const boundaryStarted = Boolean(state.boundaryStart);
@@ -445,7 +448,7 @@ function bindEvents() {
       const current = Number($("#brushSize").value); const direction = event.deltaY < 0 ? 1 : -1;
       return updateBrushSize(Math.max(1, current + direction * Math.max(1, Math.round(current * 0.1))));
     }
-    const rect = canvas.getBoundingClientRect(); const mouseX = event.clientX - rect.left; const mouseY = event.clientY - rect.top;
+    const rect = canvas.getBoundingClientRect(); const offset = compareEventOffset(event, rect); const mouseX = event.clientX - rect.left - offset; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
     state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();

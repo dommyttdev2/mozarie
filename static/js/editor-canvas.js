@@ -481,10 +481,27 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
   return true;
 }
 
+function compareEventOffset(event, rect = canvas.getBoundingClientRect()) {
+  return state.displayMode === "compare" && event.clientX - rect.left >= rect.width / 2 ? rect.width / 2 : 0;
+}
+
+function compareEventOnRight(event) { return compareEventOffset(event) > 0; }
+
+function setDisplayMode(mode) {
+  const displayMode = mode === "compare" ? "compare" : "single";
+  if (state.displayMode === displayMode) return;
+  state.displayMode = displayMode;
+  const single = $("#singleViewButton"); const compare = $("#compareViewButton");
+  single.classList.toggle("active", displayMode === "single"); compare.classList.toggle("active", displayMode === "compare");
+  single.setAttribute("aria-pressed", String(displayMode === "single")); compare.setAttribute("aria-pressed", String(displayMode === "compare"));
+  fitImage();
+}
+
 function fitImage() {
   if (!state.currentImage) return;
   const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
-  const width = Math.max(1, stage.clientWidth - inset.left - inset.right);
+  const panelWidth = state.displayMode === "compare" ? stage.clientWidth / 2 : stage.clientWidth;
+  const width = Math.max(1, panelWidth - inset.left - inset.right);
   const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
   state.view.x = inset.left + (width - state.currentImage.width * state.view.scale) / 2;
@@ -713,10 +730,14 @@ function refreshMaskStatus(renderGalleryAfter = false) {
 }
 
 function paintMosaicPreview() {
+  paintMosaicPreviewAt(0);
+}
+
+function paintMosaicPreviewAt(offset) {
   if (!state.currentImage) return;
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(layerCtx); layerCtx.clearRect(0, 0, width, height);
-  layerCtx.save(); layerCtx.translate(state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
+  layerCtx.save(); layerCtx.translate(offset + state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
   layerCtx.drawImage(mosaicCanvas, 0, 0);
   layerCtx.globalCompositeOperation = "destination-in";
   layerCtx.drawImage(combinedCanvas, 0, 0);
@@ -976,7 +997,7 @@ function drawPolygonBoundary() {
   // Polygon drawing is handled together with every selected boundary shape.
 }
 
-function drawCandidateBlinkOverlay() {
+function drawCandidateBlinkOverlay(offset = 0) {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
   if (!ensureBlinkCanvas()) return;
   blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
@@ -1001,7 +1022,7 @@ function drawCandidateBlinkOverlay() {
     if (!image) continue;
     paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color, state.blinkModes.get(candidate.id) === "effective");
   }
-  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
+  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
   ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
 }
 
@@ -1010,8 +1031,16 @@ function renderNow() {
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) return;
   ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
-  if (state.mosaicPreviewEnabled) paintMosaicPreview();
-  drawCandidateBlinkOverlay();
+  if (state.displayMode === "compare") {
+    const offset = width / 2;
+    ctx.fillStyle = "#000"; ctx.fillRect(offset, 0, width - offset, height);
+    ctx.save(); ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
+    if (state.mosaicPreviewEnabled) paintMosaicPreviewAt(offset);
+    drawCandidateBlinkOverlay(offset);
+  } else {
+    if (state.mosaicPreviewEnabled) paintMosaicPreview();
+    drawCandidateBlinkOverlay();
+  }
   drawBoundaryRoi();
   drawPolygonBoundary();
   drawBrushCursor();
