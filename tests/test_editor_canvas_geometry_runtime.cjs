@@ -103,6 +103,7 @@ test.setDisplayMode("single");
 assert.equal(state.displayMode, "single");
 assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "true");
 assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "false");
+state.mosaicPreviewEnabled = true; test.renderNow();
 state.view = { x: 5, y: 7, scale: 2 };
 
 // The tools users can actually manipulate all produce image-space geometry.
