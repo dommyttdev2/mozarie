@@ -40,13 +40,14 @@ function clearEditor() {
   $("#emptyState").hidden = false;
   $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
-  renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render();
+  renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render(); updateBrushCursor();
 }
 
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) void saveDraft();
+  state.hover = null; updateBrushCursor();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   const record = state.images.find((image) => image.id === imageId);
@@ -497,7 +498,7 @@ function fitImage() {
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
   state.view.x = inset.left + (width - state.currentImage.width * state.view.scale) / 2;
   state.view.y = inset.top + (height - state.currentImage.height * state.view.scale) / 2;
-  render();
+  render(); updateBrushCursor();
 }
 
 function resizeRenderCanvas() {
@@ -507,7 +508,7 @@ function resizeRenderCanvas() {
   canvas.width = Math.max(1, Math.round(width * dpr)); canvas.height = Math.max(1, Math.round(height * dpr));
   layerCanvas.width = canvas.width; layerCanvas.height = canvas.height;
   boundaryOverlayCanvas.width = canvas.width; boundaryOverlayCanvas.height = canvas.height;
-  render();
+  render(); updateBrushCursor();
 }
 
 function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; context.setTransform(dpr, 0, 0, dpr, 0, 0); }
@@ -743,18 +744,23 @@ function paintMosaicPreviewAt(offset) {
   layerCtx.restore(); setCssTransform(ctx); ctx.drawImage(layerCanvas, 0, 0, width, height);
 }
 
-function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
+function updateBrushCursor() {
+  const cursor = $("#brushCursor");
+  if (!state.hover || !state.currentImage || state.panning || isBusy() || state.importing || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) { cursor.hidden = true; state.brushCursorGeometry = ""; return; }
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
   const x = state.hoverDisplayOffset + state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
-  ctx.save();
-  if (["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool)) ctx.setLineDash([6, 4]);
-  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = state.tool === "boundary_brush" ? "#50d589" : "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
-  ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#111316"; ctx.lineWidth = 1; ctx.stroke();
-  ctx.restore();
+  const diameter = Math.max(2, radius * 2);
+  const geometry = `${state.tool}:${diameter}`;
+  cursor.hidden = false;
+  if (state.brushCursorGeometry !== geometry) {
+    state.brushCursorGeometry = geometry;
+    cursor.classList.toggle("eraser", ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool));
+    cursor.classList.toggle("boundary-brush", state.tool === "boundary_brush");
+    cursor.style.width = `${diameter}px`; cursor.style.height = `${diameter}px`;
+  }
+  cursor.style.transform = `translate3d(${x - radius}px, ${y - radius}px, 0)`;
 }
-
 function roiFromPoints(start, end) {
   const left = Math.floor(Math.min(start.x, end.x)); const top = Math.floor(Math.min(start.y, end.y));
   const right = Math.ceil(Math.max(start.x, end.x)); const bottom = Math.ceil(Math.max(start.y, end.y));
@@ -1099,7 +1105,7 @@ function drawCompareRangeOverlay(offset) {
 function renderNow() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
-  if (!state.currentImage) return;
+  if (!state.currentImage) { updateBrushCursor(); return; }
   ctx.save(); if (state.displayMode === "compare") { ctx.beginPath(); ctx.rect(0, 0, width / 2, height); ctx.clip(); } ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
   if (state.displayMode === "compare") {
     const offset = width / 2;
@@ -1112,7 +1118,7 @@ function renderNow() {
   }
   drawBoundaryRoi();
   drawPolygonBoundary();
-  drawBrushCursor();
+  updateBrushCursor();
   updateBoundaryActions();
 }
 function render() {

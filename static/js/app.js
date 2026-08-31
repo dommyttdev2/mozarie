@@ -335,7 +335,7 @@ function bindEvents() {
   canvas.addEventListener("pointerdown", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     if (event.button === 1) {
-      canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
+      canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; updateBrushCursor(); return;
     }
     if (event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
@@ -396,7 +396,8 @@ function bindEvents() {
   canvas.addEventListener("pointermove", (event) => {
     const events = event.getCoalescedEvents?.() || [event];
     for (const pointEvent of events) processPointerMove(pointEvent);
-    render();
+    updateBrushCursor();
+    if (state.panning || state.drawing) render();
   });
   function finishCanvasGesture(event, cancelled = false) {
     const wasDrawing = state.drawing;
@@ -440,7 +441,7 @@ function bindEvents() {
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));
-  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); });
+  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); updateBrushCursor(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
@@ -451,7 +452,7 @@ function bindEvents() {
     const rect = canvas.getBoundingClientRect(); const offset = compareEventOffset(event, rect); const mouseX = event.clientX - rect.left - offset; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
     state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-    state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
+    state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render(); updateBrushCursor();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.fillWorker) { event.preventDefault(); cancelFillWork(); return; }

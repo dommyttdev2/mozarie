@@ -78,7 +78,7 @@ const context = {
   t: (key, data = {}) => `${key}${data.value ?? data.count ?? ""}`,
   isBusy: () => busy, closeBoundaryModeMenu: undefined,
   clearBoundaryInteraction: () => calls.push(["clearBoundaryInteraction"]), clearBoundaryConstruction: () => calls.push(["clearBoundaryConstruction"]),
-  updateBoundaryActions: () => calls.push(["boundaryActions"]), render: () => calls.push(["render"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
+  updateBoundaryActions: () => calls.push(["boundaryActions"]), updateBrushCursor: () => {}, render: () => calls.push(["render"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
   calculatedBlockSize: () => 7, currentRecord: () => images[0], mosaicDivisor: () => 3, normaliseDivisor: (value) => Number(value),
   showModalFromInvoker: (dialog) => queueMicrotask(() => dialog.close(dialog.returnValue)),
   api: async (url, options = {}) => {

@@ -3197,6 +3197,84 @@ async function main() {
         .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
       assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
+        await page.locator("#compareViewButton").click();
+        const cursorGeometry = await page.evaluate(() => {
+          const rect = canvas.getBoundingClientRect();
+          const point = { x: Math.round(state.currentImage.width * .5), y: Math.round(state.currentImage.height * .5) };
+          const x = rect.left + state.view.x + point.x * state.view.scale;
+          const y = rect.top + state.view.y + point.y * state.view.scale;
+          return { left: { x, y }, right: { x: x + rect.width / 2, y }, width: rect.width };
+        });
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        await page.evaluate(() => {
+          const canvas = document.querySelector("#editorCanvas");
+          const cursor = document.querySelector("#brushCursor");
+          const originalClearRect = ctx.clearRect.bind(ctx);
+          const metrics = { recording: false, starts: [], latencies: [], clears: 0, sides: new Set(), last: null };
+          const begin = (event) => { if (metrics.recording) metrics.starts.push(performance.now()); };
+          const end = (event) => {
+            if (!metrics.recording) return;
+            const started = metrics.starts.shift();
+            if (started === undefined) return;
+            metrics.latencies.push(performance.now() - started);
+            const rect = canvas.getBoundingClientRect();
+            metrics.sides.add(event.clientX - rect.left >= rect.width / 2 ? "right" : "left");
+            metrics.last = { x: event.clientX, y: event.clientY };
+          };
+          ctx.clearRect = (...args) => { if (metrics.recording) metrics.clears += 1; return originalClearRect(...args); };
+          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
+          window.__brushCursorPerf = { metrics, cursor, originalClearRect, begin, end, canvas };
+        });
+        const cursorMetrics = [];
+        for (const tool of ["#brushTool", "#mosaicEraserTool", "#eraserTool", "#excludeEraserTool"]) {
+          await page.locator(tool).click();
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await page.evaluate(() => { window.__brushCursorPerf.metrics.latencies.length = 0; window.__brushCursorPerf.metrics.clears = 0; window.__brushCursorPerf.metrics.sides.clear(); window.__brushCursorPerf.metrics.recording = true; });
+          for (let index = 0; index < 240; index += 1) {
+            const side = index % 2 ? "right" : "left";
+            const point = cursorGeometry[side];
+            await page.mouse.move(point.x + (index % 30), point.y + Math.floor(index / 30));
+          }
+          cursorMetrics.push(await page.evaluate(() => {
+            const value = window.__brushCursorPerf; const { metrics, cursor } = value;
+            metrics.recording = false;
+            const latency = [...metrics.latencies].sort((left, right) => left - right);
+            const rect = cursor.getBoundingClientRect();
+            return {
+              count: latency.length, clears: metrics.clears, sides: [...metrics.sides].sort(), hidden: cursor.hidden,
+              center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, last: metrics.last,
+              p95: latency[Math.max(0, Math.ceil(latency.length * .95) - 1)] || 0,
+            };
+          }));
+        }
+        for (const metric of cursorMetrics) {
+          assert.ok(metric.count >= 240, `4K ${metric.count}-event hover stream records every pointer move`);
+          assert.equal(metric.clears, 0, "4K hover-only cursor movement does not redraw the image canvas");
+          assert.deepEqual(metric.sides, ["left", "right"], "4K compare hover keeps the cursor synchronized in either editable pane");
+          assert.equal(metric.hidden, false, "4K brush cursor remains visible while hovering");
+          assert.ok(Math.abs(metric.center.x - metric.last.x) <= 1 && Math.abs(metric.center.y - metric.last.y) <= 1, `4K brush cursor center follows the final pointer within one pixel (${JSON.stringify(metric)})`);
+          assert.ok(metric.p95 < 16.7, `4K hover cursor p95 stays below one frame (actual ${metric.p95.toFixed(2)}ms)`);
+        }
+        await page.locator("#brushTool").click();
+        await page.evaluate(() => { const metrics = window.__brushCursorPerf.metrics; metrics.latencies.length = 0; metrics.clears = 0; metrics.sides.clear(); metrics.recording = true; });
+        await page.mouse.move(cursorGeometry.left.x, cursorGeometry.left.y); await page.mouse.down();
+        for (let index = 1; index <= 100; index += 1) await page.mouse.move(cursorGeometry.left.x + index, cursorGeometry.left.y + Math.floor(index / 10));
+        await page.mouse.up();
+        const dragCursorMetric = await page.evaluate(() => {
+          const value = window.__brushCursorPerf; const { metrics, cursor } = value; metrics.recording = false;
+          const latency = [...metrics.latencies].sort((left, right) => left - right); const rect = cursor.getBoundingClientRect();
+          return { count: latency.length, p95: latency[Math.max(0, Math.ceil(latency.length * .95) - 1)] || 0, center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, last: metrics.last };
+        });
+        assert.ok(dragCursorMetric.count >= 100, "4K drag keeps every pointer event available to the brush cursor");
+        assert.ok(Math.abs(dragCursorMetric.center.x - dragCursorMetric.last.x) <= 1 && Math.abs(dragCursorMetric.center.y - dragCursorMetric.last.y) <= 1, `4K drawing cursor follows the final pointer without waiting for canvas composition (${JSON.stringify(dragCursorMetric)})`);
+        assert.ok(dragCursorMetric.p95 < 16.7, `4K drawing cursor p95 stays below one frame (actual ${dragCursorMetric.p95.toFixed(2)}ms)`);
+        await page.evaluate(() => {
+          const value = window.__brushCursorPerf; const { canvas, begin, end, originalClearRect } = value;
+          ctx.clearRect = originalClearRect; canvas.removeEventListener("pointermove", begin, true); canvas.removeEventListener("pointermove", end); delete window.__brushCursorPerf;
+        });
+        console.log(`4K cursor performance: hover-p95=${Math.max(...cursorMetrics.map((metric) => metric.p95)).toFixed(2)}ms moves=${cursorMetrics[0].count}`);
+        await page.locator("#singleViewButton").click();
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
         const comparePixels = await page.evaluate(({ logical }) => {
           const sample = (offset = 0) => {
             const x = Math.round((offset + state.view.x + logical.x * state.view.scale) * (window.devicePixelRatio || 1));

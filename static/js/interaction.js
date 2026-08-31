@@ -12,7 +12,7 @@ function setTool(tool) {
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
   $("#bucketToleranceControl").hidden = !["bucket", "exclude_bucket"].includes(tool);
   canvas.style.cursor = "default";
-  updateBoundaryActions(); render();
+  updateBoundaryActions(); render(); updateBrushCursor();
   if (focusedInBoundaryMenu) focusCanvas();
 }
 
@@ -32,7 +32,7 @@ function closeBoundaryModeMenu({ restoreFocus = false } = {}) {
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
   const input = $("#brushSize"); input.value = Math.min(500, Math.max(1, Math.round(value)));
-  $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render();
+  $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render(); updateBrushCursor();
 }
 function updateBlockSizeDisplay() {
   const currentBlockSize = calculatedBlockSize(currentRecord(), mosaicDivisor());

@@ -33,7 +33,7 @@ function element(id) {
     const attributes = new Map();
     elements.set(id, {
       value: "10", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38,
-      classList: { toggle() {} }, setAttribute(name, value) { attributes.set(name, String(value)); }, getAttribute(name) { return attributes.get(name) || null; },
+      classList: { classes: new Set(), toggle(name, enabled) { if (enabled) this.classes.add(name); else this.classes.delete(name); }, contains(name) { return this.classes.has(name); } }, setAttribute(name, value) { attributes.set(name, String(value)); }, getAttribute(name) { return attributes.get(name) || null; },
     });
   }
   return elements.get(id);
@@ -85,7 +85,7 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, updateBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -219,10 +219,12 @@ state.candidates = []; state.removedCandidateIds = new Set(); state.currentId = 
 context.combinedCanvas.ctx.alpha = 255; state.maskStatus.set("image", true);
 assert.equal(test.refreshMaskStatus(false), false, "unchanged mask status updates controls without redrawing the catalogue");
 
-state.hover = { x: 3, y: 4 }; state.tool = "mosaic_eraser"; test.drawBrushCursor();
-state.tool = "brush"; test.drawBrushCursor();
-state.hover = null; test.drawBrushCursor();
-assert.ok(draw.calls.some(([name]) => name === "dash"), "eraser cursors use a dashed ring");
+state.hover = { x: 3, y: 4 }; state.tool = "mosaic_eraser"; test.updateBrushCursor();
+assert.equal(element("#brushCursor").classList.contains("eraser"), true, "eraser cursors use a dashed ring");
+state.tool = "brush"; test.updateBrushCursor();
+assert.equal(element("#brushCursor").classList.contains("eraser"), false, "brush cursor restores a solid ring");
+state.hover = null; test.updateBrushCursor();
+assert.equal(element("#brushCursor").hidden, true, "clearing hover hides the cursor");
 
 state.blinkCandidateIds = new Set(["manual:apply", "manual:exclude", "manual:excludeErase", "apply", "exclude"]);
 state.blinkModes = new Map([["manual:apply", "effective"], ["apply", "effective"]]); state.blinkPhase = true;

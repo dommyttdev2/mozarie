@@ -91,7 +91,7 @@ async function testApplicationStartupPaths() {
     bindEvents: undefined,
     setNavigationShortcutsEnabled() {}, scheduleJobPoll() {}, updateBrushSize() {}, resizeRenderCanvas() {},
     updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, resetCatalog(images) { state.images = images; },
-    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, render() {},
+    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, updateBrushCursor() {}, render() {},
     t: (key) => key, requestAnimationFrame(callback) { callback(); },
     isBusy: () => false,
     compareEventOffset: () => 0,

@@ -27,7 +27,12 @@ function canvas(width = 8, height = 6) {
 
 const elements = new Map();
 function element(id) {
-  if (!elements.has(id)) elements.set(id, { id, value: "10", textContent: "", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38 });
+  if (!elements.has(id)) {
+    const classes = new Set();
+    elements.set(id, { id, value: "10", textContent: "", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38,
+      classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); }, contains(name) { return classes.has(name); } },
+    });
+  }
   return elements.get(id);
 }
 
@@ -75,7 +80,7 @@ const context = {
   stage: { clientWidth: 80, clientHeight: 60 }, toolRail: { offsetHeight: 10 }, canvas: displayCanvas,
   addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, boundaryOverlayCanvas,
   addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, boundaryOverlayCtx, ctx,
-  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`,
+  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`, isBusy: () => false,
   closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, renderCandidates() {}, updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, updateGalleryCurrent() {},
   currentRecord: () => state.images.find((image) => image.id === state.currentId), calculatedBlockSize: () => 4,
   resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, renderCatalogViews() {},
@@ -83,7 +88,7 @@ const context = {
 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.canvasCompletion = { canvasSizeForImage, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, drawBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };`, context, { filename: canvasPath });
+vm.runInNewContext(`${source}\nglobalThis.canvasCompletion = { canvasSizeForImage, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, updateBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };`, context, { filename: canvasPath });
 const test = context.canvasCompletion;
 
 (async () => {
@@ -168,10 +173,10 @@ const test = context.canvasCompletion;
 
   test.paintMosaicPreview();
   assert.ok(layerCtx.calls.some(([name]) => name === "image"), "preview is clipped through the composed mask before painting");
-  test.drawBrushCursor();
-  assert.ok(ctx.calls.some(([name]) => name === "dash"), "eraser cursor is visibly dashed");
-  state.tool = "boundary_brush"; test.drawBrushCursor();
-  assert.ok(ctx.calls.some(([name]) => name === "arc"), "boundary brush renders a cursor ring");
+  test.updateBrushCursor();
+  assert.equal(element("#brushCursor").classList.contains("eraser"), true, "eraser cursor is visibly dashed");
+  state.tool = "boundary_brush"; test.updateBrushCursor();
+  assert.equal(element("#brushCursor").classList.contains("boundary-brush"), true, "boundary brush renders a cursor ring");
 
   state.blinkCandidateIds = new Set(["manual:apply", "manual:exclude", "manual:excludeErase", "apply", "exclude"]);
   state.blinkModes = new Map([["manual:apply", "effective"], ["apply", "effective"]]);
