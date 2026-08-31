@@ -3897,7 +3897,7 @@ class MozarieTests(unittest.TestCase):
             root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "image.png")
             state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
             state.settings["models"].update({"hand_detection_enabled": True, "hand_segmentation_enabled": True})
-            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 4:12] = True
+            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 2:10] = True
             specialist = Mock(); specialist.predict.return_value = hand_mask, np.asarray([0.9]), None
             original_fromarray = detection_module.Image.fromarray
             calls = 0
@@ -3933,7 +3933,7 @@ class MozarieTests(unittest.TestCase):
             record = self._record(image_path, 12, 12)
             state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
             state.settings["models"].update({"hand_detection_enabled": True, "hand_segmentation_enabled": True})
-            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 4:12] = True
+            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 2:10] = True
             specialist = Mock(); specialist.predict.return_value = hand_mask, np.asarray([0.9]), None
             fluid = np.zeros((12, 12), dtype=np.uint8); fluid[6:8, 4:8] = 255
 
