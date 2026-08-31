@@ -1004,17 +1004,25 @@ async function assertToolRailLayout(page, position) {
       const box = document.querySelector(selector).getBoundingClientRect();
       return { x: box.x, y: box.y, width: box.width, height: box.height };
     };
-    return { rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar") };
+    const ids = (selector) => [...document.querySelectorAll(selector)].map((element) => element.id);
+    return {
+      rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar"),
+      mosaicTools: ids('[data-i18n-aria-label="editor.mosaicTools"] > button'),
+      exclusionTools: ids('[data-i18n-aria-label="editor.exclusionTools"] > button'),
+    };
   });
   assert.equal(overlaps(boxes.rail, boxes.settings), true, "tool settings are integrated into the top editor toolbar");
   assert.equal(overlaps(boxes.rail, boxes.navigation), false, `${position} rail must not overlap image navigation`);
   assert.ok(boxes.rail.y <= boxes.settings.y, "toolbar is fixed at the editor top");
+  assert.deepEqual(boxes.mosaicTools, ["brushTool", "bucketTool", "mosaicEraserTool"], "mosaic tools keep brush, fill, eraser order");
+  assert.deepEqual(boxes.exclusionTools, ["eraserTool", "excludeBucketTool", "excludeEraserTool"], "exclusion tools keep brush, fill, eraser order");
   await page.locator("#boundaryTool").click();
   const menu = await page.locator("#boundaryModeMenu").evaluate((element) => {
     const box = element.getBoundingClientRect();
-    return { x: box.x, y: box.y, width: box.width, height: box.height };
+    return { x: box.x, y: box.y, width: box.width, height: box.height, ids: [...element.querySelectorAll("button")].map((button) => button.id) };
   });
   assert.ok(menu.width > 0 && menu.height > 0, "toolbar boundary menu opens");
+  assert.deepEqual(menu.ids, ["rectangleTool", "polygonTool", "boundaryBrushTool"], "boundary menu contains only its boundary modes");
   await page.keyboard.press("Escape");
 }
 
@@ -1306,8 +1314,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await setupFixture();
 
   // Gallery/editor controls operate after a genuine gallery selection.
-  for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
-  for (const id of ["polygonTool", "boundaryBrushTool", "bucketTool", "excludeBucketTool"]) { await click("boundaryTool"); await click(id); }
+  for (const id of ["brushTool", "bucketTool", "mosaicEraserTool", "eraserTool", "excludeBucketTool", "excludeEraserTool"]) await click(id);
+  for (const id of ["rectangleTool", "polygonTool", "boundaryBrushTool"]) { await click("boundaryTool"); await click(id); }
   for (const id of ["fitButton", "mosaicPreviewButton"]) await click(id);
   await click("collapseGalleryButton"); await click("collapseGalleryButton");
   await click("collapseInspectorButton"); await click("collapseInspectorButton");

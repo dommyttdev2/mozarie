@@ -60,10 +60,12 @@
         <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="horizontal" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
           <div class="tool-pair" role="group" aria-label="モザイク編集" data-i18n-aria-label="editor.mosaicTools">
             <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイクブラシ" title="モザイクブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+            <button id="bucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
             <button id="mosaicEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク消しゴム" title="モザイク消しゴム" data-i18n-aria-label="editor.mosaicEraser" data-i18n-title="editor.mosaicEraser"><span aria-hidden="true"></span></button>
           </div>
           <div class="tool-pair" role="group" aria-label="除外編集" data-i18n-aria-label="editor.exclusionTools">
             <button id="eraserTool" class="tool icon-button tool-icon tool-icon-brush" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+            <button id="excludeBucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             <button id="excludeEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser"><span aria-hidden="true"></span></button>
           </div>
           <div class="boundary-tool-menu">
@@ -72,8 +74,6 @@
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
               <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
-              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
-              <button id="excludeBucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>

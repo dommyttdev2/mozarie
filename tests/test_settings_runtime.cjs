@@ -127,7 +127,11 @@ vm.runInNewContext(`${source}\nglobalThis.settingsTest={renderModelStatus,render
 
   const railEvent = { target: element("#brushTool"), key: "ArrowRight", preventDefault() { this.prevented = true; } };
   context.settingsTest.handleToolRailKeydown(railEvent);
-  assert.equal(context.focused, element("#eraserTool"), "right arrow advances the horizontal tool rail");
+  assert.equal(context.focused, element("#bucketTool"), "right arrow follows the mosaic toolbar order");
+  context.settingsTest.handleToolRailKeydown({ target: element("#bucketTool"), key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.focused, element("#mosaicEraserTool"), "fill precedes the mosaic eraser in the roving toolbar order");
+  context.settingsTest.handleToolRailKeydown({ target: element("#excludeBucketTool"), key: "ArrowRight", preventDefault() {} });
+  assert.equal(context.focused, element("#excludeEraserTool"), "exclude fill precedes the exclusion eraser in the roving toolbar order");
   context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "ArrowLeft", preventDefault() {} });
   context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "Home", preventDefault() {} });
   context.settingsTest.handleToolRailKeydown({ target: element("#eraserTool"), key: "End", preventDefault() {} });
