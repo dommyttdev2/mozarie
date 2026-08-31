@@ -165,7 +165,6 @@ function syncCandidateDisplayButtons() {
 function clearCandidateBlink() {
   state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkPhase = false;
   if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
-  if (typeof releaseBlinkCanvas === "function") releaseBlinkCanvas();
   $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
 }
 
@@ -300,6 +299,7 @@ async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
   if (confirmationRequired("candidateDelete") && !await confirmAction(t("confirm.candidateDelete.title"), t("confirm.candidateDelete.message"), "candidateDelete")) return;
   state.removedCandidateIds.add(candidate.id);
+  setCandidateDisplayMode([candidate.id], "off");
   recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] });
   markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
 }
@@ -611,6 +611,7 @@ function beginManualStroke(point) {
   state.mosaicPending = true;
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
+  if (state.tool === "exclude_eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:excludeErase"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 

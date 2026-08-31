@@ -42,7 +42,6 @@ const historyExclusionCanvas = canvas();
 const historyExclusionEraseCanvas = canvas();
 const originalCanvas = canvas();
 const layerCanvas = canvas();
-const blinkCanvas = canvas();
 const boundaryOverlayCanvas = canvas();
 const displayCanvas = canvas();
 const layerCtx = layerCanvas.ctx;
@@ -74,8 +73,8 @@ const context = {
   ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
   window: { devicePixelRatio: 2 }, document: { activeElement: null },
   stage: { clientWidth: 80, clientHeight: 60 }, toolRail: { offsetHeight: 10 }, canvas: displayCanvas,
-  addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, blinkCanvas, boundaryOverlayCanvas,
-  addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, blinkCtx: blinkCanvas.ctx, boundaryOverlayCtx, ctx,
+  addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, boundaryOverlayCanvas,
+  addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, boundaryOverlayCtx, ctx,
   $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`,
   closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, renderCandidates() {}, updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, updateGalleryCurrent() {},
   currentRecord: () => state.images.find((image) => image.id === state.currentId), calculatedBlockSize: () => 4,
@@ -90,7 +89,6 @@ const test = context.canvasCompletion;
 (async () => {
   test.canvasSizeForImage({ width: 20, height: 12 });
   assert.equal(addCanvas.width, 20, "resizing an image resets every editable canvas");
-  assert.equal(blinkCanvas.height, 1, "blink canvas stays tiny until a blink is requested");
   assert.equal(state.maskDirty, true);
   assert.equal(state.manualEnabled, true);
 
@@ -178,7 +176,7 @@ const test = context.canvasCompletion;
   state.blinkCandidateIds = new Set(["manual:apply", "manual:exclude", "manual:excludeErase", "apply", "exclude"]);
   state.blinkModes = new Map([["manual:apply", "effective"], ["apply", "effective"]]);
   test.drawCandidateBlinkOverlay();
-  assert.ok(blinkCanvas.ctx.calls.some(([name]) => name === "fill"), "blink overlay colors actual candidate and manual masks");
+  assert.ok(layerCtx.calls.some(([name]) => name === "fill"), "blink overlay colors each candidate through the viewport layer");
   test.renderNow(); test.flushRender();
   console.log("test_editor_canvas_completion_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

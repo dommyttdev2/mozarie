@@ -1,7 +1,7 @@
 function canvasSizeForImage(image) {
   releaseMosaicPreview();
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
-  releaseHistoryCanvases(); releaseBlinkCanvas();
+  releaseHistoryCanvases();
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
   exclusionEraseCtx.clearRect(0, 0, image.width, image.height);
@@ -24,13 +24,6 @@ function ensureHistoryCanvases() {
 function releaseHistoryCanvases() {
   for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) { target.width = 1; target.height = 1; }
 }
-function ensureBlinkCanvas() {
-  if (!state.currentImage) return false;
-  if (blinkCanvas.width !== state.currentImage.width || blinkCanvas.height !== state.currentImage.height) { blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height; }
-  return true;
-}
-function releaseBlinkCanvas() { blinkCanvas.width = 1; blinkCanvas.height = 1; }
-
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
@@ -43,7 +36,7 @@ function clearEditor() {
   state.historyBaseDirty = false;
   addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
-  releaseHistoryCanvases(); releaseBlinkCanvas();
+  releaseHistoryCanvases();
   $("#emptyState").hidden = false;
   $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
@@ -675,13 +668,6 @@ function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = ""
   return effectiveExclusionCanvas;
 }
 
-function composePreEraseExclusionMask() {
-  effectiveExclusionCtx.clearRect(0, 0, effectiveExclusionCanvas.width, effectiveExclusionCanvas.height);
-  for (const candidate of state.candidates) if (!state.removedCandidateIds.has(candidate.id) && candidate.enabled && candidate.role === "exclude") effectiveExclusionCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
-  if (state.manualExclusionEnabled) effectiveExclusionCtx.drawImage(exclusionCanvas, 0, 0);
-  return effectiveExclusionCanvas;
-}
-
 function composeCurrentMask() {
   if (!state.currentImage) return;
   combinedCtx.clearRect(0, 0, combinedCanvas.width, combinedCanvas.height);
@@ -907,6 +893,7 @@ function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
   if (!shapes.length || !state.currentImage) return;
   setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
   boundaryOverlayCtx.save();
+  clipRenderPane(boundaryOverlayCtx, offset);
   boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
   boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
   boundaryOverlayCtx.globalCompositeOperation = "destination-out";
@@ -917,12 +904,13 @@ function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
       boundaryOverlayCtx.lineWidth = Math.max(1, shape.radius * state.view.scale); boundaryOverlayCtx.lineCap = "round"; boundaryOverlayCtx.lineJoin = "round"; boundaryOverlayCtx.stroke();
     } else boundaryOverlayCtx.fill();
   }
-  boundaryOverlayCtx.restore(); setCssTransform(ctx); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
+  boundaryOverlayCtx.restore();
+  setCssTransform(ctx); ctx.save(); clipRenderPane(ctx, offset); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
 function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
   const ready = shape.type !== "polygon" || polygonPointsValid(shape.points || []);
-  ctx.save(); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
+  ctx.save(); clipRenderPane(ctx, offset); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
   ctx.beginPath(); boundaryPath(shape, ctx, offset);
   if (shape.type === "brush") { ctx.lineWidth = Math.max(2, shape.radius * state.view.scale); ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke(); }
   else ctx.stroke();
@@ -1013,15 +1001,49 @@ function drawPolygonBoundary() {
   // Polygon drawing is handled together with every selected boundary shape.
 }
 
-function paintTintedMask(mask, color, clipMask = null) {
+function clipRenderPane(target, offset = 0) {
+  if (state.displayMode !== "compare") return;
+  target.beginPath(); target.rect(offset, 0, stage.clientWidth / 2, stage.clientHeight); target.clip();
+}
+
+function paintTintedLayer(color, opacity, offset, paintMask) {
+  // Keep blink composition at viewport size.  Reusing a full-resolution mask
+  // canvas here made each selected candidate re-tint the previous one.
+  setCssTransform(layerCtx); layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  layerCtx.save(); clipRenderPane(layerCtx, offset); paintMask(layerCtx); layerCtx.restore();
+  layerCtx.save(); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
+  layerCtx.fillRect(0, 0, stage.clientWidth, stage.clientHeight); layerCtx.restore();
+  setCssTransform(ctx); ctx.save(); clipRenderPane(ctx, offset); ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = opacity;
+  ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
+}
+
+function paintTintedMask(mask, color, opacity, offset, clipMask = null) {
   if (!mask) return;
-  blinkCtx.save();
-  blinkCtx.drawImage(mask, 0, 0);
-  if (clipMask) { blinkCtx.globalCompositeOperation = "destination-in"; blinkCtx.drawImage(clipMask, 0, 0); }
-  blinkCtx.globalCompositeOperation = "source-in";
-  blinkCtx.fillStyle = color;
-  blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
-  blinkCtx.restore();
+  paintTintedLayer(color, opacity, offset, (target) => {
+    target.save(); target.translate(offset + state.view.x, state.view.y); target.scale(state.view.scale, state.view.scale);
+    target.drawImage(mask, 0, 0);
+    if (clipMask) { target.globalCompositeOperation = "destination-in"; target.drawImage(clipMask, 0, 0); }
+    target.restore();
+  });
+}
+
+function paintEffectiveManualExclusionErase(offset, color, opacity) {
+  // The erase overlay is only meaningful where an enabled exclusion existed
+  // before the erase.  Build that union in a viewport layer so the cached
+  // post-erase exclusion canvas remains untouched.
+  setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  boundaryOverlayCtx.save(); clipRenderPane(boundaryOverlayCtx, offset);
+  boundaryOverlayCtx.translate(offset + state.view.x, state.view.y); boundaryOverlayCtx.scale(state.view.scale, state.view.scale);
+  for (const candidate of state.candidates) {
+    if (!state.removedCandidateIds.has(candidate.id) && candidate.enabled && candidate.role === "exclude") boundaryOverlayCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  }
+  if (state.manualExclusionEnabled) boundaryOverlayCtx.drawImage(exclusionCanvas, 0, 0);
+  boundaryOverlayCtx.restore();
+  paintTintedLayer(color, opacity, offset, (target) => {
+    target.save(); target.translate(offset + state.view.x, state.view.y); target.scale(state.view.scale, state.view.scale); target.drawImage(exclusionEraseCanvas, 0, 0); target.restore();
+    target.save(); target.setTransform(1, 0, 0, 1, 0, 0); target.globalCompositeOperation = "destination-in";
+    target.drawImage(boundaryOverlayCanvas, 0, 0); target.restore();
+  });
 }
 
 function selectedCandidateMask(id, role, enabled, mask, mode, exclusionMask) {
@@ -1032,32 +1054,31 @@ function selectedCandidateMask(id, role, enabled, mask, mode, exclusionMask) {
 
 function drawCandidateBlinkOverlay(offset = 0) {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
-  if (!ensureBlinkCanvas()) return;
-  blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
+  const configuredOpacity = Number(settings.overlay_opacity);
+  const opacity = Number.isFinite(configuredOpacity) ? configuredOpacity : 0.78;
   const exclusionMask = effectiveExclusionCanvas;
   const paintSelected = (id, role, enabled, mask) => {
     if (!state.blinkCandidateIds.has(id)) return;
     const selected = selectedCandidateMask(id, role, enabled, mask, state.blinkModes.get(id) || "normal", exclusionMask);
     if (!selected) return;
-    if (selected.mask) paintTintedMask(selected.mask, role === "apply" ? settings.apply_color : settings.exclude_color, selected.clip);
-    else paintTintedMask(selected, role === "apply" ? settings.apply_color : settings.exclude_color);
+    if (selected.mask) paintTintedMask(selected.mask, role === "apply" ? settings.apply_color : settings.exclude_color, opacity, offset, selected.clip);
+    else paintTintedMask(selected, role === "apply" ? settings.apply_color : settings.exclude_color, opacity, offset);
   };
   paintSelected("manual:apply", "apply", state.manualEnabled, addCanvas);
   paintSelected("manual:exclude", "exclude", state.manualExclusionEnabled, exclusionCanvas);
   // Erasing an exclusion restores mosaic, so its review color follows APPLY.
   if (state.blinkCandidateIds.has("manual:excludeErase")) {
     const mode = state.blinkModes.get("manual:excludeErase") || "normal";
-    if (mode !== "effective" || state.manualExclusionEraseEnabled) paintTintedMask(exclusionEraseCanvas, settings.apply_color, mode === "effective" ? composePreEraseExclusionMask() : null);
+    if (mode === "effective") {
+      if (state.manualExclusionEraseEnabled) paintEffectiveManualExclusionErase(offset, settings.apply_color, opacity);
+    } else paintTintedMask(exclusionEraseCanvas, settings.apply_color, opacity, offset);
   }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
     paintSelected(candidate.id, candidate.role === "exclude" ? "exclude" : "apply", candidate.enabled, state.candidateImages.get(candidate.id));
   }
-  composeEnabledExclusionMask();
-  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(offset + state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
-  ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
 }
 
 function drawCompareRangeOverlay(offset) {

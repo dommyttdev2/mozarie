@@ -525,6 +525,21 @@ async function runCandidateBlinkScenario(browser) {
     }, scenario.candidateId);
     assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
 
+    await page.evaluate(() => {
+      state.manualMaskPresent = true;
+      addCtx.fillRect(0, 0, 2, 2); exclusionCtx.fillRect(2, 0, 2, 2); exclusionEraseCtx.fillRect(3, 0, 2, 2);
+      renderCandidates();
+    });
+    for (const width of [1024, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      const rows = await page.evaluate(() => [...document.querySelectorAll(".candidate-row")].map((node) => ({ className: node.className, children: node.children.length, grid: getComputedStyle(node).gridTemplateColumns, overflow: node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight, hit: [...node.querySelectorAll("button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); }) })));
+      const apply = rows.find((item) => item.className.includes("candidate-row-manual-apply"));
+      const exclude = rows.find((item) => item.className.includes("candidate-row-manual-exclude") && !item.className.includes("erase"));
+      const erase = rows.find((item) => item.className.includes("candidate-row-manual-exclude-erase"));
+      assert.deepEqual([apply?.children, exclude?.children, erase?.children], [5, 6, 5], `real Chromium candidate row control counts are stable at ${width}px`);
+      assert.equal([apply, exclude, erase].every((item) => !item.overflow && item.hit && item.grid.split(" ").length === item.children), true, `real Chromium candidate rows do not wrap, overflow, or lose hits at ${width}px`);
+    }
+
     await page.locator("#brushTool").click();
     const canvas = await page.locator("#editorCanvas").boundingBox();
     assert.ok(canvas, "the candidate scenario has a real editor canvas");
@@ -560,6 +575,42 @@ async function runCandidateBlinkScenario(browser) {
         && !candidateRow.classList.contains("blink-selected")
         && !document.querySelector("#candidatePane")?.classList.contains("blink-active");
     }, scenario.candidateId);
+
+    const blinkPixels = await page.evaluate(async (applyId) => {
+      const source = document.createElement("canvas"); source.width = 100; source.height = 80;
+      source.getContext("2d").fillStyle = "#000000"; source.getContext("2d").fillRect(0, 0, 100, 80);
+      const mask = (left, top, width, height) => { const item = document.createElement("canvas"); item.width = 100; item.height = 80; item.getContext("2d").fillRect(left, top, width, height); return createImageBitmap(item); };
+      const record = currentRecord(); record.width = 100; record.height = 80;
+      state.currentImage = await createImageBitmap(source); canvasSizeForImage(record); prepareOriginalImage();
+      state.candidates = [
+        { id: applyId, role: "apply", enabled: true, forced: false, labelToken: "penis" },
+        { id: "candidate-blink-exclude", role: "exclude", enabled: true, forced: false, labelToken: "hand" },
+      ];
+      state.candidateImages = new Map([[applyId, await mask(30, 25, 30, 30)], ["candidate-blink-exclude", await mask(52, 25, 20, 30)]]);
+      state.removedCandidateIds.clear(); addCtx.clearRect(0, 0, 100, 80); exclusionCtx.clearRect(0, 0, 100, 80); exclusionEraseCtx.clearRect(0, 0, 100, 80);
+      state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualMaskPresent = false;
+      state.displayMode = "compare"; state.mosaicPreviewEnabled = false; fitImage(); state.maskDirty = true; composeCurrentMask();
+      const sample = (logicalX, logicalY, offset = 0) => {
+        const x = Math.round((offset + state.view.x + logicalX * state.view.scale) * (window.devicePixelRatio || 1));
+        const y = Math.round((state.view.y + logicalY * state.view.scale) * (window.devicePixelRatio || 1));
+        return [...ctx.getImageData(x, y, 1, 1).data];
+      };
+      const right = stage.clientWidth / 2;
+      state.blinkCandidateIds = new Set([applyId, "candidate-blink-exclude"]); state.blinkModes = new Map([[applyId, "normal"], ["candidate-blink-exclude", "normal"]]); state.blinkPhase = true; flushRender();
+      const colors = { left: sample(43, 40), apply: sample(43, 40, right), exclude: sample(65, 40, right) };
+      exclusionEraseCtx.fillRect(55, 35, 5, 10); exclusionEraseCtx.fillRect(80, 35, 5, 10); state.maskDirty = true; composeCurrentMask();
+      const cacheBefore = [...effectiveExclusionCtx.getImageData(0, 0, 100, 80).data];
+      state.blinkCandidateIds = new Set(["manual:excludeErase"]); state.blinkModes = new Map([["manual:excludeErase", "effective"]]); state.blinkPhase = true; flushRender();
+      const erase = { intersect: sample(56, 40, right), outside: sample(82, 40, right), cacheSame: cacheBefore.every((value, index) => value === effectiveExclusionCtx.getImageData(0, 0, 100, 80).data[index]) };
+      clearCandidateBlink(); state.displayMode = "single"; flushRender();
+      return { colors, erase };
+    }, scenario.candidateId);
+    assert.deepEqual(blinkPixels.colors.apply, [199, 47, 60, 255], "Chromium applies the configured red RGBA overlay to the right apply range");
+    assert.deepEqual(blinkPixels.colors.exclude, [31, 164, 199, 255], "Chromium applies the configured blue RGBA overlay to the right exclusion range");
+    assert.deepEqual(blinkPixels.colors.left, [0, 0, 0, 255], "compare blink never crosses the centre into the left image pane");
+    assert.equal(blinkPixels.erase.cacheSame, true, "manual erase blink leaves the cached post-erase exclusion mask untouched");
+    assert.deepEqual(blinkPixels.erase.intersect, [199, 47, 60, 255], "manual erase blinks red only where it intersects a pre-erase exclusion");
+    assert.deepEqual(blinkPixels.erase.outside, [0, 0, 0, 255], "manual erase does not color pixels outside the pre-erase exclusion union");
   } finally {
     await stopCoveredPage(page, true);
     scenario.server.closeAllConnections();
@@ -2987,6 +3038,30 @@ async function main() {
         .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
       assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
+        const comparePixels = await page.evaluate(({ logical }) => {
+          const sample = (offset = 0) => {
+            const x = Math.round((offset + state.view.x + logical.x * state.view.scale) * (window.devicePixelRatio || 1));
+            const y = Math.round((state.view.y + logical.y * state.view.scale) * (window.devicePixelRatio || 1));
+            return [...ctx.getImageData(x, y, 1, 1).data];
+          };
+          const rightOffset = stage.clientWidth / 2;
+          state.displayMode = "compare"; state.mosaicPreviewEnabled = true; clearCandidateBlink(); flushRender();
+          const staticLeft = sample(); const staticRight = sample(rightOffset);
+          state.blinkCandidateIds.add("manual:apply"); state.blinkModes.set("manual:apply", "normal"); state.blinkPhase = true; flushRender();
+          const blinkLeft = sample(); const blinkRight = sample(rightOffset);
+          state.blinkPhase = false; flushRender();
+          const blinkOffRight = sample(rightOffset);
+          state.mosaicPreviewEnabled = false; state.blinkPhase = true; flushRender();
+          const noMosaicLeft = sample(); const noMosaicBlinkRight = sample(rightOffset);
+          clearCandidateBlink(); state.displayMode = "single"; state.mosaicPreviewEnabled = true; flushRender();
+          return { staticLeft, staticRight, blinkLeft, blinkRight, blinkOffRight, noMosaicLeft, noMosaicBlinkRight };
+        }, geometry);
+        const same = (left, right) => left.every((value, index) => value === right[index]);
+        const visible = (pixel) => pixel[3] > 0 && pixel.slice(0, 3).some((value) => value > 0);
+        assert.equal(same(comparePixels.staticLeft, comparePixels.blinkLeft), true, "4K compare blink never changes the left mosaic pane");
+        assert.equal(visible(comparePixels.staticRight) && visible(comparePixels.blinkRight) && visible(comparePixels.noMosaicBlinkRight), true, "4K compare range and blink overlays render only in the right pane");
+        assert.equal(same(comparePixels.blinkOffRight, [0, 0, 0, 255]), true, "4K compare blink-off leaves the right pane black instead of leaking a range overlay");
+        assert.equal(same(comparePixels.staticLeft, comparePixels.noMosaicLeft), false, "4K compare mosaic toggle changes only the left image rendering");
         const mismatchedPixels = await page.evaluate(() => {
           const width = originalCanvas.width; const height = originalCanvas.height;
           const source = originalCtx.getImageData(0, 0, width, height).data;

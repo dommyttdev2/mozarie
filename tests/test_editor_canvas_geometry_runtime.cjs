@@ -67,7 +67,7 @@ const context = {
   window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90 }, toolRail: { offsetHeight: 30 },
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
-  blinkCanvas: canvas(), blinkCtx: canvas().ctx, combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
+  combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
   $: (id) => element(id), t: (key) => key, isBusy: () => false, isGestureActive: () => false, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
   currentRecord: () => state.images[0] || { enabledCandidateCount: 0 },
   imageUrl: (record) => `/image/${record.id}`, maskUrl: (imageId, candidateId) => `/mask/${imageId}/${candidateId}`,
@@ -75,7 +75,6 @@ const context = {
   clearTimeout() {}, showUserError(error) { context.lastUserError = error; }, queueWorkspaceDraft() {}, closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, clearEditor() {}, updateGalleryCurrent() {}, renderCandidates() {}, updateNavigationControls() {}, updateBlockSizeDisplay() {}, clearStatus() {}, prefetchNeighbors() {}, resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, updateHistoryButtons() {}, calculatedBlockSize: () => 4, flushMaskComposition() {}, prepareOriginalImage() {},
   setCssTransform(target) { target.setTransform(1, 0, 0, 1, 0, 0); },
 };
-context.blinkCtx = context.blinkCanvas.getContext("2d");
 context.combinedCtx = context.combinedCanvas.getContext("2d");
 context.addCtx = context.addCanvas.getContext("2d"); context.exclusionCtx = context.exclusionCanvas.getContext("2d"); context.exclusionEraseCtx = context.exclusionEraseCanvas.getContext("2d");
 context.effectiveExclusionCanvas = canvas(); context.effectiveExclusionCtx = context.effectiveExclusionCanvas.getContext("2d");
@@ -86,7 +85,7 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, composePreEraseExclusionMask, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareEventOffset, setDisplayMode, fitImage, drawBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -106,7 +105,6 @@ assert.equal(element("#singleViewButton").getAttribute("aria-pressed"), "true");
 assert.equal(element("#compareViewButton").getAttribute("aria-pressed"), "false");
 state.mosaicPreviewEnabled = true; test.renderNow();
 state.view = { x: 5, y: 7, scale: 2 };
-test.composePreEraseExclusionMask();
 
 // The tools users can actually manipulate all produce image-space geometry.
 assert.equal(test.roiFromPoints({ x: 1.2, y: 3.4 }, { x: 1.9, y: 4.1 }), null, "a sub-two-pixel drag does not create a detector ROI");
@@ -228,11 +226,19 @@ assert.ok(draw.calls.some(([name]) => name === "dash"), "eraser cursors use a da
 
 state.blinkCandidateIds = new Set(["manual:apply", "manual:exclude", "manual:excludeErase", "apply", "exclude"]);
 state.blinkModes = new Map([["manual:apply", "effective"], ["apply", "effective"]]); state.blinkPhase = true;
-state.candidates = [{ id: "apply", role: "apply" }, { id: "exclude", role: "exclude" }, { id: "removed", role: "apply" }, { id: "missing", role: "apply" }];
+state.candidates = [{ id: "apply", role: "apply", enabled: true }, { id: "exclude", role: "exclude", enabled: true }, { id: "removed", role: "apply" }, { id: "missing", role: "apply" }];
 state.removedCandidateIds = new Set(["removed"]); state.candidateImages = new Map([["apply", { alpha: 255 }], ["exclude", { alpha: 255 }]]);
 context.addCanvas.alpha = 255; context.exclusionCanvas.alpha = 255; context.exclusionEraseCanvas.alpha = 255;
+const cachedExclusionCalls = context.effectiveExclusionCtx.calls.length;
+state.displayMode = "compare";
 test.drawCandidateBlinkOverlay();
-assert.ok(context.blinkCtx.calls.some(([name]) => name === "fillRect"), "candidate blinking paints actual mask pixels with each role color");
+assert.ok(layerCanvas.ctx.calls.some(([name]) => name === "fillRect"), "candidate blinking paints actual mask pixels through a viewport layer");
+assert.equal(context.effectiveExclusionCtx.calls.length, cachedExclusionCalls, "effective exclusion cache is never rebuilt while blinking");
+assert.ok(displayCanvas.ctx.calls.some(([name, left, top, width]) => name === "rect" && left === 0 && top === 0 && width === 60), "compare blink clips drawing to a single pane");
+const overlayCalls = overlayCanvas.ctx.calls.length;
+state.boundaryDrafts = [{ id: "pane-safe", ...rectangle(2, 2, 12, 12) }]; state.boundaryDragging = false;
+test.drawBoundaryRoi();
+assert.ok(overlayCanvas.ctx.calls.length > overlayCalls && overlayCanvas.ctx.calls.filter(([name]) => name === "clip").length >= 2, "boundary scrim is clipped independently in both compare panes");
 test.renderNow();
 test.render(); test.flushRender();
 
