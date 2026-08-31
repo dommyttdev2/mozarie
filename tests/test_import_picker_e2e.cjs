@@ -545,6 +545,7 @@ async function runCandidateBlinkScenario(browser) {
       return { hasPixelsCalls, getImageDataCalls };
     });
     assert.deepEqual(blinkTickReads, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "a real Chromium blink tick avoids full-resolution mask readback");
+    await page.evaluate(() => window.__candidateBlinkTick());
     assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
 
     await page.evaluate(() => {
@@ -2478,8 +2479,33 @@ async function main() {
     await page.locator("#detectDialog").evaluate((dialog) => dialog.close());
     holdDetection(true);
     await page.locator("#detectAllButton").click();
+    const heldDetectionStarted = page.waitForResponse((response) => response.url().includes("/api/detect") && response.request().method() === "POST");
     await page.locator("#detectStartButton").click();
+    await heldDetectionStarted;
     await page.waitForFunction(() => document.querySelector("#processingDialog").open);
+    const lockedDetectionReads = await page.evaluate(() => {
+      const candidateControls = () => [...document.querySelectorAll("[data-candidate-batch], [data-candidate-display-toggle], [data-candidate-effective-toggle]")]
+        .map((node) => ({ type: node.dataset.candidateBatch ? "batch" : node.dataset.candidateDisplayToggle ? "display" : "effective", pressed: node.getAttribute("aria-pressed"), disabled: node.disabled }));
+      const controlsBefore = candidateControls();
+      const originalHasPixels = canvasHasPixels;
+      const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      let hasPixelsCalls = 0;
+      let getImageDataCalls = 0;
+      canvasHasPixels = (...args) => { hasPixelsCalls += 1; return originalHasPixels(...args); };
+      CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+        getImageDataCalls += 1;
+        return originalGetImageData.apply(this, args);
+      };
+      try { updateActionButtons(); } finally {
+        canvasHasPixels = originalHasPixels;
+        CanvasRenderingContext2D.prototype.getImageData = originalGetImageData;
+      }
+      return { hasPixelsCalls, getImageDataCalls, controlsBefore, controlsAfter: candidateControls() };
+    });
+    assert.deepEqual({ hasPixelsCalls: lockedDetectionReads.hasPixelsCalls, getImageDataCalls: lockedDetectionReads.getImageDataCalls }, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "locked detection controls avoid manual-mask canvas readback");
+    assert.deepEqual(lockedDetectionReads.controlsAfter.map((control) => control.pressed), lockedDetectionReads.controlsBefore.map((control) => control.pressed), "locked detection controls preserve candidate pressed state");
+    assert.deepEqual([...new Set(lockedDetectionReads.controlsAfter.map((control) => control.type))].sort(), ["batch", "display", "effective"], "the locked detection control refresh covers every candidate-control kind");
+    assert.equal(lockedDetectionReads.controlsAfter.every((control) => control.disabled), true, "locked detection controls disable every candidate control");
     assert.equal(await page.locator("#processingCancelButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the processing cancel button owns its physical hit target");
     failCancel(true);
     await page.locator("#processingCancelButton").click();
