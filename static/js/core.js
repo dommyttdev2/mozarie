@@ -540,22 +540,27 @@ function updateActionButtons() {
   syncDetectionActions();
 }
 
-function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), hasManualExclude = false) {
+function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), presence) {
+  const manualPresence = presence || {
+    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
+    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
+  };
   for (const button of document.querySelectorAll("[data-candidate-batch]")) {
     const [role, operation] = button.dataset.candidateBatch.split(":");
-    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
+    const hasManual = role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude || manualPresence.hasManualExclusionErase;
+    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || hasManual);
     button.disabled = locked || !hasRoleCandidate;
     if (operation === "toggle") {
       const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
-      if (role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas)) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
-      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
+      if (role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
+      if (role === "exclude" && manualPresence.hasManualExclusionErase) enabled.push(state.manualExclusionEraseEnabled);
       const active = enabled.length > 0 && enabled.every(Boolean);
       button.setAttribute("aria-pressed", String(active));
     }
   }
   for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) {
     const role = button.dataset.candidateDisplayToggle || button.dataset.candidateEffectiveToggle;
-    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role).length > 0;
+    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role, manualPresence).length > 0;
     button.disabled = locked || !hasRoleCandidate;
   }
 }

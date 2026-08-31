@@ -243,10 +243,28 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenPaths.add("one.png");
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";
+  const displayButton = new Element("display"); displayButton.dataset.candidateDisplayToggle = "exclude";
   const originalQuerySelectorAll = document.querySelectorAll;
-  document.querySelectorAll = (selector) => selector === "[data-candidate-batch]" ? [batchButton] : originalQuerySelectorAll(selector);
-  context.canvasHasPixels = () => true;
-  test.updateCandidateBatchButtons(true, false, false);
+  document.querySelectorAll = (selector) => {
+    if (selector === "[data-candidate-batch]") return [batchButton];
+    if (selector === "[data-candidate-display-toggle], [data-candidate-effective-toggle]") return [displayButton];
+    return originalQuerySelectorAll(selector);
+  };
+  coreState.candidates = [];
+  coreState.manualExclusionEnabled = true; coreState.manualExclusionEraseEnabled = true;
+  context.candidateDisplayIdsForRole = (role, presence) => role === "exclude" && (presence.hasManualExclude || presence.hasManualExclusionErase) ? ["manual"] : [];
+  const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
+  test.updateCandidateBatchButtons(true, false, presentManualLayers);
+  const suppliedState = { batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled };
+  let reads = 0;
+  context.canvasHasPixels = () => { reads += 1; return true; };
+  test.updateCandidateBatchButtons(true, false);
+  assert.deepEqual({ batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled }, suppliedState, "supplied manual-layer presence keeps batch and display controls identical");
+  assert.equal(reads, 2, "an unspecified batch update reads each manual exclusion layer once");
+  const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
+  test.updateCandidateBatchButtons(true, false, absentManualLayers);
+  assert.equal(batchButton.disabled, true, "false manual-layer presence disables the empty exclusion batch control");
+  assert.equal(displayButton.disabled, true, "false manual-layer presence disables the empty exclusion display control");
 }
 
 async function testDetectionImportAndSaveBehaviour() {

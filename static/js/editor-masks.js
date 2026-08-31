@@ -7,10 +7,12 @@ function renderCandidates() {
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
   if (!state.currentId) { syncCandidateDisplayButtons(); updateCandidateBatchButtons(false); return; }
-  const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
-  const hasManualExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
-  if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude && !hasManualExclusionErase) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
+  const presence = {
+    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
+    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
+  };
+  if (!state.candidates.length && !state.manualMaskPresent && !presence.hasManualExclude && !presence.hasManualExclusionErase) {
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(presence); updateCandidateBatchButtons(undefined, undefined, presence); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
@@ -31,7 +33,7 @@ function renderCandidates() {
   const makeDisplay = (id) => candidateDisplayToggle(id);
   const appendManual = (list, role) => {
     const isApply = role === "apply";
-    const exists = isApply ? state.manualMaskPresent : hasManualExclude;
+    const exists = isApply ? state.manualMaskPresent : presence.hasManualExclude;
     if (!exists) return;
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-manual ${isApply ? "candidate-row-manual-apply" : "candidate-row-manual-exclude"}`;
     const isEnabled = isApply ? state.manualEnabled : state.manualExclusionEnabled;
@@ -63,7 +65,7 @@ function renderCandidates() {
   };
   appendManual(applyList, "apply");
   appendManual(excludeList, "exclude");
-  if (hasManualExclusionErase) {
+  if (presence.hasManualExclusionErase) {
     const blinkId = "manual:excludeErase";
     const row = document.createElement("div"); row.className = "candidate-row candidate-row-manual candidate-row-manual-exclude-erase";
     row.classList.toggle("enabled", state.manualExclusionEraseEnabled);
@@ -124,29 +126,29 @@ function renderCandidates() {
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
-  syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
+  syncCandidateDisplayButtons(presence); updateCandidateBatchButtons(undefined, undefined, presence);
 }
 
 function candidateDisplayMode(id) {
   return state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
 }
 
-function candidateDisplayIdsForRole(role) {
+function candidateDisplayIdsForRole(role, presence) {
   const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
   if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
-  if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
-  if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) ids.push("manual:excludeErase");
+  if (role === "exclude" && (presence ? presence.hasManualExclude : canvasHasPixels(exclusionCtx, exclusionCanvas))) ids.push("manual:exclude");
+  if (role === "exclude" && (presence ? presence.hasManualExclusionErase : canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas))) ids.push("manual:excludeErase");
   return ids;
 }
 
-function syncCandidateDisplayButtons() {
+function syncCandidateDisplayButtons(presence) {
   document.querySelectorAll("[data-candidate-display-toggle]").forEach((button) => {
-    const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle);
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle, presence);
     const normalCount = ids.filter((id) => candidateDisplayMode(id) === "normal").length;
     button.setAttribute("aria-pressed", normalCount === ids.length && ids.length ? "true" : normalCount ? "mixed" : "false");
   });
   document.querySelectorAll("[data-candidate-effective-toggle]").forEach((button) => {
-    const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle);
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle, presence);
     const effectiveCount = ids.filter((id) => candidateDisplayMode(id) === "effective").length;
     button.setAttribute("aria-pressed", effectiveCount === ids.length && ids.length ? "true" : effectiveCount ? "mixed" : "false");
   });

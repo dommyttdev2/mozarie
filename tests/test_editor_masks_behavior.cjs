@@ -38,6 +38,7 @@ function element(selector) {
 }
 
 const events = [];
+const batchPresences = [];
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80 }, imageGeneration: 2, catalogEpoch: 3,
   candidates: [
@@ -79,7 +80,7 @@ const context = {
   flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
   setReviewed: () => events.push("review"), updateHistoryButtons() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, refreshMaskStatus() {},
   renderCandidates: () => events.push("candidates"), render: () => events.push("render"), renderCatalogViews: () => events.push("catalog"), updateActionButtons() {},
-  updateCandidateBatchButtons() {},
+  updateCandidateBatchButtons(...args) { batchPresences.push(args[2]); },
   syncCurrentCandidateRecord() {}, syncCandidateRecord() {}, retainCurrentCandidateBundle() {}, refreshCandidateRecord: async () => {}, reconcileCurrentCandidates: async () => true,
   releaseCandidateBitmap() {}, releaseCandidateBundles() {}, invalidateCandidateBundles: () => events.push("invalidate"), markImagesUnreviewed: () => events.push("unreview"),
   clearBoundaryInteraction: () => events.push("boundary-clear"), updateBoundaryActions() {}, setStatusKey: () => events.push("status"), showUserError: (error) => events.push(`error:${error}`),
@@ -90,11 +91,24 @@ const context = {
 
 const masksPath = path.join(__dirname, "..", "static", "js", "editor-masks.js");
 const source = fs.readFileSync(masksPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
+vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, syncCandidateDisplayButtons, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
 const test = context.masksTest;
 
 assert.deepEqual([...test.candidateDisplayIdsForRole("apply")], ["apply", "manual:apply"]);
 assert.deepEqual([...test.candidateDisplayIdsForRole("exclude")], ["exclude", "manual:exclude", "manual:excludeErase"]);
+const readCounts = new Map();
+context.canvasHasPixels = (ctx) => {
+  readCounts.set(ctx.name, (readCounts.get(ctx.name) || 0) + 1);
+  return ctx.pixels;
+};
+const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
+assert.deepEqual([...test.candidateDisplayIdsForRole("exclude", presentManualLayers)], ["exclude", "manual:exclude", "manual:excludeErase"], "supplied manual-layer presence preserves the displayed candidates");
+assert.equal(readCounts.size, 0, "supplied manual-layer presence avoids canvas readback");
+const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
+exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+assert.deepEqual([...test.candidateDisplayIdsForRole("exclude", absentManualLayers)], ["exclude"], "false manual-layer presence preserves the displayed candidates");
+assert.equal(readCounts.size, 0, "false supplied manual-layer presence also avoids canvas readback");
+exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
 test.setCandidateDisplayMode(["apply", "manual:apply"], "normal");
 assert.equal(test.candidateDisplayMode("apply"), "normal");
 test.toggleCandidateEffective("apply");
@@ -167,7 +181,11 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   };
 
   resetCandidateState();
+  readCounts.clear(); batchPresences.length = 0;
   test.renderCandidateRows();
+  assert.equal(readCounts.get("exclude"), 1, "one candidate render reads the exclusion layer once");
+  assert.equal(readCounts.get("excludeErase"), 1, "one candidate render reads the exclusion-erase layer once");
+  assert.deepEqual({ ...batchPresences.at(-1) }, presentManualLayers, "the batch controls receive the same manual-layer presence used for candidate display");
   const eraseRow = [...elements.values()].find((node) => node.className === "candidate-row candidate-row-manual candidate-row-manual-exclude-erase");
   const eraseToggle = eraseRow.children.find((node) => node.className === "candidate-toggle");
   state.importing = true;
