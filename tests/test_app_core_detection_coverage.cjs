@@ -91,9 +91,10 @@ async function testApplicationStartupPaths() {
     bindEvents: undefined,
     setNavigationShortcutsEnabled() {}, scheduleJobPoll() {}, updateBrushSize() {}, resizeRenderCanvas() {},
     updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, resetCatalog(images) { state.images = images; },
-    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, render() {},
+    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, updateBrushCursor() {}, render() {},
     t: (key) => key, requestAnimationFrame(callback) { callback(); },
     isBusy: () => false,
+    compareEventOffset: () => 0,
     toolRail: element("#canvasToolRail"),
   };
   for (const name of [
@@ -157,7 +158,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     forgetThumbnail() {},
   };
   const source = fs.readFileSync(path.join(jsRoot, "core.js"), "utf8");
-  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, markImagesUnreviewed, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
+  vm.runInNewContext(`${source}\nglobalThis.coreCoverage={ state, t, loadTranslations, api, setStatusKey, progressText, processingCurrentPath, abortCatalogLoads, saveTargets, setHidden, moveReviewedPathAfterApply, markImagesUnreviewed, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, formatDuration };`, context, { filename: path.join(jsRoot, "core.js") });
   const test = context.coreCoverage;
   const coreState = test.state;
   Object.assign(coreState, state);
@@ -223,6 +224,11 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.match(test.formatDuration(61), /duration/);
   assert.match(test.formatDuration(1), /duration/);
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3, startedAt: "job", activeElapsed: 3 }), /status/);
+  coreState.images = [{ id: "one", relativePath: "one.png" }, { id: "two", relativePath: "two.png" }];
+  const preparing = { kind: "detect", state: "running", phase: "preparing_models", completed: 0, total: 2, imageIds: ["one", "two"], completedImageIds: [] };
+  assert.match(test.progressText(preparing), /0/, "model preparation keeps the stable progress count");
+  assert.equal(test.processingCurrentPath(preparing), "one.png", "model preparation keeps the first unfinished filename visible");
+  assert.equal(test.processingCurrentPath({ ...preparing, phase: "detecting", completedImageIds: ["one"] }), "two.png", "phase changes do not clear the next filename");
   test.updateActionButtons();
   // The save dialog has a separate restriction and retains its live pause
   // control while the rest of the UI is locked.
@@ -237,10 +243,45 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenPaths.add("one.png");
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";
+  const displayButton = new Element("display"); displayButton.dataset.candidateDisplayToggle = "exclude";
+  const effectiveButton = new Element("effective"); effectiveButton.dataset.candidateEffectiveToggle = "exclude";
   const originalQuerySelectorAll = document.querySelectorAll;
-  document.querySelectorAll = (selector) => selector === "[data-candidate-batch]" ? [batchButton] : originalQuerySelectorAll(selector);
-  context.canvasHasPixels = () => true;
-  test.updateCandidateBatchButtons(true, false, false);
+  document.querySelectorAll = (selector) => {
+    if (selector === "[data-candidate-batch]") return [batchButton];
+    if (selector === "[data-candidate-display-toggle], [data-candidate-effective-toggle]") return [displayButton, effectiveButton];
+    return originalQuerySelectorAll(selector);
+  };
+  let candidateReads = 0;
+  Object.defineProperty(coreState, "candidates", { configurable: true, get: () => { candidateReads += 1; return []; } });
+  coreState.manualExclusionEnabled = true; coreState.manualExclusionEraseEnabled = true;
+  let reads = 0;
+  context.canvasHasPixels = () => { reads += 1; return true; };
+  let displayReads = 0;
+  context.candidateDisplayIdsForRole = (role, presence) => {
+    displayReads += 1;
+    return role === "exclude" && (presence.hasManualExclude || presence.hasManualExclusionErase) ? ["manual"] : [];
+  };
+  batchButton.setAttribute("aria-pressed", "unchanged");
+  test.updateCandidateBatchButtons(true, true);
+  assert.equal(batchButton.disabled, true, "a locked update disables candidate batch controls");
+  assert.equal(displayButton.disabled, true, "a locked update disables candidate display controls");
+  assert.equal(effectiveButton.disabled, true, "a locked update disables candidate effective-mask controls");
+  assert.equal(batchButton.getAttribute("aria-pressed"), "unchanged", "a locked update preserves candidate toggle state");
+  assert.equal(candidateReads, 0, "a locked update does not read candidate presence");
+  assert.equal(reads, 0, "a locked update does not read manual mask presence");
+  assert.equal(displayReads, 0, "a locked update does not read candidate display presence");
+  const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
+  test.updateCandidateBatchButtons(true, false, presentManualLayers);
+  const suppliedState = { batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled };
+  test.updateCandidateBatchButtons(true, false);
+  assert.deepEqual({ batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled }, suppliedState, "unlocked manual-layer readback keeps candidate controls identical");
+  assert.equal(reads, 2, "an unspecified batch update reads each manual exclusion layer once");
+  assert.equal(displayReads, 4, "an unlocked update retains candidate display presence checks");
+  const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
+  test.updateCandidateBatchButtons(true, false, absentManualLayers);
+  assert.equal(batchButton.disabled, true, "false manual-layer presence disables the empty exclusion batch control");
+  assert.equal(displayButton.disabled, true, "false manual-layer presence disables the empty exclusion display control");
+  assert.equal(effectiveButton.disabled, true, "false manual-layer presence disables the empty exclusion effective-mask control");
 }
 
 async function testDetectionImportAndSaveBehaviour() {

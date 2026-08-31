@@ -1,7 +1,7 @@
 function canvasSizeForImage(image) {
   releaseMosaicPreview();
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas]) { target.width = image.width; target.height = image.height; }
-  releaseHistoryCanvases(); releaseBlinkCanvas();
+  releaseHistoryCanvases();
   addCtx.clearRect(0, 0, image.width, image.height);
   exclusionCtx.clearRect(0, 0, image.width, image.height);
   exclusionEraseCtx.clearRect(0, 0, image.width, image.height);
@@ -24,13 +24,6 @@ function ensureHistoryCanvases() {
 function releaseHistoryCanvases() {
   for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) { target.width = 1; target.height = 1; }
 }
-function ensureBlinkCanvas() {
-  if (!state.currentImage) return false;
-  if (blinkCanvas.width !== state.currentImage.width || blinkCanvas.height !== state.currentImage.height) { blinkCanvas.width = state.currentImage.width; blinkCanvas.height = state.currentImage.height; }
-  return true;
-}
-function releaseBlinkCanvas() { blinkCanvas.width = 1; blinkCanvas.height = 1; }
-
 function clearEditor() {
   closeBoundaryModeMenu({ restoreFocus: true });
   cancelFillWork();
@@ -43,17 +36,18 @@ function clearEditor() {
   state.historyBaseDirty = false;
   addCanvas.width = exclusionCanvas.width = exclusionEraseCanvas.width = effectiveExclusionCanvas.width = combinedCanvas.width = mosaicCanvas.width = 1;
   addCanvas.height = exclusionCanvas.height = exclusionEraseCanvas.height = effectiveExclusionCanvas.height = combinedCanvas.height = mosaicCanvas.height = 1;
-  releaseHistoryCanvases(); releaseBlinkCanvas();
+  releaseHistoryCanvases();
   $("#emptyState").hidden = false;
   $("#currentFileName").textContent = t("editor.none");
   $("#candidateStatus").textContent = t("candidates.unselected");
-  renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render();
+  renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render(); updateBrushCursor();
 }
 
 async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
   if ((isBusy() || state.importing || isGestureActive() || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
   if (saveCurrentDraft) void saveDraft();
+  state.hover = null; updateBrushCursor();
   const generation = ++state.imageGeneration;
   state.pendingImageId = imageId;
   const record = state.images.find((image) => image.id === imageId);
@@ -481,15 +475,30 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
   return true;
 }
 
+function compareEventOffset(event, rect = canvas.getBoundingClientRect()) {
+  return state.displayMode === "compare" && event.clientX - rect.left >= rect.width / 2 ? rect.width / 2 : 0;
+}
+
+function setDisplayMode(mode) {
+  const displayMode = mode === "compare" ? "compare" : "single";
+  if (state.displayMode === displayMode) return;
+  state.displayMode = displayMode;
+  const single = $("#singleViewButton"); const compare = $("#compareViewButton");
+  single.classList.toggle("active", displayMode === "single"); compare.classList.toggle("active", displayMode === "compare");
+  single.setAttribute("aria-pressed", String(displayMode === "single")); compare.setAttribute("aria-pressed", String(displayMode === "compare"));
+  fitImage();
+}
+
 function fitImage() {
   if (!state.currentImage) return;
   const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
-  const width = Math.max(1, stage.clientWidth - inset.left - inset.right);
+  const panelWidth = state.displayMode === "compare" ? stage.clientWidth / 2 : stage.clientWidth;
+  const width = Math.max(1, panelWidth - inset.left - inset.right);
   const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
   state.view.x = inset.left + (width - state.currentImage.width * state.view.scale) / 2;
   state.view.y = inset.top + (height - state.currentImage.height * state.view.scale) / 2;
-  render();
+  render(); updateBrushCursor();
 }
 
 function resizeRenderCanvas() {
@@ -499,7 +508,7 @@ function resizeRenderCanvas() {
   canvas.width = Math.max(1, Math.round(width * dpr)); canvas.height = Math.max(1, Math.round(height * dpr));
   layerCanvas.width = canvas.width; layerCanvas.height = canvas.height;
   boundaryOverlayCanvas.width = canvas.width; boundaryOverlayCanvas.height = canvas.height;
-  render();
+  render(); updateBrushCursor();
 }
 
 function setCssTransform(context) { const dpr = window.devicePixelRatio || 1; context.setTransform(dpr, 0, 0, dpr, 0, 0); }
@@ -642,6 +651,11 @@ function requestMosaicPreview() {
 }
 
 function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId = "") {
+  composeEnabledExclusionMask(forcedOnly, omittedCandidateId);
+  target.drawImage(effectiveExclusionCanvas, 0, 0);
+}
+
+function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = "") {
   effectiveExclusionCtx.clearRect(0, 0, effectiveExclusionCanvas.width, effectiveExclusionCanvas.height);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -652,7 +666,7 @@ function drawEffectiveExclusions(target, forcedOnly = false, omittedCandidateId 
     effectiveExclusionCtx.save(); effectiveExclusionCtx.globalCompositeOperation = "destination-out";
     effectiveExclusionCtx.drawImage(exclusionEraseCanvas, 0, 0); effectiveExclusionCtx.restore();
   }
-  target.drawImage(effectiveExclusionCanvas, 0, 0);
+  return effectiveExclusionCanvas;
 }
 
 function composeCurrentMask() {
@@ -669,6 +683,9 @@ function composeCurrentMask() {
   combinedCtx.globalCompositeOperation = "destination-out";
   drawEffectiveExclusions(combinedCtx, true);
   combinedCtx.globalCompositeOperation = "source-over";
+  // Keep the full enabled exclusion union available for display.  The forced
+  // pass above is only for final mask composition and must not leak into UI.
+  composeEnabledExclusionMask();
   state.maskDirty = false;
 }
 function markDraftDirty(...layers) {
@@ -713,28 +730,37 @@ function refreshMaskStatus(renderGalleryAfter = false) {
 }
 
 function paintMosaicPreview() {
+  paintMosaicPreviewAt(0);
+}
+
+function paintMosaicPreviewAt(offset) {
   if (!state.currentImage) return;
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(layerCtx); layerCtx.clearRect(0, 0, width, height);
-  layerCtx.save(); layerCtx.translate(state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
+  layerCtx.save(); layerCtx.translate(offset + state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
   layerCtx.drawImage(mosaicCanvas, 0, 0);
   layerCtx.globalCompositeOperation = "destination-in";
   layerCtx.drawImage(combinedCanvas, 0, 0);
   layerCtx.restore(); setCssTransform(ctx); ctx.drawImage(layerCanvas, 0, 0, width, height);
 }
 
-function drawBrushCursor() {
-  if (!state.hover || !state.currentImage || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) return;
+function updateBrushCursor() {
+  const cursor = $("#brushCursor");
+  if (!state.hover || !state.currentImage || state.panning || isBusy() || state.importing || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) { cursor.hidden = true; state.brushCursorGeometry = ""; return; }
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
-  const x = state.view.x + state.hover.x * state.view.scale;
+  const x = state.hoverDisplayOffset + state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
-  ctx.save();
-  if (["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool)) ctx.setLineDash([6, 4]);
-  ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = state.tool === "boundary_brush" ? "#50d589" : "#ffffff"; ctx.lineWidth = 3; ctx.stroke();
-  ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.strokeStyle = "#111316"; ctx.lineWidth = 1; ctx.stroke();
-  ctx.restore();
+  const diameter = Math.max(2, radius * 2);
+  const geometry = `${state.tool}:${diameter}`;
+  cursor.hidden = false;
+  if (state.brushCursorGeometry !== geometry) {
+    state.brushCursorGeometry = geometry;
+    cursor.classList.toggle("eraser", ["mosaic_eraser", "eraser", "exclude_eraser"].includes(state.tool));
+    cursor.classList.toggle("boundary-brush", state.tool === "boundary_brush");
+    cursor.style.width = `${diameter}px`; cursor.style.height = `${diameter}px`;
+  }
+  cursor.style.transform = `translate3d(${x - radius}px, ${y - radius}px, 0)`;
 }
-
 function roiFromPoints(start, end) {
   const left = Math.floor(Math.min(start.x, end.x)); const top = Math.floor(Math.min(start.y, end.y));
   const right = Math.ceil(Math.max(start.x, end.x)); const bottom = Math.ceil(Math.max(start.y, end.y));
@@ -848,11 +874,11 @@ function boundaryRequests() {
   return requests.sort((first, second) => first.firstIndex - second.firstIndex).map(({ draftIds, draft }) => ({ draftIds, draft }));
 }
 
-function boundaryPath(shape, context = ctx) {
+function boundaryPath(shape, context = ctx, offset = state.boundaryDisplayOffset || 0) {
   const roi = boundaryDraftBounds(shape);
   if (shape.type === "polygon" && shape.points?.length) {
     shape.points.forEach((point, index) => {
-      const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+      const x = offset + state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
       if (index) context.lineTo(x, y); else context.moveTo(x, y);
     });
     if (shape.points.length === 4) context.closePath();
@@ -861,39 +887,41 @@ function boundaryPath(shape, context = ctx) {
   if (shape.type === "brush" && shape.points?.length) {
     const points = shape.points;
     const first = points[0];
-    context.moveTo(state.view.x + first.x * state.view.scale, state.view.y + first.y * state.view.scale);
-    for (const point of points.slice(1)) context.lineTo(state.view.x + point.x * state.view.scale, state.view.y + point.y * state.view.scale);
-    if (points.length === 1) context.lineTo(state.view.x + first.x * state.view.scale + 0.01, state.view.y + first.y * state.view.scale + 0.01);
+    context.moveTo(offset + state.view.x + first.x * state.view.scale, state.view.y + first.y * state.view.scale);
+    for (const point of points.slice(1)) context.lineTo(offset + state.view.x + point.x * state.view.scale, state.view.y + point.y * state.view.scale);
+    if (points.length === 1) context.lineTo(offset + state.view.x + first.x * state.view.scale + 0.01, state.view.y + first.y * state.view.scale + 0.01);
     return;
   }
-  if (roi) context.rect(state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
+  if (roi) context.rect(offset + state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
 }
 
-function drawBoundaryScrim(shapes) {
+function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
   if (!shapes.length || !state.currentImage) return;
   setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
   boundaryOverlayCtx.save();
-  boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
-  boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
+  clipRenderPane(boundaryOverlayCtx, offset);
+  boundaryOverlayCtx.beginPath(); boundaryOverlayCtx.rect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); boundaryOverlayCtx.clip();
+  boundaryOverlayCtx.fillStyle = "rgba(8, 11, 14, 0.68)"; boundaryOverlayCtx.fillRect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale);
   boundaryOverlayCtx.globalCompositeOperation = "destination-out";
   for (const shape of shapes) {
     boundaryOverlayCtx.beginPath();
-    boundaryPath(shape, boundaryOverlayCtx);
+    boundaryPath(shape, boundaryOverlayCtx, offset);
     if (shape.type === "brush") {
       boundaryOverlayCtx.lineWidth = Math.max(1, shape.radius * state.view.scale); boundaryOverlayCtx.lineCap = "round"; boundaryOverlayCtx.lineJoin = "round"; boundaryOverlayCtx.stroke();
     } else boundaryOverlayCtx.fill();
   }
-  boundaryOverlayCtx.restore(); setCssTransform(ctx); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
+  boundaryOverlayCtx.restore();
+  setCssTransform(ctx); ctx.save(); clipRenderPane(ctx, offset); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
-function drawBoundaryShape(shape) {
+function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
   const ready = shape.type !== "polygon" || polygonPointsValid(shape.points || []);
-  ctx.save(); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
-  ctx.beginPath(); boundaryPath(shape);
+  ctx.save(); clipRenderPane(ctx, offset); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
+  ctx.beginPath(); boundaryPath(shape, ctx, offset);
   if (shape.type === "brush") { ctx.lineWidth = Math.max(2, shape.radius * state.view.scale); ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke(); }
   else ctx.stroke();
   if (shape.type === "polygon") for (const point of shape.points) {
-    const x = state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
+    const x = offset + state.view.x + point.x * state.view.scale; const y = state.view.y + point.y * state.view.scale;
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = "#effff4"; ctx.fill(); ctx.stroke();
   }
   ctx.restore();
@@ -902,8 +930,11 @@ function drawBoundaryShape(shape) {
 function drawBoundaryRoi() {
   const shapes = boundaryShapes();
   if (!shapes.length) return;
-  drawBoundaryScrim(shapes);
-  shapes.forEach(drawBoundaryShape);
+  const offsets = state.displayMode === "compare" ? [0, stage.clientWidth / 2] : [0];
+  for (const offset of offsets) {
+    drawBoundaryScrim(shapes, offset);
+    shapes.forEach((shape) => drawBoundaryShape(shape, offset));
+  }
 }
 
 function polygonArea(points) {
@@ -943,7 +974,7 @@ function boundaryActionAnchor() {
   const roi = boundaryDraftBounds(active);
   if (!roi) return null;
   return {
-    left: state.view.x + roi.left * state.view.scale, right: state.view.x + roi.right * state.view.scale,
+    left: (state.boundaryDisplayOffset || 0) + state.view.x + roi.left * state.view.scale, right: (state.boundaryDisplayOffset || 0) + state.view.x + roi.right * state.view.scale,
     top: state.view.y + roi.top * state.view.scale, bottom: state.view.y + roi.bottom * state.view.scale,
   };
 }
@@ -976,45 +1007,118 @@ function drawPolygonBoundary() {
   // Polygon drawing is handled together with every selected boundary shape.
 }
 
-function drawCandidateBlinkOverlay() {
+function clipRenderPane(target, offset = 0) {
+  if (state.displayMode !== "compare") return;
+  target.beginPath(); target.rect(offset, 0, stage.clientWidth / 2, stage.clientHeight); target.clip();
+}
+
+function paintTintedLayer(color, opacity, offset, paintMask) {
+  // Keep blink composition at viewport size.  Reusing a full-resolution mask
+  // canvas here made each selected candidate re-tint the previous one.
+  setCssTransform(layerCtx); layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  layerCtx.save(); clipRenderPane(layerCtx, offset); paintMask(layerCtx); layerCtx.restore();
+  layerCtx.save(); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
+  layerCtx.fillRect(0, 0, stage.clientWidth, stage.clientHeight); layerCtx.restore();
+  setCssTransform(ctx); ctx.save(); clipRenderPane(ctx, offset); ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = opacity;
+  ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
+}
+
+function paintTintedMask(mask, color, opacity, offset, clipMask = null) {
+  if (!mask) return;
+  paintTintedLayer(color, opacity, offset, (target) => {
+    target.save(); target.translate(offset + state.view.x, state.view.y); target.scale(state.view.scale, state.view.scale);
+    target.drawImage(mask, 0, 0);
+    if (clipMask) { target.globalCompositeOperation = "destination-in"; target.drawImage(clipMask, 0, 0); }
+    target.restore();
+  });
+}
+
+function paintEffectiveManualExclusionErase(offset, color, opacity) {
+  // The erase overlay is only meaningful where an enabled exclusion existed
+  // before the erase.  Build that union in a viewport layer so the cached
+  // post-erase exclusion canvas remains untouched.
+  setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+  boundaryOverlayCtx.save(); clipRenderPane(boundaryOverlayCtx, offset);
+  boundaryOverlayCtx.translate(offset + state.view.x, state.view.y); boundaryOverlayCtx.scale(state.view.scale, state.view.scale);
+  for (const candidate of state.candidates) {
+    if (!state.removedCandidateIds.has(candidate.id) && candidate.enabled && candidate.role === "exclude") boundaryOverlayCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+  }
+  if (state.manualExclusionEnabled) boundaryOverlayCtx.drawImage(exclusionCanvas, 0, 0);
+  boundaryOverlayCtx.restore();
+  paintTintedLayer(color, opacity, offset, (target) => {
+    target.save(); target.translate(offset + state.view.x, state.view.y); target.scale(state.view.scale, state.view.scale); target.drawImage(exclusionEraseCanvas, 0, 0); target.restore();
+    target.save(); target.setTransform(1, 0, 0, 1, 0, 0); target.globalCompositeOperation = "destination-in";
+    target.drawImage(boundaryOverlayCanvas, 0, 0); target.restore();
+  });
+}
+
+function selectedCandidateMask(id, role, enabled, mask, mode, exclusionMask) {
+  if (!mask || mode !== "effective") return mask;
+  if (!enabled) return null;
+  return { mask, clip: role === "apply" ? combinedCanvas : exclusionMask };
+}
+
+function drawCandidateBlinkOverlay(offset = 0) {
   if (!state.blinkCandidateIds.size || !state.currentImage || !state.blinkPhase) return;
-  if (!ensureBlinkCanvas()) return;
-  blinkCtx.clearRect(0, 0, blinkCanvas.width, blinkCanvas.height);
   const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
-  const paintMask = (image, color, effective = false) => {
-    if (!image) return;
-    blinkCtx.save();
-    blinkCtx.drawImage(image, 0, 0);
-    if (effective) { blinkCtx.globalCompositeOperation = "destination-in"; blinkCtx.drawImage(combinedCanvas, 0, 0); }
-    blinkCtx.globalCompositeOperation = "source-in";
-    blinkCtx.fillStyle = color;
-    blinkCtx.fillRect(0, 0, blinkCanvas.width, blinkCanvas.height);
-    blinkCtx.restore();
+  const configuredOpacity = Number(settings.overlay_opacity);
+  const opacity = Number.isFinite(configuredOpacity) ? configuredOpacity : 0.78;
+  const exclusionMask = effectiveExclusionCanvas;
+  const paintSelected = (id, role, enabled, mask) => {
+    if (!state.blinkCandidateIds.has(id)) return;
+    const selected = selectedCandidateMask(id, role, enabled, mask, state.blinkModes.get(id) || "normal", exclusionMask);
+    if (!selected) return;
+    if (selected.mask) paintTintedMask(selected.mask, role === "apply" ? settings.apply_color : settings.exclude_color, opacity, offset, selected.clip);
+    else paintTintedMask(selected, role === "apply" ? settings.apply_color : settings.exclude_color, opacity, offset);
   };
-  if (state.blinkCandidateIds.has("manual:apply")) paintMask(addCanvas, settings.apply_color, state.blinkModes.get("manual:apply") === "effective");
-  if (state.blinkCandidateIds.has("manual:exclude")) paintMask(exclusionCanvas, settings.exclude_color);
-  if (state.blinkCandidateIds.has("manual:excludeErase")) paintMask(exclusionEraseCanvas, settings.apply_color);
+  paintSelected("manual:apply", "apply", state.manualEnabled, addCanvas);
+  paintSelected("manual:exclude", "exclude", state.manualExclusionEnabled, exclusionCanvas);
+  // Erasing an exclusion restores mosaic, so its review color follows APPLY.
+  if (state.blinkCandidateIds.has("manual:excludeErase")) {
+    const mode = state.blinkModes.get("manual:excludeErase") || "normal";
+    if (mode === "effective") {
+      if (state.manualExclusionEraseEnabled) paintEffectiveManualExclusionErase(offset, settings.apply_color, opacity);
+    } else paintTintedMask(exclusionEraseCanvas, settings.apply_color, opacity, offset);
+  }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
-    const image = state.candidateImages.get(candidate.id);
-    if (!image) continue;
-    paintMask(image, candidate.role === "exclude" ? settings.exclude_color : settings.apply_color, state.blinkModes.get(candidate.id) === "effective");
+    paintSelected(candidate.id, candidate.role === "exclude" ? "exclude" : "apply", candidate.enabled, state.candidateImages.get(candidate.id));
   }
-  ctx.save(); ctx.globalAlpha = settings.overlay_opacity; ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale);
-  ctx.drawImage(blinkCanvas, 0, 0); ctx.restore();
+}
+
+function drawCompareRangeOverlay(offset) {
+  if (state.blinkCandidateIds.size) { drawCandidateBlinkOverlay(offset); return; }
+  const settings = state.settings?.display || { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78 };
+  setCssTransform(layerCtx);
+  const paint = (mask, color) => {
+    layerCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
+    layerCtx.save(); layerCtx.translate(offset + state.view.x, state.view.y); layerCtx.scale(state.view.scale, state.view.scale);
+    layerCtx.drawImage(mask, 0, 0); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
+    layerCtx.fillRect(0, 0, originalCanvas.width, originalCanvas.height); layerCtx.restore();
+  };
+  ctx.save(); ctx.beginPath(); ctx.rect(offset, 0, stage.clientWidth - offset, stage.clientHeight); ctx.clip(); ctx.globalAlpha = settings.overlay_opacity;
+  paint(combinedCanvas, settings.apply_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
+  paint(effectiveExclusionCanvas, settings.exclude_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
 function renderNow() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
-  if (!state.currentImage) return;
-  ctx.save(); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
-  if (state.mosaicPreviewEnabled) paintMosaicPreview();
-  drawCandidateBlinkOverlay();
+  if (!state.currentImage) { updateBrushCursor(); return; }
+  ctx.save(); if (state.displayMode === "compare") { ctx.beginPath(); ctx.rect(0, 0, width / 2, height); ctx.clip(); } ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
+  if (state.displayMode === "compare") {
+    const offset = width / 2;
+    if (state.mosaicPreviewEnabled) paintMosaicPreview();
+    ctx.fillStyle = "#000"; ctx.fillRect(offset, 0, width - offset, height);
+    drawCompareRangeOverlay(offset);
+  } else {
+    if (state.mosaicPreviewEnabled) paintMosaicPreview();
+    drawCandidateBlinkOverlay();
+  }
   drawBoundaryRoi();
   drawPolygonBoundary();
-  drawBrushCursor();
+  updateBrushCursor();
   updateBoundaryActions();
 }
 function render() {

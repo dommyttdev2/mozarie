@@ -3,7 +3,7 @@
 // by the candidate, gallery, overview, model, and context-menu E2E cases.
 const ids = `
 pickFolder detectAllButton saveAllButton folderPath loadFolderButton pickImages pickFolderFiles settingsButton updateToast batchMoreButton clearAllMasksButton clearCatalogButton galleryFilter overviewButton collapseGalleryButton
-brushTool mosaicEraserTool eraserTool excludeEraserTool boundaryTool rectangleTool polygonTool boundaryBrushTool bucketTool excludeBucketTool fitButton undoButton redoButton mosaicPreviewButton brushSize mosaicHelpButton divisor bucketTolerance
+brushTool bucketTool mosaicEraserTool eraserTool excludeBucketTool excludeEraserTool boundaryTool rectangleTool polygonTool boundaryBrushTool singleViewButton compareViewButton fitButton undoButton redoButton mosaicPreviewButton brushSize mosaicHelpButton divisor bucketTolerance
 previousImageButton nextImageButton removeAndNextButton hideAndNextButton reviewAndNextButton boundaryDetectButton boundaryCancelButton collapseInspectorButton detectCurrentButton saveButton clearCurrentMasksButton removeCurrentImageButton detectTargetPenis detectTargetPussy confidence
 closeOverviewButton batchModeButton overviewQuery overviewFolder selectionActionsButton selectionClearButton toggleReviewMenuItem copyImagePathMenuItem removeImageMenuItem confirmNeverShow confirmAccept errorDialogClose
 detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCancelButton detectStartButton
@@ -55,7 +55,7 @@ function interactionFor(id) {
   } else if (/^(settings|modelDownload|modelHelp)/.test(id)) {
     resultKind = /^settings(?:Language|Port|DefaultOutputDirectory|ImportParallelism|SaveParallelism|OpenBrowser|Provider|GpuDevice|TargetModel|Ntd11|Sensitive|Precision|Sam|Hand|Fluid|ApplyColor|ExcludeColor|Opacity|MosaicPreview|ExcludeForcedDefault|ShortcutsEnabled)/.test(id) ? "value" : "dialog";
     scenario = "settings";
-  } else if (/^(brush|mosaicEraser|eraser|excludeEraser|boundaryTool|rectangleTool|polygonTool|boundaryBrushTool|bucketTool|excludeBucketTool|fitButton|undoButton|redoButton|mosaicPreviewButton|brushSize|divisor|bucketTolerance)/.test(id)) {
+  } else if (/^(brush|mosaicEraser|eraser|excludeEraser|boundaryTool|rectangleTool|polygonTool|boundaryBrushTool|bucketTool|excludeBucketTool|singleViewButton|compareViewButton|fitButton|undoButton|redoButton|mosaicPreviewButton|brushSize|divisor|bucketTolerance)/.test(id)) {
     resultKind = "canvas"; scenario = "editor";
   } else if (/^(overview|closeOverview|batchMode|overviewQuery|overviewFolder|selection)/.test(id)) {
     resultKind = "navigation"; scenario = "overview";

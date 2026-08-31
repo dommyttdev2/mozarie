@@ -27,7 +27,12 @@ function canvas(width = 8, height = 6) {
 
 const elements = new Map();
 function element(id) {
-  if (!elements.has(id)) elements.set(id, { id, value: "10", textContent: "", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38 });
+  if (!elements.has(id)) {
+    const classes = new Set();
+    elements.set(id, { id, value: "10", textContent: "", hidden: false, disabled: false, style: {}, offsetWidth: 142, offsetHeight: 38,
+      classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); }, contains(name) { return classes.has(name); } },
+    });
+  }
   return elements.get(id);
 }
 
@@ -42,7 +47,6 @@ const historyExclusionCanvas = canvas();
 const historyExclusionEraseCanvas = canvas();
 const originalCanvas = canvas();
 const layerCanvas = canvas();
-const blinkCanvas = canvas();
 const boundaryOverlayCanvas = canvas();
 const displayCanvas = canvas();
 const layerCtx = layerCanvas.ctx;
@@ -74,9 +78,9 @@ const context = {
   ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
   window: { devicePixelRatio: 2 }, document: { activeElement: null },
   stage: { clientWidth: 80, clientHeight: 60 }, toolRail: { offsetHeight: 10 }, canvas: displayCanvas,
-  addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, blinkCanvas, boundaryOverlayCanvas,
-  addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, blinkCtx: blinkCanvas.ctx, boundaryOverlayCtx, ctx,
-  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`,
+  addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, boundaryOverlayCanvas,
+  addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, boundaryOverlayCtx, ctx,
+  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`, isBusy: () => false,
   closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, renderCandidates() {}, updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, updateGalleryCurrent() {},
   currentRecord: () => state.images.find((image) => image.id === state.currentId), calculatedBlockSize: () => 4,
   resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, renderCatalogViews() {},
@@ -84,13 +88,12 @@ const context = {
 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.canvasCompletion = { canvasSizeForImage, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, drawBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };`, context, { filename: canvasPath });
+vm.runInNewContext(`${source}\nglobalThis.canvasCompletion = { canvasSizeForImage, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, updateBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };`, context, { filename: canvasPath });
 const test = context.canvasCompletion;
 
 (async () => {
   test.canvasSizeForImage({ width: 20, height: 12 });
   assert.equal(addCanvas.width, 20, "resizing an image resets every editable canvas");
-  assert.equal(blinkCanvas.height, 1, "blink canvas stays tiny until a blink is requested");
   assert.equal(state.maskDirty, true);
   assert.equal(state.manualEnabled, true);
 
@@ -170,15 +173,15 @@ const test = context.canvasCompletion;
 
   test.paintMosaicPreview();
   assert.ok(layerCtx.calls.some(([name]) => name === "image"), "preview is clipped through the composed mask before painting");
-  test.drawBrushCursor();
-  assert.ok(ctx.calls.some(([name]) => name === "dash"), "eraser cursor is visibly dashed");
-  state.tool = "boundary_brush"; test.drawBrushCursor();
-  assert.ok(ctx.calls.some(([name]) => name === "arc"), "boundary brush renders a cursor ring");
+  test.updateBrushCursor();
+  assert.equal(element("#brushCursor").classList.contains("eraser"), true, "eraser cursor is visibly dashed");
+  state.tool = "boundary_brush"; test.updateBrushCursor();
+  assert.equal(element("#brushCursor").classList.contains("boundary-brush"), true, "boundary brush renders a cursor ring");
 
   state.blinkCandidateIds = new Set(["manual:apply", "manual:exclude", "manual:excludeErase", "apply", "exclude"]);
   state.blinkModes = new Map([["manual:apply", "effective"], ["apply", "effective"]]);
   test.drawCandidateBlinkOverlay();
-  assert.ok(blinkCanvas.ctx.calls.some(([name]) => name === "fill"), "blink overlay colors actual candidate and manual masks");
+  assert.ok(layerCtx.calls.some(([name]) => name === "fill"), "blink overlay colors each candidate through the viewport layer");
   test.renderNow(); test.flushRender();
   console.log("test_editor_canvas_completion_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

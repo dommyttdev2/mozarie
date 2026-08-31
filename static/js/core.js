@@ -2,16 +2,16 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   images: [], currentId: null, currentImage: null, pendingImageId: null, galleryFilter: "all", maskStatus: new Map(),
-  viewMode: "edit", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
+  viewMode: "edit", displayMode: "single", overviewFilter: "all", overviewQuery: "", overviewFolder: "", reviewedPaths: new Set(), hiddenPaths: new Set(), reviewRoot: "",
   selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false,
   navigationShortcutsEnabled: true,
   candidates: [], candidateImages: new Map(), drafts: new Map(),
   draftSaveChains: new Map(),
-  tool: "brush", panning: false, drawing: false, boundaryPending: false,
-  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false,
+  tool: "brush", panning: false, drawing: false, gestureDisplayOffset: null, hoverDisplayOffset: 0, boundaryPending: false,
+  boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplayOffset: 0,
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
-  pointer: null, hover: null, history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
+  pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
   applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
@@ -49,7 +49,6 @@ const historyExclusionCanvas = document.createElement("canvas");
 const historyExclusionEraseCanvas = document.createElement("canvas");
 const layerCanvas = document.createElement("canvas");
 const boundaryOverlayCanvas = document.createElement("canvas");
-const blinkCanvas = document.createElement("canvas");
 const addCtx = addCanvas.getContext("2d");
 const exclusionCtx = exclusionCanvas.getContext("2d");
 const exclusionEraseCtx = exclusionEraseCanvas.getContext("2d");
@@ -59,7 +58,6 @@ const mosaicCtx = mosaicCanvas.getContext("2d");
 const originalCtx = originalCanvas.getContext("2d", { willReadFrequently: true });
 const layerCtx = layerCanvas.getContext("2d");
 const boundaryOverlayCtx = boundaryOverlayCanvas.getContext("2d");
-const blinkCtx = blinkCanvas.getContext("2d");
 let renderedWidth = 0;
 let renderedHeight = 0;
 let translationGeneration = 0;
@@ -241,7 +239,6 @@ function formatDuration(seconds) {
 }
 
 function progressText(job) {
-  if (job.kind === "detect" && job.state === "running" && job.phase === "preparing_models") return t("status.preparingModels");
   const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
   if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
   const key = `${job.kind}:${job.startedAt || ""}`;
@@ -258,7 +255,6 @@ function progressText(job) {
 
 function processingCurrentPath(job) {
   if (job?.kind !== "detect") return job?.current || "";
-  if (job.phase === "preparing_models") return "";
   const imageIds = job.imageIds || [];
   const completedIds = new Set(job.completedImageIds || []);
   const targetIds = new Set(imageIds);
@@ -544,23 +540,33 @@ function updateActionButtons() {
   syncDetectionActions();
 }
 
-function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), hasManualExclude = false) {
+function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), presence) {
+  if (locked) {
+    for (const button of document.querySelectorAll("[data-candidate-batch]")) button.disabled = true;
+    for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) button.disabled = true;
+    return;
+  }
+  const manualPresence = presence || {
+    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
+    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
+  };
   for (const button of document.querySelectorAll("[data-candidate-batch]")) {
     const [role, operation] = button.dataset.candidateBatch.split(":");
-    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || (role === "apply" ? state.manualMaskPresent : hasManualExclude));
-    button.disabled = locked || !hasRoleCandidate;
+    const hasManual = role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude || manualPresence.hasManualExclusionErase;
+    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || hasManual);
+    button.disabled = !hasRoleCandidate;
     if (operation === "toggle") {
       const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
-      if (role === "apply" ? state.manualMaskPresent : canvasHasPixels(exclusionCtx, exclusionCanvas)) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
-      if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) enabled.push(state.manualExclusionEraseEnabled);
+      if (role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
+      if (role === "exclude" && manualPresence.hasManualExclusionErase) enabled.push(state.manualExclusionEraseEnabled);
       const active = enabled.length > 0 && enabled.every(Boolean);
       button.setAttribute("aria-pressed", String(active));
     }
   }
   for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) {
     const role = button.dataset.candidateDisplayToggle || button.dataset.candidateEffectiveToggle;
-    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role).length > 0;
-    button.disabled = locked || !hasRoleCandidate;
+    const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role, manualPresence).length > 0;
+    button.disabled = !hasRoleCandidate;
   }
 }
 
@@ -571,6 +577,7 @@ function clearBoundaryInteraction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
+  state.boundaryDisplayOffset = 0;
   state.boundaryDrafts = [];
   state.boundaryActiveId = null;
   state.boundaryBrushStroke = null;
@@ -587,6 +594,7 @@ function clearBoundaryConstruction() {
   state.boundaryPoint = null;
   state.boundaryPromptPoint = null;
   state.boundaryDragging = false;
+  state.boundaryDisplayOffset = 0;
   state.boundaryBrushStroke = null;
   state.polygonPoints = [];
   state.polygonDragIndex = -1;

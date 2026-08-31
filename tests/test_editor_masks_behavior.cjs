@@ -28,16 +28,37 @@ exclusionCtx.pixels = true;
 exclusionEraseCtx.pixels = true;
 const elements = new Map();
 function element(selector) {
-  if (!elements.has(selector)) elements.set(selector, {
-    value: selector === "#bucketTolerance" ? "12" : "6", textContent: "", disabled: false,
-    children: [], dataset: {}, listeners: new Map(), classList: { toggle() {}, remove() {} }, setAttribute() {},
+  if (!elements.has(selector)) {
+    const classes = new Set();
+    elements.set(selector, {
+      value: selector === "#bucketTolerance" ? "12" : "6", textContent: "", disabled: false,
+      children: [], dataset: {}, listeners: new Map(), attributes: new Map(), classList: {
+        toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+        remove(...names) { names.forEach((name) => classes.delete(name)); },
+        contains(name) { return classes.has(name); },
+      }, setAttribute(name, value) { this.attributes.set(name, value); },
     addEventListener(name, callback) { this.listeners.set(name, callback); },
     append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); },
-  });
+    });
+  }
   return elements.get(selector);
 }
 
 const events = [];
+const batchPresences = [];
+let blinkTick = null;
+let displayButtonQueries = 0;
+let effectiveButtonQueries = 0;
+const displayButtons = [{
+  dataset: { candidateDisplayToggle: "exclude" },
+  attributes: new Map(),
+  setAttribute(name, value) { this.attributes.set(name, value); },
+}];
+const effectiveButtons = [{
+  dataset: { candidateEffectiveToggle: "exclude" },
+  attributes: new Map(),
+  setAttribute(name, value) { this.attributes.set(name, value); },
+}];
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80 }, imageGeneration: 2, catalogEpoch: 3,
   candidates: [
@@ -68,18 +89,25 @@ const context = {
   historyExclusionEraseCanvas: { ...historyExclusionEraseCtx.canvas, getContext: () => historyExclusionEraseCtx },
   combinedCanvas: { toDataURL: () => "data:image/png;base64,mask" }, originalCanvas: { width: 100, height: 80 }, originalCtx: addCtx,
   canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
-  $: element, document: { querySelectorAll: () => [], createElement: () => element(`node-${elements.size}`) },
-  setInterval: () => 1, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
+  $: element, document: {
+    querySelectorAll(selector) {
+      if (selector === "[data-candidate-display-toggle]") { displayButtonQueries += 1; return displayButtons; }
+      if (selector === "[data-candidate-effective-toggle]") { effectiveButtonQueries += 1; return effectiveButtons; }
+      return [];
+    },
+    createElement: () => element(`node-${elements.size}`),
+  },
+  setInterval: (callback) => { blinkTick = callback; return 1; }, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
   isBusy: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
   CANDIDATE_CLASS_TOKENS: new Set(["penis", "hand"]), CANDIDATE_SOURCE_TOKENS: new Set(["target", "hand_exclusion"]), CANDIDATE_REFINEMENT_TOKENS: new Set(),
-  t: (key) => key, confirmationRequired: () => false, confirmAction: async () => true,
+  t: (key, values) => values?.label ? `${key}:${values.label}` : key, confirmationRequired: () => false, confirmAction: async () => true,
   markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`),
   flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
   setReviewed: () => events.push("review"), updateHistoryButtons() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, refreshMaskStatus() {},
   renderCandidates: () => events.push("candidates"), render: () => events.push("render"), renderCatalogViews: () => events.push("catalog"), updateActionButtons() {},
-  updateCandidateBatchButtons() {},
+  updateCandidateBatchButtons(...args) { batchPresences.push(args[2]); },
   syncCurrentCandidateRecord() {}, syncCandidateRecord() {}, retainCurrentCandidateBundle() {}, refreshCandidateRecord: async () => {}, reconcileCurrentCandidates: async () => true,
   releaseCandidateBitmap() {}, releaseCandidateBundles() {}, invalidateCandidateBundles: () => events.push("invalidate"), markImagesUnreviewed: () => events.push("unreview"),
   clearBoundaryInteraction: () => events.push("boundary-clear"), updateBoundaryActions() {}, setStatusKey: () => events.push("status"), showUserError: (error) => events.push(`error:${error}`),
@@ -90,11 +118,37 @@ const context = {
 
 const masksPath = path.join(__dirname, "..", "static", "js", "editor-masks.js");
 const source = fs.readFileSync(masksPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
+vm.runInNewContext(`${source}\nglobalThis.masksTest = { candidateLabel, renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, syncCandidateDisplayButtons, syncCandidateBlinkTimer, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
 const test = context.masksTest;
+
+const candidateLabelFixtures = [
+  { labelToken: "penis", source: "target", refinement: "sam_high_precision", role: "apply", origin: "provenance-one" },
+  { labelToken: "pussy", source: "target", refinement: "sam_fallback", role: "apply", origin: "provenance-two" },
+  { labelToken: "testicles", source: "ntd11", refinement: "sam_high_precision", role: "apply", origin: "provenance-three" },
+  { labelToken: "boundary", source: "boundary", refinement: "sam_fallback", role: "apply", origin: "provenance-four" },
+  { labelToken: "boundary_polygon", source: "boundary", refinement: "sam_high_precision", role: "apply", origin: "provenance-five" },
+  { labelToken: "hand", source: "hand_exclusion", refinement: "sam_fallback", role: "exclude", origin: "provenance-six" },
+  { labelToken: "fluid", source: "fluid_exclusion", refinement: "sam_high_precision", role: "exclude", origin: "provenance-seven" },
+];
+for (const candidate of candidateLabelFixtures) {
+  assert.equal(test.candidateLabel(candidate), `candidateLabel.${candidate.labelToken}`, "candidate labels use only their localized class token");
+}
 
 assert.deepEqual([...test.candidateDisplayIdsForRole("apply")], ["apply", "manual:apply"]);
 assert.deepEqual([...test.candidateDisplayIdsForRole("exclude")], ["exclude", "manual:exclude", "manual:excludeErase"]);
+const readCounts = new Map();
+context.canvasHasPixels = (ctx) => {
+  readCounts.set(ctx.name, (readCounts.get(ctx.name) || 0) + 1);
+  return ctx.pixels;
+};
+const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
+assert.deepEqual([...test.candidateDisplayIdsForRole("exclude", presentManualLayers)], ["exclude", "manual:exclude", "manual:excludeErase"], "supplied manual-layer presence preserves the displayed candidates");
+assert.equal(readCounts.size, 0, "supplied manual-layer presence avoids canvas readback");
+const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
+exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+assert.deepEqual([...test.candidateDisplayIdsForRole("exclude", absentManualLayers)], ["exclude"], "false manual-layer presence preserves the displayed candidates");
+assert.equal(readCounts.size, 0, "false supplied manual-layer presence also avoids canvas readback");
+exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
 test.setCandidateDisplayMode(["apply", "manual:apply"], "normal");
 assert.equal(test.candidateDisplayMode("apply"), "normal");
 test.toggleCandidateEffective("apply");
@@ -103,6 +157,24 @@ test.toggleCandidateEffective("apply");
 assert.equal(test.candidateDisplayMode("apply"), "off");
 test.clearCandidateBlink();
 assert.equal(state.blinkCandidateIds.size, 0);
+
+state.blinkCandidateIds = new Set(["exclude"]);
+state.blinkModes = new Map([["exclude", "normal"]]);
+test.syncCandidateBlinkTimer();
+test.syncCandidateDisplayButtons(presentManualLayers);
+const displayStateBeforeTick = displayButtons[0].attributes.get("aria-pressed");
+const effectiveStateBeforeTick = effectiveButtons[0].attributes.get("aria-pressed");
+readCounts.clear(); displayButtonQueries = 0; effectiveButtonQueries = 0;
+assert.equal(state.blinkPhase, true, "starting display blinking keeps the existing visible phase");
+blinkTick();
+assert.equal(state.blinkPhase, false, "each blink tick keeps the existing phase transition");
+assert.equal(element("#candidatePane").classList.contains("blink-phase"), false, "each blink tick updates only the existing pane phase class");
+assert.equal(displayButtonQueries, 0, "a blink tick does not resynchronize the display batch controls");
+assert.equal(effectiveButtonQueries, 0, "a blink tick does not resynchronize the effective batch controls");
+assert.equal(readCounts.size, 0, "a blink tick does not read either full-resolution manual layer");
+assert.equal(displayButtons[0].attributes.get("aria-pressed"), displayStateBeforeTick, "a blink tick leaves the exclusion display button state unchanged");
+assert.equal(effectiveButtons[0].attributes.get("aria-pressed"), effectiveStateBeforeTick, "a blink tick leaves the exclusion effective button state unchanged");
+test.clearCandidateBlink();
 
 test.paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, { x: 1, y: 1 }, { x: 3, y: 3 }, "brush", 4);
 test.paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, { x: 1, y: 1 }, { x: 3, y: 3 }, "eraser", 4);
@@ -157,6 +229,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     ];
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
+    state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
     state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
     state.images = [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
@@ -166,7 +239,11 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   };
 
   resetCandidateState();
+  readCounts.clear(); batchPresences.length = 0;
   test.renderCandidateRows();
+  assert.equal(readCounts.get("exclude"), 1, "one candidate render reads the exclusion layer once");
+  assert.equal(readCounts.get("excludeErase"), 1, "one candidate render reads the exclusion-erase layer once");
+  assert.deepEqual({ ...batchPresences.at(-1) }, presentManualLayers, "the batch controls receive the same manual-layer presence used for candidate display");
   const eraseRow = [...elements.values()].find((node) => node.className === "candidate-row candidate-row-manual candidate-row-manual-exclude-erase");
   const eraseToggle = eraseRow.children.find((node) => node.className === "candidate-toggle");
   state.importing = true;
@@ -197,6 +274,46 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   await test.updateCandidate(state.candidates[0], true, true);
   assert.deepEqual(candidateCalls, [{ path: "/api/candidate/image/apply", body: { enabled: false, color: "#fff" } }], "a candidate toggle persists its requested enabled state");
   assert.equal(retainedRevision, 9, "a successful mutation retains the returned candidate revision");
+
+  resetCandidateState();
+  test.renderCandidateRows();
+  const lastRow = (className) => [...elements.values()].filter((node) => node.className === className).at(-1);
+  const controlOrder = (row) => row.children.slice(1).map((node) => node.className);
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "apply rows order ON/OFF, detection range, applied range, delete");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-forced", "candidate-delete"], "exclusion rows order ON/OFF, detection range, applied range, force, delete");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "manual apply rows retain the same keyboard tab order");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-forced", "candidate-delete"], "manual exclusion rows retain the same keyboard tab order");
+  for (const row of [lastRow("candidate-row candidate-row-apply"), lastRow("candidate-row candidate-row-exclude")]) {
+    for (const button of row.children.slice(1)) assert.equal(typeof button.listeners.get("click"), "function", "each ordered candidate control remains keyboard-operable");
+  }
+
+  const manualRows = [
+    lastRow("candidate-row candidate-row-manual candidate-row-manual-apply"),
+    lastRow("candidate-row candidate-row-manual candidate-row-manual-exclude"),
+    lastRow("candidate-row candidate-row-manual candidate-row-manual-exclude-erase"),
+  ];
+  assert.deepEqual(manualRows.map((row) => row.children[0].textContent), ["candidates.manual", "candidates.manual", "candidates.manual"], "every manual candidate row has the same role-neutral visible label");
+
+  resetCandidateState();
+  state.manualMaskPresent = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  state.candidates = candidateLabelFixtures.map((candidate, index) => ({ id: `metadata-${index}`, enabled: true, forced: candidate.role === "exclude", confidence: .9, color: "#fff", ...candidate }));
+  test.renderCandidateRows();
+  const metadataRows = [...elements.values()]
+    .filter((node) => node.className === "candidate-row candidate-row-apply" || node.className === "candidate-row candidate-row-exclude")
+    .slice(-candidateLabelFixtures.length);
+  assert.equal(metadataRows.length, candidateLabelFixtures.length, "every supported candidate token renders a candidate row");
+  for (const [index, row] of metadataRows.entries()) {
+    const candidate = candidateLabelFixtures[index];
+    const visibleLabel = row.children[0].children[0].textContent;
+    const actionNames = row.children
+      .filter((node) => node.className === "candidate-toggle" || node.className === "candidate-delete")
+      .map((node) => node.attributes.get("aria-label"));
+    assert.equal(visibleLabel, `candidateLabel.${candidate.labelToken}`, "the candidate row displays its localized class token");
+    assert.deepEqual(actionNames, [
+      `candidates.toggle:candidateLabel.${candidate.labelToken}`,
+      `candidates.delete:candidateLabel.${candidate.labelToken}`,
+    ], "candidate action names use the same localized class token");
+  }
 
   resetCandidateState();
   let staleRefreshes = 0;
@@ -238,12 +355,40 @@ assert.equal(state.manualExclusionEraseEnabled, true);
 
   resetCandidateState();
   context.confirmationRequired = (key) => key === "candidateRoleDelete";
+  test.setCandidateDisplayMode(["exclude"], "normal");
   await test.batchCandidateOperation("exclude:delete");
   assert.equal(state.removedCandidateIds.has("exclude"), true, "a confirmed role deletion is local and undoable");
+  assert.deepEqual([...state.blinkCandidateIds], [], "role deletion clears display selections for its removed candidates");
+  assert.deepEqual([...state.blinkModes], [], "role deletion clears display modes for its removed candidates");
+  assert.equal(state.blinkTimer, null, "role deletion stops a now-empty display timer");
   resetCandidateState();
   context.api = async () => { throw new Error("batch unavailable"); };
   await test.batchCandidateOperation("apply:enable");
   assert.equal(state.candidateBatchPending.size, 0, "a failed batch mutation always clears its pending state");
+
+  // A new manual exclusion-erase joins the range animation only when every
+  // already-visible exclusion layer is in its ordinary display mode.  Check
+  // before painting, because the new erase layer is not yet a member of that
+  // set at stroke start.
+  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["exclude", "manual:exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins when automatic and manual exclusions are normally displayed");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not join when an existing manual exclusion is hidden");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionEraseCtx.pixels = false;
+  test.setCandidateDisplayMode(["manual:exclude"], "normal");
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins a normally displayed manual exclusion without automatic candidates");
+
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  test.clearCandidateBlink();
+  test.beginManualStroke({ x: 5, y: 5 });
+  assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not start an animation when no existing exclusion layer is displayed");
 
   resetCandidateState();
   const boundaryBodies = [];

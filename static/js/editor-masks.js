@@ -1,5 +1,12 @@
-function candidateLabel(candidate) {
-  return t(`candidateLabel.${candidate.labelToken}`);
+function candidateLabel({ labelToken }) {
+  return t(`candidateLabel.${labelToken}`);
+}
+
+function manualLayerPresence() {
+  return {
+    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
+    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
+  };
 }
 
 function renderCandidates() {
@@ -7,10 +14,9 @@ function renderCandidates() {
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
   if (!state.currentId) { syncCandidateDisplayButtons(); updateCandidateBatchButtons(false); return; }
-  const hasManualExclude = canvasHasPixels(exclusionCtx, exclusionCanvas);
-  const hasManualExclusionErase = canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas);
-  if (!state.candidates.length && !state.manualMaskPresent && !hasManualExclude && !hasManualExclusionErase) {
-    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude); return;
+  const presence = manualLayerPresence();
+  if (!state.candidates.length && !state.manualMaskPresent && !presence.hasManualExclude && !presence.hasManualExclusionErase) {
+    const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(presence); updateCandidateBatchButtons(undefined, undefined, presence); return;
   }
   const appendEmpty = (list) => {
     if (list.children.length) return;
@@ -31,7 +37,7 @@ function renderCandidates() {
   const makeDisplay = (id) => candidateDisplayToggle(id);
   const appendManual = (list, role) => {
     const isApply = role === "apply";
-    const exists = isApply ? state.manualMaskPresent : hasManualExclude;
+    const exists = isApply ? state.manualMaskPresent : presence.hasManualExclude;
     if (!exists) return;
     const row = document.createElement("div"); row.className = `candidate-row candidate-row-manual ${isApply ? "candidate-row-manual-apply" : "candidate-row-manual-exclude"}`;
     const isEnabled = isApply ? state.manualEnabled : state.manualExclusionEnabled;
@@ -46,7 +52,7 @@ function renderCandidates() {
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = role;
-    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = isApply ? t("candidates.manual") : t("candidates.manualExclude");
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
     remove.setAttribute("aria-label", remove.title);
@@ -57,13 +63,13 @@ function renderCandidates() {
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       });
-      row.append(label, blink, forced, enabled, remove);
-    } else row.append(label, blink, candidateEffectiveToggle(blinkId), enabled, remove);
+      row.append(label, enabled, blink, candidateEffectiveToggle(blinkId), forced, remove);
+    } else row.append(label, enabled, blink, candidateEffectiveToggle(blinkId), remove);
     list.append(row);
   };
   appendManual(applyList, "apply");
   appendManual(excludeList, "exclude");
-  if (hasManualExclusionErase) {
+  if (presence.hasManualExclusionErase) {
     const blinkId = "manual:excludeErase";
     const row = document.createElement("div"); row.className = "candidate-row candidate-row-manual candidate-row-manual-exclude-erase";
     row.classList.toggle("enabled", state.manualExclusionEraseEnabled);
@@ -75,11 +81,11 @@ function renderCandidates() {
     });
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = "exclude";
-    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manualExcludeErase");
+    const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×";
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
-    row.append(label, blink, enabled, remove); excludeList.append(row);
+    row.append(label, enabled, blink, candidateEffectiveToggle(blinkId), remove); excludeList.append(row);
   }
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
@@ -119,34 +125,34 @@ function renderCandidates() {
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
-      row.append(label, blink, forced, enabled, remove);
-    } else row.append(label, blink, candidateEffectiveToggle(candidate.id), enabled, remove);
+      row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), forced, remove);
+    } else row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), remove);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
-  syncCandidateDisplayButtons(); updateCandidateBatchButtons(undefined, undefined, hasManualExclude || hasManualExclusionErase);
+  syncCandidateDisplayButtons(presence); updateCandidateBatchButtons(undefined, undefined, presence);
 }
 
 function candidateDisplayMode(id) {
   return state.blinkModes.get(id) || (state.blinkCandidateIds.has(id) ? "normal" : "off");
 }
 
-function candidateDisplayIdsForRole(role) {
+function candidateDisplayIdsForRole(role, presence) {
   const ids = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
   if (role === "apply" && state.manualMaskPresent) ids.push("manual:apply");
-  if (role === "exclude" && canvasHasPixels(exclusionCtx, exclusionCanvas)) ids.push("manual:exclude");
-  if (role === "exclude" && canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas)) ids.push("manual:excludeErase");
+  if (role === "exclude" && (presence ? presence.hasManualExclude : canvasHasPixels(exclusionCtx, exclusionCanvas))) ids.push("manual:exclude");
+  if (role === "exclude" && (presence ? presence.hasManualExclusionErase : canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas))) ids.push("manual:excludeErase");
   return ids;
 }
 
-function syncCandidateDisplayButtons() {
+function syncCandidateDisplayButtons(presence) {
   document.querySelectorAll("[data-candidate-display-toggle]").forEach((button) => {
-    const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle);
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateDisplayToggle, presence);
     const normalCount = ids.filter((id) => candidateDisplayMode(id) === "normal").length;
     button.setAttribute("aria-pressed", normalCount === ids.length && ids.length ? "true" : normalCount ? "mixed" : "false");
   });
   document.querySelectorAll("[data-candidate-effective-toggle]").forEach((button) => {
-    const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle);
+    const ids = candidateDisplayIdsForRole(button.dataset.candidateEffectiveToggle, presence);
     const effectiveCount = ids.filter((id) => candidateDisplayMode(id) === "effective").length;
     button.setAttribute("aria-pressed", effectiveCount === ids.length && ids.length ? "true" : effectiveCount ? "mixed" : "false");
   });
@@ -165,7 +171,6 @@ function syncCandidateDisplayButtons() {
 function clearCandidateBlink() {
   state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkPhase = false;
   if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
-  if (typeof releaseBlinkCanvas === "function") releaseBlinkCanvas();
   $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
 }
 
@@ -173,7 +178,11 @@ function syncCandidateBlinkTimer() {
   if (!state.blinkCandidateIds.size) { clearCandidateBlink(); return; }
   if (!state.blinkTimer) {
     state.blinkPhase = true;
-    state.blinkTimer = setInterval(() => { state.blinkPhase = !state.blinkPhase; syncCandidateDisplayButtons(); render(); }, 200);
+    state.blinkTimer = setInterval(() => {
+      state.blinkPhase = !state.blinkPhase;
+      $("#candidatePane")?.classList.toggle("blink-phase", state.blinkPhase);
+      render();
+    }, 200);
   }
 }
 
@@ -300,6 +309,7 @@ async function deleteCandidate(candidate) {
   if (!state.currentId || isBusy() || state.importing) return;
   if (confirmationRequired("candidateDelete") && !await confirmAction(t("confirm.candidateDelete.title"), t("confirm.candidateDelete.message"), "candidateDelete")) return;
   state.removedCandidateIds.add(candidate.id);
+  setCandidateDisplayMode([candidate.id], "off");
   recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] });
   markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
 }
@@ -354,6 +364,7 @@ async function batchCandidateOperation(spec) {
   const changed = state.candidates.filter((item) => item.role === role && !state.removedCandidateIds.has(item.id));
   if (operation === "delete") {
     const ids = changed.map((item) => item.id);
+    setCandidateDisplayMode(ids, "off");
     ids.forEach((id) => state.removedCandidateIds.add(id));
     if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids });
     markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
@@ -447,7 +458,7 @@ async function addBoundaryCandidate() {
 }
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
-function pointFromEvent(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left - state.view.x) / state.view.scale, y: (event.clientY - rect.top - state.view.y) / state.view.scale }; }
+function pointFromEvent(event) { const rect = canvas.getBoundingClientRect(); const offset = state.gestureDisplayOffset ?? compareEventOffset(event, rect); return { x: (event.clientX - rect.left - offset - state.view.x) / state.view.scale, y: (event.clientY - rect.top - state.view.y) / state.view.scale }; }
 function clampPoint(point) {
   if (!state.currentImage) return point;
   return {
@@ -611,6 +622,8 @@ function beginManualStroke(point) {
   state.mosaicPending = true;
   if (state.tool === "brush" && shouldBlinkNewManual("apply")) setCandidateDisplayMode(["manual:apply"], "normal");
   if (state.tool === "eraser" && shouldBlinkNewManual("exclude")) setCandidateDisplayMode(["manual:exclude"], "normal");
+  const excludeDisplayIds = state.tool === "exclude_eraser" ? candidateDisplayIdsForRole("exclude") : [];
+  if (state.tool === "exclude_eraser" && excludeDisplayIds.length && excludeDisplayIds.every((id) => candidateDisplayMode(id) === "normal")) setCandidateDisplayMode(["manual:excludeErase"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
 }
 

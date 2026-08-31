@@ -142,6 +142,8 @@ class CoreCoverageTests(unittest.TestCase):
         mask = np.full((10, 10), 255, dtype=np.uint8)
         self.assertEqual(refine_mask_with_hand(mask, np.zeros((9, 9), dtype=np.uint8))[1], "skipped")
         self.assertEqual(refine_mask_with_hand(mask, np.zeros((10, 10), dtype=np.uint8))[1], "unchanged")
+        overlap_31 = np.zeros((10, 10), dtype=np.uint8); overlap_31.flat[:31] = 255
+        self.assertEqual(refine_mask_with_hand(mask, overlap_31)[1], "unchanged")
         too_much = np.zeros((10, 10), dtype=np.uint8); too_much[:8] = 255
         self.assertEqual(refine_mask_with_hand(mask, too_much)[1], "over_cap")
         small = np.zeros((10, 10), dtype=np.uint8); small[:7] = 255

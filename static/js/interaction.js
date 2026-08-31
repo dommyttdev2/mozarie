@@ -1,18 +1,18 @@
 function setTool(tool) {
   if (isBusy() || state.importing) return;
   const focusedInBoundaryMenu = closeBoundaryModeMenu();
-  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush", "bucket", "exclude_bucket"]);
+  const boundaryTools = new Set(["boundary", "polygon", "boundary_brush"]);
   if (!boundaryTools.has(tool)) clearBoundaryInteraction();
   else if (state.tool !== tool) clearBoundaryConstruction();
   state.tool = tool;
-  for (const [id, name] of [["#brushTool", "brush"], ["#mosaicEraserTool", "mosaic_eraser"], ["#eraserTool", "eraser"], ["#excludeEraserTool", "exclude_eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"], ["#bucketTool", "bucket"], ["#excludeBucketTool", "exclude_bucket"]]) {
+  for (const [id, name] of [["#brushTool", "brush"], ["#bucketTool", "bucket"], ["#mosaicEraserTool", "mosaic_eraser"], ["#eraserTool", "eraser"], ["#excludeBucketTool", "exclude_bucket"], ["#excludeEraserTool", "exclude_eraser"], ["#rectangleTool", "boundary"], ["#polygonTool", "polygon"], ["#boundaryBrushTool", "boundary_brush"]]) {
     const active = tool === name; $(id).classList.toggle("active", active); $(id).setAttribute("aria-pressed", String(active));
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
   $("#bucketToleranceControl").hidden = !["bucket", "exclude_bucket"].includes(tool);
   canvas.style.cursor = "default";
-  updateBoundaryActions(); render();
+  updateBoundaryActions(); render(); updateBrushCursor();
   if (focusedInBoundaryMenu) focusCanvas();
 }
 
@@ -32,7 +32,7 @@ function closeBoundaryModeMenu({ restoreFocus = false } = {}) {
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
   const input = $("#brushSize"); input.value = Math.min(500, Math.max(1, Math.round(value)));
-  $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render();
+  $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render(); updateBrushCursor();
 }
 function updateBlockSizeDisplay() {
   const currentBlockSize = calculatedBlockSize(currentRecord(), mosaicDivisor());

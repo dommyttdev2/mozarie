@@ -164,7 +164,7 @@ function bindEvents() {
   $("#detectAllButton").addEventListener("click", detectAll);
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, detectionTargets()));
-  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#singleViewButton").addEventListener("click", () => setDisplayMode("single")); $("#compareViewButton").addEventListener("click", () => setDisplayMode("compare")); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) void setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -335,13 +335,14 @@ function bindEvents() {
   canvas.addEventListener("pointerdown", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     if (event.button === 1) {
-      canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; return;
+      canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; updateBrushCursor(); return;
     }
     if (event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
+    state.gestureDisplayOffset = compareEventOffset(event);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
-    state.drawing = true; state.pointer = point; state.hover = rawPoint;
-    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplayOffset = state.gestureDisplayOffset;
+    if (state.tool === "boundary") { state.boundaryDisplayOffset = state.gestureDisplayOffset; state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
       if (vertex >= 0) {
@@ -362,7 +363,7 @@ function bindEvents() {
       }
       updateBoundaryActions(); render(); return;
     }
-    if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
+    if (state.tool === "boundary_brush") { state.boundaryDisplayOffset = state.gestureDisplayOffset; beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
     beginManualStroke(rawPoint); render();
   });
@@ -372,6 +373,7 @@ function bindEvents() {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
     state.hover = pointFromEvent(event);
+    state.hoverDisplayOffset = state.gestureDisplayOffset ?? compareEventOffset(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
       if (state.tool === "boundary") {
@@ -394,7 +396,8 @@ function bindEvents() {
   canvas.addEventListener("pointermove", (event) => {
     const events = event.getCoalescedEvents?.() || [event];
     for (const pointEvent of events) processPointerMove(pointEvent);
-    render();
+    updateBrushCursor();
+    if (state.panning || state.drawing) render();
   });
   function finishCanvasGesture(event, cancelled = false) {
     const wasDrawing = state.drawing;
@@ -407,7 +410,7 @@ function bindEvents() {
         addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
         state.polygonPoints = [];
       }
-      state.polygonDragIndex = -1; state.polygonDraftDrag = null; updateBoundaryActions(); flushRender(); return;
+      state.polygonDragIndex = -1; state.polygonDraftDrag = null; state.gestureDisplayOffset = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
@@ -433,11 +436,12 @@ function bindEvents() {
         }
       }
     }
+    state.gestureDisplayOffset = null;
     flushRender();
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));
   canvas.addEventListener("pointercancel", (event) => finishCanvasGesture(event, true));
-  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); });
+  canvas.addEventListener("pointerleave", () => { if (!state.drawing) state.hover = null; render(); updateBrushCursor(); });
   canvas.addEventListener("wheel", (event) => {
     if (!state.currentImage || isBusy() || state.importing) return;
     event.preventDefault();
@@ -445,10 +449,10 @@ function bindEvents() {
       const current = Number($("#brushSize").value); const direction = event.deltaY < 0 ? 1 : -1;
       return updateBrushSize(Math.max(1, current + direction * Math.max(1, Math.round(current * 0.1))));
     }
-    const rect = canvas.getBoundingClientRect(); const mouseX = event.clientX - rect.left; const mouseY = event.clientY - rect.top;
+    const rect = canvas.getBoundingClientRect(); const offset = compareEventOffset(event, rect); const mouseX = event.clientX - rect.left - offset; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
     state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
-    state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render();
+    state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render(); updateBrushCursor();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.fillWorker) { event.preventDefault(); cancelFillWork(); return; }

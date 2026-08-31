@@ -54,9 +54,9 @@ function openDetectionDialog(imageIds) {
 }
 
 async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets()) {
-  if (!imageIds.length || isBusy() || state.importing) return;
+  if (!imageIds.length || (!state.detectionStarting && (isBusy() || state.importing))) return;
   if (!validateDetectionTargets(targetClasses, $("#detectionTargetValidation"))) return;
-  state.detectionStarting = true;
+  if (!state.detectionStarting) beginDetectionStart(imageIds);
   updateActionButtons();
   try {
     // Freeze the current manual layers before the server replaces automatic
@@ -66,11 +66,27 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
-    state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "" };
-    showProcessing(state.job);
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
-  } catch (error) { updateProgress({ state: "idle" }); showUserError(error); }
+  } catch (error) { failDetectionStart(error); }
   finally { state.detectionStarting = false; updateActionButtons(); }
+}
+
+function beginDetectionStart(imageIds) {
+  state.detectionStarting = true;
+  state.detectionTargetIds = [...imageIds];
+  state.detectCancelRequested = false;
+  state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "", imageIds: [...imageIds], completedImageIds: [] };
+  showProcessing(state.job);
+  updateProgress(state.job);
+}
+
+function failDetectionStart(error) {
+  state.job = { kind: "detect", state: "idle", total: 0, completed: 0, current: "" };
+  state.detectionTargetIds = [];
+  state.detectCancelRequested = false;
+  closeProcessing();
+  updateProgress(state.job);
+  showUserError(error);
 }
 
 async function startDetectionFromDialog(event) {
@@ -83,6 +99,7 @@ async function startDetectionFromDialog(event) {
   if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation"))) return;
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
+  beginDetectionStart(imageIds);
   if (state.settings) {
     const settings = structuredClone(state.settings);
     settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses };
@@ -91,7 +108,7 @@ async function startDetectionFromDialog(event) {
       state.settings = saved.settings;
       setSettingsForm(saved.settings, state.settingsStatus);
     }
-    catch (error) { setSettingsForm(state.settings, state.settingsStatus); showUserError(error); return; }
+    catch (error) { setSettingsForm(state.settings, state.settingsStatus); failDetectionStart(error); state.detectionStarting = false; updateActionButtons(); return; }
   }
   await runDetection(imageIds, confidence, parallelism, targetClasses);
 }

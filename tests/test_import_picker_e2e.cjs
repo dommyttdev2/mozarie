@@ -501,6 +501,11 @@ async function runCandidateBlinkScenario(browser) {
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
+      const setInterval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) => {
+        if (delay === 200) window.__candidateBlinkTick = callback;
+        return setInterval(callback, delay, ...args);
+      };
     });
     await page.goto(scenario.url, { waitUntil: "networkidle" });
     await page.locator(`.gallery-item[data-id="${scenario.imageId}"]`).click();
@@ -515,6 +520,80 @@ async function runCandidateBlinkScenario(browser) {
     }
     await page.evaluate(() => loadTranslations("ja"));
 
+    const candidateLabelPresentation = await page.evaluate(async () => {
+      const candidates = state.candidates;
+      const manual = {
+        maskPresent: state.manualMaskPresent, enabled: state.manualEnabled,
+        exclusionEnabled: state.manualExclusionEnabled, exclusionEraseEnabled: state.manualExclusionEraseEnabled,
+        exclusionForced: state.manualExclusionForced,
+      };
+      const layers = [addCtx, exclusionCtx, exclusionEraseCtx].map((context) => context.getImageData(0, 0, context.canvas.width, context.canvas.height));
+      const metadataCandidates = [
+        { id: "metadata-penis", labelToken: "penis", source: "target", refinement: "sam_high_precision", role: "apply", origin: "basic-model-penis" },
+        { id: "metadata-pussy", labelToken: "pussy", source: "auto", refinement: "sam_fallback", role: "apply", origin: "automatic-pussy" },
+        { id: "metadata-testicles", labelToken: "testicles", source: "ntd11", refinement: "sam_high_precision", role: "apply", origin: "ntd11-testicles" },
+        { id: "metadata-boundary", labelToken: "boundary", source: "boundary", refinement: "sam_fallback", role: "apply", origin: "boundary-origin" },
+        { id: "metadata-polygon", labelToken: "boundary_polygon", source: "boundary", refinement: "sam_high_precision", role: "apply", origin: "polygon-origin" },
+        { id: "metadata-hand", labelToken: "hand", source: "hand_exclusion", refinement: "sam_fallback", role: "exclude", origin: "hand-exclusion-origin" },
+        { id: "metadata-fluid", labelToken: "fluid", source: "fluid_exclusion", refinement: "sam_high_precision", role: "exclude", origin: "fluid-exclusion-origin" },
+      ].map((candidate) => ({ ...candidate, enabled: true, forced: candidate.role === "exclude", confidence: .9, color: "#fff" }));
+      const snapshot = () => ({
+        automatic: metadataCandidates.map((candidate) => {
+          const row = document.querySelector(`[data-candidate-blink-id="${candidate.id}"]`);
+          return {
+            label: row?.querySelector(".candidate-class")?.textContent,
+            role: row?.dataset.candidateBlinkRole,
+            names: [row?.querySelector(".candidate-toggle")?.getAttribute("aria-label"), row?.querySelector(".candidate-delete")?.getAttribute("aria-label")],
+            text: row?.textContent,
+          };
+        }),
+        manual: [".candidate-row-manual-apply", ".candidate-row-manual-exclude", ".candidate-row-manual-exclude-erase"].map((selector) => {
+          const row = document.querySelector(selector);
+          return {
+            label: row?.querySelector(".candidate-label")?.textContent,
+            role: row?.dataset.candidateBlinkRole,
+            names: [row?.querySelector(".candidate-toggle")?.getAttribute("aria-label"), row?.querySelector(".candidate-delete")?.getAttribute("aria-label")],
+          };
+        }),
+        sections: [...document.querySelectorAll(".candidate-section h3")].map((heading) => heading.textContent),
+      });
+      state.candidates = metadataCandidates;
+      state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
+      addCtx.fillRect(0, 0, 1, 1); exclusionCtx.fillRect(0, 0, 1, 1); exclusionEraseCtx.fillRect(0, 0, 1, 1);
+      renderCandidates();
+      const ja = snapshot();
+      await loadTranslations("en");
+      const en = snapshot();
+      await loadTranslations("ja");
+      state.candidates = candidates;
+      state.manualMaskPresent = manual.maskPresent; state.manualEnabled = manual.enabled;
+      state.manualExclusionEnabled = manual.exclusionEnabled; state.manualExclusionEraseEnabled = manual.exclusionEraseEnabled; state.manualExclusionForced = manual.exclusionForced;
+      [addCtx, exclusionCtx, exclusionEraseCtx].forEach((context, index) => context.putImageData(layers[index], 0, 0));
+      renderCandidates();
+      return { ja, en };
+    });
+    assert.deepEqual(candidateLabelPresentation.ja.automatic.map((row) => row.label), ["penis", "pussy", "testicles", "境界", "4点境界", "手", "白い液"], "real Chromium candidate rows show only their localized class labels");
+    assert.deepEqual(candidateLabelPresentation.en.automatic.map((row) => row.label), ["Penis", "Vulva", "Testicles", "Boundary", "Four-point boundary", "Hand", "Fluid"], "real Chromium candidate labels localize every supported token");
+    for (const locale of ["ja", "en"]) {
+      for (const row of candidateLabelPresentation[locale].automatic) {
+        assert.ok(row.names.every((name) => name.includes(row.label)), `candidate actions retain their localized visible label in ${locale}`);
+      }
+      const presentedText = candidateLabelPresentation[locale].automatic.flatMap((row) => [row.text, ...row.names]).join("\n");
+      for (const metadata of ["target", "ntd11", "hand_exclusion", "fluid_exclusion", "sam_fallback", "sam_high_precision", "basic-model-penis", "automatic-pussy", "ntd11-testicles", "polygon-origin", "hand-exclusion-origin", "fluid-exclusion-origin", "apply", "exclude"]) {
+        assert.equal(presentedText.includes(metadata), false, `candidate row text and action names do not leak ${metadata} in ${locale}`);
+      }
+    }
+    assert.deepEqual(candidateLabelPresentation.ja.automatic.map((row) => row.role), ["apply", "apply", "apply", "apply", "apply", "exclude", "exclude"], "candidate row roles still choose the apply and exclusion sections");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.label), ["手書き", "手書き", "手書き"], "all manual rows have the same role-neutral Japanese label");
+    assert.deepEqual(candidateLabelPresentation.en.manual.map((row) => row.label), ["Manual", "Manual", "Manual"], "all manual rows have the same role-neutral English label");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.role), ["apply", "exclude", "exclude"], "manual rows preserve their apply and exclusion roles");
+    assert.deepEqual(candidateLabelPresentation.ja.manual.map((row) => row.names), [
+      ["手書きモザイクを使用", "手書きを削除"],
+      ["手描き除外を使用", "手描き除外を削除"],
+      ["手描き除外削除を使用", "手描き除外削除を削除"],
+    ], "manual actions retain role-specific Japanese names");
+    assert.deepEqual(candidateLabelPresentation.en.sections, ["Mosaic ranges", "Exclusion ranges"], "section headings retain the apply and exclusion distinction in English");
+
     const sectionDisplay = page.locator('[data-candidate-display-toggle="apply"]');
     await sectionDisplay.click();
     await page.waitForFunction((id) => {
@@ -523,7 +602,40 @@ async function runCandidateBlinkScenario(browser) {
         && document.querySelector("#candidatePane")?.classList.contains("blink-active")
         && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
     }, scenario.candidateId);
+    const blinkTickReads = await page.evaluate(() => {
+      const originalHasPixels = canvasHasPixels;
+      const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      let hasPixelsCalls = 0;
+      let getImageDataCalls = 0;
+      canvasHasPixels = (...args) => { hasPixelsCalls += 1; return originalHasPixels(...args); };
+      CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+        getImageDataCalls += 1;
+        return originalGetImageData.apply(this, args);
+      };
+      try { window.__candidateBlinkTick(); } finally {
+        canvasHasPixels = originalHasPixels;
+        CanvasRenderingContext2D.prototype.getImageData = originalGetImageData;
+      }
+      return { hasPixelsCalls, getImageDataCalls };
+    });
+    assert.deepEqual(blinkTickReads, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "a real Chromium blink tick avoids full-resolution mask readback");
+    await page.evaluate(() => window.__candidateBlinkTick());
     assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
+
+    await page.evaluate(() => {
+      state.manualMaskPresent = true;
+      addCtx.fillRect(0, 0, 2, 2); exclusionCtx.fillRect(2, 0, 2, 2); exclusionEraseCtx.fillRect(3, 0, 2, 2);
+      renderCandidates();
+    });
+    for (const width of [1024, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      const rows = await page.evaluate(() => [...document.querySelectorAll(".candidate-row")].map((node) => ({ className: node.className, children: node.children.length, grid: getComputedStyle(node).gridTemplateColumns, overflow: node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight, hit: [...node.querySelectorAll("button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); }) })));
+      const apply = rows.find((item) => item.className.includes("candidate-row-manual-apply"));
+      const exclude = rows.find((item) => item.className.includes("candidate-row-manual-exclude") && !item.className.includes("erase"));
+      const erase = rows.find((item) => item.className.includes("candidate-row-manual-exclude-erase"));
+      assert.deepEqual([apply?.children, exclude?.children, erase?.children], [5, 6, 5], `real Chromium candidate row control counts are stable at ${width}px`);
+      assert.equal([apply, exclude, erase].every((item) => !item.overflow && item.hit && item.grid.split(" ").length === item.children), true, `real Chromium candidate rows do not wrap, overflow, or lose hits at ${width}px`);
+    }
 
     await page.locator("#brushTool").click();
     const canvas = await page.locator("#editorCanvas").boundingBox();
@@ -560,6 +672,42 @@ async function runCandidateBlinkScenario(browser) {
         && !candidateRow.classList.contains("blink-selected")
         && !document.querySelector("#candidatePane")?.classList.contains("blink-active");
     }, scenario.candidateId);
+
+    const blinkPixels = await page.evaluate(async (applyId) => {
+      const source = document.createElement("canvas"); source.width = 100; source.height = 80;
+      source.getContext("2d").fillStyle = "#000000"; source.getContext("2d").fillRect(0, 0, 100, 80);
+      const mask = (left, top, width, height) => { const item = document.createElement("canvas"); item.width = 100; item.height = 80; item.getContext("2d").fillRect(left, top, width, height); return createImageBitmap(item); };
+      const record = currentRecord(); record.width = 100; record.height = 80;
+      state.currentImage = await createImageBitmap(source); canvasSizeForImage(record); prepareOriginalImage();
+      state.candidates = [
+        { id: applyId, role: "apply", enabled: true, forced: false, labelToken: "penis" },
+        { id: "candidate-blink-exclude", role: "exclude", enabled: true, forced: false, labelToken: "hand" },
+      ];
+      state.candidateImages = new Map([[applyId, await mask(30, 25, 30, 30)], ["candidate-blink-exclude", await mask(52, 25, 20, 30)]]);
+      state.removedCandidateIds.clear(); addCtx.clearRect(0, 0, 100, 80); exclusionCtx.clearRect(0, 0, 100, 80); exclusionEraseCtx.clearRect(0, 0, 100, 80);
+      state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualMaskPresent = false;
+      state.displayMode = "compare"; state.mosaicPreviewEnabled = false; fitImage(); state.maskDirty = true; composeCurrentMask();
+      const sample = (logicalX, logicalY, offset = 0) => {
+        const x = Math.round((offset + state.view.x + logicalX * state.view.scale) * (window.devicePixelRatio || 1));
+        const y = Math.round((state.view.y + logicalY * state.view.scale) * (window.devicePixelRatio || 1));
+        return [...ctx.getImageData(x, y, 1, 1).data];
+      };
+      const right = stage.clientWidth / 2;
+      state.blinkCandidateIds = new Set([applyId, "candidate-blink-exclude"]); state.blinkModes = new Map([[applyId, "normal"], ["candidate-blink-exclude", "normal"]]); state.blinkPhase = true; flushRender();
+      const colors = { left: sample(43, 40), apply: sample(43, 40, right), exclude: sample(65, 40, right) };
+      exclusionEraseCtx.fillRect(55, 35, 5, 10); exclusionEraseCtx.fillRect(80, 35, 5, 10); state.maskDirty = true; composeCurrentMask();
+      const cacheBefore = [...effectiveExclusionCtx.getImageData(0, 0, 100, 80).data];
+      state.blinkCandidateIds = new Set(["manual:excludeErase"]); state.blinkModes = new Map([["manual:excludeErase", "effective"]]); state.blinkPhase = true; flushRender();
+      const erase = { intersect: sample(56, 40, right), outside: sample(82, 40, right), cacheSame: cacheBefore.every((value, index) => value === effectiveExclusionCtx.getImageData(0, 0, 100, 80).data[index]) };
+      clearCandidateBlink(); state.displayMode = "single"; flushRender();
+      return { colors, erase };
+    }, scenario.candidateId);
+    assert.deepEqual(blinkPixels.colors.apply, [199, 47, 60, 255], "Chromium applies the configured red RGBA overlay to the right apply range");
+    assert.deepEqual(blinkPixels.colors.exclude, [31, 164, 199, 255], "Chromium applies the configured blue RGBA overlay to the right exclusion range");
+    assert.deepEqual(blinkPixels.colors.left, [0, 0, 0, 255], "compare blink never crosses the centre into the left image pane");
+    assert.equal(blinkPixels.erase.cacheSame, true, "manual erase blink leaves the cached post-erase exclusion mask untouched");
+    assert.deepEqual(blinkPixels.erase.intersect, [199, 47, 60, 255], "manual erase blinks red only where it intersects a pre-erase exclusion");
+    assert.deepEqual(blinkPixels.erase.outside, [0, 0, 0, 255], "manual erase does not color pixels outside the pre-erase exclusion union");
   } finally {
     await stopCoveredPage(page, true);
     scenario.server.closeAllConnections();
@@ -1004,17 +1152,25 @@ async function assertToolRailLayout(page, position) {
       const box = document.querySelector(selector).getBoundingClientRect();
       return { x: box.x, y: box.y, width: box.width, height: box.height };
     };
-    return { rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar") };
+    const ids = (selector) => [...document.querySelectorAll(selector)].map((element) => element.id);
+    return {
+      rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar"),
+      mosaicTools: ids('[data-i18n-aria-label="editor.mosaicTools"] > button'),
+      exclusionTools: ids('[data-i18n-aria-label="editor.exclusionTools"] > button'),
+    };
   });
   assert.equal(overlaps(boxes.rail, boxes.settings), true, "tool settings are integrated into the top editor toolbar");
   assert.equal(overlaps(boxes.rail, boxes.navigation), false, `${position} rail must not overlap image navigation`);
   assert.ok(boxes.rail.y <= boxes.settings.y, "toolbar is fixed at the editor top");
+  assert.deepEqual(boxes.mosaicTools, ["brushTool", "bucketTool", "mosaicEraserTool"], "mosaic tools keep brush, fill, eraser order");
+  assert.deepEqual(boxes.exclusionTools, ["eraserTool", "excludeBucketTool", "excludeEraserTool"], "exclusion tools keep brush, fill, eraser order");
   await page.locator("#boundaryTool").click();
   const menu = await page.locator("#boundaryModeMenu").evaluate((element) => {
     const box = element.getBoundingClientRect();
-    return { x: box.x, y: box.y, width: box.width, height: box.height };
+    return { x: box.x, y: box.y, width: box.width, height: box.height, ids: [...element.querySelectorAll("button")].map((button) => button.id) };
   });
   assert.ok(menu.width > 0 && menu.height > 0, "toolbar boundary menu opens");
+  assert.deepEqual(menu.ids, ["rectangleTool", "polygonTool", "boundaryBrushTool"], "boundary menu contains only its boundary modes");
   await page.keyboard.press("Escape");
 }
 
@@ -1109,7 +1265,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
         applyPauseHidden: document.querySelector("#applyPauseButton")?.hidden,
       },
       state: {
-        tool: state.tool, view: state.viewMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
+        tool: state.tool, view: state.viewMode, displayMode: state.displayMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
         galleryCollapsed: state.galleryCollapsed, inspectorCollapsed: state.inspectorCollapsed, mosaicPreview: state.mosaicPreviewEnabled,
         current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
         galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenPaths.size,
@@ -1173,6 +1329,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     collapseGalleryButton: (before, after) => changed(before, after, (item) => item.state.galleryCollapsed, "collapseGalleryButton"),
     collapseInspectorButton: (before, after) => changed(before, after, (item) => item.state.inspectorCollapsed, "collapseInspectorButton"),
     boundaryTool: (before, after) => changed(before, after, (item) => item.controls.boundaryTool.expanded, "boundaryTool"),
+    singleViewButton: (before, after) => assert.equal(after.state.displayMode, "single", "singleViewButton must select the single editor view"),
+    compareViewButton: (before, after) => assert.equal(after.state.displayMode, "compare", "compareViewButton must select the compare editor view"),
     fitButton: () => assertFitPostcondition(),
     undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
     redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
@@ -1306,13 +1464,32 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await setupFixture();
 
   // Gallery/editor controls operate after a genuine gallery selection.
-  for (const id of ["brushTool", "mosaicEraserTool", "eraserTool", "excludeEraserTool", "boundaryTool", "rectangleTool"]) await click(id);
-  for (const id of ["polygonTool", "boundaryBrushTool", "bucketTool", "excludeBucketTool"]) { await click("boundaryTool"); await click(id); }
-  for (const id of ["fitButton", "mosaicPreviewButton"]) await click(id);
+  for (const id of ["brushTool", "bucketTool", "mosaicEraserTool", "eraserTool", "excludeBucketTool", "excludeEraserTool"]) await click(id);
+  for (const id of ["rectangleTool", "polygonTool", "boundaryBrushTool"]) { await click("boundaryTool"); await click(id); }
+  for (const id of ["singleViewButton", "compareViewButton", "singleViewButton", "fitButton", "mosaicPreviewButton"]) await click(id);
   await click("collapseGalleryButton"); await click("collapseGalleryButton");
   await click("collapseInspectorButton"); await click("collapseInspectorButton");
-  await input("brushSize", "50"); await input("divisor", "101"); await input("bucketTolerance", "21");
+  await input("brushSize", "50"); await input("divisor", "101"); await click("bucketTool"); await input("bucketTolerance", "21");
   await click("mosaicHelpButton"); await click("mosaicHelpCloseButton");
+  await page.locator("#compareViewButton").click();
+  const compareCanvas = await page.locator("#editorCanvas").boundingBox();
+  const compareBefore = await page.evaluate(() => ({ history: state.history.length, scale: state.view.scale, x: state.view.x, y: state.view.y, right: state.view.x + stage.clientWidth / 2, singlePressed: $("#singleViewButton").getAttribute("aria-pressed"), comparePressed: $("#compareViewButton").getAttribute("aria-pressed") }));
+  assert.deepEqual({ singlePressed: compareBefore.singlePressed, comparePressed: compareBefore.comparePressed }, { singlePressed: "false", comparePressed: "true" }, "compare buttons are an exclusive accessible toggle");
+  await click("brushTool");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5);
+  await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .49, compareCanvas.y + compareCanvas.height * .5); await page.mouse.up();
+  await page.waitForFunction((history) => state.history.length > history, compareBefore.history);
+  const rightEdit = await page.evaluate(() => ({ history: state.history.length, points: state.history.at(-1)?.points || [], width: state.currentImage.width, scale: state.view.scale, x: state.view.x, right: state.view.x + stage.clientWidth / 2 }));
+  const rightSpan = Math.max(...rightEdit.points.map((point) => point.x)) - Math.min(...rightEdit.points.map((point) => point.x));
+  assert.ok(rightEdit.points.length > 1 && rightSpan <= rightEdit.width && rightEdit.points.at(-1).x < rightEdit.points[0].x, "a right-pane stroke remains one shared-image stroke when it crosses the centre line");
+  assert.equal(rightEdit.right - rightEdit.x, (await page.locator("#canvasStage").evaluate((node) => node.clientWidth)) / 2, "both compare panes retain one shared view transform");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5); await page.mouse.wheel(0, -120);
+  const rightZoom = await page.evaluate(() => ({ scale: state.view.scale, x: state.view.x, y: state.view.y }));
+  assert.ok(rightZoom.scale > rightEdit.scale, "wheel zoom from the right pane updates the shared transform");
+  await page.mouse.move(compareCanvas.x + compareCanvas.width * .25, compareCanvas.y + compareCanvas.height * .5); await page.mouse.down({ button: "middle" }); await page.mouse.move(compareCanvas.x + compareCanvas.width * .25 + 12, compareCanvas.y + compareCanvas.height * .5 + 8); await page.mouse.up({ button: "middle" });
+  const leftPan = await page.evaluate(() => ({ x: state.view.x, y: state.view.y, scale: state.view.scale }));
+  assert.deepEqual({ x: Math.round(leftPan.x - rightZoom.x), y: Math.round(leftPan.y - rightZoom.y), scale: leftPan.scale }, { x: 12, y: 8, scale: rightZoom.scale }, "middle pan from either pane keeps the shared compare transform synchronized");
+  await page.locator("#singleViewButton").click();
   await page.evaluate(() => { state.manualMaskPresent = true; renderCandidates(); });
   for (const selector of ["[data-candidate-batch]", "[data-candidate-display-toggle]", "[data-candidate-effective-toggle]"]) {
     const before = await snapshot(); await page.locator(selector).first().click();
@@ -2376,8 +2553,33 @@ async function main() {
     await page.locator("#detectDialog").evaluate((dialog) => dialog.close());
     holdDetection(true);
     await page.locator("#detectAllButton").click();
+    const heldDetectionStarted = page.waitForResponse((response) => response.url().includes("/api/detect") && response.request().method() === "POST");
     await page.locator("#detectStartButton").click();
+    await heldDetectionStarted;
     await page.waitForFunction(() => document.querySelector("#processingDialog").open);
+    const lockedDetectionReads = await page.evaluate(() => {
+      const candidateControls = () => [...document.querySelectorAll("[data-candidate-batch], [data-candidate-display-toggle], [data-candidate-effective-toggle]")]
+        .map((node) => ({ type: node.dataset.candidateBatch ? "batch" : node.dataset.candidateDisplayToggle ? "display" : "effective", pressed: node.getAttribute("aria-pressed"), disabled: node.disabled }));
+      const controlsBefore = candidateControls();
+      const originalHasPixels = canvasHasPixels;
+      const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      let hasPixelsCalls = 0;
+      let getImageDataCalls = 0;
+      canvasHasPixels = (...args) => { hasPixelsCalls += 1; return originalHasPixels(...args); };
+      CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+        getImageDataCalls += 1;
+        return originalGetImageData.apply(this, args);
+      };
+      try { updateActionButtons(); } finally {
+        canvasHasPixels = originalHasPixels;
+        CanvasRenderingContext2D.prototype.getImageData = originalGetImageData;
+      }
+      return { hasPixelsCalls, getImageDataCalls, controlsBefore, controlsAfter: candidateControls() };
+    });
+    assert.deepEqual({ hasPixelsCalls: lockedDetectionReads.hasPixelsCalls, getImageDataCalls: lockedDetectionReads.getImageDataCalls }, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "locked detection controls avoid manual-mask canvas readback");
+    assert.deepEqual(lockedDetectionReads.controlsAfter.map((control) => control.pressed), lockedDetectionReads.controlsBefore.map((control) => control.pressed), "locked detection controls preserve candidate pressed state");
+    assert.deepEqual([...new Set(lockedDetectionReads.controlsAfter.map((control) => control.type))].sort(), ["batch", "display", "effective"], "the locked detection control refresh covers every candidate-control kind");
+    assert.equal(lockedDetectionReads.controlsAfter.every((control) => control.disabled), true, "locked detection controls disable every candidate control");
     assert.equal(await page.locator("#processingCancelButton").evaluate((button) => { const rect = button.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === button; }), true, "the processing cancel button owns its physical hit target");
     failCancel(true);
     await page.locator("#processingCancelButton").click();
@@ -2803,7 +3005,7 @@ async function main() {
       assert.equal(editor.help.followsLabel && editor.help.fitsHeading, true, `mosaic help sits immediately after the block-size label at ${width}/${language}`);
       assert.equal(editor.orientation, "horizontal", `toolbar exposes its horizontal layout at ${width}/${language}`);
       assert.ok(editor.controls.every((control) => control.width > 0 && control.height >= 25 && control.height <= 28), `candidate section controls use compact buttons at ${width}/${language}`);
-      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "表示" : "Show")).length, 2, `both candidate sections expose a display button at ${width}/${language}`);
+      assert.equal(editor.controls.filter((control) => control.text === (language === "ja" ? "検出範囲" : "Detection range")).length, 2, `both candidate sections expose a detection-range button at ${width}/${language}`);
       assert.equal(editor.candidateOverflow, false, `candidate controls do not overflow at ${width}/${language}`);
       assert.equal(editor.candidateHit, true, `candidate display segments own their hit targets at ${width}/${language}`);
       assert.equal(editor.targets.count === 2 && editor.targets.native && editor.targets.oneLine && editor.targets.centered && editor.targets.withinPane && editor.targets.compact && editor.targets.selected && editor.targets.tracksAbsent, true, `target label and chips stay compact and aligned at ${width}/${language}`);
@@ -2867,6 +3069,43 @@ async function main() {
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
     assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    const candidateDisplayLifecycle = await page.evaluate(async () => {
+      const original = {
+        candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds,
+        tool: state.tool, confirmation: state.settings.confirmations.candidateRoleDelete,
+      };
+      const candidate = { id: "display-exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" };
+      const resetLayers = () => {
+        exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+        exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+        state.activeStroke = null; state.mosaicPending = false;
+      };
+      state.candidates = [candidate]; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+      state.settings.confirmations.candidateRoleDelete = false; state.tool = "exclude_eraser";
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4);
+      clearCandidateBlink(); setCandidateDisplayMode([candidate.id, "manual:exclude"], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const joinsNormal = candidateDisplayMode("manual:excludeErase") === "normal";
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4); state.candidates = [];
+      clearCandidateBlink(); setCandidateDisplayMode(["manual:exclude"], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const joinsManualOnly = candidateDisplayMode("manual:excludeErase") === "normal";
+      state.candidates = [candidate];
+      resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4); clearCandidateBlink(); setCandidateDisplayMode([candidate.id], "normal");
+      beginManualStroke({ x: 8, y: 8 });
+      const skipsHiddenManual = candidateDisplayMode("manual:excludeErase") === "off";
+      resetLayers(); clearCandidateBlink(); setCandidateDisplayMode([candidate.id], "normal");
+      await batchCandidateOperation("exclude:delete");
+      const roleDeleteClearsDisplay = state.removedCandidateIds.has(candidate.id)
+        && state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0 && state.blinkTimer === null
+        && !document.querySelector("#candidatePane").classList.contains("blink-active");
+      clearCandidateBlink(); state.candidates = original.candidates; state.candidateImages = original.images;
+      state.removedCandidateIds = original.removed; state.tool = original.tool;
+      state.settings.confirmations.candidateRoleDelete = original.confirmation;
+      renderCandidates(); render();
+      return { joinsNormal, joinsManualOnly, skipsHiddenManual, roleDeleteClearsDisplay };
+    });
+    assert.deepEqual(candidateDisplayLifecycle, { joinsNormal: true, joinsManualOnly: true, skipsHiddenManual: true, roleDeleteClearsDisplay: true }, `browser candidate display lifecycle clears deleted ranges and only adds an exclusion erase to a fully normal existing range: ${JSON.stringify(candidateDisplayLifecycle)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
       const draft = (label) => ({
         add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",
@@ -2958,6 +3197,108 @@ async function main() {
         .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
       assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
+        await page.locator("#compareViewButton").click();
+        const cursorGeometry = await page.evaluate(() => {
+          const rect = canvas.getBoundingClientRect();
+          const point = { x: Math.round(state.currentImage.width * .5), y: Math.round(state.currentImage.height * .5) };
+          const x = rect.left + state.view.x + point.x * state.view.scale;
+          const y = rect.top + state.view.y + point.y * state.view.scale;
+          return { left: { x, y }, right: { x: x + rect.width / 2, y }, width: rect.width };
+        });
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        await page.evaluate(() => {
+          const canvas = document.querySelector("#editorCanvas");
+          const cursor = document.querySelector("#brushCursor");
+          const originalClearRect = ctx.clearRect.bind(ctx);
+          const metrics = { recording: false, starts: [], latencies: [], clears: 0, sides: new Set(), last: null };
+          const begin = (event) => { if (metrics.recording) metrics.starts.push(performance.now()); };
+          const end = (event) => {
+            if (!metrics.recording) return;
+            const started = metrics.starts.shift();
+            if (started === undefined) return;
+            metrics.latencies.push(performance.now() - started);
+            const rect = canvas.getBoundingClientRect();
+            metrics.sides.add(event.clientX - rect.left >= rect.width / 2 ? "right" : "left");
+            metrics.last = { x: event.clientX, y: event.clientY };
+          };
+          ctx.clearRect = (...args) => { if (metrics.recording) metrics.clears += 1; return originalClearRect(...args); };
+          canvas.addEventListener("pointermove", begin, true); canvas.addEventListener("pointermove", end);
+          window.__brushCursorPerf = { metrics, cursor, originalClearRect, begin, end, canvas };
+        });
+        const cursorMetrics = [];
+        for (const tool of ["#brushTool", "#mosaicEraserTool", "#eraserTool", "#excludeEraserTool"]) {
+          await page.locator(tool).click();
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await page.evaluate(() => { window.__brushCursorPerf.metrics.latencies.length = 0; window.__brushCursorPerf.metrics.clears = 0; window.__brushCursorPerf.metrics.sides.clear(); window.__brushCursorPerf.metrics.recording = true; });
+          for (let index = 0; index < 240; index += 1) {
+            const side = index % 2 ? "right" : "left";
+            const point = cursorGeometry[side];
+            await page.mouse.move(point.x + (index % 30), point.y + Math.floor(index / 30));
+          }
+          cursorMetrics.push(await page.evaluate(() => {
+            const value = window.__brushCursorPerf; const { metrics, cursor } = value;
+            metrics.recording = false;
+            const latency = [...metrics.latencies].sort((left, right) => left - right);
+            const rect = cursor.getBoundingClientRect();
+            return {
+              count: latency.length, clears: metrics.clears, sides: [...metrics.sides].sort(), hidden: cursor.hidden,
+              center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, last: metrics.last,
+              p95: latency[Math.max(0, Math.ceil(latency.length * .95) - 1)] || 0,
+            };
+          }));
+        }
+        for (const metric of cursorMetrics) {
+          assert.ok(metric.count >= 240, `4K ${metric.count}-event hover stream records every pointer move`);
+          assert.equal(metric.clears, 0, "4K hover-only cursor movement does not redraw the image canvas");
+          assert.deepEqual(metric.sides, ["left", "right"], "4K compare hover keeps the cursor synchronized in either editable pane");
+          assert.equal(metric.hidden, false, "4K brush cursor remains visible while hovering");
+          assert.ok(Math.abs(metric.center.x - metric.last.x) <= 1 && Math.abs(metric.center.y - metric.last.y) <= 1, `4K brush cursor center follows the final pointer within one pixel (${JSON.stringify(metric)})`);
+          assert.ok(metric.p95 < 16.7, `4K hover cursor p95 stays below one frame (actual ${metric.p95.toFixed(2)}ms)`);
+        }
+        await page.locator("#brushTool").click();
+        await page.evaluate(() => { const metrics = window.__brushCursorPerf.metrics; metrics.latencies.length = 0; metrics.clears = 0; metrics.sides.clear(); metrics.recording = true; });
+        await page.mouse.move(cursorGeometry.left.x, cursorGeometry.left.y); await page.mouse.down();
+        for (let index = 1; index <= 100; index += 1) await page.mouse.move(cursorGeometry.left.x + index, cursorGeometry.left.y + Math.floor(index / 10));
+        await page.mouse.up();
+        const dragCursorMetric = await page.evaluate(() => {
+          const value = window.__brushCursorPerf; const { metrics, cursor } = value; metrics.recording = false;
+          const latency = [...metrics.latencies].sort((left, right) => left - right); const rect = cursor.getBoundingClientRect();
+          return { count: latency.length, p95: latency[Math.max(0, Math.ceil(latency.length * .95) - 1)] || 0, center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, last: metrics.last };
+        });
+        assert.ok(dragCursorMetric.count >= 100, "4K drag keeps every pointer event available to the brush cursor");
+        assert.ok(Math.abs(dragCursorMetric.center.x - dragCursorMetric.last.x) <= 1 && Math.abs(dragCursorMetric.center.y - dragCursorMetric.last.y) <= 1, `4K drawing cursor follows the final pointer without waiting for canvas composition (${JSON.stringify(dragCursorMetric)})`);
+        assert.ok(dragCursorMetric.p95 < 16.7, `4K drawing cursor p95 stays below one frame (actual ${dragCursorMetric.p95.toFixed(2)}ms)`);
+        await page.evaluate(() => {
+          const value = window.__brushCursorPerf; const { canvas, begin, end, originalClearRect } = value;
+          ctx.clearRect = originalClearRect; canvas.removeEventListener("pointermove", begin, true); canvas.removeEventListener("pointermove", end); delete window.__brushCursorPerf;
+        });
+        console.log(`4K cursor performance: hover-p95=${Math.max(...cursorMetrics.map((metric) => metric.p95)).toFixed(2)}ms moves=${cursorMetrics[0].count}`);
+        await page.locator("#singleViewButton").click();
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+        const comparePixels = await page.evaluate(({ logical }) => {
+          const sample = (offset = 0) => {
+            const x = Math.round((offset + state.view.x + logical.x * state.view.scale) * (window.devicePixelRatio || 1));
+            const y = Math.round((state.view.y + logical.y * state.view.scale) * (window.devicePixelRatio || 1));
+            return [...ctx.getImageData(x, y, 1, 1).data];
+          };
+          const rightOffset = stage.clientWidth / 2;
+          state.displayMode = "compare"; state.mosaicPreviewEnabled = true; clearCandidateBlink(); flushRender();
+          const staticLeft = sample(); const staticRight = sample(rightOffset);
+          state.blinkCandidateIds.add("manual:apply"); state.blinkModes.set("manual:apply", "normal"); state.blinkPhase = true; flushRender();
+          const blinkLeft = sample(); const blinkRight = sample(rightOffset);
+          state.blinkPhase = false; flushRender();
+          const blinkOffRight = sample(rightOffset);
+          state.mosaicPreviewEnabled = false; state.blinkPhase = true; flushRender();
+          const noMosaicLeft = sample(); const noMosaicBlinkRight = sample(rightOffset);
+          clearCandidateBlink(); state.displayMode = "single"; state.mosaicPreviewEnabled = true; flushRender();
+          return { staticLeft, staticRight, blinkLeft, blinkRight, blinkOffRight, noMosaicLeft, noMosaicBlinkRight };
+        }, geometry);
+        const same = (left, right) => left.every((value, index) => value === right[index]);
+        const visible = (pixel) => pixel[3] > 0 && pixel.slice(0, 3).some((value) => value > 0);
+        assert.equal(same(comparePixels.staticLeft, comparePixels.blinkLeft), true, "4K compare blink never changes the left mosaic pane");
+        assert.equal(visible(comparePixels.staticRight) && visible(comparePixels.blinkRight) && visible(comparePixels.noMosaicBlinkRight), true, "4K compare range and blink overlays render only in the right pane");
+        assert.equal(same(comparePixels.blinkOffRight, [0, 0, 0, 255]), true, "4K compare blink-off leaves the right pane black instead of leaking a range overlay");
+        assert.equal(same(comparePixels.staticLeft, comparePixels.noMosaicLeft), false, "4K compare mosaic toggle changes only the left image rendering");
         const mismatchedPixels = await page.evaluate(() => {
           const width = originalCanvas.width; const height = originalCanvas.height;
           const source = originalCtx.getImageData(0, 0, width, height).data;

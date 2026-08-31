@@ -60,10 +60,12 @@
         <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="horizontal" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
           <div class="tool-pair" role="group" aria-label="モザイク編集" data-i18n-aria-label="editor.mosaicTools">
             <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイクブラシ" title="モザイクブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
+            <button id="bucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
             <button id="mosaicEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク消しゴム" title="モザイク消しゴム" data-i18n-aria-label="editor.mosaicEraser" data-i18n-title="editor.mosaicEraser"><span aria-hidden="true"></span></button>
           </div>
           <div class="tool-pair" role="group" aria-label="除外編集" data-i18n-aria-label="editor.exclusionTools">
             <button id="eraserTool" class="tool icon-button tool-icon tool-icon-brush" type="button" data-toolbar-item aria-pressed="false" aria-label="除外ブラシ" title="除外ブラシ" data-i18n-aria-label="editor.eraser" data-i18n-title="editor.eraser"><span aria-hidden="true"></span></button>
+            <button id="excludeBucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             <button id="excludeEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="除外消しゴム" title="除外消しゴム" data-i18n-aria-label="editor.excludeEraser" data-i18n-title="editor.excludeEraser"><span aria-hidden="true"></span></button>
           </div>
           <div class="boundary-tool-menu">
@@ -72,11 +74,11 @@
               <button id="rectangleTool" class="boundary-mode-button boundary-mode-square" type="button" aria-pressed="false" aria-label="矩形" title="矩形" data-i18n-aria-label="boundary.rectangle" data-i18n-title="boundary.rectangle"><span aria-hidden="true"></span></button>
               <button id="polygonTool" class="boundary-mode-button boundary-mode-diamond" type="button" aria-pressed="false" aria-label="4点" title="4点" data-i18n-aria-label="boundary.polygon" data-i18n-title="boundary.polygon"><span aria-hidden="true"></span></button>
               <button id="boundaryBrushTool" class="boundary-mode-button boundary-mode-brush" type="button" aria-pressed="false" aria-label="境界ブラシ" title="境界ブラシ" data-i18n-aria-label="boundary.brush" data-i18n-title="boundary.brush"><span aria-hidden="true"></span></button>
-              <button id="bucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button>
-              <button id="excludeBucketTool" class="boundary-mode-button" type="button" aria-pressed="false" aria-label="除外塗りつぶし" title="除外塗りつぶし" data-i18n-aria-label="editor.excludeFill" data-i18n-title="editor.excludeFill">▧</button>
             </div>
           </div>
           <span class="tool-separator" aria-hidden="true"></span>
+          <button id="singleViewButton" class="tool icon-button active" type="button" data-toolbar-item aria-pressed="true" aria-label="1枚表示" title="1枚表示" data-i18n-aria-label="editor.singleView" data-i18n-title="editor.singleView">1</button>
+          <button id="compareViewButton" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-label="2枚表示" title="2枚表示" data-i18n-aria-label="editor.compareView" data-i18n-title="editor.compareView">2</button>
           <button id="fitButton" class="tool icon-button" type="button" data-toolbar-item aria-label="全体表示" title="全体表示" data-i18n-aria-label="editor.fit" data-i18n-title="editor.fit">⊙</button>
           <button id="undoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="元に戻す" title="元に戻す" data-i18n-aria-label="editor.undo" data-i18n-title="editor.undo">↶</button>
           <button id="redoButton" class="tool icon-button" type="button" data-toolbar-item aria-label="やり直す" title="やり直す" data-i18n-aria-label="editor.redo" data-i18n-title="editor.redo">↷</button>
@@ -94,6 +96,7 @@
           <button id="removeAndNextButton" type="button" data-i18n="navigation.removeAndNext">削除して次へ</button><button id="hideAndNextButton" type="button" data-i18n="navigation.hideAndNext">非表示にして次へ</button><button id="reviewAndNextButton" class="primary" type="button" data-i18n="navigation.reviewAndNext">確認済にして次へ</button>
         </div>
         <canvas id="editorCanvas" tabindex="0" data-i18n-aria-label="editor.canvas" aria-label="画像編集キャンバス"></canvas>
+        <div id="brushCursor" class="brush-cursor" aria-hidden="true" hidden></div>
         <div id="boundaryActions" class="boundary-actions" role="group" aria-label="境界操作" data-i18n-aria-label="boundary.actions" hidden>
           <button id="boundaryDetectButton" class="primary" type="button" disabled data-i18n="boundary.detect">検出</button>
           <button id="boundaryCancelButton" class="danger" type="button" data-i18n="boundary.cancel">取消</button>
@@ -131,11 +134,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">切替</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">切替</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">表示</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>

@@ -2618,11 +2618,22 @@ class MozarieTests(unittest.TestCase):
         genital = np.zeros((30, 30), dtype=np.uint8)
         genital[5:25, 5:25] = 255
         hand = np.zeros_like(genital)
-        hand[5:8, 10:20] = 255
+        hand[5:8, 10:21] = 255
         refined, decision = refine_mask_with_hand(genital, hand)
         self.assertEqual(decision, "refined")
-        self.assertTrue(np.all(refined[5:8, 10:20] == 0))
+        self.assertTrue(np.all(refined[5:8, 10:21] == 0))
         self.assertLess(np.count_nonzero(refined), np.count_nonzero(genital))
+
+    def test_hand_refinement_ignores_31_pixels_and_accepts_32_pixels(self):
+        genital = np.full((20, 20), 255, dtype=np.uint8)
+        overlap_31 = np.zeros_like(genital); overlap_31.flat[:31] = 255
+        unchanged, decision = refine_mask_with_hand(genital, overlap_31)
+        self.assertEqual(decision, "unchanged")
+        self.assertTrue(np.array_equal(unchanged, genital))
+        overlap_32 = np.zeros_like(genital); overlap_32.flat[:32] = 255
+        refined, decision = refine_mask_with_hand(genital, overlap_32)
+        self.assertEqual(decision, "refined")
+        self.assertEqual(np.count_nonzero(refined), np.count_nonzero(genital) - 32)
 
     def test_hand_refinement_skips_over_cap(self):
         genital = np.zeros((30, 30), dtype=np.uint8)
@@ -3534,7 +3545,7 @@ class MozarieTests(unittest.TestCase):
     def test_full_hand_exclusion_is_kept_separate_from_the_apply_mask(self):
         state = self.new_state()
         final_mask = np.zeros((12, 12), dtype=np.uint8); final_mask[2:10, 2:10] = 255
-        hand = np.zeros_like(final_mask); hand[8:10, 8:10] = 255
+        hand = np.zeros_like(final_mask); hand[2:6, 2:10] = 255
         segment = {"class_name": "penis", "mask": final_mask, "_confirmed_hand": hand}
         segment["image_exclusions"] = {"hand": hand}
         finalized = state._finalize_exclusions(np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
@@ -3628,7 +3639,7 @@ class MozarieTests(unittest.TestCase):
         safe = np.zeros((30, 30), dtype=np.uint8); safe[14:30, 14:30] = 255
         hand = np.zeros((30, 30), dtype=np.uint8)
         hand[:16, :20] = 255
-        hand[22:24, 14:20] = 255
+        hand[22:26, 22:30] = 255
         segments = [
             {"class_name": "penis", "mask": unsafe, "confidence": .8, "source": "target", "image_exclusions": {"hand": hand}},
             {"class_name": "pussy", "mask": safe, "confidence": .8, "source": "target"},
@@ -3636,7 +3647,7 @@ class MozarieTests(unittest.TestCase):
         finalized = state._finalize_exclusions(np.zeros((30, 30, 3), dtype=np.uint8), segments)
         published = finalized[0]["image_exclusions"]["hand"]
         self.assertFalse(np.any(published[unsafe > 0]))
-        self.assertTrue(np.all(published[22:24, 14:20] == 255))
+        self.assertTrue(np.all(published[22:26, 22:30] == 255))
 
     def test_hand_and_fluid_refinement_metadata(self):
         state = self.new_state()
@@ -3645,7 +3656,7 @@ class MozarieTests(unittest.TestCase):
         rgb = np.zeros((24, 24, 3), dtype=np.uint8)
         rgb[14:18, 14:18] = 255
         sam_mask = np.zeros((1, 24, 24), dtype=bool)
-        sam_mask[0, 4:8, 4:8] = True
+        sam_mask[0, 4:8, 2:10] = True
         predictor = Mock()
         predictor.predict.return_value = sam_mask, np.asarray([0.95]), None
         record = ImageRecord(image_id="image", path=Path(__file__), relative_path="image.png", width=24, height=24, mtime_ns=0)
@@ -3879,14 +3890,14 @@ class MozarieTests(unittest.TestCase):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
-                masks[0, 2:10, 2:10] = True
+                masks[0, 1:11, 1:11] = True
                 return masks, np.asarray([0.9]), None
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "image.png")
             state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
             state.settings["models"].update({"hand_detection_enabled": True, "hand_segmentation_enabled": True})
-            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:6, 4:8] = True
+            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 2:10] = True
             specialist = Mock(); specialist.predict.return_value = hand_mask, np.asarray([0.9]), None
             original_fromarray = detection_module.Image.fromarray
             calls = 0
@@ -3903,7 +3914,7 @@ class MozarieTests(unittest.TestCase):
                  patch.object(state, "_hand_segmentation_predictor_for", return_value=specialist), \
                  patch.object(detection_module.Image, "fromarray", side_effect=fail_second_mask):
                 with self.assertRaisesRegex(OSError, "second mask"):
-                    state.add_boundary_candidate(image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
+                    state.add_boundary_candidate(image_id, {"roi": {"left": 1, "top": 1, "right": 11, "bottom": 11}, "point": {"x": 5, "y": 5}})
 
             self.assertEqual(state.candidates.get(image_id, []), [])
             self.assertEqual(list((state.cache_dir / image_id).glob("*.png")), [])
@@ -3913,7 +3924,7 @@ class MozarieTests(unittest.TestCase):
         class FakePredictor:
             def predict(self, **_kwargs):
                 masks = np.zeros((1, 12, 12), dtype=bool)
-                masks[0, 2:10, 2:10] = True
+                masks[0, 1:11, 1:11] = True
                 return masks, np.asarray([0.9]), None
 
         with tempfile.TemporaryDirectory() as directory:
@@ -3922,7 +3933,7 @@ class MozarieTests(unittest.TestCase):
             record = self._record(image_path, 12, 12)
             state = self.new_state(); state.root = Path(directory); state.images = {record.image_id: record}; state.order = [record.image_id]
             state.settings["models"].update({"hand_detection_enabled": True, "hand_segmentation_enabled": True})
-            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:6, 4:8] = True
+            hand_mask = np.zeros((1, 12, 12), dtype=bool); hand_mask[0, 4:8, 2:10] = True
             specialist = Mock(); specialist.predict.return_value = hand_mask, np.asarray([0.9]), None
             fluid = np.zeros((12, 12), dtype=np.uint8); fluid[6:8, 4:8] = 255
 
@@ -3930,7 +3941,7 @@ class MozarieTests(unittest.TestCase):
                  patch.object(state, "_boundary_hand_boxes", return_value=[(4, 4, 8, 8)]), \
                  patch.object(state, "_hand_segmentation_predictor_for", return_value=specialist), \
                  patch.object(detection_module, "white_fluid_mask", return_value=fluid):
-                state.add_boundary_candidate(record.image_id, {"roi": {"left": 2, "top": 2, "right": 10, "bottom": 10}, "point": {"x": 5, "y": 5}})
+                state.add_boundary_candidate(record.image_id, {"roi": {"left": 1, "top": 1, "right": 11, "bottom": 11}, "point": {"x": 5, "y": 5}})
 
             candidates = state.list_candidates(record.image_id)
             self.assertEqual([candidate["role"] for candidate in candidates], ["apply", "exclude", "exclude"])

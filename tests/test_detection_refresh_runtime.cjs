@@ -15,15 +15,58 @@ async function testDetectionWaitsForDraft() {
     isBusy: () => false,
     saveDraft: async () => { events.push("draft"); },
     api: async () => { events.push("detect"); return { ok: true }; },
-    updateActionButtons() {}, showProcessing() {}, updateProgress() {}, setStatusKey() {}, setStatus() {},
+    updateActionButtons() {}, showProcessing() {}, closeProcessing() {}, updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() {},
     t: (key) => key,
   };
   vm.runInNewContext(
     `${fs.readFileSync(path.join(root, "detection.js"), "utf8")}\nglobalThis.runDetectionForTest=runDetection;`,
-    context,
+    context, { filename: path.join(root, "detection.js") },
   );
   await context.runDetectionForTest(["image"], 0.5, 1, ["penis"]);
   assert.deepEqual(events, ["draft", "detect"], "manual layers are captured before detection starts");
+}
+
+async function testDetectionShowsProcessingBeforeDelayedRequests() {
+  const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
+  const settings = deferred(); const draft = deferred(); const detect = deferred();
+  const controls = new Map();
+  const control = (id) => {
+    if (!controls.has(id)) controls.set(id, { id, value: id === "#detectConfidenceNumber" ? "0.5" : "1", checked: id === "#dialogTargetPenis", textContent: "", hidden: false, disabled: false, close() { this.closed = true; } });
+    return controls.get(id);
+  };
+  const events = [];
+  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, pendingDetectionTargetIds: ["one", "two"], settings: { detection: { targets: ["penis"] } }, settingsStatus: null };
+  const context = {
+    state, Math, Promise, structuredClone, normaliseDetectionConfidence: (value) => Number(value), $: control, isBusy: () => state.job?.state === "running",
+    saveDraft: () => { events.push("draft"); return draft.promise; },
+    api: (path) => { events.push(path); return path.startsWith("/api/settings") ? settings.promise : detect.promise; },
+    setSettingsForm() {}, updateActionButtons() {}, showProcessing: (job) => events.push(`modal:${job.completed}/${job.total}:${job.current}`), closeProcessing: () => events.push("close"), updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() {}, t: (key) => key,
+  };
+  vm.runInNewContext(`${fs.readFileSync(path.join(root, "detection.js"), "utf8")}\nglobalThis.startDetectionForTest=startDetectionFromDialog;`, context, { filename: path.join(root, "detection.js") });
+  const pending = context.startDetectionForTest({ preventDefault() {} });
+  assert.equal(events[0], "modal:0/2:", "the modal opens synchronously before settings, draft, and detect requests");
+  assert.deepEqual({ imageIds: [...state.job.imageIds], completedImageIds: [...state.job.completedImageIds], completed: state.job.completed, total: state.job.total }, { imageIds: ["one", "two"], completedImageIds: [], completed: 0, total: 2 });
+  settings.resolve({ settings: state.settings }); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft", "a delayed draft keeps the same optimistic processing state");
+  draft.resolve(); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft|/api/detect", "a delayed detect request does not recreate the modal");
+  detect.resolve({ ok: true }); await pending;
+  assert.equal(events.filter((event) => event.startsWith("modal:")).length, 1, "the modal is shown once while the start request is pending");
+}
+
+async function testDetectionStartFailureClosesProcessing() {
+  const events = []; const validation = { id: "#detectionTargetValidation", textContent: "", hidden: true };
+  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null };
+  const context = {
+    state, Math, Promise, $: () => validation, isBusy: () => false,
+    saveDraft: async () => { throw new Error("draft failed"); }, api: async () => ({ ok: true }),
+    updateActionButtons() {}, showProcessing() { events.push("show"); }, closeProcessing() { events.push("close"); }, updateProgress(job) { events.push(job.state); }, setStatusKey() {}, setStatus() {}, showUserError() { events.push("error"); }, t: (key) => key,
+  };
+  vm.runInNewContext(`${fs.readFileSync(path.join(root, "detection.js"), "utf8")}\nglobalThis.runDetectionForTest=runDetection;`, context, { filename: path.join(root, "detection.js") });
+  await context.runDetectionForTest(["image"], .5, 1, ["penis"]);
+  assert.deepEqual(events, ["show", "running", "close", "idle", "error"], "a start failure closes the optimistic modal and returns the job to idle");
+  assert.deepEqual([...state.detectionTargetIds], [], "a start failure removes the optimistic target set");
+  assert.equal(state.detectionStarting, false, "a start failure releases the starting state");
 }
 
 async function testCompletionInvalidatesAndReloadsCandidates() {
@@ -66,6 +109,8 @@ async function testCompletionInvalidatesAndReloadsCandidates() {
 
 Promise.resolve()
   .then(testDetectionWaitsForDraft)
+  .then(testDetectionShowsProcessingBeforeDelayedRequests)
+  .then(testDetectionStartFailureClosesProcessing)
   .then(testCompletionInvalidatesAndReloadsCandidates)
   .then(() => console.log("test_detection_refresh_runtime: passed"))
   .catch((error) => { console.error(error); process.exitCode = 1; });

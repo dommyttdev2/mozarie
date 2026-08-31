@@ -66,6 +66,7 @@ TARGET_CONTAINMENT = 0.60
 HAND_CONFIDENCE = 0.395
 HAND_SAM_MIN_SCORE = 0.88
 HAND_MAX_REMOVAL_RATIO = 0.70
+HAND_MIN_OVERLAP_PIXELS = 32
 HAND_MIN_REMAINING_RATIO = 0.15
 HAND_MIN_REMAINING_PIXELS = 32
 HAND_BOX_PADDING_RATIO = 0.03
@@ -513,7 +514,7 @@ def refine_mask_with_hand(mask: np.ndarray, hand_mask: np.ndarray) -> tuple[np.n
         return mask, "skipped"
     removed = (genital > 0) & (hand > 0)
     removal_count = int(np.count_nonzero(removed))
-    if removal_count == 0:
+    if removal_count < HAND_MIN_OVERLAP_PIXELS:
         return mask, "unchanged"
     if removal_count / area > HAND_MAX_REMOVAL_RATIO:
         return mask, "over_cap"
