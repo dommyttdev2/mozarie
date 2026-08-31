@@ -308,7 +308,7 @@ def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
         if masks is not None:
             dense_embeddings = this._embed_masks(masks)
         else:
-            dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
+            dense_embeddings = this.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
                 batch_size, -1, this.image_embedding_size[0], this.image_embedding_size[1]
             )
         return sparse_embeddings, dense_embeddings
