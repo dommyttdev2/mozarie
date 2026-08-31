@@ -43,6 +43,9 @@ class Element {
   querySelectorAll() { return []; }
   getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 }; }
   getContext() { return { clearRect() {}, drawImage() {}, getImageData() { return { data: new Uint8ClampedArray(4) }; } }; }
+  setPointerCapture(pointerId) { this.pointerId = pointerId; }
+  hasPointerCapture(pointerId) { return this.pointerId === pointerId; }
+  releasePointerCapture(pointerId) { if (this.pointerId === pointerId) this.pointerId = null; }
 }
 
 function browserFixture() {
@@ -69,7 +72,7 @@ function browserFixture() {
 
 async function testApplicationStartupPaths() {
   const { document, element } = browserFixture();
-  const state = { settings: null, images: [], view: { scale: 1, x: 0, y: 0 } };
+  const state = { settings: null, images: [], view: { scale: 1, x: 0, y: 0 }, displayMode: "single", compareSplit: .5 };
   const apiResults = [];
   const context = {
     console, Promise, Map, Set, Array, Object, Number, String, Boolean, Math, Error,
@@ -91,7 +94,7 @@ async function testApplicationStartupPaths() {
     bindEvents: undefined,
     setNavigationShortcutsEnabled() {}, scheduleJobPoll() {}, updateBrushSize() {}, resizeRenderCanvas() {},
     updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, resetCatalog(images) { state.images = images; },
-    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, updateBrushCursor() {}, render() {},
+    setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, updateBrushCursor() {}, updateCompareSplitter() {}, render() {},
     t: (key) => key, requestAnimationFrame(callback) { callback(); },
     isBusy: () => false,
     compareEventOffset: () => 0,
@@ -130,6 +133,26 @@ async function testApplicationStartupPaths() {
   const wheel = context.canvas.listeners.get("wheel");
   wheel({ shiftKey: true, deltaY: -1, preventDefault() {}, clientX: 10, clientY: 10 });
   wheel({ shiftKey: false, deltaY: 1, preventDefault() {}, clientX: 10, clientY: 10 });
+
+  state.displayMode = "compare";
+  const splitter = element("#compareSplitter");
+  const pointer = (clientX, pointerId = 7) => ({ button: 0, clientX, pointerId, preventDefault() {} });
+  splitter.listeners.get("pointerdown")(pointer(30));
+  assert.equal(state.compareSplit, .3, "splitter pointerdown sets the compare ratio");
+  splitter.listeners.get("pointermove")(pointer(70));
+  assert.equal(state.compareSplit, .7, "splitter pointermove updates the captured compare ratio");
+  splitter.listeners.get("pointerup")(pointer(70));
+  assert.equal(splitter.hasPointerCapture(7), false, "splitter pointerup releases capture");
+  splitter.listeners.get("pointerdown")(pointer(70));
+  splitter.listeners.get("pointercancel")(pointer(70));
+  assert.equal(splitter.hasPointerCapture(7), false, "splitter pointercancel releases capture");
+  for (const event of [
+    { key: "ArrowLeft", shiftKey: false, expected: .69 }, { key: "ArrowRight", shiftKey: true, expected: .74 },
+    { key: "Home", shiftKey: false, expected: .2 }, { key: "End", shiftKey: false, expected: .8 },
+  ]) {
+    splitter.listeners.get("keydown")({ ...event, preventDefault() {} });
+    assert.equal(state.compareSplit, event.expected, `splitter ${event.key} applies its accessible compare ratio`);
+  }
 }
 
 async function testCoreBoundaryAndWorkspaceBehaviour() {

@@ -165,6 +165,31 @@ function bindEvents() {
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, detectionTargets()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#singleViewButton").addEventListener("click", () => setDisplayMode("single")); $("#compareViewButton").addEventListener("click", () => setDisplayMode("compare")); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  const splitter = $("#compareSplitter");
+  const setCompareSplit = (clientX) => {
+    const rect = canvas.getBoundingClientRect();
+    state.compareSplit = Math.max(.2, Math.min(.8, (clientX - rect.left) / rect.width));
+    updateCompareSplitter(); render(); updateBrushCursor();
+  };
+  splitter.addEventListener("pointerdown", (event) => {
+    if (state.displayMode !== "compare" || event.button !== 0) return;
+    event.preventDefault(); splitter.setPointerCapture(event.pointerId); setCompareSplit(event.clientX);
+  });
+  splitter.addEventListener("pointermove", (event) => {
+    if (splitter.hasPointerCapture(event.pointerId)) setCompareSplit(event.clientX);
+  });
+  const releaseCompareSplitterPointer = (event) => { if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId); };
+  splitter.addEventListener("pointerup", releaseCompareSplitterPointer);
+  splitter.addEventListener("pointercancel", releaseCompareSplitterPointer);
+  splitter.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? .05 : .01;
+    if (event.key === "ArrowLeft") state.compareSplit = Math.max(.2, state.compareSplit - step);
+    else if (event.key === "ArrowRight") state.compareSplit = Math.min(.8, state.compareSplit + step);
+    else if (event.key === "Home") state.compareSplit = .2;
+    else if (event.key === "End") state.compareSplit = .8;
+    else return;
+    event.preventDefault(); updateCompareSplitter(); render(); updateBrushCursor();
+  });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) void setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
@@ -339,10 +364,11 @@ function bindEvents() {
     }
     if (event.button !== 0) return;
     canvas.setPointerCapture(event.pointerId);
-    state.gestureDisplayOffset = compareEventOffset(event);
+    state.gestureDisplaySide = compareEventSide(event);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
-    state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplayOffset = state.gestureDisplayOffset;
-    if (state.tool === "boundary") { state.boundaryDisplayOffset = state.gestureDisplayOffset; state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
+    state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplaySide = state.gestureDisplaySide;
+    if (["boundary", "polygon", "boundary_brush"].includes(state.tool)) state.boundaryDisplaySide = state.gestureDisplaySide;
+    if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
     if (state.tool === "polygon") {
       const vertex = polygonVertexAt(point);
       if (vertex >= 0) {
@@ -363,7 +389,7 @@ function bindEvents() {
       }
       updateBoundaryActions(); render(); return;
     }
-    if (state.tool === "boundary_brush") { state.boundaryDisplayOffset = state.gestureDisplayOffset; beginBoundaryBrushStroke(point); render(); return; }
+    if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
     beginManualStroke(rawPoint); render();
   });
@@ -373,7 +399,7 @@ function bindEvents() {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
     state.hover = pointFromEvent(event);
-    state.hoverDisplayOffset = state.gestureDisplayOffset ?? compareEventOffset(event);
+    state.hoverDisplaySide = state.gestureDisplaySide ?? compareEventSide(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
       if (state.tool === "boundary") {
@@ -410,7 +436,7 @@ function bindEvents() {
         addBoundaryDraft({ type: "polygon", points: state.polygonPoints.map((item) => ({ ...item })), roi: polygonRoi(state.polygonPoints) });
         state.polygonPoints = [];
       }
-      state.polygonDragIndex = -1; state.polygonDraftDrag = null; state.gestureDisplayOffset = null; updateBoundaryActions(); flushRender(); return;
+      state.polygonDragIndex = -1; state.polygonDraftDrag = null; state.gestureDisplaySide = null; updateBoundaryActions(); flushRender(); return;
     }
     const boundaryStart = state.boundaryStart;
     const boundaryDragging = state.boundaryDragging;
@@ -436,7 +462,7 @@ function bindEvents() {
         }
       }
     }
-    state.gestureDisplayOffset = null;
+    state.gestureDisplaySide = null;
     flushRender();
   }
   canvas.addEventListener("pointerup", (event) => finishCanvasGesture(event));

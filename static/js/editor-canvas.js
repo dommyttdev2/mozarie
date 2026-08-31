@@ -475,8 +475,34 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
   return true;
 }
 
+function compareSplitX(width = stage.clientWidth) { return Math.round(width * state.compareSplit); }
+
+function comparePaneBounds(width = stage.clientWidth) {
+  if (state.displayMode !== "compare") return [{ offset: 0, width }];
+  const split = compareSplitX(width);
+  return [{ offset: 0, width: split }, { offset: split, width: width - split }];
+}
+
+function compareSideOffset(side, width = stage.clientWidth) {
+  return state.displayMode === "compare" && side === "right" ? compareSplitX(width) : 0;
+}
+
+function compareEventSide(event, rect = canvas.getBoundingClientRect()) {
+  return state.displayMode === "compare" && event.clientX - rect.left >= compareSplitX(rect.width) ? "right" : "left";
+}
+
 function compareEventOffset(event, rect = canvas.getBoundingClientRect()) {
-  return state.displayMode === "compare" && event.clientX - rect.left >= rect.width / 2 ? rect.width / 2 : 0;
+  return compareSideOffset(compareEventSide(event, rect), rect.width);
+}
+
+function updateCompareSplitter() {
+  const splitter = $("#compareSplitter");
+  if (!splitter) return;
+  const visible = state.displayMode === "compare";
+  stage.dataset.displayMode = state.displayMode;
+  splitter.hidden = !visible;
+  splitter.style.setProperty("--compare-split", `${state.compareSplit * 100}%`);
+  splitter.setAttribute("aria-valuenow", String(Math.round(state.compareSplit * 100)));
 }
 
 function setDisplayMode(mode) {
@@ -486,13 +512,14 @@ function setDisplayMode(mode) {
   const single = $("#singleViewButton"); const compare = $("#compareViewButton");
   single.classList.toggle("active", displayMode === "single"); compare.classList.toggle("active", displayMode === "compare");
   single.setAttribute("aria-pressed", String(displayMode === "single")); compare.setAttribute("aria-pressed", String(displayMode === "compare"));
+  updateCompareSplitter();
   fitImage();
 }
 
 function fitImage() {
   if (!state.currentImage) return;
   const inset = { left: 20, right: 20, top: Math.max(58, toolRail.offsetHeight + 12), bottom: 62 };
-  const panelWidth = state.displayMode === "compare" ? stage.clientWidth / 2 : stage.clientWidth;
+  const panelWidth = Math.min(...comparePaneBounds().map((pane) => pane.width));
   const width = Math.max(1, panelWidth - inset.left - inset.right);
   const height = Math.max(1, stage.clientHeight - inset.top - inset.bottom);
   state.view.scale = Math.min(width / state.currentImage.width, height / state.currentImage.height);
@@ -508,6 +535,7 @@ function resizeRenderCanvas() {
   canvas.width = Math.max(1, Math.round(width * dpr)); canvas.height = Math.max(1, Math.round(height * dpr));
   layerCanvas.width = canvas.width; layerCanvas.height = canvas.height;
   boundaryOverlayCanvas.width = canvas.width; boundaryOverlayCanvas.height = canvas.height;
+  updateCompareSplitter();
   render(); updateBrushCursor();
 }
 
@@ -748,7 +776,7 @@ function updateBrushCursor() {
   const cursor = $("#brushCursor");
   if (!state.hover || !state.currentImage || state.panning || isBusy() || state.importing || !["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary_brush"].includes(state.tool)) { cursor.hidden = true; state.brushCursorGeometry = ""; return; }
   const radius = Math.max(1, Number($("#brushSize").value) * state.view.scale / 2);
-  const x = state.hoverDisplayOffset + state.view.x + state.hover.x * state.view.scale;
+  const x = compareSideOffset(state.hoverDisplaySide) + state.view.x + state.hover.x * state.view.scale;
   const y = state.view.y + state.hover.y * state.view.scale;
   const diameter = Math.max(2, radius * 2);
   const geometry = `${state.tool}:${diameter}`;
@@ -874,7 +902,7 @@ function boundaryRequests() {
   return requests.sort((first, second) => first.firstIndex - second.firstIndex).map(({ draftIds, draft }) => ({ draftIds, draft }));
 }
 
-function boundaryPath(shape, context = ctx, offset = state.boundaryDisplayOffset || 0) {
+function boundaryPath(shape, context = ctx, offset = compareSideOffset(state.boundaryDisplaySide)) {
   const roi = boundaryDraftBounds(shape);
   if (shape.type === "polygon" && shape.points?.length) {
     shape.points.forEach((point, index) => {
@@ -895,7 +923,7 @@ function boundaryPath(shape, context = ctx, offset = state.boundaryDisplayOffset
   if (roi) context.rect(offset + state.view.x + roi.left * state.view.scale, state.view.y + roi.top * state.view.scale, (roi.right - roi.left) * state.view.scale, (roi.bottom - roi.top) * state.view.scale);
 }
 
-function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
+function drawBoundaryScrim(shapes, offset = compareSideOffset(state.boundaryDisplaySide)) {
   if (!shapes.length || !state.currentImage) return;
   setCssTransform(boundaryOverlayCtx); boundaryOverlayCtx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
   boundaryOverlayCtx.save();
@@ -914,7 +942,7 @@ function drawBoundaryScrim(shapes, offset = state.boundaryDisplayOffset || 0) {
   setCssTransform(ctx); ctx.save(); clipRenderPane(ctx, offset); ctx.drawImage(boundaryOverlayCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
 
-function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
+function drawBoundaryShape(shape, offset = compareSideOffset(state.boundaryDisplaySide)) {
   const ready = shape.type !== "polygon" || polygonPointsValid(shape.points || []);
   ctx.save(); clipRenderPane(ctx, offset); ctx.strokeStyle = ready ? "#50d589" : "#f0ba62"; ctx.lineWidth = 2;
   ctx.beginPath(); boundaryPath(shape, ctx, offset);
@@ -930,7 +958,7 @@ function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
 function drawBoundaryRoi() {
   const shapes = boundaryShapes();
   if (!shapes.length) return;
-  const offsets = state.displayMode === "compare" ? [0, stage.clientWidth / 2] : [0];
+  const offsets = comparePaneBounds().map((pane) => pane.offset);
   for (const offset of offsets) {
     drawBoundaryScrim(shapes, offset);
     shapes.forEach((shape) => drawBoundaryShape(shape, offset));
@@ -973,8 +1001,9 @@ function boundaryActionAnchor() {
   const active = activeBoundaryShape() || state.boundaryDrafts.find((draft) => draft.id === state.boundaryActiveId) || state.boundaryDrafts.at(-1);
   const roi = boundaryDraftBounds(active);
   if (!roi) return null;
+  const offset = compareSideOffset(state.boundaryDisplaySide);
   return {
-    left: (state.boundaryDisplayOffset || 0) + state.view.x + roi.left * state.view.scale, right: (state.boundaryDisplayOffset || 0) + state.view.x + roi.right * state.view.scale,
+    left: offset + state.view.x + roi.left * state.view.scale, right: offset + state.view.x + roi.right * state.view.scale,
     top: state.view.y + roi.top * state.view.scale, bottom: state.view.y + roi.bottom * state.view.scale,
   };
 }
@@ -1009,7 +1038,8 @@ function drawPolygonBoundary() {
 
 function clipRenderPane(target, offset = 0) {
   if (state.displayMode !== "compare") return;
-  target.beginPath(); target.rect(offset, 0, stage.clientWidth / 2, stage.clientHeight); target.clip();
+  const pane = comparePaneBounds().find((item) => item.offset === offset);
+  target.beginPath(); target.rect(offset, 0, pane.width, stage.clientHeight); target.clip();
 }
 
 function paintTintedLayer(color, opacity, offset, paintMask) {
@@ -1097,7 +1127,7 @@ function drawCompareRangeOverlay(offset) {
     layerCtx.drawImage(mask, 0, 0); layerCtx.globalCompositeOperation = "source-in"; layerCtx.fillStyle = color;
     layerCtx.fillRect(0, 0, originalCanvas.width, originalCanvas.height); layerCtx.restore();
   };
-  ctx.save(); ctx.beginPath(); ctx.rect(offset, 0, stage.clientWidth - offset, stage.clientHeight); ctx.clip(); ctx.globalAlpha = settings.overlay_opacity;
+  ctx.save(); clipRenderPane(ctx, offset); ctx.globalAlpha = settings.overlay_opacity;
   paint(combinedCanvas, settings.apply_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight);
   paint(effectiveExclusionCanvas, settings.exclude_color); ctx.drawImage(layerCanvas, 0, 0, stage.clientWidth, stage.clientHeight); ctx.restore();
 }
@@ -1106,11 +1136,11 @@ function renderNow() {
   const width = stage.clientWidth; const height = stage.clientHeight;
   setCssTransform(ctx); ctx.clearRect(0, 0, width, height);
   if (!state.currentImage) { updateBrushCursor(); return; }
-  ctx.save(); if (state.displayMode === "compare") { ctx.beginPath(); ctx.rect(0, 0, width / 2, height); ctx.clip(); } ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
+  ctx.save(); clipRenderPane(ctx); ctx.translate(state.view.x, state.view.y); ctx.scale(state.view.scale, state.view.scale); ctx.drawImage(state.currentImage, 0, 0); ctx.restore();
   if (state.displayMode === "compare") {
-    const offset = width / 2;
+    const [, rightPane] = comparePaneBounds(width); const offset = rightPane.offset;
     if (state.mosaicPreviewEnabled) paintMosaicPreview();
-    ctx.fillStyle = "#000"; ctx.fillRect(offset, 0, width - offset, height);
+    ctx.save(); clipRenderPane(ctx, offset); ctx.beginPath(); ctx.rect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); ctx.clip(); ctx.fillStyle = "#000"; ctx.fillRect(offset + state.view.x, state.view.y, state.currentImage.width * state.view.scale, state.currentImage.height * state.view.scale); ctx.restore();
     drawCompareRangeOverlay(offset);
   } else {
     if (state.mosaicPreviewEnabled) paintMosaicPreview();

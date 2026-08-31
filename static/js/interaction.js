@@ -73,6 +73,7 @@ function resetCurrentDraft() {
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
   state.manualMaskPresent = false; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+  state.maskDirty = true; flushMaskComposition();
   resetHistoryToCurrentManualMask(); refreshMaskStatus(true); render();
 }
 
@@ -89,8 +90,9 @@ async function clearMasks(imageIds, titleKey, messageKey) {
     for (const imageId of imageIds) state.drafts.delete(imageId);
     for (const imageId of imageIds) releaseCandidateBundles(imageId);
     if (imageIds.includes(state.currentId)) {
-      state.candidates = []; resetCurrentDraft();
+      clearCandidateBlink(); state.candidates = []; resetCurrentDraft();
       $("#candidateStatus").textContent = t("candidates.none"); renderCandidates();
+      flushRender();
     }
     const refreshed = await api("/api/images");
     if (!isCurrentCatalogEpoch(catalogEpoch)) return;

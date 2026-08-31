@@ -686,25 +686,27 @@ async function runCandidateBlinkScenario(browser) {
       state.candidateImages = new Map([[applyId, await mask(30, 25, 30, 30)], ["candidate-blink-exclude", await mask(52, 25, 20, 30)]]);
       state.removedCandidateIds.clear(); addCtx.clearRect(0, 0, 100, 80); exclusionCtx.clearRect(0, 0, 100, 80); exclusionEraseCtx.clearRect(0, 0, 100, 80);
       state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualMaskPresent = false;
-      state.displayMode = "compare"; state.mosaicPreviewEnabled = false; fitImage(); state.maskDirty = true; composeCurrentMask();
+      state.compareSplit = .5; state.displayMode = "compare"; state.mosaicPreviewEnabled = false; fitImage(); state.maskDirty = true; composeCurrentMask();
       const sample = (logicalX, logicalY, offset = 0) => {
         const x = Math.round((offset + state.view.x + logicalX * state.view.scale) * (window.devicePixelRatio || 1));
         const y = Math.round((state.view.y + logicalY * state.view.scale) * (window.devicePixelRatio || 1));
         return [...ctx.getImageData(x, y, 1, 1).data];
       };
-      const right = stage.clientWidth / 2;
+      const right = stage.clientWidth * state.compareSplit;
       state.blinkCandidateIds = new Set([applyId, "candidate-blink-exclude"]); state.blinkModes = new Map([[applyId, "normal"], ["candidate-blink-exclude", "normal"]]); state.blinkPhase = true; flushRender();
       const colors = { left: sample(43, 40), apply: sample(43, 40, right), exclude: sample(65, 40, right) };
+      const outside = [...ctx.getImageData(Math.round((right + state.view.x - 1) * (window.devicePixelRatio || 1)), Math.round((state.view.y + 1) * (window.devicePixelRatio || 1)), 1, 1).data];
       exclusionEraseCtx.fillRect(55, 35, 5, 10); exclusionEraseCtx.fillRect(80, 35, 5, 10); state.maskDirty = true; composeCurrentMask();
       const cacheBefore = [...effectiveExclusionCtx.getImageData(0, 0, 100, 80).data];
       state.blinkCandidateIds = new Set(["manual:excludeErase"]); state.blinkModes = new Map([["manual:excludeErase", "effective"]]); state.blinkPhase = true; flushRender();
       const erase = { intersect: sample(56, 40, right), outside: sample(82, 40, right), cacheSame: cacheBefore.every((value, index) => value === effectiveExclusionCtx.getImageData(0, 0, 100, 80).data[index]) };
       clearCandidateBlink(); state.displayMode = "single"; flushRender();
-      return { colors, erase };
+      return { colors, erase, outside };
     }, scenario.candidateId);
     assert.deepEqual(blinkPixels.colors.apply, [199, 47, 60, 255], "Chromium applies the configured red RGBA overlay to the right apply range");
     assert.deepEqual(blinkPixels.colors.exclude, [31, 164, 199, 255], "Chromium applies the configured blue RGBA overlay to the right exclusion range");
     assert.deepEqual(blinkPixels.colors.left, [0, 0, 0, 255], "compare blink never crosses the centre into the left image pane");
+    assert.deepEqual(blinkPixels.outside, [0, 0, 0, 0], "the right compare pane stays transparent outside the fitted image rectangle");
     assert.equal(blinkPixels.erase.cacheSame, true, "manual erase blink leaves the cached post-erase exclusion mask untouched");
     assert.deepEqual(blinkPixels.erase.intersect, [199, 47, 60, 255], "manual erase blinks red only where it intersects a pre-erase exclusion");
     assert.deepEqual(blinkPixels.erase.outside, [0, 0, 0, 255], "manual erase does not color pixels outside the pre-erase exclusion union");
@@ -767,10 +769,10 @@ async function assertDesktopLayout(page, width, height) {
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
       const pane = document.querySelector("#galleryPane").getBoundingClientRect();
-      const action = document.querySelector("#batchMoreButton").getBoundingClientRect();
+      const action = document.querySelector("#collapseGalleryButton").getBoundingClientRect();
       return { rightGap: pane.right - action.right };
     });
-    assert.ok(heading.rightGap <= 12, `all-image actions align with the gallery right edge at ${width}x${height}`);
+    assert.ok(heading.rightGap <= 12, `gallery heading actions align with the gallery right edge at ${width}x${height}`);
   }
   assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "the gallery has no inactive batch-edit row");
   await page.locator("#overviewButton").click();
@@ -1469,27 +1471,98 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   for (const id of ["singleViewButton", "compareViewButton", "singleViewButton", "fitButton", "mosaicPreviewButton"]) await click(id);
   await click("collapseGalleryButton"); await click("collapseGalleryButton");
   await click("collapseInspectorButton"); await click("collapseInspectorButton");
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const galleryHeading = await page.evaluate(() => {
+    const title = document.querySelector(".gallery-heading h2").getBoundingClientRect();
+    const action = document.querySelector("#batchMoreButton").getBoundingClientRect();
+    const close = document.querySelector("#collapseGalleryButton").getBoundingClientRect();
+    return { titleRight: title.right, actionLeft: action.left, actionRight: action.right, closeLeft: close.left, localCountHidden: getComputedStyle(document.querySelector(".gallery-local-count")).display === "none" };
+  });
+  assert.equal(galleryHeading.localCountHidden, true, "1024px gallery hides the secondary local count before it can overlap the heading action");
+  assert.ok(galleryHeading.titleRight <= galleryHeading.actionLeft, "1024px gallery title and all-images action do not overlap");
+  assert.ok(galleryHeading.actionRight <= galleryHeading.closeLeft, "1024px gallery all-images action and close control do not overlap");
+  await page.setViewportSize({ width: 1280, height: 900 });
   await input("brushSize", "50"); await input("divisor", "101"); await click("bucketTool"); await input("bucketTolerance", "21");
   await click("mosaicHelpButton"); await click("mosaicHelpCloseButton");
   await page.locator("#compareViewButton").click();
   const compareCanvas = await page.locator("#editorCanvas").boundingBox();
-  const compareBefore = await page.evaluate(() => ({ history: state.history.length, scale: state.view.scale, x: state.view.x, y: state.view.y, right: state.view.x + stage.clientWidth / 2, singlePressed: $("#singleViewButton").getAttribute("aria-pressed"), comparePressed: $("#compareViewButton").getAttribute("aria-pressed") }));
+  const splitterBefore = await page.locator("#compareSplitter").boundingBox();
+  assert.deepEqual(await page.locator("#compareSplitter").evaluate((node) => ({ touchAction: getComputedStyle(node).touchAction, userSelect: getComputedStyle(node).userSelect })), { touchAction: "none", userSelect: "none" }, "the compare splitter owns touch dragging without text selection");
+  await page.mouse.move(splitterBefore.x + splitterBefore.width / 2, splitterBefore.y + splitterBefore.height / 2); await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .3, splitterBefore.y + splitterBefore.height / 2); await page.mouse.up();
+  assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "30", "pointer dragging fixes the compare split at 30 percent");
+  await page.locator("#compareSplitter").focus(); await page.keyboard.press("Shift+ArrowRight");
+  assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "35", "Shift+Arrow adjusts the compare split by five percent");
+  await page.keyboard.press("Home"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "20", "Home moves the compare split to its minimum");
+  await page.keyboard.press("End"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "80", "End moves the compare split to its maximum");
+  const splitterAfterKeys = await page.locator("#compareSplitter").boundingBox();
+  await page.mouse.move(splitterAfterKeys.x + splitterAfterKeys.width / 2, splitterAfterKeys.y + splitterAfterKeys.height / 2); await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .5, splitterAfterKeys.y + splitterAfterKeys.height / 2); await page.mouse.up();
+  const compareBefore = await page.evaluate(() => ({ history: state.history.length, scale: state.view.scale, x: state.view.x, y: state.view.y, right: state.view.x + stage.clientWidth * state.compareSplit, singlePressed: $("#singleViewButton").getAttribute("aria-pressed"), comparePressed: $("#compareViewButton").getAttribute("aria-pressed") }));
   assert.deepEqual({ singlePressed: compareBefore.singlePressed, comparePressed: compareBefore.comparePressed }, { singlePressed: "false", comparePressed: "true" }, "compare buttons are an exclusive accessible toggle");
   await click("brushTool");
-  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5);
-  await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .49, compareCanvas.y + compareCanvas.height * .5); await page.mouse.up();
+  const rightStroke = await page.evaluate(() => {
+    const rect = canvas.getBoundingClientRect(); const offset = stage.clientWidth * state.compareSplit;
+    const y = rect.top + state.view.y + state.currentImage.height * state.view.scale * .5;
+    return { start: { x: rect.left + offset + state.view.x + state.currentImage.width * state.view.scale * .75, y }, end: { x: rect.left + offset + state.view.x + state.currentImage.width * state.view.scale * .25, y } };
+  });
+  await page.mouse.move(rightStroke.start.x, rightStroke.start.y);
+  await page.mouse.down(); await page.mouse.move(rightStroke.end.x, rightStroke.end.y); await page.mouse.up();
   await page.waitForFunction((history) => state.history.length > history, compareBefore.history);
-  const rightEdit = await page.evaluate(() => ({ history: state.history.length, points: state.history.at(-1)?.points || [], width: state.currentImage.width, scale: state.view.scale, x: state.view.x, right: state.view.x + stage.clientWidth / 2 }));
+  const rightEdit = await page.evaluate(() => ({ history: state.history.length, points: state.history.at(-1)?.points || [], width: state.currentImage.width, scale: state.view.scale, x: state.view.x, right: state.view.x + stage.clientWidth * state.compareSplit }));
   const rightSpan = Math.max(...rightEdit.points.map((point) => point.x)) - Math.min(...rightEdit.points.map((point) => point.x));
-  assert.ok(rightEdit.points.length > 1 && rightSpan <= rightEdit.width && rightEdit.points.at(-1).x < rightEdit.points[0].x, "a right-pane stroke remains one shared-image stroke when it crosses the centre line");
-  assert.equal(rightEdit.right - rightEdit.x, (await page.locator("#canvasStage").evaluate((node) => node.clientWidth)) / 2, "both compare panes retain one shared view transform");
-  await page.mouse.move(compareCanvas.x + compareCanvas.width * .75, compareCanvas.y + compareCanvas.height * .5); await page.mouse.wheel(0, -120);
+  assert.ok(rightEdit.points.length > 1 && rightSpan <= rightEdit.width && rightEdit.points.at(-1).x < rightEdit.points[0].x, "a right-pane stroke remains one shared-image stroke with the selected split");
+  assert.equal(rightEdit.right - rightEdit.x, await page.locator("#canvasStage").evaluate((node) => node.clientWidth * state.compareSplit), "both compare panes retain one shared view transform");
+  await page.mouse.move(rightStroke.start.x, rightStroke.start.y); await page.mouse.wheel(0, 120);
   const rightZoom = await page.evaluate(() => ({ scale: state.view.scale, x: state.view.x, y: state.view.y }));
-  assert.ok(rightZoom.scale > rightEdit.scale, "wheel zoom from the right pane updates the shared transform");
-  await page.mouse.move(compareCanvas.x + compareCanvas.width * .25, compareCanvas.y + compareCanvas.height * .5); await page.mouse.down({ button: "middle" }); await page.mouse.move(compareCanvas.x + compareCanvas.width * .25 + 12, compareCanvas.y + compareCanvas.height * .5 + 8); await page.mouse.up({ button: "middle" });
+  assert.ok(rightZoom.scale < rightEdit.scale, "wheel zoom-out from the right pane updates the shared transform");
+  const leftPanStart = await page.evaluate(() => {
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.left + state.view.x + state.currentImage.width * state.view.scale * .25, y: rect.top + state.view.y + state.currentImage.height * state.view.scale * .5 };
+  });
+  await page.mouse.move(leftPanStart.x, leftPanStart.y); await page.mouse.down({ button: "middle" }); await page.mouse.move(leftPanStart.x + 12, leftPanStart.y + 8); await page.mouse.up({ button: "middle" });
   const leftPan = await page.evaluate(() => ({ x: state.view.x, y: state.view.y, scale: state.view.scale }));
   assert.deepEqual({ x: Math.round(leftPan.x - rightZoom.x), y: Math.round(leftPan.y - rightZoom.y), scale: leftPan.scale }, { x: 12, y: 8, scale: rightZoom.scale }, "middle pan from either pane keeps the shared compare transform synchronized");
+  await click("boundaryTool"); await click("rectangleTool");
+  const rightBoundary = await page.evaluate(() => {
+    state.compareSplit = .5; updateCompareSplitter(); fitImage();
+    const rect = canvas.getBoundingClientRect(); const offset = stage.clientWidth * state.compareSplit;
+    const point = (ratio) => ({ x: rect.left + offset + state.view.x + state.currentImage.width * state.view.scale * ratio, y: rect.top + state.view.y + state.currentImage.height * state.view.scale * ratio });
+    return { start: point(.35), end: point(.62) };
+  });
+  await page.mouse.move(rightBoundary.start.x, rightBoundary.start.y); await page.mouse.down(); await page.mouse.move(rightBoundary.end.x, rightBoundary.end.y); await page.mouse.up();
+  await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
+  await click("boundaryTool"); await click("boundaryBrushTool");
+  const rightCursor = await page.evaluate(() => {
+    const rect = canvas.getBoundingClientRect(); const offset = stage.clientWidth * state.compareSplit;
+    return { x: rect.left + offset + state.view.x + state.currentImage.width * state.view.scale * .5, y: rect.top + state.view.y + state.currentImage.height * state.view.scale * .5 };
+  });
+  await page.mouse.move(rightCursor.x, rightCursor.y);
+  const sideBoundBefore = await page.evaluate(() => {
+    const action = document.querySelector("#boundaryActions").getBoundingClientRect(); const cursor = document.querySelector("#brushCursor").getBoundingClientRect();
+    return { actionLeft: action.left, anchor: boundaryActionAnchor(), cursorLeft: cursor.left, split: state.compareSplit, width: stage.clientWidth };
+  });
+  await page.locator("#compareSplitter").focus();
+  for (let index = 0; index < 4; index += 1) await page.keyboard.press("Shift+ArrowRight");
+  await page.waitForFunction(() => Math.abs(state.compareSplit - .7) < .01);
+  const sideBoundAfter = await page.evaluate(() => {
+    const action = document.querySelector("#boundaryActions").getBoundingClientRect(); const cursor = document.querySelector("#brushCursor").getBoundingClientRect();
+    return { actionLeft: action.left, anchor: boundaryActionAnchor(), cursorLeft: cursor.left, split: state.compareSplit, width: stage.clientWidth };
+  });
+  const splitDelta = Math.round(sideBoundAfter.width * (sideBoundAfter.split - sideBoundBefore.split));
+  assert.ok(Math.abs((sideBoundAfter.anchor.left - sideBoundBefore.anchor.left) - splitDelta) <= 1, "moving the split relocates the right-side boundary action anchor without retaining its old pixel offset");
+  assert.ok(Math.abs((sideBoundAfter.cursorLeft - sideBoundBefore.cursorLeft) - splitDelta) <= 1, "moving the split relocates the right-side brush cursor without retaining its old pixel offset");
   await page.locator("#singleViewButton").click();
+  const singleBoundaryAnchor = await page.evaluate(() => {
+    const anchor = boundaryActionAnchor(); const roi = boundaryDraftBounds(activeBoundaryShape() || state.boundaryDrafts.find((draft) => draft.id === state.boundaryActiveId) || state.boundaryDrafts.at(-1));
+    return { actual: anchor.left, expected: state.view.x + roi.left * state.view.scale };
+  });
+  assert.ok(Math.abs(singleBoundaryAnchor.actual - singleBoundaryAnchor.expected) <= 1, "single view removes the right-side boundary offset");
+  await page.locator("#compareViewButton").click();
+  const restoredBoundaryAnchor = await page.evaluate(() => {
+    const anchor = boundaryActionAnchor(); const roi = boundaryDraftBounds(activeBoundaryShape() || state.boundaryDrafts.find((draft) => draft.id === state.boundaryActiveId) || state.boundaryDrafts.at(-1));
+    return { actual: anchor.left, expected: compareSplitX() + state.view.x + roi.left * state.view.scale };
+  });
+  assert.ok(Math.abs(restoredBoundaryAnchor.actual - restoredBoundaryAnchor.expected) <= 1, "returning to compare restores the boundary action to the current right-side split");
+  await page.locator("#singleViewButton").click(); await click("fitButton");
   await page.evaluate(() => { state.manualMaskPresent = true; renderCandidates(); });
   for (const selector of ["[data-candidate-batch]", "[data-candidate-display-toggle]", "[data-candidate-effective-toggle]"]) {
     const before = await snapshot(); await page.locator(selector).first().click();
@@ -1510,17 +1583,23 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   // created by the main pixel scenario.  The disabled state is asserted here;
   // all start/cancel/pause controls are then enabled by a real detection run.
   assert.equal(await page.locator("#boundaryDetectButton").isDisabled(), true, "boundary detection is disabled until a boundary is drawn");
+  const boundaryDragPoints = () => page.evaluate(() => {
+    const rect = canvas.getBoundingClientRect();
+    const point = (ratio) => ({ x: rect.left + state.view.x + state.currentImage.width * state.view.scale * ratio, y: rect.top + state.view.y + state.currentImage.height * state.view.scale * ratio });
+    return { start: point(.25), end: point(.75) };
+  });
+  const dragBoundary = async () => {
+    const { start, end } = await boundaryDragPoints();
+    await page.mouse.move(start.x, start.y); await page.mouse.down(); await page.mouse.move(end.x, end.y); await page.mouse.up();
+  };
   await click("boundaryTool"); await click("rectangleTool");
-  const boundaryCanvas = await page.locator("#editorCanvas").boundingBox();
-  await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 - 6, boundaryCanvas.y + boundaryCanvas.height / 2 - 6);
-  await page.mouse.down(); await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 + 6, boundaryCanvas.y + boundaryCanvas.height / 2 + 6); await page.mouse.up();
+  await dragBoundary();
   await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
   await click("boundaryDetectButton");
   await page.waitForTimeout(50);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await click("boundaryTool"); await click("rectangleTool");
-  await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 - 6, boundaryCanvas.y + boundaryCanvas.height / 2 - 6);
-  await page.mouse.down(); await page.mouse.move(boundaryCanvas.x + boundaryCanvas.width / 2 + 6, boundaryCanvas.y + boundaryCanvas.height / 2 + 6); await page.mouse.up();
+  await dragBoundary();
   await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
   await click("boundaryCancelButton");
   await click("detectCurrentButton");
@@ -1581,8 +1660,14 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   const clearCanvas = await page.locator("#editorCanvas").boundingBox();
   await page.mouse.move(clearCanvas.x + clearCanvas.width / 2, clearCanvas.y + clearCanvas.height / 2);
   await page.mouse.down(); await page.mouse.move(clearCanvas.x + clearCanvas.width / 2 + 8, clearCanvas.y + clearCanvas.height / 2 + 8); await page.mouse.up();
+  await page.evaluate(() => { state.blinkCandidateIds.add("manual:apply"); state.blinkModes.set("manual:apply", "normal"); state.blinkPhase = true; state.blinkTimer = setInterval(() => {}, 1000); flushRender(); });
   await page.waitForFunction(() => !document.querySelector("#clearCurrentMasksButton").disabled); await click("clearCurrentMasksButton");
   if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await click("confirmAccept");
+  await page.waitForFunction(() => {
+    const empty = (target) => { const data = target.getContext("2d").getImageData(0, 0, target.width, target.height).data; for (let index = 3; index < data.length; index += 4) if (data[index]) return false; return true; };
+    return empty(combinedCanvas) && empty(effectiveExclusionCanvas)
+      && state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0 && state.blinkTimer === null;
+  });
   await setupFixture(); await click("brushTool");
   const saveCanvas = await page.locator("#editorCanvas").boundingBox();
   await page.mouse.move(saveCanvas.x + saveCanvas.width / 2, saveCanvas.y + saveCanvas.height / 2);
@@ -3198,12 +3283,13 @@ async function main() {
       assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
       if (width === 3840) {
         await page.locator("#compareViewButton").click();
+        await page.evaluate(() => { state.compareSplit = .5; updateCompareSplitter(); flushRender(); });
         const cursorGeometry = await page.evaluate(() => {
           const rect = canvas.getBoundingClientRect();
           const point = { x: Math.round(state.currentImage.width * .5), y: Math.round(state.currentImage.height * .5) };
           const x = rect.left + state.view.x + point.x * state.view.scale;
           const y = rect.top + state.view.y + point.y * state.view.scale;
-          return { left: { x, y }, right: { x: x + rect.width / 2, y }, width: rect.width };
+          return { left: { x, y }, right: { x: x + rect.width * state.compareSplit, y }, width: rect.width };
         });
         await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await page.evaluate(() => {
@@ -3218,7 +3304,7 @@ async function main() {
             if (started === undefined) return;
             metrics.latencies.push(performance.now() - started);
             const rect = canvas.getBoundingClientRect();
-            metrics.sides.add(event.clientX - rect.left >= rect.width / 2 ? "right" : "left");
+            metrics.sides.add(event.clientX - rect.left >= rect.width * state.compareSplit ? "right" : "left");
             metrics.last = { x: event.clientX, y: event.clientY };
           };
           ctx.clearRect = (...args) => { if (metrics.recording) metrics.clears += 1; return originalClearRect(...args); };
@@ -3281,7 +3367,8 @@ async function main() {
             const y = Math.round((state.view.y + logical.y * state.view.scale) * (window.devicePixelRatio || 1));
             return [...ctx.getImageData(x, y, 1, 1).data];
           };
-          const rightOffset = stage.clientWidth / 2;
+          state.compareSplit = .5;
+          const rightOffset = stage.clientWidth * state.compareSplit;
           state.displayMode = "compare"; state.mosaicPreviewEnabled = true; clearCandidateBlink(); flushRender();
           const staticLeft = sample(); const staticRight = sample(rightOffset);
           state.blinkCandidateIds.add("manual:apply"); state.blinkModes.set("manual:apply", "normal"); state.blinkPhase = true; flushRender();

@@ -60,6 +60,7 @@
   "editor.fit": "全体表示",
   "editor.singleView": "1枚表示",
   "editor.compareView": "2枚表示",
+  "editor.compareSplitter": "比較表示の分割位置",
   "editor.undo": "元に戻す",
   "editor.redo": "やり直す",
   "editor.mosaicPreview": "モザイク表示",
