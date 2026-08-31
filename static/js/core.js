@@ -541,6 +541,11 @@ function updateActionButtons() {
 }
 
 function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), locked = isBusy() || state.importing || state.candidateBatchPending.has(state.currentId), presence) {
+  if (locked) {
+    for (const button of document.querySelectorAll("[data-candidate-batch]")) button.disabled = true;
+    for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) button.disabled = true;
+    return;
+  }
   const manualPresence = presence || {
     hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
     hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
@@ -549,7 +554,7 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
     const [role, operation] = button.dataset.candidateBatch.split(":");
     const hasManual = role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude || manualPresence.hasManualExclusionErase;
     const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || hasManual);
-    button.disabled = locked || !hasRoleCandidate;
+    button.disabled = !hasRoleCandidate;
     if (operation === "toggle") {
       const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
       if (role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
@@ -561,7 +566,7 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
   for (const button of document.querySelectorAll("[data-candidate-display-toggle], [data-candidate-effective-toggle]")) {
     const role = button.dataset.candidateDisplayToggle || button.dataset.candidateEffectiveToggle;
     const hasRoleCandidate = hasImage && candidateDisplayIdsForRole(role, manualPresence).length > 0;
-    button.disabled = locked || !hasRoleCandidate;
+    button.disabled = !hasRoleCandidate;
   }
 }
 

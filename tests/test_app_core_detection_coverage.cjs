@@ -244,27 +244,44 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";
   const displayButton = new Element("display"); displayButton.dataset.candidateDisplayToggle = "exclude";
+  const effectiveButton = new Element("effective"); effectiveButton.dataset.candidateEffectiveToggle = "exclude";
   const originalQuerySelectorAll = document.querySelectorAll;
   document.querySelectorAll = (selector) => {
     if (selector === "[data-candidate-batch]") return [batchButton];
-    if (selector === "[data-candidate-display-toggle], [data-candidate-effective-toggle]") return [displayButton];
+    if (selector === "[data-candidate-display-toggle], [data-candidate-effective-toggle]") return [displayButton, effectiveButton];
     return originalQuerySelectorAll(selector);
   };
-  coreState.candidates = [];
+  let candidateReads = 0;
+  Object.defineProperty(coreState, "candidates", { configurable: true, get: () => { candidateReads += 1; return []; } });
   coreState.manualExclusionEnabled = true; coreState.manualExclusionEraseEnabled = true;
-  context.candidateDisplayIdsForRole = (role, presence) => role === "exclude" && (presence.hasManualExclude || presence.hasManualExclusionErase) ? ["manual"] : [];
-  const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
-  test.updateCandidateBatchButtons(true, false, presentManualLayers);
-  const suppliedState = { batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled };
   let reads = 0;
   context.canvasHasPixels = () => { reads += 1; return true; };
+  let displayReads = 0;
+  context.candidateDisplayIdsForRole = (role, presence) => {
+    displayReads += 1;
+    return role === "exclude" && (presence.hasManualExclude || presence.hasManualExclusionErase) ? ["manual"] : [];
+  };
+  batchButton.setAttribute("aria-pressed", "unchanged");
+  test.updateCandidateBatchButtons(true, true);
+  assert.equal(batchButton.disabled, true, "a locked update disables candidate batch controls");
+  assert.equal(displayButton.disabled, true, "a locked update disables candidate display controls");
+  assert.equal(effectiveButton.disabled, true, "a locked update disables candidate effective-mask controls");
+  assert.equal(batchButton.getAttribute("aria-pressed"), "unchanged", "a locked update preserves candidate toggle state");
+  assert.equal(candidateReads, 0, "a locked update does not read candidate presence");
+  assert.equal(reads, 0, "a locked update does not read manual mask presence");
+  assert.equal(displayReads, 0, "a locked update does not read candidate display presence");
+  const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
+  test.updateCandidateBatchButtons(true, false, presentManualLayers);
+  const suppliedState = { batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled };
   test.updateCandidateBatchButtons(true, false);
-  assert.deepEqual({ batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled }, suppliedState, "supplied manual-layer presence keeps batch and display controls identical");
+  assert.deepEqual({ batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled }, suppliedState, "unlocked manual-layer readback keeps candidate controls identical");
   assert.equal(reads, 2, "an unspecified batch update reads each manual exclusion layer once");
+  assert.equal(displayReads, 4, "an unlocked update retains candidate display presence checks");
   const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
   test.updateCandidateBatchButtons(true, false, absentManualLayers);
   assert.equal(batchButton.disabled, true, "false manual-layer presence disables the empty exclusion batch control");
   assert.equal(displayButton.disabled, true, "false manual-layer presence disables the empty exclusion display control");
+  assert.equal(effectiveButton.disabled, true, "false manual-layer presence disables the empty exclusion effective-mask control");
 }
 
 async function testDetectionImportAndSaveBehaviour() {
