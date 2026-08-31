@@ -230,10 +230,10 @@ class JobsSavingCoverageTests(unittest.TestCase):
 
     def test_terminal_release_discards_directml_models_without_cuda_cache(self) -> None:
         state = self.make_jobs()
+        state.settings["models"]["provider"] = "directml"
         state.models = object(); state.hand_model = object()
         state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
-        with patch.object(jobs_module, "runtime_backend", return_value="directml"), \
-             patch.object(state, "_empty_selected_gpu_cache") as empty:
+        with patch.object(state, "_empty_selected_gpu_cache") as empty:
             state._release_gpu_job_memory()
         self.assertIsNone(state.models); self.assertIsNone(state.hand_model)
         self.assertIsNone(state.sam_predictor); self.assertIsNone(state.hand_segmentation_predictor)

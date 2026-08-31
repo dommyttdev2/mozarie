@@ -72,7 +72,7 @@ class JobsMixin:
     def _release_gpu_job_memory(self) -> None:
         """Release accelerator-backed models after a background job has returned."""
         provider = str(self.settings["models"].get("provider", "gpu"))
-        if provider != "gpu":
+        if provider == "cpu":
             return
         gpu_device = int(self.settings["models"].get("gpu_device", 0))
         with self.inference_lock:
