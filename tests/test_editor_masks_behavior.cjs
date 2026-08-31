@@ -28,17 +28,37 @@ exclusionCtx.pixels = true;
 exclusionEraseCtx.pixels = true;
 const elements = new Map();
 function element(selector) {
-  if (!elements.has(selector)) elements.set(selector, {
-    value: selector === "#bucketTolerance" ? "12" : "6", textContent: "", disabled: false,
-    children: [], dataset: {}, listeners: new Map(), classList: { toggle() {}, remove() {} }, setAttribute() {},
+  if (!elements.has(selector)) {
+    const classes = new Set();
+    elements.set(selector, {
+      value: selector === "#bucketTolerance" ? "12" : "6", textContent: "", disabled: false,
+      children: [], dataset: {}, listeners: new Map(), classList: {
+        toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
+        remove(...names) { names.forEach((name) => classes.delete(name)); },
+        contains(name) { return classes.has(name); },
+      }, setAttribute() {},
     addEventListener(name, callback) { this.listeners.set(name, callback); },
     append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); },
-  });
+    });
+  }
   return elements.get(selector);
 }
 
 const events = [];
 const batchPresences = [];
+let blinkTick = null;
+let displayButtonQueries = 0;
+let effectiveButtonQueries = 0;
+const displayButtons = [{
+  dataset: { candidateDisplayToggle: "exclude" },
+  attributes: new Map(),
+  setAttribute(name, value) { this.attributes.set(name, value); },
+}];
+const effectiveButtons = [{
+  dataset: { candidateEffectiveToggle: "exclude" },
+  attributes: new Map(),
+  setAttribute(name, value) { this.attributes.set(name, value); },
+}];
 const state = {
   currentId: "image", currentImage: { width: 100, height: 80 }, imageGeneration: 2, catalogEpoch: 3,
   candidates: [
@@ -69,8 +89,15 @@ const context = {
   historyExclusionEraseCanvas: { ...historyExclusionEraseCtx.canvas, getContext: () => historyExclusionEraseCtx },
   combinedCanvas: { toDataURL: () => "data:image/png;base64,mask" }, originalCanvas: { width: 100, height: 80 }, originalCtx: addCtx,
   canvas: { getBoundingClientRect: () => ({ left: 0, top: 0 }) },
-  $: element, document: { querySelectorAll: () => [], createElement: () => element(`node-${elements.size}`) },
-  setInterval: () => 1, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
+  $: element, document: {
+    querySelectorAll(selector) {
+      if (selector === "[data-candidate-display-toggle]") { displayButtonQueries += 1; return displayButtons; }
+      if (selector === "[data-candidate-effective-toggle]") { effectiveButtonQueries += 1; return effectiveButtons; }
+      return [];
+    },
+    createElement: () => element(`node-${elements.size}`),
+  },
+  setInterval: (callback) => { blinkTick = callback; return 1; }, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
   isBusy: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
@@ -91,7 +118,7 @@ const context = {
 
 const masksPath = path.join(__dirname, "..", "static", "js", "editor-masks.js");
 const source = fs.readFileSync(masksPath, "utf8");
-vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, syncCandidateDisplayButtons, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
+vm.runInNewContext(`${source}\nglobalThis.masksTest = { renderCandidateRows: renderCandidates, candidateDisplayMode, candidateDisplayIdsForRole, syncCandidateDisplayButtons, syncCandidateBlinkTimer, setCandidateDisplayMode, toggleCandidateDisplay, toggleCandidateEffective, clearCandidateBlink, clearCandidateMutationState, nextCandidateMutationVersion, enqueueCandidateMutation, waitForCandidateMutations, updateCandidate, deleteCandidate, deleteManualMask, deleteManualExclusion, deleteManualExclusionErase, shouldBlinkNewManual, batchCandidateOperation, paintStrokeOnContexts, paintStrokePath, paintFillSpans, applyFillSpans, enableManualLayerForTool, beginManualStroke, appendManualStrokePoint, completeManualStroke, cancelManualStroke, replayManualStroke, recordHistoryOperation, resetHistoryToCurrentManualMask, restoreSnapshot, buildCombinedMask, addBoundaryCandidate, cancelBoundary, completedPolygonVertexAt, fillAt };\nrenderCandidates = globalThis.renderCandidates; render = globalThis.render;`, context, { filename: masksPath });
 const test = context.masksTest;
 
 assert.deepEqual([...test.candidateDisplayIdsForRole("apply")], ["apply", "manual:apply"]);
@@ -117,6 +144,24 @@ test.toggleCandidateEffective("apply");
 assert.equal(test.candidateDisplayMode("apply"), "off");
 test.clearCandidateBlink();
 assert.equal(state.blinkCandidateIds.size, 0);
+
+state.blinkCandidateIds = new Set(["exclude"]);
+state.blinkModes = new Map([["exclude", "normal"]]);
+test.syncCandidateBlinkTimer();
+test.syncCandidateDisplayButtons(presentManualLayers);
+const displayStateBeforeTick = displayButtons[0].attributes.get("aria-pressed");
+const effectiveStateBeforeTick = effectiveButtons[0].attributes.get("aria-pressed");
+readCounts.clear(); displayButtonQueries = 0; effectiveButtonQueries = 0;
+assert.equal(state.blinkPhase, true, "starting display blinking keeps the existing visible phase");
+blinkTick();
+assert.equal(state.blinkPhase, false, "each blink tick keeps the existing phase transition");
+assert.equal(element("#candidatePane").classList.contains("blink-phase"), false, "each blink tick updates only the existing pane phase class");
+assert.equal(displayButtonQueries, 0, "a blink tick does not resynchronize the display batch controls");
+assert.equal(effectiveButtonQueries, 0, "a blink tick does not resynchronize the effective batch controls");
+assert.equal(readCounts.size, 0, "a blink tick does not read either full-resolution manual layer");
+assert.equal(displayButtons[0].attributes.get("aria-pressed"), displayStateBeforeTick, "a blink tick leaves the exclusion display button state unchanged");
+assert.equal(effectiveButtons[0].attributes.get("aria-pressed"), effectiveStateBeforeTick, "a blink tick leaves the exclusion effective button state unchanged");
+test.clearCandidateBlink();
 
 test.paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, { x: 1, y: 1 }, { x: 3, y: 3 }, "brush", 4);
 test.paintStrokeOnContexts(addCtx, exclusionCtx, exclusionEraseCtx, { x: 1, y: 1 }, { x: 3, y: 3 }, "eraser", 4);

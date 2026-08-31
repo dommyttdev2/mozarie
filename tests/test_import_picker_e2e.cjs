@@ -501,6 +501,11 @@ async function runCandidateBlinkScenario(browser) {
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
+      const setInterval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) => {
+        if (delay === 200) window.__candidateBlinkTick = callback;
+        return setInterval(callback, delay, ...args);
+      };
     });
     await page.goto(scenario.url, { waitUntil: "networkidle" });
     await page.locator(`.gallery-item[data-id="${scenario.imageId}"]`).click();
@@ -523,6 +528,23 @@ async function runCandidateBlinkScenario(browser) {
         && document.querySelector("#candidatePane")?.classList.contains("blink-active")
         && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
     }, scenario.candidateId);
+    const blinkTickReads = await page.evaluate(() => {
+      const originalHasPixels = canvasHasPixels;
+      const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      let hasPixelsCalls = 0;
+      let getImageDataCalls = 0;
+      canvasHasPixels = (...args) => { hasPixelsCalls += 1; return originalHasPixels(...args); };
+      CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+        getImageDataCalls += 1;
+        return originalGetImageData.apply(this, args);
+      };
+      try { window.__candidateBlinkTick(); } finally {
+        canvasHasPixels = originalHasPixels;
+        CanvasRenderingContext2D.prototype.getImageData = originalGetImageData;
+      }
+      return { hasPixelsCalls, getImageDataCalls };
+    });
+    assert.deepEqual(blinkTickReads, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "a real Chromium blink tick avoids full-resolution mask readback");
     assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
 
     await page.evaluate(() => {

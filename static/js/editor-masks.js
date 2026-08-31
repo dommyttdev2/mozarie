@@ -2,15 +2,19 @@ function candidateLabel(candidate) {
   return t(`candidateLabel.${candidate.labelToken}`);
 }
 
+function manualLayerPresence() {
+  return {
+    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
+    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
+  };
+}
+
 function renderCandidates() {
   const applyList = $("#candidateList");
   const excludeList = $("#exclusionList");
   applyList.textContent = ""; excludeList.textContent = "";
   if (!state.currentId) { syncCandidateDisplayButtons(); updateCandidateBatchButtons(false); return; }
-  const presence = {
-    hasManualExclude: canvasHasPixels(exclusionCtx, exclusionCanvas),
-    hasManualExclusionErase: canvasHasPixels(exclusionEraseCtx, exclusionEraseCanvas),
-  };
+  const presence = manualLayerPresence();
   if (!state.candidates.length && !state.manualMaskPresent && !presence.hasManualExclude && !presence.hasManualExclusionErase) {
     const empty = document.createElement("p"); empty.className = "candidate-empty"; empty.textContent = t("candidates.none"); applyList.append(empty); syncCandidateDisplayButtons(presence); updateCandidateBatchButtons(undefined, undefined, presence); return;
   }
@@ -174,7 +178,11 @@ function syncCandidateBlinkTimer() {
   if (!state.blinkCandidateIds.size) { clearCandidateBlink(); return; }
   if (!state.blinkTimer) {
     state.blinkPhase = true;
-    state.blinkTimer = setInterval(() => { state.blinkPhase = !state.blinkPhase; syncCandidateDisplayButtons(); render(); }, 200);
+    state.blinkTimer = setInterval(() => {
+      state.blinkPhase = !state.blinkPhase;
+      $("#candidatePane")?.classList.toggle("blink-phase", state.blinkPhase);
+      render();
+    }, 200);
   }
 }
 
