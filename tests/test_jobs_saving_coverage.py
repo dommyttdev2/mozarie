@@ -239,6 +239,54 @@ class JobsSavingCoverageTests(unittest.TestCase):
         self.assertIsNone(state.sam_predictor); self.assertIsNone(state.hand_segmentation_predictor)
         empty.assert_not_called()
 
+    def test_terminal_release_blocks_settings_and_boundary_inference_until_cache_cleanup(self) -> None:
+        state = self.make_jobs()
+        cleanup_started = threading.Event()
+        allow_cleanup = threading.Event()
+        settings_entered = threading.Event()
+        boundary_entered = threading.Event()
+
+        class BlockingInferenceLock:
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+
+            def __enter__(self):
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                self.lock.release()
+
+        state.inference_lock = BlockingInferenceLock()
+
+        def release_cache(**_kwargs):
+            cleanup_started.set()
+            self.assertTrue(allow_cleanup.wait(2))
+
+        cleanup = threading.Thread(target=state._release_gpu_job_memory)
+
+        def update_settings():
+            with state.inference_lock:
+                settings_entered.set()
+
+        def run_boundary_inference():
+            with state.inference_lock:
+                boundary_entered.set()
+
+        with patch.object(state, "_release_gpu_cache", side_effect=release_cache):
+            cleanup.start()
+            self.assertTrue(cleanup_started.wait(2))
+            settings = threading.Thread(target=update_settings)
+            boundary = threading.Thread(target=run_boundary_inference)
+            settings.start(); boundary.start()
+            self.assertFalse(settings_entered.wait(.1))
+            self.assertFalse(boundary_entered.wait(.1))
+            allow_cleanup.set()
+            cleanup.join(2); settings.join(2); boundary.join(2)
+        self.assertFalse(cleanup.is_alive())
+        self.assertTrue(settings_entered.is_set())
+        self.assertTrue(boundary_entered.is_set())
+
     def test_job_races_and_remaining_worker_branches(self) -> None:
         state = self.make_jobs()
         class DeviceContext:
