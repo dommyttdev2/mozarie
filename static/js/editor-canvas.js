@@ -929,8 +929,11 @@ function drawBoundaryShape(shape, offset = state.boundaryDisplayOffset || 0) {
 function drawBoundaryRoi() {
   const shapes = boundaryShapes();
   if (!shapes.length) return;
-  drawBoundaryScrim(shapes);
-  shapes.forEach((shape) => drawBoundaryShape(shape));
+  const offsets = state.displayMode === "compare" ? [0, stage.clientWidth / 2] : [0];
+  for (const offset of offsets) {
+    drawBoundaryScrim(shapes, offset);
+    shapes.forEach((shape) => drawBoundaryShape(shape, offset));
+  }
 }
 
 function polygonArea(points) {
@@ -1035,7 +1038,8 @@ function drawCandidateBlinkOverlay(offset = 0) {
   };
   paintSelected("manual:apply", "apply", state.manualEnabled, addCanvas);
   paintSelected("manual:exclude", "exclude", state.manualExclusionEnabled, exclusionCanvas);
-  paintSelected("manual:excludeErase", "exclude", state.manualExclusionEraseEnabled, exclusionEraseCanvas);
+  // Erasing an exclusion restores mosaic, so its review color follows APPLY.
+  paintSelected("manual:excludeErase", "apply", state.manualExclusionEraseEnabled, exclusionEraseCanvas);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
     if (!state.blinkCandidateIds.has(candidate.id)) continue;
