@@ -218,6 +218,16 @@ class JobsSavingCoverageTests(unittest.TestCase):
         collect.assert_not_called()
         release.assert_not_called()
 
+    def test_cpu_cache_release_collects_without_calling_cuda(self) -> None:
+        state = self.make_jobs()
+        torch = Mock()
+        with patch.object(jobs_module.gc, "collect") as collect, \
+             patch.dict(jobs_module.sys.modules, {"torch": torch}), \
+             patch.object(jobs_module, "runtime_backend") as backend:
+            state._release_gpu_cache(provider="cpu")
+        collect.assert_called_once_with()
+        backend.assert_not_called()
+
     def test_terminal_release_discards_directml_models_without_cuda_cache(self) -> None:
         state = self.make_jobs()
         state.models = object(); state.hand_model = object()
