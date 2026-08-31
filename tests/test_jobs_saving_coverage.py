@@ -14,6 +14,7 @@ from PIL import Image
 
 from mozarie.core import BrowserSaveReceipt, BrowserSaveToken, ClientError, ImageRecord, Job, JobControl, SAVE_TOKEN_TTL_SECONDS
 from mozarie.domain import Candidate, CandidateRole
+import mozarie.jobs as jobs_module
 from mozarie.jobs import JobsMixin
 from mozarie.saving import SavingMixin
 
@@ -32,6 +33,9 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.catalog_generation = 1
         state.active_import_count = 0
         state.worker_thread = None
+        state.models = None; state.hand_model = None
+        state.sam_predictor = None; state.sam_image_id = None
+        state.hand_segmentation_predictor = None; state.hand_segmentation_image_id = None
         state.order = []
         state.images = {}
         state.candidates = {}
@@ -128,7 +132,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.sam_predictor = sam; state.hand_segmentation_predictor = hand_segmentation
         state.models = object(); state.hand_model = object()
         with patch.object(state, "_release_gpu_cache") as release:
-            state._discard_gpu_models_after_oom()
+            state._release_gpu_job_memory()
         sam.reset_image.assert_called_once(); hand_segmentation.reset_image.assert_called_once()
         release.assert_called_once_with(provider="gpu", gpu_device=2)
         with tempfile.TemporaryDirectory() as raw:
@@ -151,7 +155,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.job = Job(kind="detect", state="running", total=1)
         with patch.object(state, "_release_gpu_job_memory") as release:
             state._cancel_job(1, 1); state._finish_job(1, 1)
-        self.assertEqual(state.job.state, "complete"); self.assertEqual(release.call_count, 2)
+        self.assertEqual(state.job.state, "complete"); release.assert_not_called()
         state._fail_job = Mock()
         state._run_fixed_workers([SimpleNamespace(image_id="one")], 1, lambda *_args: (_ for _ in ()).throw(RuntimeError("boom")), JobControl(), 1, 1)
         self.assertTrue(True)
@@ -164,17 +168,66 @@ class JobsSavingCoverageTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         for exc, code in ((__import__("sqlite3").DatabaseError("x"), "workspace_database_error"), (ValueError("x"), "internal_error"), (RuntimeError("invalid graph"), "internal_error")):
             state.job = Job(kind="detect", state="running")
-            with patch.object(state, "_release_gpu_job_memory"):
-                state._fail_job(exc, 1, 1)
+            state._fail_job(exc, 1, 1)
             self.assertEqual(state.job.error_code, code)
         state.job = Job(kind="apply", state="running")
-        with patch.object(state, "_release_gpu_job_memory"):
-            state._fail_job(OSError("x"), 1, 1)
+        state._fail_job(OSError("x"), 1, 1)
         self.assertEqual(state.job.error_code, "output_unavailable")
         state.job = Job(kind="detect", state="running")
-        with patch.object(state, "_discard_gpu_models_after_oom"):
-            state._fail_job(RuntimeError("CUDA out of memory"), 1, 1)
+        state._fail_job(RuntimeError("CUDA out of memory"), 1, 1)
         self.assertEqual(state.job.error_code, "gpu_out_of_memory")
+
+    def test_job_thread_releases_gpu_once_after_every_terminal_worker_path(self) -> None:
+        for kind, terminal in (("detect", "complete"), ("apply", "complete"), ("detect", "cancelled"), ("detect", "failed"), ("detect", "oom")):
+            with self.subTest(kind=kind, terminal=terminal):
+                state = self.make_jobs()
+                record = SimpleNamespace(image_id="one")
+                retained_tracebacks = []
+
+                def worker(_records, *, control, job_generation, catalog_generation):
+                    if terminal == "complete":
+                        state._finish_job(job_generation, catalog_generation)
+                    elif terminal == "cancelled":
+                        state._cancel_job(job_generation, catalog_generation)
+                    else:
+                        try:
+                            raise RuntimeError("CUDA out of memory" if terminal == "oom" else "failure")
+                        except RuntimeError as exc:
+                            state._fail_job(exc, job_generation, catalog_generation)
+                            retained_tracebacks.append(exc.__traceback__)
+                    release.assert_not_called()
+
+                with patch.object(state, "_release_gpu_job_memory") as release:
+                    state._start_job(kind, [record], worker)
+                    assert state.worker_thread is not None
+                    state.worker_thread.join(2)
+                release.assert_called_once_with()
+                if terminal == "oom":
+                    self.assertEqual(retained_tracebacks, [None])
+
+    def test_terminal_release_keeps_cpu_model_cache(self) -> None:
+        state = self.make_jobs()
+        state.settings["models"]["provider"] = "cpu"
+        state.models = object(); state.hand_model = object()
+        state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
+        with patch.object(jobs_module.gc, "collect") as collect, \
+             patch.object(state, "_release_gpu_cache") as release:
+            state._release_gpu_job_memory()
+        self.assertIsNotNone(state.models); self.assertIsNotNone(state.hand_model)
+        self.assertIsNotNone(state.sam_predictor); self.assertIsNotNone(state.hand_segmentation_predictor)
+        collect.assert_not_called()
+        release.assert_not_called()
+
+    def test_terminal_release_discards_directml_models_without_cuda_cache(self) -> None:
+        state = self.make_jobs()
+        state.models = object(); state.hand_model = object()
+        state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
+        with patch.object(jobs_module, "runtime_backend", return_value="directml"), \
+             patch.object(state, "_empty_selected_gpu_cache") as empty:
+            state._release_gpu_job_memory()
+        self.assertIsNone(state.models); self.assertIsNone(state.hand_model)
+        self.assertIsNone(state.sam_predictor); self.assertIsNone(state.hand_segmentation_predictor)
+        empty.assert_not_called()
 
     def test_job_races_and_remaining_worker_branches(self) -> None:
         state = self.make_jobs()
