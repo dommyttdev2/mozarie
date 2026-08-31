@@ -3545,7 +3545,7 @@ class MozarieTests(unittest.TestCase):
     def test_full_hand_exclusion_is_kept_separate_from_the_apply_mask(self):
         state = self.new_state()
         final_mask = np.zeros((12, 12), dtype=np.uint8); final_mask[2:10, 2:10] = 255
-        hand = np.zeros_like(final_mask); hand[8:10, 8:10] = 255
+        hand = np.zeros_like(final_mask); hand[2:6, 2:10] = 255
         segment = {"class_name": "penis", "mask": final_mask, "_confirmed_hand": hand}
         segment["image_exclusions"] = {"hand": hand}
         finalized = state._finalize_exclusions(np.zeros((12, 12, 3), dtype=np.uint8), [segment])[0]
