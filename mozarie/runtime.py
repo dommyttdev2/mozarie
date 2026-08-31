@@ -74,6 +74,19 @@ class DxgiDevice:
 
     index: int
     name: str
+    vendor_id: int
+    device_id: int
+    subsys_id: int
+    revision: int
+    dedicated_video_memory: int
+    dedicated_system_memory: int
+    shared_system_memory: int
+    luid_low: int
+    luid_high: int
+
+    @property
+    def luid(self) -> str:
+        return f"{self.luid_high & 0xFFFFFFFF:08X}{self.luid_low & 0xFFFFFFFF:08X}"
 
 
 def _dxgi_adapter_names() -> list[DxgiDevice]:
@@ -150,7 +163,21 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
                     )(adapter_vtable[8])
                     desc = _AdapterDesc()
                     if get_desc(adapter, ctypes.byref(desc)) >= 0:
-                        devices.append(DxgiDevice(index=index, name=desc.Description.rstrip("\0")))
+                        devices.append(
+                            DxgiDevice(
+                                index=index,
+                                name=desc.Description.rstrip("\0"),
+                                vendor_id=int(desc.VendorId),
+                                device_id=int(desc.DeviceId),
+                                subsys_id=int(desc.SubSysId),
+                                revision=int(desc.Revision),
+                                dedicated_video_memory=int(desc.DedicatedVideoMemory),
+                                dedicated_system_memory=int(desc.DedicatedSystemMemory),
+                                shared_system_memory=int(desc.SharedSystemMemory),
+                                luid_low=int(desc.AdapterLuid.LowPart),
+                                luid_high=int(desc.AdapterLuid.HighPart),
+                            )
+                        )
                 finally:
                     adapter_release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
                         ctypes.cast(
@@ -182,14 +209,38 @@ def _log_gpu_diagnostics(stage: str, *, logical_device_id: int | None = None, to
 
     dxgi_devices = _dxgi_adapter_names()
     pid = os.getpid()
-    print(f"[Mozarie GPU] stage={stage} pid={pid} backend=directml logical={logical_device_id} torch_index={torch_index} dml_index={directml_index}", flush=True)
+    print(
+        f"[Mozarie GPU] stage={stage} pid={pid} backend=directml "
+        f"logical={logical_device_id} torch_index={torch_index} dml_index={directml_index}",
+        flush=True,
+    )
     if dxgi_devices:
         for device in dxgi_devices:
-            print(f"[Mozarie GPU] DXGI index={device.index} name={device.name!r}", flush=True)
+            print(
+                f"[Mozarie GPU] DXGI index={device.index} name={device.name!r} "
+                f"vendor_id=0x{device.vendor_id:04X} device_id=0x{device.device_id:04X} "
+                f"subsys_id=0x{device.subsys_id:08X} revision=0x{device.revision:02X} "
+                f"dedicated_video_memory={device.dedicated_video_memory} "
+                f"shared_system_memory={device.shared_system_memory} luid={device.luid}",
+                flush=True,
+            )
     else:
         print("[Mozarie GPU] DXGI enumeration unavailable", flush=True)
     for index, name in enumerate(torch_devices):
         print(f"[Mozarie GPU] torch-directml index={index} name={name!r}", flush=True)
+
+    if dxgi_devices and torch_devices:
+        for dxgi_device in dxgi_devices:
+            matches = [
+                index
+                for index, name in enumerate(torch_devices)
+                if _normalize_device_name(name) == _normalize_device_name(dxgi_device.name)
+            ]
+            print(
+                f"[Mozarie GPU] NAME-MATCH DXGI index={dxgi_device.index} "
+                f"name={dxgi_device.name!r} torch_indices={matches}",
+                flush=True,
+            )
 
 
 def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
