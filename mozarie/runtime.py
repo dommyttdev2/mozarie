@@ -111,7 +111,6 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
         create_factory.argtypes = [ctypes.POINTER(_Guid), ctypes.POINTER(ctypes.c_void_p)]
         create_factory.restype = ctypes.c_long
 
-        # IID_IDXGIFactory = 7b7166ec-21c7-44ae-b21a-c9ae321ae369
         iid_factory = _Guid(
             0x7B7166EC,
             0x21C7,
@@ -168,13 +167,33 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:
         return []
 
 
-def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
-    """Expose DirectML GPUs using DXGI's physical adapter order.
+def _log_gpu_diagnostics(stage: str, *, logical_device_id: int | None = None, torch_index: int | None = None, directml_index: int | None = None) -> None:
+    """Print detailed DirectML GPU mapping information for live troubleshooting."""
+    try:
+        directml = directml_module()
+        torch_count = int(directml.device_count())
+        torch_devices = [
+            str(directml.device_name(index)).rstrip("\0")
+            for index in range(torch_count)
+        ]
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"[Mozarie GPU] stage={stage} DirectML enumeration failed: {exc!r}", flush=True)
+        return
 
-    ONNX Runtime's DirectML ``device_id`` is a DXGI adapter ordinal.  Using
-    this order for the UI makes the configured logical GPU match ONNX Runtime;
-    PyTorch DirectML is translated by name in ``torch_device`` below.
-    """
+    dxgi_devices = _dxgi_adapter_names()
+    pid = os.getpid()
+    print(f"[Mozarie GPU] stage={stage} pid={pid} backend=directml logical={logical_device_id} torch_index={torch_index} dml_index={directml_index}", flush=True)
+    if dxgi_devices:
+        for device in dxgi_devices:
+            print(f"[Mozarie GPU] DXGI index={device.index} name={device.name!r}", flush=True)
+    else:
+        print("[Mozarie GPU] DXGI enumeration unavailable", flush=True)
+    for index, name in enumerate(torch_devices):
+        print(f"[Mozarie GPU] torch-directml index={index} name={name!r}", flush=True)
+
+
+def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
+    """Expose DirectML GPUs using DXGI's physical adapter order."""
     directml = module or directml_module()
     dxgi_devices = _dxgi_adapter_names()
     if dxgi_devices:
@@ -196,8 +215,9 @@ def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
                 backend="directml",
             ).payload())
         if devices:
+            _log_gpu_diagnostics("device-list")
             return devices
-    return [
+    devices = [
         RuntimeDevice(
             id=index,
             name=str(directml.device_name(index)).rstrip("\0"),
@@ -205,6 +225,8 @@ def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
         ).payload()
         for index in range(int(directml.device_count()))
     ]
+    _log_gpu_diagnostics("device-list-fallback")
+    return devices
 
 
 def _resolve_directml_torch_index(logical_device_id: int, directml: Any) -> int:
@@ -230,10 +252,13 @@ def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str 
         return "cpu"
     selected = backend or runtime_backend(torch_module=torch)
     if selected == "cuda":
-        return f"cuda:{int(device_id)}"
+        resolved = int(device_id)
+        print(f"[Mozarie GPU] stage=torch-device backend=cuda logical={int(device_id)} resolved={resolved} pid={os.getpid()}", flush=True)
+        return f"cuda:{resolved}"
     if selected == "directml":
         directml = directml_module()
         torch_index = _resolve_directml_torch_index(int(device_id), directml)
+        _log_gpu_diagnostics("torch-device", logical_device_id=int(device_id), torch_index=torch_index, directml_index=int(device_id))
         return directml.device(torch_index)
     raise RuntimeError("No GPU runtime is available")
 
@@ -252,8 +277,6 @@ def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
             points = torch.cat([points, padding_point], dim=1)
             labels = torch.cat([labels, padding_label], dim=1)
         point_embedding = this.pe_layer.forward_with_coords(points, this.input_image_size)
-        # Boolean assignment with no selected elements fails in torch-directml.
-        # Arithmetic masks preserve SAM's result without constructing a 0x256 view.
         not_a_point = (labels == -1).unsqueeze(-1)
         point_embedding = torch.where(
             not_a_point,
@@ -285,7 +308,7 @@ def patch_directml_sam_prompt_encoder(model: Any, torch: Any) -> None:
         if masks is not None:
             dense_embeddings = this._embed_masks(masks)
         else:
-            dense_embeddings = this.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
+            dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
                 batch_size, -1, this.image_embedding_size[0], this.image_embedding_size[1]
             )
         return sparse_embeddings, dense_embeddings
