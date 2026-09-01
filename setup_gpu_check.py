@@ -90,6 +90,33 @@ def _print_exception_chain(exc: BaseException) -> None:
         depth += 1
 
 
+def _print_directml_identity_snapshot() -> None:  # pragma: no cover - Windows hardware diagnostic
+    """Print runtime identities only after a DirectML setup failure."""
+    try:
+        import torch_directml
+
+        count = int(torch_directml.device_count())
+        print(f"[Mozarie] torch-directml devices: {count}")
+        for index in range(count):
+            name = str(torch_directml.device_name(index)).rstrip("\0")
+            print(f"[Mozarie] torch-directml logical {index}: {name}")
+    except Exception as exc:
+        print(f"[Mozarie] torch-directml identity diagnostic failed: {type(exc).__name__}: {exc}")
+
+    try:
+        from mozarie.runtime import _dxgi_adapter_names
+
+        adapters = _dxgi_adapter_names()
+        print(f"[Mozarie] DXGI adapters: {len(adapters)}")
+        for adapter in adapters:
+            print(
+                f"[Mozarie] DXGI index {adapter.index}: "
+                f"name={adapter.name!r}, luid={adapter.luid!r}"
+            )
+    except Exception as exc:
+        print(f"[Mozarie] DXGI identity diagnostic failed: {type(exc).__name__}: {exc}")
+
+
 def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
@@ -109,6 +136,7 @@ def main() -> int:
         except Exception as exc:
             print(f"[Mozarie] DirectML setup probe failed for logical GPU {device}.")
             _print_exception_chain(exc)
+            _print_directml_identity_snapshot()
             print(DIRECTML_RUNTIME_FAILED_MESSAGE)
             return 1
     try:
