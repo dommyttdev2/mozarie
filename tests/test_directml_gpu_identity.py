@@ -55,6 +55,14 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
         self.assertEqual(runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters, physical_identity_resolver=resolver), 2)
         self.assertEqual([call.args for call in resolver.call_args_list], [((0, 26920747),), ((0, 52342),)])
 
+    def test_duplicate_different_luids_use_default_physical_identity_resolver(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(0, 26920747)), runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(0, 52342))]
+        identity = frozenset({("hardware", "software")})
+        with patch("mozarie.directml_identity.physical_adapter_identity", return_value=identity) as resolver:
+            self.assertEqual(runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters), 2)
+        self.assertEqual([call.args for call in resolver.call_args_list], [((0, 26920747),), ((0, 52342),)])
+
     def test_duplicate_different_luids_ambiguous_identity_fails_closed(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)), runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20))]
@@ -98,7 +106,7 @@ class DirectMlPhysicalIdentityTests(unittest.TestCase):
     class FakeGdi32:
         def __init__(self, *, count=1, identities=None, fail_open=False, fail_query=False):
             self.count = count
-            self.identities = identities or [("HW", "SW")] * count
+            self.identities = identities if identities is not None else [("HW", "SW")] * count
             self.fail_open = fail_open
             self.fail_query = fail_query
             self.closed = []
@@ -142,6 +150,11 @@ class DirectMlPhysicalIdentityTests(unittest.TestCase):
 
     def test_physical_identity_rejects_duplicate_members(self) -> None:
         gdi32 = self.FakeGdi32(count=2)
+        self.assertIsNone(self._resolve(gdi32))
+        self.assertEqual(gdi32.closed, [123])
+
+    def test_physical_identity_rejects_empty_pnp_key(self) -> None:
+        gdi32 = self.FakeGdi32(identities=[("", "SW")])
         self.assertIsNone(self._resolve(gdi32))
         self.assertEqual(gdi32.closed, [123])
 
