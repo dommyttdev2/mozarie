@@ -218,8 +218,9 @@ def directml_onnx_device_id(
     GPU name. Duplicate DXGI entries are accepted only when Windows proves that
     every matching entry identifies one physical adapter: either all entries
     have one AdapterLuid, or their distinct LUIDs resolve through D3DKMT to the
-    same hardware and software PnP identity. Missing or conflicting identity
-    fails closed; numeric device ids are never used as a fallback.
+    same complete set of physical hardware/software PnP identities. Missing or
+    conflicting identity fails closed; numeric device ids are never used as a
+    fallback.
     """
     logical = int(logical_device_id)
     try:
