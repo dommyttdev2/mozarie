@@ -193,6 +193,43 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:  # pragma: no cover
         return []
 
 
+def directml_onnx_device_id(
+    logical_device_id: int,
+    *,
+    module: Any | None = None,
+    adapters: list[DxgiDevice] | None = None,
+) -> int:
+    """Resolve a torch-directml logical id to one unique DXGI adapter id.
+
+    torch-directml and ONNX Runtime DirectML may enumerate the same physical
+    GPUs in different orders. The logical id is therefore resolved by the
+    selected GPU name. If identity cannot be proven uniquely, fail closed.
+    """
+    logical = int(logical_device_id)
+    try:
+        directml = module or directml_module()
+        count = int(directml.device_count())
+        if logical < 0 or logical >= count:
+            raise ValueError(f"Invalid DirectML logical device id: {logical}")
+        selected_name = str(directml.device_name(logical)).rstrip("\0")
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError("Unable to identify the selected DirectML GPU") from exc
+
+    resolved_adapters = _dxgi_adapter_names() if adapters is None else list(adapters)
+    if not resolved_adapters:
+        raise RuntimeError("Unable to enumerate DXGI adapters completely")
+
+    target = _normalize_device_name(selected_name)
+    matches = [
+        adapter.index
+        for adapter in resolved_adapters
+        if _normalize_device_name(adapter.name) == target
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("Unable to map the selected DirectML GPU to one DXGI adapter")
+    return matches[0]
+
+
 def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
     """Expose physical GPU choices using torch-directml's stable device list."""
     directml = module or directml_module()
