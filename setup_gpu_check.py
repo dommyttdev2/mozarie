@@ -29,6 +29,8 @@ def _runtime_modules():
 
 
 def _gpu_is_ready(np, ort, torch, datasets, device: int) -> bool:
+    # Some builds warn while merely enumerating an unsupported secondary GPU.
+    # Do not hide warnings outside this one capability probe.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message=r"\s*Found GPU\d+")
         warnings.filterwarnings(
