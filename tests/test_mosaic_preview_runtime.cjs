@@ -150,12 +150,99 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
     assert.equal(state.mosaicInFlightGeneration, 0, "each switch clears its active generation");
   }
   assert.equal(draws.length - drawCountBeforeSoak, 100, "each image switch paints only its newest stroke or undo frame");
+
+  // Preview scheduling is deliberately tolerant of each transient editor
+  // state: no selected image, an active render, a stale source decode, and a
+  // source API failure all leave no frame or bitmap behind.
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = false; state.currentImage = null;
+  await context.rebuildMosaicPreview();
+  state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "transient"; state.mosaicWorkerBusy = true;
+  await context.rebuildMosaicPreview(); assert.equal(state.mosaicPending, true, "a render requested while busy is retained as one pending update");
+  state.mosaicWorkerBusy = false; state.mosaicPending = false;
+  let resolveSource; let sourceDecodes = 0;
+  context.createImageBitmap = (image) => {
+    if (image === state.currentImage) { sourceDecodes += 1; return new Promise((resolve) => { resolveSource = resolve; }); }
+    return Promise.resolve(bitmap("mask"));
+  };
+  const sourceWorker = context.createMosaicWorker();
+  const sourceFirst = context.ensureMosaicPreviewSource(sourceWorker); const sourceSecond = context.ensureMosaicPreviewSource(sourceWorker);
+  const staleDecodedSource = bitmap("stale-source-decode"); state.currentImage = { width: 12, height: 9, newer: true };
+  resolveSource(staleDecodedSource);
+  assert.deepEqual(await Promise.all([sourceFirst, sourceSecond]), ["", ""], "a source decode that belongs to an old image is rejected");
+  assert.equal(sourceDecodes, 1, "concurrent source requests share one bitmap decode"); assert.equal(staleDecodedSource.closed, true);
+  sourceWorker.onmessage({ data: { type: "heartbeat" } });
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "source-error";
+  context.createImageBitmap = async () => { throw new Error("source unavailable"); };
+  const failedWorker = context.createMosaicWorker();
+  assert.equal(await context.ensureMosaicPreviewSource(failedWorker), "");
+  assert.equal(state.mosaicPreviewEnabled, false, "a failed source bitmap disables only the preview");
+
+  // Source and mask work can each become obsolete at a different await point.
+  // Exercise those cancellations with real worker callbacks and bitmap closes.
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "source-post-error";
+  context.createImageBitmap = async () => bitmap("source-post-error");
+  const postErrorWorker = context.createMosaicWorker(); postErrorWorker.postMessage = (payload, transfer) => {
+    if (payload.type === "source") throw new Error("worker stopped");
+    return Worker.prototype.postMessage.call(postErrorWorker, payload, transfer);
+  };
+  assert.equal(await context.ensureMosaicPreviewSource(postErrorWorker), "");
+  assert.equal(state.mosaicPreviewEnabled, false, "a worker source-post failure closes the decoded source and disables preview");
+
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "stroke"; state.activeStroke = { id: "stroke" };
+  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
+  await context.rebuildMosaicPreview();
+  assert.equal(state.mosaicWorkerBusy, false); assert.equal(state.mosaicPending, true, "an active manual stroke defers preview rendering");
+  context.requestMosaicPreview(); assert.equal(state.mosaicPending, true, "requesting during a stroke only records pending work");
+  state.activeStroke = null; state.mosaicPreviewRequested = true; context.requestMosaicPreview();
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "mask-stale";
+  let resolveStaleMask; let staleMaskRequested;
+  context.createImageBitmap = (image) => image === state.currentImage
+    ? Promise.resolve(bitmap("source"))
+    : new Promise((resolve) => { staleMaskRequested = true; resolveStaleMask = resolve; });
+  const staleMaskBuild = context.rebuildMosaicPreview();
+  while (!staleMaskRequested) await Promise.resolve();
+  const staleMask = bitmap("mask-stale"); context.releaseMosaicPreview(); resolveStaleMask(staleMask); await staleMaskBuild;
+  assert.equal(staleMask.closed, true, "a mask captured for a released worker is closed without posting");
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "mask-error";
+  context.createImageBitmap = async (image) => { if (image === state.currentImage) return bitmap("source"); throw new Error("mask unavailable"); };
+  await context.rebuildMosaicPreview(); assert.equal(state.mosaicPreviewEnabled, false, "a mask capture failure disables preview and releases its worker");
+
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "worker-error";
+  const statusWorker = context.createMosaicWorker(); state.mosaicWorkerBusy = true; state.mosaicInFlightGeneration = 0;
+  statusWorker.onmessage({ data: { type: "error" } });
+  assert.equal(state.mosaicPreviewEnabled, false, "a worker error before a frame is in flight fails the pending preview");
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; const onerrorWorker = context.createMosaicWorker(); onerrorWorker.onerror();
+  assert.equal(state.mosaicPreviewEnabled, false, "an active worker error handler releases the preview worker");
+
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "raf-stroke"; state.activeStroke = null; state.mosaicPreviewRequested = false;
+  context.requestAnimationFrame = (callback) => { state.activeStroke = { id: "late-stroke" }; callback(); return 1; };
+  context.requestMosaicPreview();
+  assert.equal(state.mosaicPending, true, "a stroke starting before the scheduled preview frame leaves work pending");
+  state.activeStroke = null;
+
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "source-replaced";
+  let resolveReplacedSource; context.createImageBitmap = () => new Promise((resolve) => { resolveReplacedSource = resolve; });
+  const replacementWorker = context.createMosaicWorker(); const replacedSource = context.ensureMosaicPreviewSource(replacementWorker);
+  const newerSourcePromise = Promise.resolve("newer-source"); state.mosaicSourcePromise = newerSourcePromise;
+  resolveReplacedSource(bitmap("source-replaced")); await replacedSource;
+  assert.equal(state.mosaicSourcePromise, newerSourcePromise, "an older source completion cannot clear a newer source promise");
+
+  context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "render-post-error";
+  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask-render-post-error");
+  const renderPostWorker = context.createMosaicWorker(); renderPostWorker.postMessage = (payload, transfer) => {
+    if (payload.type === "render") throw new Error("render stopped");
+    return Worker.prototype.postMessage.call(renderPostWorker, payload, transfer);
+  };
+  await context.rebuildMosaicPreview();
+  assert.equal(state.mosaicPreviewEnabled, false, "a render post failure closes its captured mask and disables preview");
+
+  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
   context.releaseMosaicPreview();
   assert.equal(state.mosaicWorker, null, "release leaves no active worker handle");
   assert.equal(counters.workerCanvases, 0, "all controlled worker canvas handles are reclaimed");
   assert.equal(counters.workers, counters.terminated, "all controlled workers are terminated");
   assert.equal(counters.closed, counters.bitmaps, "all source, mask, and output bitmaps are reclaimed");
   assert.ok(counters.peakWorkerCanvases <= 1, "at most one worker canvas bundle is live");
-  assert.ok(counters.workers <= 102, "100 switches create a bounded number of workers");
+  assert.ok(counters.workers <= 112, "100 switches and transient states create a bounded number of workers");
   console.log("test_mosaic_preview_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
