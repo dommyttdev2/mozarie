@@ -16,6 +16,10 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
             device_name=lambda index: names[index],
         )
 
+    def assert_runtime_mapping_failure(self, callback) -> None:
+        with self.assertRaises(RuntimeError):
+            callback()
+
     def assert_gpu_unavailable(self, callback) -> None:
         with self.assertRaises(Exception) as raised:
             callback()
@@ -24,44 +28,64 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
     def test_reverse_enumeration_maps_selected_physical_gpu(self) -> None:
         directml = self._directml("AMD Radeon(TM) Graphics", " AMD   Radeon RX 6600M\0")
         adapters = [
-            SimpleNamespace(index=0, name="amd radeon rx 6600m"),
-            SimpleNamespace(index=1, name="AMD Radeon(TM) Graphics"),
+            runtime_module.DxgiDevice(index=0, name="amd radeon rx 6600m"),
+            runtime_module.DxgiDevice(index=1, name="AMD Radeon(TM) Graphics"),
         ]
-        with patch("mozarie.inference.onnx.directml_module", return_value=directml), \
-             patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=adapters):
-            self.assertEqual(onnx_module._directml_onnx_device_id(1), 0)
+        self.assertEqual(
+            runtime_module.directml_onnx_device_id(1, module=directml, adapters=adapters),
+            0,
+        )
+
+    def test_onnx_wrapper_converts_mapping_failure_to_gpu_unavailable(self) -> None:
+        with patch("mozarie.inference.onnx.directml_onnx_device_id", side_effect=RuntimeError("mapping failed")):
+            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
 
     def test_directml_identity_acquisition_failure_fails_closed(self) -> None:
-        with patch("mozarie.inference.onnx.directml_module", side_effect=ImportError("torch-directml unavailable")):
-            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
+        with patch("mozarie.runtime.directml_module", side_effect=ImportError("torch-directml unavailable")):
+            self.assert_runtime_mapping_failure(lambda: runtime_module.directml_onnx_device_id(0))
 
     def test_invalid_logical_device_id_fails_closed(self) -> None:
         directml = self._directml("GPU 0", "GPU 1")
-        with patch("mozarie.inference.onnx.directml_module", return_value=directml):
-            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(2))
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(
+                2,
+                module=directml,
+                adapters=[runtime_module.DxgiDevice(index=0, name="GPU 0")],
+            )
+        )
+
+    def test_negative_logical_device_id_fails_closed(self) -> None:
+        directml = self._directml("GPU 0", "GPU 1")
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(
+                -1,
+                module=directml,
+                adapters=[runtime_module.DxgiDevice(index=0, name="GPU 0")],
+            )
+        )
 
     def test_empty_dxgi_enumeration_fails_closed(self) -> None:
         directml = self._directml("GPU 0")
-        with patch("mozarie.inference.onnx.directml_module", return_value=directml), \
-             patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=[]):
-            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=[])
+        )
 
     def test_name_mismatch_fails_closed(self) -> None:
         directml = self._directml("Selected GPU")
-        adapters = [SimpleNamespace(index=0, name="Different GPU")]
-        with patch("mozarie.inference.onnx.directml_module", return_value=directml), \
-             patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=adapters):
-            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
+        adapters = [runtime_module.DxgiDevice(index=0, name="Different GPU")]
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
+        )
 
     def test_duplicate_dxgi_name_fails_closed(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [
-            SimpleNamespace(index=0, name="AMD Radeon RX 6600M"),
-            SimpleNamespace(index=2, name="AMD Radeon RX 6600M"),
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M"),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M"),
         ]
-        with patch("mozarie.inference.onnx.directml_module", return_value=directml), \
-             patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=adapters):
-            self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
+        )
 
     def test_dxgi_not_found_is_the_only_normal_enumeration_end(self) -> None:
         adapter = object()
