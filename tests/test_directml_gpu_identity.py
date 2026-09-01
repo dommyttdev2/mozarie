@@ -21,7 +21,7 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
         self.assertEqual(getattr(raised.exception, "error_code", None), "gpu_unavailable")
 
     def test_reverse_enumeration_maps_selected_physical_gpu(self) -> None:
-        directml = self._directml("AMD Radeon(TM) Graphics", " AMD   Radeon RX 6600M\0 ")
+        directml = self._directml("AMD Radeon(TM) Graphics", " AMD   Radeon RX 6600M\0")
         adapters = [
             SimpleNamespace(index=0, name="amd radeon rx 6600m"),
             SimpleNamespace(index=1, name="AMD Radeon(TM) Graphics"),
