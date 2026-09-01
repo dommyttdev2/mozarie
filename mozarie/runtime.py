@@ -209,14 +209,17 @@ def directml_onnx_device_id(
     *,
     module: Any | None = None,
     adapters: list[DxgiDevice] | None = None,
+    physical_identity_resolver: Any | None = None,
 ) -> int:
     """Resolve a torch-directml logical id to one unique physical DXGI GPU.
 
     torch-directml and ONNX Runtime DirectML may enumerate the same physical
-    GPUs in different orders. The logical id is therefore resolved by the
-    selected GPU name. Duplicate name entries are accepted only when DXGI
-    proves they share one AdapterLuid, meaning they identify the same physical
-    adapter. Otherwise identity is ambiguous and mapping fails closed.
+    GPUs in different orders. The logical id is first resolved by normalized
+    GPU name. Duplicate DXGI entries are accepted only when Windows proves that
+    every matching entry identifies one physical adapter: either all entries
+    have one AdapterLuid, or their distinct LUIDs resolve through D3DKMT to the
+    same hardware and software PnP identity. Missing or conflicting identity
+    fails closed; numeric device ids are never used as a fallback.
     """
     logical = int(logical_device_id)
     try:
@@ -243,11 +246,28 @@ def directml_onnx_device_id(
     if len(matches) > 1:
         luids = {adapter.luid for adapter in matches}
         if None not in luids and len(luids) == 1:
-            # DXGI enumeration order is the ONNX Runtime DirectML device order.
-            # Once every matching entry is proven to have the same AdapterLuid,
-            # the entries are aliases of one physical GPU. Use the first
-            # enumerated alias; never guess from the numeric device id.
             return matches[0].index
+        if None not in luids:
+            resolver = physical_identity_resolver
+            if resolver is None:
+                try:
+                    from .directml_identity import physical_adapter_identity
+                except (ImportError, OSError) as exc:
+                    raise RuntimeError(
+                        "Unable to map the selected DirectML GPU to one physical DXGI adapter"
+                    ) from exc
+                resolver = physical_adapter_identity
+            try:
+                identities = [resolver(adapter.luid) for adapter in matches]
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Unable to map the selected DirectML GPU to one physical DXGI adapter"
+                ) from exc
+            if all(identity is not None for identity in identities) and len(set(identities)) == 1:
+                # DXGI enumeration order is the ONNX Runtime DirectML device order.
+                # The matching entries are proven aliases of one physical GPU;
+                # use the first enumerated alias, never a numeric-index heuristic.
+                return matches[0].index
     raise RuntimeError("Unable to map the selected DirectML GPU to one physical DXGI adapter")
 
 
