@@ -243,7 +243,11 @@ def directml_onnx_device_id(
     if len(matches) > 1:
         luids = {adapter.luid for adapter in matches}
         if None not in luids and len(luids) == 1:
-            return min(adapter.index for adapter in matches)
+            # DXGI enumeration order is the ONNX Runtime DirectML device order.
+            # Once every matching entry is proven to have the same AdapterLuid,
+            # the entries are aliases of one physical GPU. Use the first
+            # enumerated alias; never guess from the numeric device id.
+            return matches[0].index
     raise RuntimeError("Unable to map the selected DirectML GPU to one physical DXGI adapter")
 
 
