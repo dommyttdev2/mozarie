@@ -25,7 +25,8 @@ function element(children = {}) {
     getAttribute(name) { return attributes.get(name); },
     querySelector(selector) { return children[selector] || null; },
     scrollIntoView(options) { this.scrolled = options; },
-    addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; },
+    listeners: new Map(),
+    addEventListener(name, callback) { this.listeners.set(name, callback); }, showModal() { this.open = true; }, close() { this.open = false; },
   };
   return node;
 }
@@ -78,7 +79,7 @@ function makeGalleryRuntime() {
   };
   const context = {
     codedError(code) { const error = new Error(); error.code = code; return error; },
-    console, Map, Set, Array, Math, String, Object, document, encodeURIComponent,
+    console, Map, Set, Array, Math, String, Object, document, encodeURIComponent, window: { addEventListener() {} },
     IntersectionObserver: class { constructor(callback, options) { this.callback = callback; this.options = options; observers.push(this); } observe(image) { this.observed = image; } unobserve(image) { image.unobserved = true; } },
     state, $: (selector) => nodes.get(selector), $$: () => [],
     t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; },
@@ -93,8 +94,9 @@ function makeGalleryRuntime() {
     async selectImage(id) { selected.push(`image:${id}`); }, async setReviewed(image, value) { image.reviewed = value; return context.reviewResult; }, async setHidden(image, value) { image.hidden = value; return context.hideResult; },
   };
   context.reviewResult = true; context.hideResult = true;
-  const source = `${fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8")}\nglobalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows, scrollCatalogImage };`;
+  const source = fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
+  vm.runInNewContext("globalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, catalogWindow, focusCatalogIndex, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows, scrollCatalogImage };", context, { filename: "test-gallery-exports.js" });
   return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
 
@@ -117,6 +119,24 @@ async function galleryInteractions() {
 
   runtime.renderGallery();
   assert.equal(runtime.gallery.children.length, 4, "the fixed-row window keeps one spacer plus the mounted cards");
+  const galleryWindow = runtime.catalogWindows.get("gallery");
+  galleryWindow.frame = 1;
+  runtime.gallery.listeners.get("scroll")();
+  assert.equal(runtime.frames.length, 0, "a queued gallery render coalesces another scroll event");
+  galleryWindow.frame = 0;
+  runtime.focusCatalogIndex(galleryWindow, -1);
+  runtime.scrollCatalogImage("missing", "one");
+  runtime.gallery.clientHeight = 30;
+  const scrollCases = [
+    [0, "one"],
+    [500, "three"],
+    [0, "three"],
+    [290, "three"],
+  ];
+  for (const [scrollTop, imageId] of scrollCases) {
+    runtime.gallery.scrollTop = scrollTop;
+    runtime.scrollCatalogImage("gallery", imageId);
+  }
   const firstNode = state.galleryNodes.get("one");
   assert.equal(firstNode.getAttribute("aria-current"), "true"); assert.match(firstNode.getAttribute("aria-label"), /sets\/one/);
   firstNode.onclick(); firstNode.onmouseenter(); firstNode.oncontextmenu({});
@@ -142,6 +162,15 @@ async function galleryInteractions() {
   runtime.renderCatalogViews();
 
   const navigationWindow = { images: Array.from({ length: 12 }, (_, index) => ({ id: `logical-${index}` })), container: { clientWidth: 500, clientHeight: 50 }, options: { columns: 5, minWidth: 1, padding: 0, gap: 0, rowHeight: 10 } };
+  assert.equal(runtime.catalogMoveIndex({ ...navigationWindow, images: [] }, 0, { key: "ArrowRight" }), -1, "empty virtual catalogs have no keyboard target");
+  assert.equal(runtime.catalogMoveIndex({ ...navigationWindow, container: { clientWidth: 500, clientHeight: 0 } }, 7, { key: "PageUp" }), 2, "zero-height catalogs retain a one-row page");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 0, { key: "ArrowLeft" }), 0, "Left keeps focus at the first logical card");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 0, { key: "ArrowRight" }), 1, "Right moves to the next logical card");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "ArrowUp" }), 2, "Up moves one virtual row");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "ArrowDown" }), 11, "Down clamps to the final virtual row");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "PageUp" }), 0, "PageUp clamps at the catalog start");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 2, { key: "PageDown" }), 12 - 1, "PageDown clamps at the catalog end");
+  assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "x" }), -1, "unmapped keys leave virtual focus unchanged");
   assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "Home" }), 5, "Home moves to the current logical row start");
   assert.equal(runtime.catalogMoveIndex(navigationWindow, 7, { key: "End" }), 9, "End moves to the current logical row end");
   assert.equal(runtime.catalogMoveIndex(navigationWindow, 11, { key: "Home" }), 10, "Home handles the first cell of an incomplete final row");
@@ -162,6 +191,7 @@ async function galleryInteractions() {
   const visibleTop = runtime.gallery.scrollTop;
   runtime.scrollCatalogImage("gallery", "window-4");
   assert.equal(runtime.gallery.scrollTop, visibleTop, "selecting another visible card does not recenter the gallery");
+  runtime.scrollCatalogImage("gallery", "missing");
   state.images = catalogImages; state.galleryFilter = "all"; runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
 
   runtime.gallery.scrollTop = 999; runtime.overviewGrid.scrollTop = 555;
@@ -198,10 +228,10 @@ async function galleryInteractions() {
 
 function makeSaveRuntime() {
   const nodes = new Map();
-  const ids = ["#applyResult", "#applyStartButton", "#deleteOriginal", "#removeAfterSave", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog", "#singleSaveOutputDirectoryStatus"];
+  const ids = ["#applyResult", "#applyStartButton", "#deleteOriginal", "#removeAfterSave", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog", "#singleSaveOutputDirectoryStatus", "#singleSaveResult", "#singleSaveSuffixRow", "#singleSaveDeleteOriginalRow", "#singleSaveOutputDirectoryRow", "#singleSaveOverwriteMode", "#singleSaveOverwriteRow", "#singleSaveDeleteOriginal", "#singleSaveChooseOutputDirectoryButton", "#singleSaveStartButton", "#singleSaveSettings", "#singleSaveCopyMode", "#singleSaveSuffix", "#singleSaveDialog"];
   for (const id of ids) nodes.set(id, element());
   nodes.get("#applyTargetMode").value = "masked"; nodes.get("#applyDivisor").value = "16"; nodes.get("#divisor").value = "16"; nodes.get("#applySuffix").value = "_m";
-  const saveMode = element(); saveMode.value = "copy";
+  const saveMode = element(); saveMode.value = "copy"; const singleSaveMode = element(); singleSaveMode.value = "copy";
   const errors = []; const calls = []; const requests = [];
   const state = {
     sourceAccess: new Map(), applyTargetIds: ["file"], images: [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }, { id: "session", sourceKind: "session", relativePath: "session.png" }],
@@ -216,10 +246,10 @@ function makeSaveRuntime() {
   };
   const context = {
     codedError(code) { const error = new Error(); error.code = code; return error; },
-    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, window: { showDirectoryPicker: async () => ({ name: "picked", async queryPermission() { return "granted"; } }) }, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
+    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, window: { showDirectoryPicker: async () => ({ name: "picked", async queryPermission() { return "granted"; } }) }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'input[name="singleSaveMode"]:checked') return singleSaveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
     state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
     fetch(url, options) { return handler(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
-    showUserError(error) { errors.push(error); }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; }, async rememberOutputDirectoryHandle() {},
+    showUserError(error) { errors.push(error); }, userErrorCode(error) { return error?.code || "internal_error"; }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; }, async rememberOutputDirectoryHandle() {},
     saveTargets() { return state.applyTargetIds; }, isBusy() { return Boolean(context.busy); }, async flushDraftSaves() { if (context.flushError) throw context.flushError; }, async waitForCandidateMutations() { calls.push("wait-candidates"); }, updateBlockSizeDisplay() { calls.push("block-size"); },
     updateActionButtons() { calls.push("actions"); }, releaseCandidateBundles(id) { calls.push(`release:${id}`); }, resetCurrentDraft() { calls.push("reset-draft"); }, pruneSourceAccess() { calls.push("prune"); },
     releaseImageCaches(id) { calls.push(`cache:${id}`); }, clearCandidateMutationState(id) { calls.push(`mutation:${id}`); }, clearReviewForRemovedImage() { calls.push("clear-review"); }, clearBatchSelection() { calls.push("clear-batch"); }, clearEditor() { calls.push("clear-editor"); }, renderCatalogViews() { calls.push("catalog"); }, updateSelectionActionBar() { calls.push("selection"); },
@@ -229,14 +259,29 @@ function makeSaveRuntime() {
     modalInvokers: new Map(), updateProgress() { calls.push("progress"); }, setStatusKey(key) { calls.push(`status:${key}`); }, scheduleJobPoll() { calls.push("schedule"); },
   };
   context.confirmed = true;
-  const source = `${fs.readFileSync(path.join(jsRoot, "save.js"), "utf8")}\nglobalThis.__saveTest = { setApplyResult, showApplyError, isTerminalApply, selectedSaveMode, sourceAccessFor, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, applyRestrictionMessage, syncApplyMode, refreshApplyTargets, openApplyDialog, draftPayload, renderOutputDirectory, setOutputDirectoryPickerBusy, pickOutputDirectory, chooseOutputDirectory, waitForBrowserSave, showBrowserSaveProgress, reconcileStoredMaskStatuses, reconcileBrowserSaveState, ensureHandlePermission, ensureSaveSources, writeSourceHandle, removeSourceHandle, snapshotSourceHandle, restoreSourceHandle, removeCompletedImagesFromCatalog, runBrowserSave, commitBrowserSaveWithRetry, cancelBrowserSave, isDefinitiveCommitRejection, startApplyFromDialog, finishSaveStart, controlApply, showRunningApply, finishApplyJob, isTerminalDetection, finishDetectionJob, pollJob, scheduleJobPoll };`;
+  const source = fs.readFileSync(path.join(jsRoot, "save.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "save.js") });
-  return { ...context.__saveTest, calls, context, errors, nodes, requests, saveMode, state, setHandler(fn) { handler = fn; } };
+  vm.runInNewContext("globalThis.__saveTest = { setApplyResult, showApplyError, isTerminalApply, selectedSaveMode, sourceAccessFor, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, applyRestrictionMessage, syncApplyMode, refreshApplyTargets, openApplyDialog, selectedSingleSaveMode, setSingleSaveResult, syncSingleSaveMode, openSingleSaveDialog, chooseSingleOutputDirectory, singleOutputName, writeSingleOutput, renderSingleSave, startSingleSave, draftPayload, renderOutputDirectory, setOutputDirectoryPickerBusy, pickOutputDirectory, ensureOutputDirectoryPermission, chooseOutputDirectory, waitForBrowserSave, showBrowserSaveProgress, reconcileStoredMaskStatuses, reconcileBrowserSaveState, ensureHandlePermission, ensureSaveSources, writeSourceHandle, removeSourceHandle, snapshotSourceHandle, restoreSourceHandle, removeCompletedImagesFromCatalog, runBrowserSave, commitBrowserSaveWithRetry, cancelBrowserSave, isDefinitiveCommitRejection, startApplyFromDialog, finishSaveStart, controlApply, showRunningApply, finishApplyJob, isTerminalDetection, finishDetectionJob, pollJob, scheduleJobPoll };", context, { filename: "test-save-exports.js" });
+  return { ...context.__saveTest, calls, context, errors, nodes, requests, saveMode, singleSaveMode, state, setHandler(fn) { handler = fn; } };
 }
 
 async function saveInteractions() {
   const runtime = makeSaveRuntime(); const { state } = runtime;
   runtime.setApplyResult("ok"); assert.equal(runtime.nodes.get("#applyResult").textContent, "ok"); runtime.setApplyResult("bad", true); runtime.showApplyError("bad"); assert.equal(runtime.errors.length, 2);
+  assert.equal(runtime.selectedSingleSaveMode(), "copy"); runtime.setSingleSaveResult("single", true); assert.equal(runtime.nodes.get("#singleSaveResult").textContent, "single");
+  await runtime.openSingleSaveDialog(null); runtime.context.busy = true; await runtime.openSingleSaveDialog("file"); runtime.context.busy = false; runtime.context.flushError = new Error("draft"); await runtime.openSingleSaveDialog("file"); runtime.context.flushError = null; state.candidateUpdateChains.set("pending", Promise.resolve()); await runtime.openSingleSaveDialog("file"); state.candidateUpdateChains.clear(); assert.equal(state.singleSave.imageId, "file");
+  state.singleSave = null; runtime.syncSingleSaveMode(); state.singleSave = { imageId: "missing" }; runtime.syncSingleSaveMode(); state.singleSave = { imageId: "file" }; runtime.singleSaveMode.value = "overwrite"; runtime.syncSingleSaveMode(); runtime.singleSaveMode.value = "copy";
+  runtime.syncSingleSaveMode(); assert.equal(runtime.nodes.get("#singleSaveStartButton").disabled, true); state.outputDirectoryHandle = { name: "single-output" }; runtime.syncSingleSaveMode(); assert.equal(runtime.nodes.get("#singleSaveStartButton").disabled, false); state.saving = true; await runtime.chooseSingleOutputDirectory(); state.saving = false;
+  runtime.context.window.showDirectoryPicker = async () => { const error = new Error("cancel"); error.name = "AbortError"; throw error; }; await runtime.chooseSingleOutputDirectory(); runtime.context.window.showDirectoryPicker = async () => { throw new Error("picker"); }; await runtime.chooseSingleOutputDirectory(); runtime.context.window.showDirectoryPicker = async () => ({ name: "picked", async queryPermission() { return "granted"; } });
+  const supportedPicker = runtime.context.window.showDirectoryPicker; runtime.context.window.showDirectoryPicker = undefined; await assert.rejects(runtime.pickOutputDirectory(), (error) => error.code === "directory_picker_unsupported"); runtime.context.window.showDirectoryPicker = supportedPicker;
+  assert.equal(runtime.singleOutputName("nested/file.png", "_m"), "file_m.png"); assert.equal(runtime.singleOutputName("file", "_m", 2), "file_m_2");
+  assert.equal(runtime.singleOutputName("", "_m"), "image_m");
+  const writeHandle = { async getFileHandle(name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; }, async removeEntry() {} };
+  const writeResponse = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } };
+  await runtime.writeSingleOutput(writeHandle, "file.png", "_m", writeResponse); const savedLocks = runtime.context.navigator.locks; runtime.context.navigator.locks = null; await assert.rejects(runtime.writeSingleOutput(writeHandle, "file.png", "_m", writeResponse), (error) => error.code === "output_write_unsupported"); runtime.context.navigator.locks = savedLocks;
+  runtime.setHandler(async (url) => url === "/api/save/render" ? { ok: false, status: 409, json: async () => ({ error_code: "save_state_changed" }) } : {}); await assert.rejects(runtime.renderSingleSave({}), (error) => error.code === "save_state_changed");
+  runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "single-token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") return { cleared: false, stale: false }; if (url === "/api/images") return { images: state.images }; return {}; });
+  state.singleSave = { imageId: "file", divisor: 16, draft: null }; state.outputDirectoryHandle = { name: "single-output", async queryPermission() { return "granted"; }, async getFileHandle(name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; }, async removeEntry() {} }; runtime.nodes.get("#singleSaveSuffix").value = "_m"; await runtime.startSingleSave({ preventDefault() {} });
   assert.equal(runtime.isTerminalApply({ kind: "detect", state: "complete" }), false); state.applyRunning = true; assert.equal(runtime.isTerminalApply({ kind: "apply", state: "complete" }), true); state.applyRunning = false; state.handledApplyStartedAt = 2; assert.equal(runtime.isTerminalApply({ kind: "apply", state: "complete", startedAt: 3 }), true);
   assert.equal(runtime.selectedSaveMode(), "copy"); assert.equal(runtime.sourceAccessFor("missing"), null); assert.equal(runtime.sourceCanOverwrite(state.images[0]), true); assert.equal(runtime.sourceCanDelete(state.images[1]), false); assert.equal(runtime.applyTargetsSupport("overwrite"), true);
   state.applyTargetIds = ["session"]; runtime.saveMode.value = "overwrite"; assert.match(runtime.applyRestrictionMessage(), /overwriteUnavailable/); runtime.syncApplyMode(); assert.equal(runtime.nodes.get("#applyStartButton").disabled, true);
@@ -280,11 +325,818 @@ async function saveInteractions() {
   state.applyFinishing = true; await runtime.finishApplyJob({}); state.applyFinishing = false; state.images = [{ id: "file" }]; state.currentId = "file"; runtime.setHandler(async (url) => url === "/api/images" ? { images: [{ id: "file" }] } : { images: [] }); await runtime.finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["file"], completedImageIds: ["file"], startedAt: 8 }); assert.equal(state.handledApplyStartedAt, 8);
   assert.equal(runtime.isTerminalDetection({ kind: "detect", state: "complete", startedAt: null }, {}), false); assert.equal(runtime.isTerminalDetection({ kind: "detect", state: "complete", startedAt: 9 }, { kind: "detect", state: "running", startedAt: 9 }), true);
   state.detectionTargetIds = ["file"]; state.currentId = "file"; await runtime.finishDetectionJob({ kind: "detect", state: "complete", startedAt: 9, imageIds: ["file"], completedImageIds: ["file"] });
+  let sourceFile = { name: "file.png", size: 2, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1, 2]).buffer; } }; const sourceHandle = { name: "file.png", async queryPermission() { return "granted"; }, async getFile() { return sourceFile; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } };
+  const sourceAccess = { fileHandle: sourceHandle, name: "file.png", size: 2, lastModified: 1 }; state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", sourceAccess]]); state.singleSave = { imageId: "file", divisor: 16, draft: null }; runtime.singleSaveMode.value = "overwrite"; runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; error.saveState = "pending"; throw error; } if (url === "/api/save/cancel") return {}; return { images: state.images }; }); await runtime.startSingleSave({ preventDefault() {} });
+  const restoreFail = { fileHandle: { async createWritable() { throw new Error("write"); } } }; await assert.rejects(runtime.restoreSourceHandle(restoreFail, Uint8Array.from([1]), false));
+  state.images = [{ id: "session", sourceKind: "session", relativePath: "session.png" }]; state.sourceAccess = new Map(); runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "session", candidateRevision: 1, relativePath: "session.png" }] } : url === "/api/images" ? { images: state.images } : {}); await assert.rejects(runtime.runBrowserSave(["session"], "_m", false, "overwrite"), (error) => error.code === "source_action_unavailable");
+  state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.currentId = "file"; state.sourceAccess = new Map([["file", sourceAccess]]); runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") { const error = new Error("pending"); error.status = 400; error.saveState = "pending"; throw error; } if (url === "/api/save/cancel") return {}; return { images: state.images }; }); await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"));
+  runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") return { cleared: false, stale: false }; if (url === "/api/images") return { images: state.images }; return {}; }); await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
+  runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") return { cleared: false, stale: false }; if (url === "/api/images") throw new Error("catalog"); return {}; }); await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
+  state.images = [{ id: "file", relativePath: "file.png" }]; state.currentId = "file"; runtime.setHandler(async (url) => url === "/api/images" ? { images: [{ id: "file", relativePath: "file.png" }] } : {}); await runtime.finishApplyJob({ kind: "apply", state: "cancelled", completed: 0, imageIds: [], completedImageIds: [], startedAt: 10 }); await runtime.finishApplyJob({ kind: "apply", state: "error", completed: 0, imageIds: [], completedImageIds: [], startedAt: 11 });
+  state.applyRunning = true; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "complete", completed: 1, imageIds: [], completedImageIds: [], startedAt: 12 } : { images: state.images }); await runtime.pollJob(); state.detectionTargetIds = ["file"]; state.job = { kind: "detect", state: "running", startedAt: 13 }; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "detect", state: "cancelled", completed: 0, imageIds: ["file"], completedImageIds: [], startedAt: 13 } : { images: state.images }); await runtime.pollJob(); runtime.setHandler(async (url) => url === "/api/job" ? { kind: "detect", state: "error", completed: 0, imageIds: ["file"], completedImageIds: [], startedAt: 14 } : { images: state.images }); state.job = { kind: "detect", state: "running", startedAt: 14 }; await runtime.pollJob();
+  state.applyRunning = true; state.applyFinishing = false; state.job = { kind: "apply", state: "running", startedAt: 15 }; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "cancelled", completed: 0, imageIds: [], completedImageIds: [], startedAt: 15 } : { images: state.images }); await runtime.pollJob(); state.pageLoadedAt = 1; state.handledDetectionStartedAt = null; state.job = { kind: "detect", state: "running", startedAt: 16 }; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "detect", state: "cancelled", completed: 0, imageIds: ["file"], completedImageIds: [], startedAt: 16 } : { images: state.images }); await runtime.pollJob();
+  state.applyRunning = true; state.applyFinishing = false; state.job = { kind: "apply", state: "running", startedAt: 17 }; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "error", completed: 0, imageIds: [], completedImageIds: [], startedAt: 17, errorCode: "internal_error" } : { images: state.images }); await runtime.pollJob(); state.handledDetectionStartedAt = null; state.processing = { kind: "detect", startedAt: 18 }; state.job = { kind: "detect", state: "running", startedAt: 18 }; const cancelledDetection = { kind: "detect", state: "cancelled", completed: 0, imageIds: ["file"], completedImageIds: [], startedAt: 18 }; assert.equal(runtime.isTerminalDetection(cancelledDetection, state.job), true); runtime.setHandler(async (url) => url === "/api/job" ? cancelledDetection : { images: state.images }); await runtime.pollJob(); state.processing = null;
   state.browserSave = {}; await runtime.pollJob(); state.browserSave = null; state.pollInFlight = null; runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "running", total: 2, completed: 1, current: "file" } : { images: state.images }); await runtime.pollJob(); runtime.setHandler(async () => { throw new Error("offline"); }); await runtime.pollJob(); await runtime.pollJob(); await runtime.pollJob(); runtime.scheduleJobPoll(true); runtime.scheduleJobPoll(false);
+  const detectionRuntime = makeSaveRuntime(); detectionRuntime.state.images = [{ id: "file", relativePath: "file.png" }]; detectionRuntime.state.currentId = "file"; detectionRuntime.state.pageLoadedAt = 1; detectionRuntime.state.job = { kind: "detect", state: "running", startedAt: 99 }; detectionRuntime.setHandler(async (url) => url === "/api/job" ? { kind: "detect", state: "cancelled", completed: 0, imageIds: ["file"], completedImageIds: [], startedAt: 99 } : { images: detectionRuntime.state.images }); await detectionRuntime.pollJob(); assert.ok(detectionRuntime.calls.includes("status:status.detectCancelled"));
+  detectionRuntime.state.handledDetectionStartedAt = null; detectionRuntime.state.job = { kind: "detect", state: "running", startedAt: 100 }; detectionRuntime.setHandler(async (url) => url === "/api/job" ? { kind: "detect", state: "complete", completed: 1, imageIds: ["file"], completedImageIds: ["file"], startedAt: 100 } : { images: detectionRuntime.state.images }); await detectionRuntime.pollJob(); assert.ok(detectionRuntime.calls.includes("status:status.detectDone"));
+
+  const pipeFailure = { body: { async pipeTo() { throw new Error("write failed"); } } };
+  const outputCases = [
+    [{ async getFileHandle() { const error = new Error("blocked"); error.name = "SecurityError"; throw error; } }, "file.png", "_m", pipeFailure, "blocked"],
+    [{ async getFileHandle(_name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { const error = new Error("unsupported"); error.name = "TypeError"; throw error; } }; }, async removeEntry() {} }, "file.png", "_m", pipeFailure, "output_write_unsupported"],
+  ];
+  for (const [handle, name, suffix, response, expected] of outputCases) {
+    await assert.rejects(runtime.writeSingleOutput(handle, name, suffix, response), (error) => error.code === expected || error.message === expected);
+  }
+  const cleanupFailure = { async getFileHandle(_name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { return { async abort() {}, async write() {}, async close() {} }; } }; }, async removeEntry() { throw new Error("cleanup"); } };
+  await assert.rejects(runtime.writeSingleOutput(cleanupFailure, "file.png", "_m", pipeFailure), (error) => error.code === "output_cleanup_failed");
+  assert.equal(await runtime.ensureHandlePermission(null, true), undefined);
+  const permissionDenied = { fileHandle: { async queryPermission() { return "denied"; }, async requestPermission() { return "denied"; }, async getFile() { return { size: 0, lastModified: 0 }; } } };
+  await assert.rejects(runtime.ensureHandlePermission(permissionDenied, true), (error) => error.code === "source_permission_denied");
+  const busyAccess = { fileHandle: { async createWritable() { const error = new Error("busy"); error.name = "NoModificationAllowedError"; throw error; } } };
+  await assert.rejects(runtime.writeSourceHandle(busyAccess, { body: { async pipeTo() {} } }), (error) => error.code === "source_busy");
+}
+
+// Keep these failure boundaries in fresh browser-shaped runtimes: a failed
+// save must leave both the source and its chosen output directory coherent.
+async function saveCoverageMatrix() {
+  const response = (token = "token") => ({ ok: true, headers: { get() { return token; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([9])); await stream.close(); } } });
+  const missing = () => { const error = new Error("missing"); error.name = "NotFoundError"; throw error; };
+
+  for (const [label, setup, expectation] of [
+    ["directory permission outcomes", async (runtime) => {
+      const { state } = runtime;
+      await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error.code === "output_permission_denied");
+      for (const permission of ["denied", "prompt"]) {
+        const handle = { async queryPermission() { return permission; }, async requestPermission() { return "denied"; } };
+        await assert.rejects(runtime.ensureOutputDirectoryPermission(handle), (error) => error.code === "output_permission_denied");
+      }
+      const throwing = { async queryPermission() { throw new Error("permission"); } };
+      await assert.rejects(runtime.ensureOutputDirectoryPermission(throwing), (error) => error.code === "output_permission_denied");
+      state.outputDirectoryHandle = { name: "ready", async queryPermission() { return "granted"; } };
+    }, () => {}],
+    ["output lock and stream cleanup", async (runtime) => {
+      const lock = runtime.context.navigator.locks;
+      runtime.context.navigator.locks = { async request() { throw new Error("lock"); } };
+      await assert.rejects(runtime.writeSingleOutput({}, "file.png", "_m", response()), (error) => error.code === "output_write_unsupported");
+      runtime.context.navigator.locks = lock;
+      let aborted = false; let removed = false;
+      const output = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {}, async abort() { aborted = true; } }; } }; }, async removeEntry() { removed = true; } };
+      await assert.rejects(runtime.writeSingleOutput(output, "file.png", "_m", { body: { async pipeTo() { throw new Error("pipe"); } } }), /pipe/);
+      assert.equal(aborted, true); assert.equal(removed, true);
+      let sequence = 0;
+      const collision = { async getFileHandle(name, options) { if (!options?.create) { sequence += 1; if (sequence === 1) return { name }; return missing(); } return { async createWritable() { return { async write() {}, async close() {} }; } }; } };
+      assert.equal((await runtime.writeSingleOutput(collision, "file.png", "_m", response())).name, "file_m_1.png");
+    }, () => {}],
+    ["source permission and write translation", async (runtime) => {
+      const permission = { fileHandle: { async queryPermission() { return "granted"; }, async getFile() { return { size: 1, lastModified: 2 }; } } };
+      await runtime.ensureHandlePermission(permission, false);
+      const unsupported = { fileHandle: { async createWritable() { const error = new Error("unsupported"); error.name = "NotSupportedError"; throw error; } } };
+      await assert.rejects(runtime.writeSourceHandle(unsupported, response()), (error) => error.code === "source_write_unsupported");
+      const aborting = { fileHandle: { async createWritable() { return { async abort() {}, async write() {}, async close() {} }; } } };
+      await assert.rejects(runtime.writeSourceHandle(aborting, { body: { async pipeTo() { throw new Error("pipe"); } } }), /pipe/);
+      const noBuffer = { fileHandle: { async getFile() { return {}; } } };
+      assert.equal(await runtime.snapshotSourceHandle(noBuffer), null);
+    }, () => {}],
+    ["single save exits and confirmations", async (runtime) => {
+      const { state, nodes } = runtime;
+      const event = { preventDefault() {} };
+      state.singleSave = null; await runtime.startSingleSave(event);
+      state.singleSave = { imageId: "file", divisor: 16, draft: null }; state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+      runtime.singleSaveMode.value = "copy"; state.outputDirectoryHandle = null; await runtime.startSingleSave(event);
+      state.outputDirectoryHandle = { name: "out", async queryPermission() { return "granted"; } };
+      runtime.singleSaveMode.value = "overwrite"; runtime.context.confirmed = false; await runtime.startSingleSave(event);
+      runtime.context.confirmed = true; runtime.singleSaveMode.value = "copy"; nodes.get("#singleSaveDeleteOriginal").checked = true; runtime.context.confirmed = false; await runtime.startSingleSave(event);
+      runtime.context.confirmed = true;
+    }, () => {}],
+    ["single copy keeps and deletes source", async (runtime) => {
+      const { state, nodes } = runtime;
+      const file = { name: "session.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([3]).buffer; } };
+      let removed = false;
+      const fileHandle = { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; } };
+      const access = { fileHandle, parentHandle: { async removeEntry() { removed = true; }, async getFileHandle() { return { async createWritable() { return { async write() {}, async close() {} }; } }; } }, name: file.name, size: 1, lastModified: 1 };
+      state.images = [{ id: "session", sourceKind: "session", relativePath: "session.png" }]; state.singleSave = { imageId: "session", divisor: 16, draft: null }; state.outputDirectoryHandle = { name: "out", async queryPermission() { return "granted"; }, async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() {} }; state.sourceAccess = new Map([["session", access]]);
+      runtime.singleSaveMode.value = "copy"; nodes.get("#singleSaveDeleteOriginal").checked = true;
+      runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "session", candidateRevision: 1, relativePath: "session.png" }] } : url === "/api/save/render" ? response() : url === "/api/save/commit" ? { cleared: true, stale: false } : url === "/api/images" ? { images: state.images } : {});
+      await runtime.startSingleSave({ preventDefault() {} }); assert.equal(removed, true);
+    }, () => {}],
+  ]) {
+    const runtime = makeSaveRuntime();
+    await setup(runtime);
+    expectation(runtime);
+    assert.ok(label);
+  }
+
+  const singleFailureCases = [
+    {
+      label: "image disappears before the single save dialog opens",
+      run: async (runtime) => {
+        runtime.state.candidateUpdateChains.set("pending", Promise.resolve());
+        await runtime.openSingleSaveDialog("missing");
+        assert.equal(runtime.state.singleSave, undefined);
+      },
+    },
+    {
+      label: "prepare has no single save entry",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.singleSave = { imageId: "file", divisor: 16, draft: null };
+        state.outputDirectoryHandle = { name: "out", async queryPermission() { return "granted"; } };
+        runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [] } : {});
+        await runtime.startSingleSave({ preventDefault() {} });
+        assert.match(runtime.nodes.get("#singleSaveResult").textContent, /save_state_changed/);
+      },
+    },
+    {
+      label: "render response has no save token",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.singleSave = { imageId: "file", divisor: 16, draft: null };
+        state.outputDirectoryHandle = { name: "out", async queryPermission() { return "granted"; } };
+        runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] } : url === "/api/save/render" ? response("") : {});
+        await runtime.startSingleSave({ preventDefault() {} });
+        assert.match(runtime.nodes.get("#singleSaveResult").textContent, /save_state_changed/);
+      },
+    },
+    {
+      label: "failed copy removes its browser output",
+      run: async (runtime) => {
+        const { state } = runtime;
+        let removed = false;
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.singleSave = { imageId: "file", divisor: 16, draft: null };
+        state.outputDirectoryHandle = {
+          name: "out", async queryPermission() { return "granted"; },
+          async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; },
+          async removeEntry() { removed = true; },
+        };
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/save/status") return { state: "pending" };
+          return {};
+        });
+        await runtime.startSingleSave({ preventDefault() {} });
+        assert.equal(removed, true);
+      },
+    },
+    {
+      label: "successful overwrite reports completion",
+      run: async (runtime) => {
+        const { state } = runtime;
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } };
+        const access = { fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }, name: file.name, size: 1, lastModified: 1 };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.sourceAccess = new Map([["file", access]]); state.singleSave = { imageId: "file", divisor: 16, draft: null };
+        runtime.singleSaveMode.value = "overwrite";
+        runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] } : url === "/api/save/render" ? response() : url === "/api/save/commit" ? { cleared: false, stale: false } : url === "/api/images" ? { images: state.images } : {});
+        await runtime.startSingleSave({ preventDefault() {} });
+        assert.match(runtime.nodes.get("#singleSaveResult").textContent, /apply\.complete/);
+      },
+    },
+  ];
+  for (const scenario of singleFailureCases) {
+    const runtime = makeSaveRuntime();
+    await scenario.run(runtime);
+    assert.ok(scenario.label);
+  }
+
+  const helperFailureCases = [
+    {
+      label: "output file names are exhausted",
+      run: async (runtime) => {
+        const occupied = { async getFileHandle() { return {}; } };
+        await assert.rejects(runtime.writeSingleOutput(occupied, "file.png", "_m", response()), (error) => error.code === "output_name_exhausted");
+      },
+    },
+    {
+      label: "output abort failure preserves the pipe failure",
+      run: async (runtime) => {
+        const output = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async abort() { throw new Error("abort"); } }; } }; }, async removeEntry() {} };
+        await assert.rejects(runtime.writeSingleOutput(output, "file.png", "_m", { body: { async pipeTo() { throw new Error("pipe"); } } }), /pipe/);
+      },
+    },
+    {
+      label: "render allows a missing token meta element",
+      run: async (runtime) => {
+        const querySelector = runtime.context.document.querySelector;
+        runtime.context.document.querySelector = (selector) => selector === 'meta[name="mozarie-token"]' ? null : querySelector(selector);
+        runtime.setHandler(async (url, options) => {
+          assert.equal(url, "/api/save/render"); assert.equal(options.headers["X-Mozarie-Token"], ""); return response();
+        });
+        await runtime.renderSingleSave({ imageId: "file" });
+      },
+    },
+    {
+      label: "apply directory selection ignores busy and empty picks",
+      run: async (runtime) => {
+        runtime.state.applyRunning = true; await runtime.chooseOutputDirectory();
+        runtime.state.applyRunning = false; runtime.context.window.showDirectoryPicker = async () => null;
+        await runtime.chooseOutputDirectory();
+        assert.equal(runtime.nodes.get("#applyResult").textContent, "");
+      },
+    },
+    {
+      label: "source and restore abort failures preserve the write failure",
+      run: async (runtime) => {
+        const failing = { fileHandle: { async createWritable() { return { async abort() { throw new Error("abort"); } }; } } };
+        await assert.rejects(runtime.writeSourceHandle(failing, { body: { async pipeTo() { throw new Error("pipe"); } } }), /pipe/);
+        const restore = { fileHandle: { async createWritable() { return { async write() { throw new Error("write"); }, async close() {}, async abort() { throw new Error("abort"); } }; } } };
+        await assert.rejects(runtime.restoreSourceHandle(restore, Uint8Array.from([1]), false), /write/);
+      },
+    },
+    {
+      label: "restore translates exclusive writer failures",
+      run: async (runtime) => {
+        for (const [name, code] of [["NoModificationAllowedError", "source_busy"], ["TypeError", "source_write_unsupported"]]) {
+          const access = { fileHandle: { async createWritable() { const error = new Error(name); error.name = name; throw error; } } };
+          await assert.rejects(runtime.restoreSourceHandle(access, Uint8Array.from([1]), false), (error) => error.code === code);
+        }
+      },
+    },
+  ];
+  for (const scenario of helperFailureCases) {
+    const runtime = makeSaveRuntime();
+    await scenario.run(runtime);
+    assert.ok(scenario.label);
+  }
+
+  const runCases = [
+    { mode: "copy", deleteOriginal: false, sourceKind: "filesystem", committed: { cleared: true, stale: true, deleted: false }, removeAfterSave: true },
+    { mode: "copy", deleteOriginal: true, sourceKind: "session", committed: { cleared: true, stale: false, deleted: true }, removeAfterSave: true },
+    { mode: "overwrite", deleteOriginal: false, sourceKind: "filesystem", committed: { cleared: true, stale: false, deleted: false }, removeAfterSave: false },
+  ];
+  for (const scenario of runCases) {
+    const runtime = makeSaveRuntime(); const { state } = runtime;
+    const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([2]).buffer; } };
+    const access = { fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }, name: file.name, size: 1, lastModified: 1 };
+    if (scenario.deleteOriginal) access.parentHandle = { async removeEntry() {}, async getFileHandle() { return access.fileHandle; } };
+    state.images = [{ id: "file", sourceKind: scenario.sourceKind, relativePath: "file.png" }]; state.currentId = "file"; state.sourceAccess = new Map([["file", access]]); state.outputDirectoryHandle = { name: "out", async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; }, async removeEntry() {} };
+    runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] } : url === "/api/save/render" ? response() : url === "/api/save/commit" ? scenario.committed : url === "/api/catalog/remove" ? { images: state.images, removedImageIds: [] } : url === "/api/images" ? { images: state.images } : {});
+    await runtime.runBrowserSave(["file"], "_m", scenario.deleteOriginal, scenario.mode, scenario.removeAfterSave);
+  }
+
+  const browserBatchFailureCases = [
+    {
+      label: "copy rejects a missing save token without committing",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() {} };
+        runtime.setHandler(async (url) => url === "/api/save/prepare" ? { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] } : url === "/api/save/render" ? response("") : url === "/api/images" ? { images: state.images } : {});
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "copy"), (error) => error.code === "save_state_changed");
+      },
+    },
+    {
+      label: "copy restores a deleted source when commit is definitively rejected",
+      run: async (runtime) => {
+        const { state } = runtime;
+        let restored = false; let outputRemoved = false;
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } };
+        const restoredHandle = { name: file.name, async getFile() { return file; }, async createWritable() { return { async write() { restored = true; }, async close() {} }; } };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; } }, parentHandle: { async removeEntry() {}, async getFileHandle() { return restoredHandle; } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() { outputRemoved = true; } };
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", true, "copy"), /rejected/);
+        assert.equal(restored, true); assert.equal(outputRemoved, true);
+      },
+    },
+    {
+      label: "stale masks skip one batch entry and later entries still complete",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "stale", sourceKind: "filesystem", relativePath: "stale.png" }, { id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() {} };
+        runtime.setHandler(async (url, options) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "stale", candidateRevision: 1, relativePath: "stale.png" }, { imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") { if (JSON.parse(options.body).imageId === "stale") throw runtime.context.codedError("no_effective_mask"); return response(); }
+          if (url === "/api/save/commit") return { cleared: false, stale: false, deleted: false };
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await runtime.runBrowserSave(["stale", "file"], "_m", false, "copy");
+        assert.match(runtime.nodes.get("#applyResult").textContent, /apply\.complete/);
+      },
+    },
+  ];
+  for (const scenario of browserBatchFailureCases) {
+    const runtime = makeSaveRuntime();
+    await scenario.run(runtime);
+    assert.ok(scenario.label);
+  }
+
+  // Exercise the browser-owned batch failure boundaries as a matrix.  The
+  // source and destination must be reconciled together whenever a commit
+  // does not settle conclusively.
+  const batchRecoveryCases = [
+    {
+      label: "copy deletion rolls back its source and cleans its output after a definitive rejection",
+      mode: "copy",
+      run: async (runtime) => {
+        const { state } = runtime; let restored = 0; let cleaned = 0;
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([4]).buffer; } };
+        const restoredHandle = { name: file.name, async getFile() { return file; }, async createWritable() { return { async write() { restored += 1; }, async close() {} }; } };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; } }, parentHandle: { async removeEntry() {}, async getFileHandle() { return restoredHandle; } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() { cleaned += 1; } };
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", true, "copy"), /rejected/);
+        assert.equal(restored, 1); assert.equal(cleaned, 1);
+      },
+    },
+    {
+      label: "copy deletion reports restore failure when its snapshot is unavailable",
+      mode: "copy",
+      run: async (runtime) => {
+        const { state } = runtime; let cleaned = 0;
+        const file = { name: "file.png", size: 1, lastModified: 1 };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; } }, parentHandle: { async removeEntry() {}, async getFileHandle() { throw new Error("must not restore without a snapshot"); } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() { cleaned += 1; } };
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", true, "copy"), (error) => error.code === "source_restore_failed");
+        assert.equal(cleaned, 0, "a failed rollback keeps the output for manual recovery");
+      },
+    },
+    {
+      label: "copy preserves its commit rejection when output cleanup also fails",
+      mode: "copy",
+      run: async (runtime) => {
+        const { state } = runtime; let cleanupAttempts = 0;
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+        state.outputDirectoryHandle = { async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() { cleanupAttempts += 1; throw new Error("cleanup"); } };
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "copy"), /rejected/);
+        assert.equal(cleanupAttempts, 1);
+      },
+    },
+    {
+      label: "overwrite turns a non-JSON render failure into an internal error",
+      mode: "overwrite",
+      run: async (runtime) => {
+        const { state } = runtime;
+        runtime.context.responseError = (binary, body) => { const error = new Error("save_render_failed"); error.code = body.error_code || "internal_error"; error.status = binary.status; return error; };
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([5]).buffer; } };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { throw new Error("must not write"); } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return { ok: false, status: 502, async json() { throw new Error("not JSON"); } };
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), (error) => error.code === "internal_error" && error.status === 502);
+      },
+    },
+    {
+      label: "overwrite passes an empty render token through to its commit",
+      mode: "overwrite",
+      run: async (runtime) => {
+        const { state } = runtime; let token;
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([6]).buffer; } };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() {}, async close() {} }; } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        runtime.setHandler(async (url, options) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response("");
+          if (url === "/api/save/commit") { token = JSON.parse(options.body).saveToken; return { cleared: false, stale: false, deleted: false }; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
+        assert.equal(token, "");
+      },
+    },
+    {
+      label: "overwrite restores its access handle after pending and definitive commits fail",
+      mode: "overwrite",
+      run: async (runtime) => {
+        for (const [status, saveState] of [[503, "pending"], [400, null]]) {
+          const { state } = runtime; let writes = 0; let cancelled = 0;
+          const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([7]).buffer; } };
+          const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() { writes += 1; }, async close() {} }; } } };
+          state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+          runtime.setHandler(async (url) => {
+            if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+            if (url === "/api/save/render") return response();
+            if (url === "/api/save/commit") { const error = new Error("commit"); error.status = status; throw error; }
+            if (url === "/api/save/status") return { state: saveState };
+            if (url === "/api/save/cancel") { cancelled += 1; return {}; }
+            if (url === "/api/images") return { images: state.images };
+            return {};
+          });
+          await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), /commit/);
+          assert.equal(writes, 2, `${status} restores the original source bytes`); assert.equal(cancelled, saveState === "pending" ? 1 : 0);
+        }
+      },
+    },
+    {
+      label: "overwrite reports a failed source restoration",
+      mode: "overwrite",
+      run: async (runtime) => {
+        const { state } = runtime; let writers = 0;
+        const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([8]).buffer; } };
+        const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { writers += 1; if (writers === 2) { const error = new Error("unsupported"); error.name = "TypeError"; throw error; } return { async write() {}, async close() {} }; } } };
+        state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.sourceAccess = new Map([["file", access]]);
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+          if (url === "/api/save/render") return response();
+          if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), (error) => error.code === "source_restore_failed");
+      },
+    },
+    {
+      label: "filesystem overwrite and invalid parallelism fall back to one serial worker",
+      mode: "overwrite",
+      run: async (runtime) => {
+        const { state } = runtime; let active = 0; let maximum = 0;
+        state.images = ["one", "two"].map((id) => ({ id, sourceKind: "filesystem", relativePath: `${id}.png` })); state.settings.saving.parallelism = 0;
+        runtime.setHandler(async (url, options) => {
+          if (url === "/api/save/prepare") return { entries: ["one", "two"].map((imageId) => ({ imageId, candidateRevision: 1, relativePath: `${imageId}.png` })) };
+          if (url === "/api/save/render") { active += 1; maximum = Math.max(maximum, active); await new Promise((resolve) => setImmediate(resolve)); active -= 1; return response(); }
+          if (url === "/api/save/commit") return { cleared: false, stale: false, deleted: false };
+          if (url === "/api/images") return { images: state.images };
+          return {};
+        });
+        await runtime.runBrowserSave(["one", "two"], "_m", false, "overwrite");
+        assert.equal(maximum, 1);
+      },
+    },
+  ];
+  for (const scenario of batchRecoveryCases) {
+    const runtime = makeSaveRuntime();
+    await scenario.run(runtime);
+    assert.ok(scenario.label && scenario.mode);
+  }
+
+  for (const status of [400, 503]) {
+    const runtime = makeSaveRuntime(); let attempts = 0;
+    runtime.setHandler(async (url) => {
+      if (url === "/api/save/commit") { attempts += 1; const error = new Error("commit"); error.status = status; throw error; }
+      if (url === "/api/save/status") return status === 503 ? { state: "committed" } : { state: "pending" };
+      return {};
+    });
+    if (status === 400) await assert.rejects(runtime.commitBrowserSaveWithRetry({}), /commit/);
+    else assert.equal((await runtime.commitBrowserSaveWithRetry({})).state, "committed");
+    assert.ok(attempts >= 1);
+  }
+
+  for (const job of [
+    { kind: "apply", state: "running", total: 0, completed: 4, current: "", startedAt: 30 },
+    { kind: "apply", state: "paused", total: 3, completed: 2, current: "file", startedAt: 31 },
+  ]) {
+    const runtime = makeSaveRuntime(); runtime.state.job = { kind: "idle", state: "idle" };
+    runtime.setHandler(async (url) => url === "/api/job" ? job : { images: runtime.state.images });
+    await runtime.pollJob(); assert.equal(runtime.state.job, job);
+  }
+
+  for (const job of [
+    { kind: "detect", state: "complete", startedAt: 41, imageIds: [], completedImageIds: [] },
+    { kind: "detect", state: "error", startedAt: 42, imageIds: ["file"], completedImageIds: [] },
+  ]) {
+    const runtime = makeSaveRuntime(); runtime.state.images = [{ id: "file" }]; runtime.state.currentId = "file"; runtime.state.pageLoadedAt = 1; runtime.state.job = { kind: "detect", state: "running", startedAt: job.startedAt };
+    runtime.setHandler(async (url) => url === "/api/job" ? job : { images: runtime.state.images });
+    await runtime.pollJob();
+  }
+
+  const lifecycleCases = [
+    {
+      label: "apply dialog waits for candidate writes before opening",
+      run: async (runtime) => {
+        runtime.state.candidateUpdateChains.set("file", Promise.resolve());
+        await runtime.openApplyDialog({ initialMode: "masked" });
+        assert.ok(runtime.calls.includes("wait-candidates"));
+        assert.equal(runtime.nodes.get("#applyDialog").open, true);
+      },
+    },
+    {
+      label: "apply directory selection accepts an empty picker result",
+      run: async (runtime) => {
+        runtime.context.pickOutputDirectory = async () => null;
+        await runtime.chooseOutputDirectory();
+        assert.equal(runtime.errors.length, 0);
+      },
+    },
+    {
+      label: "paused browser saves resume before the next entry",
+      run: async (runtime) => {
+        const save = { paused: true, cancelled: false, failed: false };
+        runtime.context.setTimeout = (callback, delay) => { assert.equal(delay, 100); save.paused = false; callback(); return 1; };
+        assert.equal(await runtime.waitForBrowserSave(save), true);
+      },
+    },
+    {
+      label: "catalog cleanup infers removed images when the server omits them",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "file" }, { id: "kept" }]; state.currentId = "file";
+        runtime.setHandler(async (url) => url === "/api/catalog/remove" ? { images: [{ id: "kept" }] } : {});
+        await runtime.removeCompletedImagesFromCatalog(["file"], ["file", "kept"], new Map([["file", { id: "file" }]]));
+        assert.ok(runtime.calls.includes("cache:file"));
+      },
+    },
+    {
+      label: "uncertain commit reports the server save state",
+      run: async (runtime) => {
+        runtime.setHandler(async (url) => {
+          if (url === "/api/save/commit") { const error = new Error("down"); error.status = 503; throw error; }
+          if (url === "/api/save/status") return { state: "pending" };
+          return {};
+        });
+        await assert.rejects(runtime.commitBrowserSaveWithRetry({ imageId: "file" }), (error) => error.saveState === "pending");
+      },
+    },
+    {
+      label: "apply confirmations can stop overwrite or delete before saving",
+      run: async (runtime) => {
+        const event = { preventDefault() {} };
+        runtime.state.applyTargetIds = ["file"]; runtime.saveMode.value = "overwrite"; runtime.context.confirmed = false;
+        await runtime.startApplyFromDialog(event);
+        assert.equal(runtime.state.applyRunning, false);
+        runtime.saveMode.value = "copy"; runtime.nodes.get("#deleteOriginal").checked = true;
+        runtime.state.outputDirectoryHandle = { async queryPermission() { return "granted"; } };
+        await runtime.startApplyFromDialog(event);
+        assert.equal(runtime.state.applyRunning, false);
+      },
+    },
+    {
+      label: "apply stops if importing begins while candidate writes settle",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.applyTargetIds = ["file"]; state.candidateUpdateChains.set("file", Promise.resolve()); state.outputDirectoryHandle = { async queryPermission() { return "granted"; } };
+        runtime.context.waitForCandidateMutations = async () => { runtime.calls.push("wait-before-import"); state.importing = true; };
+        await runtime.startApplyFromDialog({ preventDefault() {} });
+        assert.ok(runtime.calls.includes("wait-before-import"));
+        assert.equal(state.applyRunning, false);
+      },
+    },
+    {
+      label: "remote apply controls post their requested action",
+      run: async (runtime) => {
+        await runtime.controlApply("cancel");
+        assert.equal(runtime.requests.at(-1).url, "/api/job/cancel");
+      },
+    },
+    {
+      label: "apply completion falls back to stored targets and ignores stale reloads",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.applyTargetIds = ["file"]; state.images = [{ id: "file" }];
+        runtime.context.isCurrentGeneration = () => false;
+        runtime.setHandler(async (url) => url === "/api/images" ? { images: [{ id: "file" }] } : {});
+        await runtime.finishApplyJob({ kind: "apply", state: "complete", completed: 0, completedImageIds: null });
+        assert.equal(state.images[0].id, "file");
+      },
+    },
+    {
+      label: "apply cleanup stops if its catalog epoch changes",
+      run: async (runtime) => {
+        const { state } = runtime;
+        state.images = [{ id: "file" }]; state.currentId = "file";
+        runtime.context.removeCompletedImagesFromCatalog = async () => { state.catalogEpoch += 1; };
+        runtime.setHandler(async (url) => url === "/api/images" ? { images: [{ id: "file" }] } : {});
+        await runtime.finishApplyJob({ kind: "apply", state: "complete", completed: 1, imageIds: ["file"], completedImageIds: ["file"], removeAfterSave: true });
+        assert.equal(state.applyFinishing, false);
+      },
+    },
+    {
+      label: "detection reloads ignore stale generations",
+      run: async (runtime) => {
+        runtime.state.images = [{ id: "file" }];
+        runtime.context.isCurrentGeneration = () => false;
+        runtime.setHandler(async (url) => url === "/api/images" ? { images: [{ id: "replacement" }] } : {});
+        await runtime.finishDetectionJob({ kind: "detect", state: "complete", startedAt: 1, imageIds: ["file"], completedImageIds: ["file"] });
+        assert.equal(runtime.state.images[0].id, "file");
+      },
+    },
+    {
+      label: "polling shares its in-flight request and reports apply failures",
+      run: async (runtime) => {
+        runtime.state.pollInFlight = Promise.resolve("shared");
+        assert.equal(await runtime.pollJob(), "shared");
+        runtime.state.pollInFlight = null; runtime.state.applyRunning = true;
+        runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "error", completed: 0, startedAt: 2, errorCode: "save_failed" } : { images: [] });
+        await runtime.pollJob();
+        assert.equal(runtime.errors.at(-1).code, "save_failed");
+      },
+    },
+    {
+      label: "polling renders zero totals and chooses each scheduling interval",
+      run: async (runtime) => {
+        const delays = [];
+        runtime.context.setTimeout = (_callback, delay) => { delays.push(delay); return delays.length; };
+        runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "running", total: 0, completed: 9, current: "file" } : {});
+        await runtime.pollJob();
+        assert.equal(runtime.nodes.get("#applyProgress").value, 1);
+        runtime.scheduleJobPoll(true);
+        runtime.context.document.visibilityState = "hidden"; runtime.scheduleJobPoll();
+        runtime.context.document.visibilityState = "visible"; runtime.state.pollFailures = 2; runtime.scheduleJobPoll();
+        runtime.state.pollFailures = 0; runtime.state.job = { kind: "apply", state: "paused" }; runtime.scheduleJobPoll();
+        runtime.state.job = { kind: "idle", state: "idle" }; runtime.scheduleJobPoll();
+        assert.deepEqual(delays.slice(-5), [0, 10000, 10000, 600, 2500]);
+      },
+    },
+  ];
+  for (const scenario of lifecycleCases) {
+    const runtime = makeSaveRuntime();
+    await scenario.run(runtime);
+    assert.ok(scenario.label);
+  }
+
+  // Keep these at the end: the coverage merger must see the original save.js
+  // source execute through each browser-owned recovery boundary.
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let writes = 0;
+    const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } };
+    const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() { writes += 1; }, async close() {} }; } } };
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: file.name }]; state.sourceAccess = new Map([["file", access]]); state.singleSave = { imageId: "file", divisor: 16, draft: null };
+    runtime.singleSaveMode.value = "overwrite";
+    runtime.setHandler(async (url) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: file.name }] };
+      if (url === "/api/save/render") return response();
+      if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await runtime.startSingleSave({ preventDefault() {} });
+    assert.equal(writes, 2, "a rejected single overwrite restores its source");
+  }
+
+  {
+    const runtime = makeSaveRuntime(); let created = false;
+    const access = {
+      name: "restored.png", fileHandle: { name: "restored.png" },
+      parentHandle: { async getFileHandle(name, options) {
+        created = name === "restored.png" && options.create;
+        return { name, async createWritable() { return { async write() { throw new Error("write failed"); }, async close() {} }; } };
+      } },
+    };
+    await assert.rejects(runtime.restoreSourceHandle(access, Uint8Array.from([1]), true), /write failed/);
+    assert.equal(created, true);
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let writes = 0; let renderOptions;
+    const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([2]).buffer; } };
+    const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() { writes += 1; }, async close() {} }; } } };
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: file.name }]; state.sourceAccess = new Map([["file", access]]);
+    const querySelector = runtime.context.document.querySelector;
+    runtime.context.document.querySelector = (selector) => selector === 'meta[name="mozarie-token"]' ? null : querySelector(selector);
+    runtime.setHandler(async (url, options) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: file.name }] };
+      if (url === "/api/save/render") { renderOptions = options; return response(); }
+      if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 503; throw error; }
+      if (url === "/api/save/status") return { state: "pending" };
+      if (url === "/api/save/cancel") return {};
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), /rejected/);
+    assert.equal(renderOptions.headers["X-Mozarie-Token"], ""); assert.equal(JSON.parse(renderOptions.body).imageId, "file"); assert.equal(writes, 2, "a rejected batch overwrite restores its source");
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let renderOptions;
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+    runtime.setHandler(async (url, options) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+      if (url === "/api/save/render") { renderOptions = options; return response(); }
+      if (url === "/api/save/commit") return { cleared: false, stale: false, deleted: false };
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
+    assert.equal(renderOptions.headers["X-Mozarie-Token"], "token"); assert.equal(JSON.parse(renderOptions.body).imageId, "file");
+  }
+
+  {
+    const runtime = makeSaveRuntime();
+    runtime.setHandler(async (url) => {
+      if (url === "/api/save/commit") { const error = new Error("down"); error.status = 503; throw error; }
+      if (url === "/api/save/status") return {};
+      return {};
+    });
+    await assert.rejects(runtime.commitBrowserSaveWithRetry({ imageId: "file" }), (error) => error.saveState === "unknown");
+  }
+
+  {
+    const runtime = makeSaveRuntime(); runtime.state.applyRunning = true;
+    runtime.setHandler(async (url) => url === "/api/job" ? { kind: "apply", state: "error", completed: 0, startedAt: 99 } : { images: [] });
+    await runtime.pollJob(); assert.equal(runtime.errors.at(-1).code, "internal_error");
+  }
+
+  for (const [job, expected] of [
+    [{ kind: "apply", state: "running", total: 3, completed: 0, current: "file" }, 0],
+    [{ kind: "apply", state: "running", completed: 2, current: "file" }, 1],
+  ]) {
+    const runtime = makeSaveRuntime();
+    runtime.setHandler(async (url) => url === "/api/job" ? job : {});
+    await runtime.pollJob(); assert.equal(runtime.nodes.get("#applyProgress").value, expected);
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state, nodes } = runtime; let restored = 0; let cleaned = 0;
+    const file = { name: "file.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([3]).buffer; } };
+    const restoredHandle = { name: file.name, async getFile() { return file; }, async createWritable() { return { async write() { restored += 1; }, async close() {} }; } };
+    const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { async queryPermission() { return "granted"; }, async getFile() { return file; } }, parentHandle: { async removeEntry() {}, async getFileHandle(name, options) { assert.equal(name, file.name); assert.equal(options.create, true); return restoredHandle; } } };
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: file.name }]; state.sourceAccess = new Map([["file", access]]); state.singleSave = { imageId: "file", divisor: 16, draft: null };
+    state.outputDirectoryHandle = { name: "out", async queryPermission() { return "granted"; }, async getFileHandle(_name, options) { if (!options?.create) return missing(); return { async createWritable() { return { async write() {}, async close() {} }; } }; }, async removeEntry() { cleaned += 1; } };
+    runtime.singleSaveMode.value = "copy"; nodes.get("#singleSaveDeleteOriginal").checked = true;
+    runtime.setHandler(async (url) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: file.name }] };
+      if (url === "/api/save/render") return response();
+      if (url === "/api/save/commit") { const error = new Error("pending"); error.status = 503; throw error; }
+      if (url === "/api/save/status") return { state: "pending" };
+      if (url === "/api/save/cancel") return {};
+      return {};
+    });
+    await runtime.startSingleSave({ preventDefault() {} });
+    assert.equal(restored, 1); assert.equal(cleaned, 1);
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let writes = 0;
+    const file = { name: "file.png", size: 1, lastModified: 1 };
+    const access = { name: file.name, size: 1, lastModified: 1, fileHandle: { name: file.name, async queryPermission() { return "granted"; }, async getFile() { return file; }, async createWritable() { return { async write() { writes += 1; }, async close() {} }; } } };
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: file.name }]; state.sourceAccess = new Map([["file", access]]);
+    runtime.setHandler(async (url) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: file.name }] };
+      if (url === "/api/save/render") return response();
+      if (url === "/api/save/commit") { const error = new Error("rejected"); error.status = 400; throw error; }
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), (error) => error.code === "source_restore_failed");
+    assert.equal(writes, 1);
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let header;
+    const querySelector = runtime.context.document.querySelector;
+    runtime.context.document.querySelector = (selector) => selector === 'meta[name="mozarie-token"]' ? null : querySelector(selector);
+    runtime.context.responseError = (binary, body) => Object.assign(new Error("save_render_failed"), { code: body.error_code || "internal_error", status: binary.status });
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+    runtime.setHandler(async (url, options) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+      if (url === "/api/save/render") { header = options.headers["X-Mozarie-Token"]; return { ok: false, status: 502, async json() { throw new Error("not JSON"); } }; }
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await assert.rejects(runtime.runBrowserSave(["file"], "_m", false, "overwrite"), (error) => error.code === "internal_error" && error.status === 502);
+    assert.equal(header, "");
+  }
+
+  {
+    const runtime = makeSaveRuntime(); const { state } = runtime; let saveToken;
+    const querySelector = runtime.context.document.querySelector;
+    runtime.context.document.querySelector = (selector) => selector === 'meta[name="mozarie-token"]' ? null : querySelector(selector);
+    state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }];
+    runtime.setHandler(async (url, options) => {
+      if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+      if (url === "/api/save/render") return { ok: true, headers: undefined };
+      if (url === "/api/save/commit") { saveToken = JSON.parse(options.body).saveToken; return { cleared: false, stale: false, deleted: false }; }
+      if (url === "/api/images") return { images: state.images };
+      return {};
+    });
+    await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
+    assert.equal(saveToken, "");
+  }
 }
 
 (async () => {
   await galleryInteractions();
   await saveInteractions();
+  await saveCoverageMatrix();
   console.log("test_gallery_save_coverage: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

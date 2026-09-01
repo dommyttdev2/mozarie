@@ -4,7 +4,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 function canvas(width = 100, height = 80) {
-  const target = { width, height, alpha: 0 };
+  const target = { width, height, alpha: 0, toBlob(done) { done({}); } };
   target.ctx = {
     calls: [], alpha: 0,
     clearRect(...args) { this.calls.push(["clear", ...args]); this.alpha = 0; },
@@ -64,7 +64,7 @@ class Worker {
 const context = {
   codedError(code) { const error = new Error(); error.code = code; return error; },
   state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
-  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90, dataset: {} }, toolRail: { offsetHeight: 30 },
+  window: { devicePixelRatio: 1 }, document: { activeElement: null }, stage: { clientWidth: 120, clientHeight: 90, dataset: {} }, toolRail: { offsetHeight: 30 }, renderedWidth: 0, renderedHeight: 0,
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
   combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
@@ -84,8 +84,8 @@ context.historyAddCanvas = canvas(); context.historyExclusionCanvas = canvas(); 
 
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
-vm.runInNewContext(`${source}
-globalThis.geometryRuntime = { selectImage, loadImage, loadCandidateBundle, invalidateStaleAsset, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, canvasToDataUrl, saveDraft, restoreDraft, setCssTransform, rebuildMosaicPreview, compareSplitX, comparePaneBounds, compareSideOffset, compareEventSide, compareEventOffset, updateCompareSplitter, setDisplayMode, fitImage, updateBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };`, context, { filename: canvasPath });
+vm.runInNewContext(source, context, { filename: canvasPath });
+vm.runInNewContext("globalThis.geometryRuntime = { selectImage, loadImage, imageAssetVersion, invalidateStaleAsset, imageCacheKey, candidateCacheKey, cachedImage, prefetchNeighbors, releaseImageCaches, releaseStaleImageVersions, releaseCandidateBundles, releaseCandidateBitmap, invalidateCandidateBundles, retainCurrentCandidateBundle, loadCandidateBundle, reconcileCurrentCandidates, syncCandidateRecord, syncCurrentCandidateRecord, syncStoredMaskStatus, updateCandidateStatus, canvasToDataUrl, saveDraft, restoreDraft, resizeRenderCanvas, setCssTransform, releaseMosaicPreview, prepareOriginalImage, mosaicPreviewFailed, createMosaicWorker, ensureMosaicPreviewSource, rebuildMosaicPreview, requestMosaicPreview, composeEnabledExclusionMask, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, paintMosaicPreviewAt, paintTintedMask, selectedCandidateMask, compareSplitX, comparePaneBounds, compareSideOffset, compareEventSide, compareEventOffset, updateCompareSplitter, setDisplayMode, fitImage, updateBrushCursor, roiFromPoints, boundaryDraftRoi, boundaryDraftId, pointForRoi, polygonRoi, boundaryDraftBounds, addBoundaryDraft, activeBoundaryShape, boundaryShapes, strokeRoi, appendBoundaryBrushPoint, beginBoundaryBrushStroke, completeBoundaryBrushStroke, rectsTouch, joinRois, boundaryRequests, boundaryPath, drawBoundaryScrim, drawBoundaryShape, drawBoundaryRoi, polygonArea, polygonSegmentsIntersect, polygonPointsValid, polygonIsValid, canDetectBoundary, hasBoundaryDraft, boundaryActionAnchor, updateBoundaryActions, drawCandidateBlinkOverlay, drawCompareRangeOverlay, refreshMaskStatus, renderNow, render, flushRender };", context, { filename: "test-editor-canvas-geometry-exports.js" });
 const test = context.geometryRuntime;
 
 function rectangle(left, top, right, bottom) { return { type: "rectangle", roi: { left, top, right, bottom } }; }
@@ -257,11 +257,71 @@ assert.ok(displayCanvas.ctx.calls.some(([name, left, top, width]) => name === "r
 const overlayCalls = overlayCanvas.ctx.calls.length;
 state.boundaryDrafts = [{ id: "pane-safe", ...rectangle(2, 2, 12, 12) }]; state.boundaryDragging = false;
 test.drawBoundaryRoi();
+
+// Exclusion erase has a separate effective display pass: it is limited to the
+// already-excluded pixels and uses the apply colour because it restores mosaic.
+state.displayMode = "single"; state.currentImage = { width: 100, height: 80, alpha: 255 };
+state.blinkCandidateIds = new Set(["manual:excludeErase"]); state.blinkModes = new Map([["manual:excludeErase", "effective"]]);
+state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+test.drawCandidateBlinkOverlay();
+assert.ok(overlayCanvas.ctx.calls.some(([name]) => name === "image"), "effective exclusion erase first composes the existing exclusion mask");
+state.manualExclusionEraseEnabled = false;
+test.drawCandidateBlinkOverlay();
+state.manualExclusionEraseEnabled = true;
 assert.ok(overlayCanvas.ctx.calls.length > overlayCalls && overlayCanvas.ctx.calls.filter(([name]) => name === "clip").length >= 2, "boundary scrim is clipped independently in both compare panes");
 test.renderNow();
 test.render(); test.flushRender();
 
 (async () => {
+  // Cache and request helpers are exercised with their real cache ownership
+  // rules.  These are the states reached while selecting, replacing, and
+  // clearing editor images.
+  assert.equal(test.imageAssetVersion({ assetVersion: "v2" }), "v2");
+  assert.equal(test.imageAssetVersion({ assetVersion: 2 }), "");
+  assert.equal(test.imageCacheKey({ id: "image", assetVersion: "v2" }), "image:v2");
+  assert.equal(test.candidateCacheKey("image", 4), "image:4");
+  const released = [];
+  state.imageCache = cache([["image:v1", { close() { released.push("image"); } }], ["other:v1", { close() { released.push("other"); } }]]);
+  state.candidateBundleCache = cache([["image:1", { candidateImages: new Map([["mask", { close() { released.push("mask"); } }]]) }], ["other:1", { candidateImages: new Map() }]]);
+  state.imageInflight = new Map([["image:v1", Promise.resolve()], ["other:v1", Promise.resolve()]]);
+  state.candidateInflight = new Map([["image:1", Promise.resolve()], ["other:1", Promise.resolve()]]);
+  test.releaseImageCaches("image");
+  assert.equal(state.imageCache.has("image:v1"), false);
+  assert.equal(state.imageCache.has("other:v1"), true);
+  assert.equal(state.imageInflight.has("image:v1"), false);
+  assert.equal(state.candidateInflight.has("image:1"), false);
+  test.releaseImageCaches();
+  assert.equal(state.imageCache.items.size, 0);
+  state.imageCache = cache([["image:old", { close() {} }], ["image:new", { close() {} }]]);
+  state.candidateBundleCache = cache([["image:old", { candidateImages: new Map() }], ["image:new", { candidateImages: new Map() }]]);
+  test.releaseStaleImageVersions("image", "image:new", "image:new");
+  assert.equal(state.imageCache.has("image:old"), false);
+  assert.equal(state.candidateBundleCache.has("image:old"), false);
+  state.candidateInflight = new Map([["image:old", Promise.resolve()], ["other:old", Promise.resolve()]]);
+  state.currentId = "image"; state.candidateImages = new Map([["shown", { alpha: 255 }]]);
+  test.releaseCandidateBundles("image");
+  assert.equal(state.candidateImages.size, 0);
+  assert.equal(state.candidateInflight.has("image:old"), false);
+
+  state.images = [{ id: "prefetch", assetVersion: "v1" }, { id: "selected", assetVersion: "v1" }, { id: "next", assetVersion: "v1" }];
+  const prefetched = [];
+  context.schedulePrefetch = (record, priority) => prefetched.push([record.id, priority]);
+  test.prefetchNeighbors(state.images[1]);
+  assert.deepEqual(prefetched, [["prefetch", 1], ["next", 1]]);
+  state.imageCache = cache(); state.imageInflight = new Map(); state.catalogLoadControllers = new Set(); state.catalogEpoch = 1;
+  context.fetchBitmap = async () => ({ width: 2, height: 2, close() { released.push("fetched"); } });
+  context.imageUrl = (record) => `/images/${record.id}`;
+  context.catalogRecordMatches = () => true;
+  const fetched = await test.cachedImage(state.images[0]);
+  assert.equal(fetched.width, 2);
+  assert.equal(await test.cachedImage(state.images[0]), fetched, "decoded images are reused from the editor cache");
+  state.imageCache = cache(); state.imageInflight = new Map(); let decodeCalls = 0; let finishDecode;
+  context.fetchBitmap = () => { decodeCalls += 1; return new Promise((resolve) => { finishDecode = resolve; }); };
+  const firstImageLoad = test.cachedImage(state.images[0]); const secondImageLoad = test.cachedImage(state.images[0]);
+  finishDecode({ width: 3, height: 3, close() {} });
+  assert.equal((await Promise.all([firstImageLoad, secondImageLoad]))[0].width, 3);
+  assert.equal(decodeCalls, 1, "concurrent image reads share one decoded bitmap request");
+
   // Candidate cache ownership is exercised with decoded images, rather than
   // calling cache helpers directly.
   state.images = [];
@@ -314,6 +374,39 @@ test.render(); test.flushRender();
   await test.selectImage("broken", true, { saveCurrentDraft: false });
   assert.equal(context.lastUserError, loadError, "image load failures reach the standard user error path");
 
+  // A successful gallery selection changes the image, candidate bundle, and
+  // editor dimensions together.  This remains distinct from the stale/error
+  // paths above, so a rejected image never leaves partial UI state behind.
+  const selectable = { id: "selected", assetVersion: "v3", candidateRevision: 2, relativePath: "folder/selected.png", width: 12, height: 9, enabledCandidateCount: 0 };
+  state.images = [selectable]; state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.imageGeneration = 20;
+  state.imageCache = cache(); state.candidateBundleCache = cache(); state.drafts = new Map(); state.mosaicPreviewEnabled = false;
+  context.cachedImage = async () => ({ width: 12, height: 9, alpha: 255 });
+  context.loadCandidateBundle = async () => ({ candidates: [{ id: "candidate", enabled: true, role: "apply" }], candidateImages: new Map([["candidate", { alpha: 255 }]]), candidateRevision: 3 });
+  context.loadWorkspaceDraft = async () => null; context.decodeDraftImages = async () => [null, null, null, null, null, null];
+  await test.selectImage("selected", true, { saveCurrentDraft: false });
+  assert.equal(state.currentId, "selected");
+  assert.equal(state.candidates[0].id, "candidate");
+  test.syncCurrentCandidateRecord();
+  assert.equal(selectable.candidateCount, 1);
+  assert.equal(element("#currentFileName").textContent, "folder/selected.png");
+  await test.selectImage("selected", false, { saveCurrentDraft: false });
+
+  // Selection is intentionally inert while another editor operation owns the
+  // canvas.  These are separate UI states (busy work, import, gesture, and a
+  // candidate batch), not aliases of the same guard.
+  const selectionGuards = [
+    () => { context.isBusy = () => true; },
+    () => { state.importing = true; },
+    () => { context.isGestureActive = () => true; },
+    () => { state.candidateBatchPending = new Set(["candidate"]); },
+  ];
+  for (const arm of selectionGuards) {
+    const generationBefore = state.imageGeneration; arm();
+    await test.selectImage("selected", false, { saveCurrentDraft: false });
+    assert.equal(state.imageGeneration, generationBefore, "blocked selection does not start a competing image request");
+    context.isBusy = () => false; context.isGestureActive = () => false; state.importing = false; state.candidateBatchPending = new Set();
+  }
+
   context.Image = class { set src(_source) { this.onerror(); } };
   await assert.rejects(test.loadImage("bad-image"), (error) => error?.code === "image_read_failed");
   context.FileReader = class { readAsDataURL() { this.error = new Error("encode failed"); this.onerror(); } };
@@ -346,5 +439,219 @@ test.render(); test.flushRender();
     historyBase: { removedCandidateIds: ["old"], candidateIds: ["old"] }, removedCandidateIds: ["old"], manualMaskPresent: false,
   }, [null, null, null, null, null, null]);
   assert.deepEqual(JSON.parse(JSON.stringify(state.history.map((stroke) => stroke.kind))), ["brush"], "a newer candidate revision removes only obsolete candidate-history operations");
+
+  // A complete persisted edit restores all three layers and keeps the history
+  // cursor usable for undo/redo.  The same helper also deliberately rejects a
+  // result which finishes after the user selected a different image.
+  state.images = [{ id: "restore", candidateRevision: 3, enabledCandidateCount: 0 }]; state.currentId = "restore"; state.imageGeneration = 13;
+  state.currentImage = { width: 10, height: 10 }; state.candidates = [{ id: "still-here", enabled: true, role: "apply" }];
+  const restoredLayers = [{ alpha: 255 }, { alpha: 255 }, { alpha: 255 }, { alpha: 255 }, { alpha: 255 }, { alpha: 255 }];
+  const restored = await test.restoreDraft("restore", 13, {
+    candidateRevision: 3, manualEnabled: false, manualExclusionEnabled: false, manualExclusionEraseEnabled: false, manualExclusionForced: false, manualMaskPresent: true,
+    removedCandidateIds: ["still-here", "stale"], history: [{ kind: "removeCandidates", points: [{ x: 1, y: 2 }], spans: [1] }, { kind: "brush", points: [{ x: 2, y: 3 }] }], historyIndex: 1,
+    historyBase: { removedCandidateIds: ["still-here", "stale"], candidateIds: ["still-here", "stale"] },
+  }, restoredLayers);
+  assert.equal(restored, true);
+  assert.equal(state.history.length, 2);
+  assert.equal(state.historyIndex, 1);
+  assert.deepEqual([...state.removedCandidateIds], ["still-here"]);
+  assert.equal(state.manualEnabled, false);
+  state.currentId = "other";
+  assert.equal(await test.restoreDraft("restore", 13, null, restoredLayers), false, "late draft decodes cannot overwrite a newly selected image");
+
+  state.currentId = "restore"; state.currentImage = { width: 10, height: 10, alpha: 255 }; state.images = [{ id: "restore", candidateRevision: 3 }]; state.drafts = new Map(); state.draftSaveChains = new Map();
+  context.FileReader = class { readAsDataURL() { this.result = "data:image/png;base64,AA=="; this.onload(); } };
+  state.draftDirty = true; state.draftLayerDirty = new Set(["add", "exclusion", "exclusionErase", "unknown"]); state.historyBaseDirty = true;
+  context.addCanvas.ctx.alpha = context.exclusionCanvas.ctx.alpha = context.exclusionEraseCanvas.ctx.alpha = 255;
+  context.historyAddCanvas.ctx.alpha = context.historyExclusionCanvas.ctx.alpha = context.historyExclusionEraseCanvas.ctx.alpha = 255;
+  state.history = [{ kind: "brush", points: [{ x: 1, y: 1 }], spans: [0] }]; state.historyIndex = 1;
+  state.historyRemovedCandidateIds = new Set(["still-here"]); state.historyCandidateIds = new Set(["still-here"]);
+  await test.saveDraft();
+  assert.equal(state.drafts.get("restore").historyBase.add.startsWith("data:image/png"), true, "dirty history base layers are persisted with the edit");
+  assert.equal(state.drafts.get("restore").add.startsWith("data:image/png"), true, "dirty manual layers are persisted with the edit");
+
+  state.displayMode = "single"; state.currentImage = null; test.fitImage();
+  state.currentImage = { width: 10, height: 10 }; context.window.devicePixelRatio = 2; displayCanvas.width = 0; displayCanvas.height = 0;
+  test.resizeRenderCanvas();
+  assert.deepEqual([displayCanvas.width, displayCanvas.height], [240, 180], "resizing the editor allocates the display backing store at device resolution");
+  test.resizeRenderCanvas();
+  context.window.devicePixelRatio = 1;
+
+  // Late responses are discarded before either draft restoration or UI writes.
+  // This is the normal race when the user moves on while a decoded image is in
+  // flight, and is intentionally a successful no-op rather than an error.
+  const late = { id: "late", assetVersion: "v1", candidateRevision: 1, relativePath: "late.png", width: 8, height: 8 };
+  state.images = [late]; state.currentId = null; state.currentImage = null; state.imageCache = cache(); state.candidateBundleCache = cache(); state.drafts = new Map();
+  context.cachedImage = async () => ({ width: 8, height: 8 }); context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
+  context.isCurrentGeneration = () => false;
+  await test.selectImage("late", true, { saveCurrentDraft: false });
+  assert.equal(state.currentId, null, "a late image response cannot replace the current editor image");
+  let generationChecks = 0; context.isCurrentGeneration = () => ++generationChecks === 1;
+  state.drafts.set("late", { add: "draft" });
+  await test.selectImage("late", true, { saveCurrentDraft: false });
+  assert.equal(state.currentId, null, "a selection finishing after draft decode also leaves the editor unchanged");
+  context.isCurrentGeneration = () => true;
+
+  let staleInvalidated = null;
+  state.images = [{ id: "stale-error", assetVersion: "v1", candidateRevision: 1 }]; state.imageCache = cache(); state.candidateBundleCache = cache();
+  context.cachedImage = async () => { const error = new Error("stale"); error.code = "stale_asset"; throw error; };
+  context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
+  context.invalidateStaleAsset = (id) => { staleInvalidated = id; };
+  await test.selectImage("stale-error", true, { saveCurrentDraft: false });
+  assert.equal(staleInvalidated, "stale-error", "a stale asset response evicts only its obsolete decoded data");
+
+  // Candidate revisions may arrive while the image is not selected, may have
+  // no decoded bundle yet, or may transfer the displayed bundle to a new key.
+  state.images = [{ id: "inactive", candidateRevision: 1 }, { id: "active", candidateRevision: 1 }]; state.currentId = "inactive";
+  state.candidateBundleCache = cache(); state.candidateImages = new Map(); state.candidates = [];
+  test.retainCurrentCandidateBundle("missing", 2);
+  state.currentId = "active"; test.retainCurrentCandidateBundle("inactive", 2);
+  assert.equal(state.images[0].candidateRevision, 2, "inactive records only update revision metadata");
+  state.currentId = "active"; test.retainCurrentCandidateBundle("active", 3);
+  assert.equal(state.images[1].candidateRevision, 3, "a selected record without a decoded bundle still advances revision metadata");
+  state.candidateImages = new Map([["active-mask", { width: 1, height: 1 }]]); state.candidates = [{ id: "active-mask", enabled: true, role: "apply" }];
+  state.candidateBundleCache.set("active:3", { candidateImages: state.candidateImages }, 1);
+  test.retainCurrentCandidateBundle("active", 4);
+  assert.equal(state.candidateBundleCache.has("active:4"), true, "the displayed bundle transfers ownership to the new server revision");
+  state.candidateBundleCache.set("other:1", { candidateImages: new Map() }, 0);
+  state.candidateBundleCache.set("active:5", { candidateImages: new Map() }, 0);
+  test.invalidateCandidateBundles("active");
+  assert.equal(state.candidateBundleCache.has("other:1"), true, "revision cleanup leaves other images alone");
+  assert.equal(state.candidateBundleCache.has("active:5"), false, "revision cleanup drops stale active bundles");
+  state.drafts = new Map(); test.syncStoredMaskStatus("active", []);
+
+  // Clearing an unrelated stale image must close only the cache entries that
+  // belong to that image and leave the current editor intact.
+  let staleClosed = 0;
+  state.currentId = "active"; state.currentImage = { close() {} }; state.candidateImages = new Map(); state.galleryNodes = new Map([["orphan", { querySelector() { return { src: "thumb" }; } }]]); state.overviewNodes = new Map([["orphan", { querySelector() { return { src: "thumb" }; } }]]);
+  state.imageCache = cache([["orphan:v1", { close() { staleClosed += 1; } }]]);
+  state.candidateBundleCache = cache([["orphan:1", { candidateImages: new Map([["orphan-mask", { close() { staleClosed += 1; } }]]) }]]);
+  context.forgetThumbnail = () => {};
+  test.invalidateStaleAsset("orphan");
+  assert.equal(staleClosed, 2); assert.equal(state.currentId, "active");
+  state.candidateBundleCache = cache([["orphan:missing-images", {}]]);
+  test.invalidateStaleAsset("orphan");
+
+  // Revision-zero is a valid initial server state.  Transfer and inactive
+  // record updates must not mistake it for absence.
+  state.images = [{ id: "zero", candidateRevision: 0 }, { id: "other", candidateRevision: 1 }]; state.currentId = "other";
+  state.candidateBundleCache = cache(); state.candidateImages = new Map(); state.candidates = [];
+  test.retainCurrentCandidateBundle("zero", 0);
+  assert.equal(state.images[0].candidateRevision, 0);
+  state.currentId = "zero"; test.retainCurrentCandidateBundle("zero", 0);
+  assert.equal(state.images[0].candidateRevision, 0);
+
+  state.drafts = new Map(); state.maskStatus = new Map(); state.images = [{ id: "zero", candidateRevision: 1 }];
+  test.syncStoredMaskStatus("zero", []);
+  state.drafts.set("zero", { hasEffectiveMask: false, candidateRevision: 1 }); test.syncStoredMaskStatus("zero", []);
+  assert.equal(state.maskStatus.get("zero"), false);
+  state.images = []; state.drafts.set("zero", { hasEffectiveMask: false, candidateRevision: 2 }); test.syncStoredMaskStatus("zero", []);
+  assert.equal(state.maskStatus.has("zero"), false, "an empty stale draft does not create a status for a missing record");
+
+  await assert.rejects(test.canvasToDataUrl({ toBlob(done) { done(null); } }), (error) => error.code === "internal_error");
+
+  // Draft restoration accepts the compact stored form, including omitted
+  // history-base IDs, but never applies it after selection has changed.
+  const restoreRecord = { id: "restore-current", candidateRevision: 7, enabledCandidateCount: 0 };
+  state.images = [restoreRecord]; state.currentId = "restore-current"; state.imageGeneration = 70; state.currentImage = { width: 10, height: 10 };
+  state.candidates = [{ id: "kept", enabled: true, role: "apply" }]; state.drafts = new Map([[
+    "restore-current", { candidateRevision: 7, removedCandidateIds: ["kept", "old"], history: [{ kind: "brush", points: [{ x: 1, y: 1 }] }], historyIndex: 99, historyBase: {} },
+  ]]);
+  context.decodeDraftImages = async () => [null, null, null, null, null, null];
+  assert.equal(await test.restoreDraft("restore-current", 70), true);
+  assert.equal(state.historyIndex, 1); assert.deepEqual([...state.historyCandidateIds], ["kept"]);
+  state.drafts.set("restore-current", { candidateRevision: 6, history: [{ kind: "removeCandidates" }, { kind: "brush", points: [] }], historyIndex: 2, historyBase: { removedCandidateIds: ["old"], candidateIds: ["old"] }, removedCandidateIds: ["old"] });
+  assert.equal(await test.restoreDraft("restore-current", 70), true);
+  assert.deepEqual(state.history.map((stroke) => stroke.kind), ["brush"]);
+  state.currentId = "different";
+  assert.equal(await test.restoreDraft("restore-current", 70, state.drafts.get("restore-current"), [null, null, null, null, null, null]), false);
+
+  // Saving over an older compact draft creates all history-base layer keys
+  // without requiring the previous draft to already have that object.
+  state.images = [{ id: "save-current", candidateRevision: 1 }]; state.currentId = "save-current"; state.currentImage = { width: 8, height: 8 };
+  state.drafts = new Map([["save-current", {}]]); state.draftSaveChains = new Map(); state.draftDirty = true; state.draftLayerDirty = new Set(); state.historyBaseDirty = true;
+  state.history = [{ kind: "brush" }]; state.historyIndex = 1; state.removedCandidateIds = new Set(); state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set();
+  context.historyAddCanvas.ctx.alpha = context.historyExclusionCanvas.ctx.alpha = context.historyExclusionEraseCanvas.ctx.alpha = 0;
+  await test.saveDraft();
+  assert.deepEqual(JSON.parse(JSON.stringify(state.drafts.get("save-current").historyBase)), { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [] });
+
+  state.currentId = "different"; context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
+  assert.equal(await test.reconcileCurrentCandidates("save-current", 70), false, "a candidate response for a no-longer-current image is ignored");
+
+  // Empty editor and display-only paths must remain harmless: no mask
+  // composition, canvas paint, or splitter update can assume an image exists.
+  state.currentId = null; state.currentImage = null; state.maskDirty = true;
+  test.composeCurrentMask(); test.refreshMaskStatus(); test.prepareOriginalImage(); test.paintMosaicPreviewAt(12); test.renderNow();
+  assert.equal(state.maskDirty, true, "without an image composition leaves its pending state untouched");
+  test.paintTintedMask(null, "#fff", 1, 0);
+  assert.equal(test.selectedCandidateMask("missing", "apply", true, null, "effective", context.combinedCanvas), null);
+  assert.equal(test.selectedCandidateMask("disabled", "apply", false, context.addCanvas, "effective", context.combinedCanvas), null);
+  assert.equal(test.selectedCandidateMask("normal", "apply", true, context.addCanvas, "normal", context.combinedCanvas), context.addCanvas);
+  test.drawBoundaryScrim([]); test.drawBoundaryShape({ type: "rectangle", roi: null });
+  const lookup = context.$; context.$ = (id) => id === "#compareSplitter" ? null : lookup(id);
+  test.updateCompareSplitter(); context.$ = lookup;
+
+  // Geometry validation and display fallbacks deliberately have visible
+  // behaviour for both valid and invalid inputs.
+  assert.equal(test.polygonSegmentsIntersect({ x: 0, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }, { x: 4, y: 0 }), true);
+  state.boundaryDrafts = [{ id: "invalid-only", type: "polygon", points: [{ x: 0, y: 0 }] }];
+  assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryRequests())), [], "an incomplete polygon is never sent to boundary detection");
+  test.drawBoundaryShape({ type: "polygon", points: [{ x: 0, y: 0 }] });
+  state.displayMode = "single"; test.setDisplayMode("single");
+  context.window.devicePixelRatio = 0; displayCanvas.width = 0; test.resizeRenderCanvas(); test.resizeRenderCanvas(); context.window.devicePixelRatio = 1;
+
+  state.currentImage = { width: 20, height: 20, alpha: 255 }; state.currentId = "blink"; state.view = { x: 0, y: 0, scale: 1 };
+  state.blinkCandidateIds = new Set(["manual:apply"]); state.blinkModes = new Map(); state.blinkPhase = true; state.manualEnabled = true;
+  state.settings = { display: { apply_color: "#abc", exclude_color: "#def", overlay_opacity: "not-a-number" } };
+  test.drawCandidateBlinkOverlay();
+  state.settings = null; test.drawCandidateBlinkOverlay();
+  state.blinkCandidateIds.clear(); state.displayMode = "compare"; state.compareSplit = .5;
+  test.drawCompareRangeOverlay(test.compareSplitX());
+  context.Image = class { set src(value) { this.source = value; this.onload(); } };
+  assert.equal((await test.loadImage("ok-image")).source, "ok-image", "a decoded image resolves through its load handler");
+
+  // The compact draft format deliberately permits omitted history fields.
+  // Both the defaulted and explicit forms retain the same editable state.
+  state.images = [{ id: "compact", candidateRevision: 2, enabledCandidateCount: 0 }]; state.currentId = "compact"; state.currentImage = { width: 8, height: 8 }; state.imageGeneration = 81;
+  state.candidates = [{ id: "kept", enabled: true, role: "apply" }];
+  await test.restoreDraft("compact", 81, { candidateRevision: 2, history: [{ kind: "brush" }], historyBase: {}, removedCandidateIds: [], historyIndex: undefined }, [null, null, null, null, null, null]);
+  assert.equal(state.historyIndex, 0);
+  state.drafts = new Map([["compact", { historyBase: { add: "old-add", exclusion: "old-exclusion", exclusionErase: "old-erase" } }]]);
+  state.draftSaveChains = new Map(); state.draftDirty = true; state.draftLayerDirty = new Set(); state.historyBaseDirty = true; state.history = [{ kind: "brush" }]; state.historyIndex = 1;
+  state.historyRemovedCandidateIds = null; state.historyCandidateIds = null; state.removedCandidateIds = new Set();
+  context.historyAddCanvas.ctx.alpha = context.historyExclusionCanvas.ctx.alpha = context.historyExclusionEraseCanvas.ctx.alpha = 0;
+  await test.saveDraft();
+  assert.equal(state.drafts.get("compact").historyBase.add, "", "a newly encoded empty history base replaces a stale layer");
+
+  for (const [id, historyBase, expected] of [
+    ["keep-history-base", { add: "old-add", exclusion: "old-exclusion", exclusionErase: "old-erase" }, ["old-add", "old-exclusion", "old-erase"]],
+    ["default-history-base", undefined, ["", "", ""]],
+  ]) {
+    state.images = [{ id, candidateRevision: 2 }]; state.currentId = id; state.currentImage = { width: 8, height: 8 };
+    state.drafts = new Map([[id, historyBase ? { historyBase } : {}]]); state.draftSaveChains = new Map(); state.draftDirty = true; state.draftLayerDirty = new Set(); state.historyBaseDirty = false;
+    state.history = [{ kind: "brush" }]; state.historyIndex = 1; state.removedCandidateIds = new Set(); state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set();
+    await test.saveDraft();
+    assert.deepEqual([state.drafts.get(id).historyBase.add, state.drafts.get(id).historyBase.exclusion, state.drafts.get(id).historyBase.exclusionErase], expected);
+  }
+
+  state.images = [{ id: "compact", candidateRevision: 1 }]; state.drafts = new Map([["compact", { hasEffectiveMask: true, candidateRevision: 0 }]]); state.maskStatus = new Map();
+  test.syncStoredMaskStatus("compact", []); assert.equal(state.maskStatus.get("compact"), true);
+  state.drafts.set("compact", { hasEffectiveMask: false, candidateRevision: 0 }); test.syncStoredMaskStatus("compact", []);
+  assert.equal(state.maskStatus.has("compact"), false);
+
+  state.candidates = [{ id: "removed", enabled: true, role: "apply" }, { id: "off", enabled: false, role: "apply" }, { id: "exclude", enabled: true, role: "exclude" }];
+  state.removedCandidateIds = new Set(["removed"]); state.manualEnabled = false; state.manualExclusionEnabled = false; state.manualExclusionEraseEnabled = false;
+  test.maskStatusWithoutCandidate("off");
+  state.candidates = [
+    { id: "target", enabled: true, role: "apply" }, { id: "disabled", enabled: false, role: "apply" },
+    { id: "other-apply", enabled: true, role: "apply" }, { id: "excluded", enabled: true, role: "exclude" }, { id: "removed", enabled: true, role: "apply" },
+  ]; state.removedCandidateIds = new Set(["removed"]); test.maskStatusWithoutCandidate("target");
+  const validBoundary = [{ x: 1, y: 1 }, { x: 8, y: 1 }, { x: 8, y: 8 }, { x: 1, y: 8 }];
+  state.boundaryDrafts = [{ id: "invalid-again", type: "polygon", points: [{ x: 1, y: 1 }] }]; test.boundaryRequests();
+  state.boundaryDrafts = [{ id: "valid-again", type: "polygon", points: validBoundary }];
+  assert.equal(test.boundaryRequests().length, 1);
+  state.boundaryDrafts = [{ id: "missing-points", type: "polygon" }];
+  assert.deepEqual(JSON.parse(JSON.stringify(test.boundaryRequests())), [], "a polygon without points takes the same rejected detection path");
+  for (const shape of [{ type: "rectangle", roi: { left: 1, top: 1, right: 4, bottom: 4 } }, { type: "polygon", points: validBoundary }, { type: "polygon", points: [{ x: 1, y: 1 }] }, { type: "polygon", points: "" }]) test.drawBoundaryShape(shape);
   console.log("test_editor_canvas_geometry_runtime: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
