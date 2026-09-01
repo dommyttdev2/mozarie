@@ -110,7 +110,11 @@ def _probe_onnx(
         "cpu": "CPUExecutionProvider",
     }[profile]
     provider_device = int(gpu_device)
-    if profile == "directml" and directml_identity is not None:
+    if profile == "directml":
+        if directml_identity is None:
+            raise ProfileError(
+                "DirectML GPU identity is required to map the selected device to an ONNX Runtime adapter."
+            )
         try:
             provider_device = directml_onnx_device_id(
                 gpu_device,
