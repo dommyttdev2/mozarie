@@ -97,15 +97,15 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
             lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
         )
 
-    def test_duplicate_dxgi_entries_for_same_luid_map_same_physical_gpu(self) -> None:
+    def test_duplicate_dxgi_entries_for_same_luid_use_enumerated_alias(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [
-            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(7, 42)),
             runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(7, 42)),
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(7, 42)),
         ]
         self.assertEqual(
             runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters),
-            0,
+            2,
         )
 
     def test_dxgi_not_found_is_the_only_normal_enumeration_end(self) -> None:
