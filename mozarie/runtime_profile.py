@@ -95,15 +95,35 @@ def preflight(profile: str) -> None:
         )
 
 
-def _probe_onnx(ort: object, onnx: object, np: object, profile: str, gpu_device: int) -> str:
+def _probe_onnx(
+    ort: object,
+    onnx: object,
+    np: object,
+    profile: str,
+    gpu_device: int,
+    *,
+    directml_identity: object | None = None,
+) -> str:
     expected = {
         "cuda": "CUDAExecutionProvider",
         "directml": "DmlExecutionProvider",
         "cpu": "CPUExecutionProvider",
     }[profile]
+    provider_device = int(gpu_device)
+    if profile == "directml" and directml_identity is not None:
+        try:
+            provider_device = directml_onnx_device_id(
+                gpu_device,
+                module=directml_identity,
+            )
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProfileError(
+                f"The selected DirectML device {gpu_device} could not be mapped to an ONNX Runtime adapter."
+            ) from exc
+
     providers: list[object] = [expected]
     if profile in {"cuda", "directml"}:
-        providers = [(expected, {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        providers = [(expected, {"device_id": provider_device}), "CPUExecutionProvider"]
 
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
@@ -154,7 +174,7 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
 
     providers = list(ort.get_available_providers())
     devices: list[str] = []
-    onnx_gpu_device = gpu_device
+    directml_identity: object | None = None
     if selected == "cuda":
         if not getattr(torch.version, "cuda", None) or "CUDAExecutionProvider" not in providers:
             raise ProfileError("CUDA PyTorch or CUDAExecutionProvider is unavailable.")
@@ -183,12 +203,7 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
         probe = torch.ones(1, device=device) + 1
         if float(probe.cpu().item()) != 2.0:
             raise ProfileError("The DirectML tensor probe failed.")
-        try:
-            onnx_gpu_device = directml_onnx_device_id(gpu_device, module=torch_directml)
-        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise ProfileError(
-                f"The selected DirectML device {gpu_device} could not be mapped to an ONNX Runtime adapter."
-            ) from exc
+        directml_identity = torch_directml
     else:
         if "CPUExecutionProvider" not in providers:
             raise ProfileError("CPUExecutionProvider is unavailable.")
@@ -196,7 +211,14 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
         if float(probe.item()) != 2.0:
             raise ProfileError("The CPU tensor probe failed.")
 
-    onnx_provider = _probe_onnx(ort, onnx, np, selected, onnx_gpu_device)
+    onnx_provider = _probe_onnx(
+        ort,
+        onnx,
+        np,
+        selected,
+        gpu_device,
+        directml_identity=directml_identity,
+    )
 
     return {
         "schema": 1,
