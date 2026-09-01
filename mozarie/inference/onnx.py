@@ -84,29 +84,36 @@ class Letterbox:
 
 
 def _directml_onnx_device_id(logical_device_id: int) -> int:
-    """Map the UI/torch-directml GPU id to ONNX Runtime's DXGI adapter id.
+    """Map a torch-directml selection to one unique DXGI adapter.
 
     torch-directml and ONNX Runtime DirectML can enumerate the same physical
-    adapters in different orders.  The UI id identifies the GPU through
-    torch-directml; ONNX receives the first DXGI adapter with the same name.
+    adapters in different orders. The logical id therefore cannot be reused as
+    an ONNX ``device_id``. If the physical GPU cannot be identified uniquely,
+    fail closed instead of guessing an adapter index.
     """
     logical = int(logical_device_id)
     try:
         directml = directml_module()
         count = int(directml.device_count())
         if logical < 0 or logical >= count:
-            raise RuntimeError(f"Invalid DirectML logical device id: {logical}")
+            raise ValueError(f"Invalid DirectML logical device id: {logical}")
         selected_name = str(directml.device_name(logical)).rstrip("\0")
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-        return logical
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise _gpu_unavailable_error() from exc
+
+    adapters = _dxgi_adapter_names()
+    if not adapters:
+        raise _gpu_unavailable_error()
 
     target = _normalize_device_name(selected_name)
     matches = [
         adapter.index
-        for adapter in _dxgi_adapter_names()
+        for adapter in adapters
         if _normalize_device_name(adapter.name) == target
     ]
-    return min(matches) if matches else logical
+    if len(matches) != 1:
+        raise _gpu_unavailable_error()
+    return matches[0]
 
 
 def available_providers(device: str, gpu_device: int = 0) -> list[object]:
