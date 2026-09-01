@@ -14,7 +14,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..runtime import directml_onnx_device_id, runtime_backend
+from ..runtime import (
+    _dxgi_adapter_names,
+    directml_module,
+    directml_onnx_device_id,
+    runtime_backend,
+)
 
 
 _dll_directory_handles: list[object] = []
@@ -81,7 +86,11 @@ class Letterbox:
 def _directml_onnx_device_id(logical_device_id: int) -> int:
     """Map a torch-directml selection to one unique DXGI adapter."""
     try:
-        return directml_onnx_device_id(int(logical_device_id))
+        return directml_onnx_device_id(
+            int(logical_device_id),
+            module=directml_module(),
+            adapters=_dxgi_adapter_names(),
+        )
     except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise _gpu_unavailable_error() from exc
 
