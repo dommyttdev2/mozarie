@@ -90,9 +90,11 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile.write_marker(venv, {"schema": 2, "profile": "cuda"})
             with patch.dict(os.environ, {}, clear=True):
                 self.assertIsNone(runtime_profile.selected_profile(venv))
-    def test_onnx_probe_runs_on_the_selected_directml_device(self) -> None:
+
+    def test_onnx_probe_rejects_directml_without_identity(self) -> None:
         ort, onnx, np = self._probe_dependencies(["DmlExecutionProvider"])
-        self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, "directml", 1), "DmlExecutionProvider")
+        with self.assertRaisesRegex(runtime_profile.ProfileError, "identity is required"):
+            runtime_profile._probe_onnx(ort, onnx, np, "directml", 1)
 
     def test_onnx_probe_allows_cpu_graph_provider_after_cuda(self) -> None:
         ort, onnx, np = self._probe_dependencies(["CUDAExecutionProvider", "CPUExecutionProvider"])
