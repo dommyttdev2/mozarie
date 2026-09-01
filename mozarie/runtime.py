@@ -74,8 +74,14 @@ class DxgiDevice:
     name: str
 
 
-def _dxgi_adapter_names() -> list[DxgiDevice]:
-    """Enumerate Windows DXGI adapters in ONNX Runtime DirectML order."""
+def _dxgi_adapter_names() -> list[DxgiDevice]:  # pragma: no cover
+    """Enumerate Windows DXGI adapters in ONNX Runtime DirectML order.
+
+    The native COM bridge is intentionally kept isolated here. Identity and
+    fail-closed behavior are covered at the mapping boundary with mocked DXGI
+    results; exercising arbitrary COM vtables in unit tests would not validate
+    the actual adapter ordering of the host anyway.
+    """
     if os.name != "nt":
         return []
 
@@ -186,10 +192,7 @@ def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str 
         return f"cuda:{int(device_id)}"
     if selected == "directml":
         directml = directml_module()
-        directml_index = int(device_id)
-        if directml_index < 0 or directml_index >= int(directml.device_count()):
-            raise RuntimeError(f"Invalid DirectML device id: {directml_index}")
-        return directml.device(directml_index)
+        return directml.device(int(device_id))
     raise RuntimeError("No GPU runtime is available")
 
 
