@@ -73,6 +73,7 @@ def _normalize_device_name(value: str) -> str:
 class DxgiDevice:
     index: int
     name: str
+    luid: tuple[int, int] | None = None
 
 
 def _enumerate_dxgi_adapter_names(
@@ -96,10 +97,13 @@ def _enumerate_dxgi_adapter_names(
         if hr < 0 or not adapter:
             return []
         try:
-            desc_hr, name = describe_adapter(adapter)
-            if int(desc_hr) < 0:
+            description = describe_adapter(adapter)
+            desc_hr = int(description[0])
+            if desc_hr < 0:
                 return []
-            devices.append(DxgiDevice(index=index, name=str(name).rstrip("\0")))
+            name = str(description[1]).rstrip("\0")
+            luid = description[2] if len(description) > 2 else None
+            devices.append(DxgiDevice(index=index, name=name, luid=luid))
         finally:
             release_adapter(adapter)
         index += 1
@@ -163,7 +167,9 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:  # pragma: no cover
             adapter = ctypes.c_void_p()
             return int(enum_adapters(factory, index, ctypes.byref(adapter))), adapter
 
-        def describe_adapter(adapter: ctypes.c_void_p) -> tuple[int, str]:
+        def describe_adapter(
+            adapter: ctypes.c_void_p,
+        ) -> tuple[int, str, tuple[int, int]]:
             adapter_vtable = ctypes.cast(
                 adapter,
                 ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
@@ -174,7 +180,12 @@ def _dxgi_adapter_names() -> list[DxgiDevice]:  # pragma: no cover
                 ctypes.POINTER(_AdapterDesc),
             )(adapter_vtable[8])
             desc = _AdapterDesc()
-            return int(get_desc(adapter, ctypes.byref(desc))), desc.Description.rstrip("\0")
+            hr = int(get_desc(adapter, ctypes.byref(desc)))
+            return (
+                hr,
+                desc.Description.rstrip("\0"),
+                (int(desc.AdapterLuid.HighPart), int(desc.AdapterLuid.LowPart)),
+            )
 
         def release_adapter(adapter: ctypes.c_void_p) -> None:
             adapter_release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(
@@ -199,11 +210,13 @@ def directml_onnx_device_id(
     module: Any | None = None,
     adapters: list[DxgiDevice] | None = None,
 ) -> int:
-    """Resolve a torch-directml logical id to one unique DXGI adapter id.
+    """Resolve a torch-directml logical id to one unique physical DXGI GPU.
 
     torch-directml and ONNX Runtime DirectML may enumerate the same physical
     GPUs in different orders. The logical id is therefore resolved by the
-    selected GPU name. If identity cannot be proven uniquely, fail closed.
+    selected GPU name. Duplicate name entries are accepted only when DXGI
+    proves they share one AdapterLuid, meaning they identify the same physical
+    adapter. Otherwise identity is ambiguous and mapping fails closed.
     """
     logical = int(logical_device_id)
     try:
@@ -221,13 +234,17 @@ def directml_onnx_device_id(
 
     target = _normalize_device_name(selected_name)
     matches = [
-        adapter.index
+        adapter
         for adapter in resolved_adapters
         if _normalize_device_name(adapter.name) == target
     ]
-    if len(matches) != 1:
-        raise RuntimeError("Unable to map the selected DirectML GPU to one DXGI adapter")
-    return matches[0]
+    if len(matches) == 1:
+        return matches[0].index
+    if len(matches) > 1:
+        luids = {adapter.luid for adapter in matches}
+        if None not in luids and len(luids) == 1:
+            return min(adapter.index for adapter in matches)
+    raise RuntimeError("Unable to map the selected DirectML GPU to one physical DXGI adapter")
 
 
 def directml_devices(module: Any | None = None) -> list[dict[str, object]]:
