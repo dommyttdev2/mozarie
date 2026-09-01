@@ -77,7 +77,7 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
             lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
         )
 
-    def test_duplicate_dxgi_name_fails_closed(self) -> None:
+    def test_duplicate_dxgi_name_without_identity_fails_closed(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [
             runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M"),
@@ -87,17 +87,48 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
             lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
         )
 
+    def test_duplicate_dxgi_name_with_different_luids_fails_closed(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20)),
+        ]
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
+        )
+
+    def test_duplicate_dxgi_entries_for_same_luid_map_same_physical_gpu(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(7, 42)),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(7, 42)),
+        ]
+        self.assertEqual(
+            runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters),
+            0,
+        )
+
     def test_dxgi_not_found_is_the_only_normal_enumeration_end(self) -> None:
         adapter = object()
         enum_adapter = Mock(side_effect=[(0, adapter), (runtime_module._DXGI_ERROR_NOT_FOUND, None)])
-        describe_adapter = Mock(return_value=(0, "GPU 0\0"))
+        describe_adapter = Mock(return_value=(0, "GPU 0\0", (3, 9)))
         release_adapter = Mock()
 
         self.assertEqual(
             runtime_module._enumerate_dxgi_adapter_names(enum_adapter, describe_adapter, release_adapter),
-            [runtime_module.DxgiDevice(index=0, name="GPU 0")],
+            [runtime_module.DxgiDevice(index=0, name="GPU 0", luid=(3, 9))],
         )
         release_adapter.assert_called_once_with(adapter)
+
+    def test_dxgi_legacy_descriptor_without_luid_is_supported_for_tests(self) -> None:
+        adapter = object()
+        enum_adapter = Mock(side_effect=[(0, adapter), (runtime_module._DXGI_ERROR_NOT_FOUND, None)])
+        describe_adapter = Mock(return_value=(0, "GPU 0\0"))
+        release_adapter = Mock()
+        self.assertEqual(
+            runtime_module._enumerate_dxgi_adapter_names(enum_adapter, describe_adapter, release_adapter),
+            [runtime_module.DxgiDevice(index=0, name="GPU 0")],
+        )
 
     def test_dxgi_partial_enumeration_failure_discards_previous_results(self) -> None:
         adapter = object()
