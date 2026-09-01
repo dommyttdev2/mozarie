@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import os
 from pathlib import Path
+import subprocess
+import sys
 import warnings
 
 from mozarie.config import SettingsStore
@@ -187,6 +190,29 @@ def _dxgi_extended_snapshot() -> list[dict[str, object]]:  # pragma: no cover - 
         release_factory(factory)
 
 
+def _probe_dml_visible_device(adapter_index: int) -> str:  # pragma: no cover - Windows hardware diagnostic
+    """Ask a fresh torch-directml process what one DML-visible adapter exposes."""
+    code = (
+        "import torch_directml; "
+        "c=int(torch_directml.device_count()); "
+        "print('count='+str(c)); "
+        "[print('device='+str(i)+':'+repr(str(torch_directml.device_name(i)).rstrip(chr(0)))) for i in range(c)]"
+    )
+    env = dict(os.environ)
+    env["DML_VISIBLE_DEVICES"] = str(adapter_index)
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    stdout = " | ".join(line.strip() for line in result.stdout.splitlines() if line.strip())
+    stderr = " | ".join(line.strip() for line in result.stderr.splitlines() if line.strip())
+    return f"exit={result.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+
+
 def _print_directml_identity_snapshot() -> None:  # pragma: no cover - Windows hardware diagnostic
     """Print runtime identities only after a DirectML setup failure."""
     try:
@@ -218,6 +244,13 @@ def _print_directml_identity_snapshot() -> None:  # pragma: no cover - Windows h
                 f"revision=0x{adapter['revision']:X}, dedicated_video={adapter['dedicated_video']}, "
                 f"dedicated_system={adapter['dedicated_system']}, shared_system={adapter['shared_system']}"
             )
+        for adapter in adapters:
+            index = int(adapter["index"])
+            try:
+                probe = _probe_dml_visible_device(index)
+                print(f"[Mozarie] DML_VISIBLE_DEVICES={index}: {probe}")
+            except Exception as exc:
+                print(f"[Mozarie] DML_VISIBLE_DEVICES={index}: diagnostic failed: {type(exc).__name__}: {exc}")
     except Exception as exc:
         print(f"[Mozarie] DXGI identity diagnostic failed: {type(exc).__name__}: {exc}")
 
