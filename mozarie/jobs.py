@@ -69,11 +69,13 @@ class JobsMixin:
         if torch is not None and runtime_backend(torch_module=torch) == "cuda":
             self._empty_selected_gpu_cache(torch, int(gpu_device if gpu_device is not None else self.settings["models"].get("gpu_device", 0)))
 
-    def _discard_gpu_models_after_oom(self) -> None:
-        """Drop every CUDA-backed model/session after all detection workers have stopped."""
-        provider = str(self.settings["models"].get("provider", "gpu"))
-        gpu_device = int(self.settings["models"].get("gpu_device", 0))
+    def _release_gpu_job_memory(self) -> None:
+        """Release accelerator-backed models after a background job has returned."""
         with self.inference_lock:
+            provider = str(self.settings["models"].get("provider", "gpu"))
+            if provider != "gpu":
+                return
+            gpu_device = int(self.settings["models"].get("gpu_device", 0))
             with self.sam_lock:
                 if self.sam_predictor is not None:
                     self.sam_predictor.reset_image()
@@ -86,13 +88,14 @@ class JobsMixin:
             with self.lock:
                 self.models = None
                 self.hand_model = None
-        self._release_gpu_cache(provider=provider, gpu_device=gpu_device)
+            self._release_gpu_cache(provider=provider, gpu_device=gpu_device)
 
     def recover_gpu_oom_for_request(self, exc: BaseException) -> ClientError | None:
         """Map an interactive inference OOM and make the next request reusable."""
         client_error = self._gpu_oom_client_error(exc)
         if client_error is not None:
-            self._discard_gpu_models_after_oom()
+            exc.__traceback__ = None
+            self._release_gpu_job_memory()
         return client_error
 
     def _set_job_parallelism(
@@ -254,12 +257,19 @@ class JobsMixin:
             self._job_output_slots: dict[int, str] = {}
             self.job_control = control
         LOGGER.debug("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
-        thread = threading.Thread(
-            target=worker,
-            args=(records, *args),
-            kwargs={"control": control, "job_generation": job_generation, "catalog_generation": catalog_generation},
-            daemon=True,
-        )
+        def run_worker() -> None:
+            try:
+                worker(
+                    records,
+                    *args,
+                    control=control,
+                    job_generation=job_generation,
+                    catalog_generation=catalog_generation,
+                )
+            finally:
+                self._release_gpu_job_memory()
+
+        thread = threading.Thread(target=run_worker, daemon=True)
         with self.lock:
             self.worker_thread = thread
         thread.start()
@@ -277,7 +287,6 @@ class JobsMixin:
             time.sleep(0.1)
 
     def _cancel_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        cancelled = False
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation):
                 self._resume_job_clock()
@@ -286,14 +295,6 @@ class JobsMixin:
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
-                cancelled = True
-        if cancelled:
-            self._release_gpu_job_memory()
-
-    def _release_gpu_job_memory(self) -> None:
-        """Return unused PyTorch allocator memory after a terminal GPU job."""
-        self._release_gpu_cache()
-
     def combined_candidate_mask(
         self,
         image_id: str,
@@ -485,7 +486,6 @@ class JobsMixin:
         return sorted(failures, key=lambda failure: failure[0])
 
     def _finish_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
-        # The current-job gate makes terminal cleanup unconditional below.
         with self.lock:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
@@ -498,14 +498,15 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
-            # Capture the final label while the job state is still protected.
-            # Cleanup intentionally happens outside the state lock.
-        self._release_gpu_job_memory()
         LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         unexpected: Exception | None = None
         gpu_oom = self._gpu_oom_client_error(exc)
+        if gpu_oom is not None:
+            # The worker retains the original exception until it returns. Do
+            # not retain partially-created CUDA models through that traceback.
+            exc.__traceback__ = None
         if not isinstance(exc, ClientError):
             if isinstance(exc, sqlite3.DatabaseError):
                 exc = ClientError("作業データを保存できませんでした。Mozarieを再起動して、もう一度お試しください。", "workspace_database_error")
@@ -534,13 +535,6 @@ class JobsMixin:
             self.job.params = dict(exc.params)
             self.job.current = ""
             self.job.active_count = 0
-        if gpu_oom is not None:
-            # The traceback can retain partially-created SAM/HandSegNet models.
-            # No traceback is shown for a classified, expected OOM.
-            exc.__traceback__ = None
-            self._discard_gpu_models_after_oom()
-        else:
-            self._release_gpu_job_memory()
         if unexpected is not None:
             LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc, exc_info=unexpected)
         else:

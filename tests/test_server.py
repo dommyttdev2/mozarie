@@ -2838,13 +2838,11 @@ class MozarieTests(unittest.TestCase):
         torch_oom = type("OutOfMemoryError", (RuntimeError,), {"__module__": "torch.cuda"})
         state = self.new_state()
         state.job = core_module.Job(kind="detect", state="running", parallelism=1)
-        with patch.object(state, "_discard_gpu_models_after_oom") as recover:
-            state._fail_job(torch_oom("Could not allocate tensor with 1073741824 bytes"))
+        state._fail_job(torch_oom("Could not allocate tensor with 1073741824 bytes"))
         self.assertEqual(state.job.error_code, "gpu_out_of_memory")
         self.assertEqual(state.job.params, {"parallelism": 1})
         self.assertNotIn("1073741824", state.job.error)
         self.assertIn("vit_b", state.job.error)
-        recover.assert_called_once_with()
 
     def test_detection_records_effective_parallelism_for_oom_guidance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2852,8 +2850,7 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state(); image_id = state.set_root(directory)[0]["id"]; record = state.image_for_id(image_id)
             state.job = core_module.Job(kind="detect", state="running", total=1, image_ids=(image_id,))
             with patch.object(state, "_ensure_models", return_value=object()), \
-                 patch.object(state, "_detect_image", side_effect=RuntimeError("cuda out of memory")), \
-                 patch.object(state, "_discard_gpu_models_after_oom"):
+                 patch.object(state, "_detect_image", side_effect=RuntimeError("cuda out of memory")):
                 state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE, 4)
             self.assertEqual(state.job.parallelism, 1)
             self.assertEqual(state.job.params, {"parallelism": 1})
@@ -2863,8 +2860,9 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.job = core_module.Job(kind="detect", state="running")
         state.models = object(); state.sam_predictor = Mock(); state.hand_segmentation_predictor = Mock()
+        state._fail_job(RuntimeError("cuda out of memory"))
         with patch.object(state, "_release_gpu_cache") as cache:
-            state._fail_job(RuntimeError("cuda out of memory"))
+            state._release_gpu_job_memory()
         self.assertIsNone(state.models)
         self.assertIsNone(state.sam_predictor)
         self.assertIsNone(state.hand_segmentation_predictor)
@@ -2881,7 +2879,7 @@ class MozarieTests(unittest.TestCase):
             state._fail_job(RuntimeError("no kernel image is available for execution on the device"))
         self.assertEqual(state.job.error_code, "internal_error")
         self.assertNotIn("kernel image", state.job.error)
-        release.assert_called_once_with()
+        release.assert_not_called()
 
     def test_terminal_gpu_job_empties_the_pytorch_cache(self):
         state = self.new_state()
@@ -2889,7 +2887,7 @@ class MozarieTests(unittest.TestCase):
         state.job = core_module.Job(kind="detect", state="running")
         cuda = Mock(); cuda.is_available.return_value = True
         with patch.dict(jobs_module.sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}):
-            state._finish_job()
+            state._release_gpu_job_memory()
         cuda.empty_cache.assert_called_once_with()
 
     def test_terminal_gpu_job_does_not_import_torch_just_to_empty_its_cache(self):
@@ -2897,7 +2895,7 @@ class MozarieTests(unittest.TestCase):
         state.settings["models"]["provider"] = "gpu"
         state.job = core_module.Job(kind="detect", state="running")
         with patch.object(jobs_module.sys, "modules", {}):
-            state._finish_job()
+            state._release_gpu_job_memory()
 
     def test_invalidate_sam_image_releases_only_that_image_embeddings(self):
         state = self.new_state()
@@ -2926,8 +2924,7 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         state.settings["models"]["provider"] = "cpu"
         state.job = core_module.Job(kind="detect", state="running")
-        with patch.object(state, "_release_gpu_job_memory"):
-            state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
+        state._fail_job(RuntimeError("BFCArena failed to allocate memory"))
         self.assertEqual(state.job.error_code, "internal_error")
         self.assertNotIn("GPU", state.job.error)
 
@@ -2961,6 +2958,16 @@ class MozarieTests(unittest.TestCase):
             second = state._ensure_models()
         self.assertIs(first, second)
         self.assertEqual(segmenter.call_count, 1)
+
+    def test_terminal_gpu_release_allows_detection_models_to_reload(self):
+        state = self.new_state()
+        first = object()
+        second = object()
+        with patch.object(state, "_load_detection_models", side_effect=[first, second]) as load:
+            self.assertIs(state._ensure_models(), first)
+            state._release_gpu_job_memory()
+            self.assertIs(state._ensure_models(), second)
+        self.assertEqual(load.call_count, 2)
 
     def test_auxiliary_setting_change_keeps_sam_cache(self):
         state = self.new_state()
@@ -3402,10 +3409,20 @@ class MozarieTests(unittest.TestCase):
             state._boundary_hand_boxes(np.zeros((8, 8, 3), dtype=np.uint8))
         self.assertEqual(detector.call_count, 1)
 
+    def test_boundary_operation_keeps_cached_hand_model_until_a_job_ends(self):
+        state = self.new_state(); state.settings["models"]["hand_detection_enabled"] = True
+        hand = Mock(); hand.detect_boxes.return_value = []
+        with patch.object(state, "_configured_model_path", return_value=Path("hand.onnx")), \
+             patch.object(detection_module, "HandDetector", return_value=hand), \
+             patch.object(state, "_release_gpu_job_memory") as release:
+            state._boundary_hand_boxes(np.zeros((8, 8, 3), dtype=np.uint8))
+        self.assertIs(state.hand_model, hand)
+        release.assert_not_called()
+
     def test_hand_detector_is_dropped_with_gpu_model_cache(self):
         state = self.new_state(); state.hand_model = Mock()
         with patch.object(state, "_release_gpu_cache"):
-            state._discard_gpu_models_after_oom()
+            state._release_gpu_job_memory()
         self.assertIsNone(state.hand_model)
 
     def test_precise_segments_receive_hand_refinement(self):
