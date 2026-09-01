@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import sys
 
+from .runtime import directml_onnx_device_id
+
 
 PROFILES = {"cuda", "directml", "cpu"}
 RUNTIME_DISTRIBUTIONS = {
@@ -152,6 +154,7 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
 
     providers = list(ort.get_available_providers())
     devices: list[str] = []
+    onnx_gpu_device = gpu_device
     if selected == "cuda":
         if not getattr(torch.version, "cuda", None) or "CUDAExecutionProvider" not in providers:
             raise ProfileError("CUDA PyTorch or CUDAExecutionProvider is unavailable.")
@@ -180,6 +183,12 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
         probe = torch.ones(1, device=device) + 1
         if float(probe.cpu().item()) != 2.0:
             raise ProfileError("The DirectML tensor probe failed.")
+        try:
+            onnx_gpu_device = directml_onnx_device_id(gpu_device, module=torch_directml)
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProfileError(
+                f"The selected DirectML device {gpu_device} could not be mapped to an ONNX Runtime adapter."
+            ) from exc
     else:
         if "CPUExecutionProvider" not in providers:
             raise ProfileError("CPUExecutionProvider is unavailable.")
@@ -187,7 +196,7 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
         if float(probe.item()) != 2.0:
             raise ProfileError("The CPU tensor probe failed.")
 
-    onnx_provider = _probe_onnx(ort, onnx, np, selected, gpu_device)
+    onnx_provider = _probe_onnx(ort, onnx, np, selected, onnx_gpu_device)
 
     return {
         "schema": 1,
