@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from mozarie import runtime as runtime_module
 from mozarie.inference import onnx as onnx_module
 
 
@@ -61,6 +62,60 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
         with patch("mozarie.inference.onnx.directml_module", return_value=directml), \
              patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=adapters):
             self.assert_gpu_unavailable(lambda: onnx_module._directml_onnx_device_id(0))
+
+    def test_dxgi_not_found_is_the_only_normal_enumeration_end(self) -> None:
+        adapter = object()
+        enum_adapter = Mock(side_effect=[(0, adapter), (runtime_module._DXGI_ERROR_NOT_FOUND, None)])
+        describe_adapter = Mock(return_value=(0, "GPU 0\0"))
+        release_adapter = Mock()
+
+        self.assertEqual(
+            runtime_module._enumerate_dxgi_adapter_names(enum_adapter, describe_adapter, release_adapter),
+            [runtime_module.DxgiDevice(index=0, name="GPU 0")],
+        )
+        release_adapter.assert_called_once_with(adapter)
+
+    def test_dxgi_partial_enumeration_failure_discards_previous_results(self) -> None:
+        adapter = object()
+        enum_adapter = Mock(side_effect=[(0, adapter), (-1, None)])
+        describe_adapter = Mock(return_value=(0, "GPU 0"))
+        release_adapter = Mock()
+
+        self.assertEqual(
+            runtime_module._enumerate_dxgi_adapter_names(enum_adapter, describe_adapter, release_adapter),
+            [],
+        )
+        release_adapter.assert_called_once_with(adapter)
+
+    def test_dxgi_null_adapter_fails_the_whole_enumeration(self) -> None:
+        describe_adapter = Mock()
+        release_adapter = Mock()
+
+        self.assertEqual(
+            runtime_module._enumerate_dxgi_adapter_names(
+                Mock(return_value=(0, None)),
+                describe_adapter,
+                release_adapter,
+            ),
+            [],
+        )
+        describe_adapter.assert_not_called()
+        release_adapter.assert_not_called()
+
+    def test_dxgi_descriptor_failure_discards_the_whole_enumeration(self) -> None:
+        adapter = object()
+        describe_adapter = Mock(return_value=(-1, ""))
+        release_adapter = Mock()
+
+        self.assertEqual(
+            runtime_module._enumerate_dxgi_adapter_names(
+                Mock(return_value=(0, adapter)),
+                describe_adapter,
+                release_adapter,
+            ),
+            [],
+        )
+        release_adapter.assert_called_once_with(adapter)
 
 
 if __name__ == "__main__":
