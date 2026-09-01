@@ -123,8 +123,18 @@ class OnnxAdapterTests(unittest.TestCase):
             path.write_bytes(b"model")
             session = Mock()
             session.get_providers.return_value = ["DmlExecutionProvider"]
+            directml = SimpleNamespace(
+                device_count=lambda: 2,
+                device_name=lambda index: ["AMD Radeon(TM) Graphics", "AMD Radeon RX 6600M"][index],
+            )
+            adapters = [
+                SimpleNamespace(index=0, name="AMD Radeon(TM) Graphics"),
+                SimpleNamespace(index=1, name="AMD Radeon RX 6600M"),
+            ]
             with patch.dict(os.environ, {"MOZARIE_RUNTIME": "directml"}), \
                  patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["DmlExecutionProvider", "CPUExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.directml_module", return_value=directml), \
+                 patch("mozarie.inference.onnx._dxgi_adapter_names", return_value=adapters), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", return_value=session) as create:
                 self.assertIs(create_session(path, "gpu", 1), session)
             options = create.call_args.kwargs["sess_options"]

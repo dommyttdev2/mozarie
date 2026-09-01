@@ -14,7 +14,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-from ..runtime import runtime_backend
+from ..runtime import (
+    _dxgi_adapter_names,
+    directml_module,
+    directml_onnx_device_id,
+    runtime_backend,
+)
 
 
 _dll_directory_handles: list[object] = []
@@ -78,6 +83,18 @@ class Letterbox:
     source_height: int
 
 
+def _directml_onnx_device_id(logical_device_id: int) -> int:
+    """Map a torch-directml selection to one unique DXGI adapter."""
+    try:
+        return directml_onnx_device_id(
+            int(logical_device_id),
+            module=directml_module(),
+            adapters=_dxgi_adapter_names(),
+        )
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise _gpu_unavailable_error() from exc
+
+
 def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
@@ -86,7 +103,8 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
-        return [("DmlExecutionProvider", {"device_id": int(gpu_device)}), "CPUExecutionProvider"]
+        directml_index = _directml_onnx_device_id(int(gpu_device))
+        return [("DmlExecutionProvider", {"device_id": directml_index}), "CPUExecutionProvider"]
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {
@@ -110,14 +128,9 @@ def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.Inf
     try:
         session = ort.InferenceSession(model, sess_options=options, providers=available_providers(device, gpu_device))
     except Exception as exc:
-        # A model parser/data failure is not a GPU outage.  The selected
-        # provider becoming unavailable is identified either before creation
-        # or by ORT returning a CPU-only session below.
         if getattr(exc, "error_code", None):
             raise
         raise _model_load_error() from exc
-    # Provider failure must be visible to the user.  ORT otherwise silently
-    # recreates this session with a fallback provider during ``run``.
     session.disable_fallback()
     expected = {"cuda": "CUDAExecutionProvider", "directml": "DmlExecutionProvider"}.get(backend)
     if expected is not None and session.get_providers()[0] != expected:
@@ -133,8 +146,6 @@ def create_session(path: Path, device: str = "gpu", gpu_device: int = 0) -> ort.
     except Exception as exc:
         if getattr(exc, "error_code", None):
             if device.lower() != "cpu" and getattr(exc, "error_code", None) == "model_load_failed":
-                # A fixed identity model distinguishes a corrupt configured
-                # ONNX file from a CUDA provider that cannot initialize.
                 diagnose_runtime(device, gpu_device)
             raise
         raise _model_load_error() from exc
@@ -164,8 +175,6 @@ def diagnose_runtime(device: str = "gpu", gpu_device: int = 0) -> tuple[str, ...
     except Exception as exc:
         if getattr(exc, "error_code", None) == "gpu_unavailable":
             raise
-        # The diagnostic model and tensor are fixed and valid. A failure here
-        # is therefore a selected-provider runtime failure, not a user model.
         raise _gpu_unavailable_error() from exc
     return tuple(session.get_providers())
 
@@ -241,13 +250,15 @@ class BaseOnnxModel:
     def __init__(self, path: Path, *, device: str = "gpu", gpu_device: int = 0) -> None:
         self.path = path
         self.device = device
+        self.gpu_device = int(gpu_device)
         self.session = create_session(path, device, gpu_device)
         self.input_name = self.session.get_inputs()[0].name
         self.run_options = None
-        self.run_lock = threading.RLock() if self.session.get_providers()[0] in {"CUDAExecutionProvider", "DmlExecutionProvider"} else None
-        if self.session.get_providers()[0] == "CUDAExecutionProvider":
+        provider = self.session.get_providers()[0]
+        self.run_lock = threading.RLock() if provider in {"CUDAExecutionProvider", "DmlExecutionProvider"} else None
+        if provider == "CUDAExecutionProvider":
             self.run_options = ort.RunOptions()
-            self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{int(gpu_device)}")
+            self.run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{self.gpu_device}")
 
     def run(self, tensor: np.ndarray) -> list[np.ndarray]:
         feeds = {self.input_name: tensor}
