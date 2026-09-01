@@ -77,6 +77,18 @@ def _save_cpu_provider() -> bool:
     return True
 
 
+def _print_exception_chain(exc: BaseException) -> None:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    depth = 0
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        prefix = "cause" if depth else "error"
+        print(f"[Mozarie] DirectML {prefix}: {type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+        depth += 1
+
+
 def main() -> int:
     try:
         settings = SettingsStore(APP_DIR).load()
@@ -93,7 +105,9 @@ def main() -> int:
             validate(profile, device)
             print(f"[Mozarie] DirectML GPU {device} is ready.")
             return 0
-        except Exception:
+        except Exception as exc:
+            print(f"[Mozarie] DirectML setup probe failed for logical GPU {device}.")
+            _print_exception_chain(exc)
             print(DIRECTML_RUNTIME_FAILED_MESSAGE)
             return 1
     try:
