@@ -87,26 +87,110 @@ class DirectMlGpuIdentityTests(unittest.TestCase):
             lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
         )
 
-    def test_duplicate_dxgi_name_with_different_luids_fails_closed(self) -> None:
+    def test_duplicate_dxgi_name_with_different_luids_requires_physical_identity(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [
             runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)),
             runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20)),
         ]
         self.assert_runtime_mapping_failure(
-            lambda: runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters)
+            lambda: runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=lambda luid: None,
+            )
         )
 
-    def test_duplicate_dxgi_entries_for_same_luid_use_enumerated_alias(self) -> None:
+    def test_duplicate_different_luids_same_pnp_identity_use_enumerated_alias(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(0, 26920747)),
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(0, 52342)),
+        ]
+        identity = (
+            r"\registry\machine\system\controlset001\enum\pci\ven_1002&dev_73ff\device parameters",
+            r"\registry\machine\system\controlset001\control\class\display\0001",
+        )
+        resolver = Mock(return_value=identity)
+        self.assertEqual(
+            runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=resolver,
+            ),
+            2,
+        )
+        self.assertEqual(resolver.call_args_list[0].args, ((0, 26920747),))
+        self.assertEqual(resolver.call_args_list[1].args, ((0, 52342),))
+
+    def test_duplicate_different_luids_conflicting_pnp_identity_fails_closed(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20)),
+        ]
+        identities = {
+            (1, 10): ("hardware-a", "software-a"),
+            (1, 20): ("hardware-b", "software-b"),
+        }
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=identities.get,
+            )
+        )
+
+    def test_duplicate_different_luids_partial_pnp_identity_fails_closed(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20)),
+        ]
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=lambda luid: ("hardware", "software") if luid == (1, 10) else None,
+            )
+        )
+
+    def test_duplicate_different_luids_resolver_error_fails_closed(self) -> None:
+        directml = self._directml("AMD Radeon RX 6600M")
+        adapters = [
+            runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(1, 10)),
+            runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(1, 20)),
+        ]
+        self.assert_runtime_mapping_failure(
+            lambda: runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=Mock(side_effect=OSError("KMT unavailable")),
+            )
+        )
+
+    def test_duplicate_dxgi_entries_for_same_luid_use_enumerated_alias_without_pnp_probe(self) -> None:
         directml = self._directml("AMD Radeon RX 6600M")
         adapters = [
             runtime_module.DxgiDevice(index=2, name="AMD Radeon RX 6600M", luid=(7, 42)),
             runtime_module.DxgiDevice(index=0, name="AMD Radeon RX 6600M", luid=(7, 42)),
         ]
+        resolver = Mock()
         self.assertEqual(
-            runtime_module.directml_onnx_device_id(0, module=directml, adapters=adapters),
+            runtime_module.directml_onnx_device_id(
+                0,
+                module=directml,
+                adapters=adapters,
+                physical_identity_resolver=resolver,
+            ),
             2,
         )
+        resolver.assert_not_called()
 
     def test_dxgi_not_found_is_the_only_normal_enumeration_end(self) -> None:
         adapter = object()
