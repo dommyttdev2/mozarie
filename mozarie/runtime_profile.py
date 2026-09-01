@@ -7,8 +7,6 @@ import os
 from pathlib import Path
 import sys
 
-from .runtime import directml_onnx_device_id
-
 
 PROFILES = {"cuda", "directml", "cpu"}
 RUNTIME_DISTRIBUTIONS = {
@@ -116,6 +114,8 @@ def _probe_onnx(
                 "DirectML GPU identity is required to map the selected device to an ONNX Runtime adapter."
             )
         try:
+            from .runtime import directml_onnx_device_id
+
             provider_device = directml_onnx_device_id(
                 gpu_device,
                 module=directml_identity,
