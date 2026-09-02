@@ -35,6 +35,26 @@ function renderCandidates() {
     button.textContent = text; button.addEventListener("click", onChange); return button;
   };
   const makeDisplay = (id) => candidateDisplayToggle(id);
+  const makeExpandInput = (candidate, disabled) => {
+    const label = document.createElement("label"); label.className = "candidate-expand";
+    const text = document.createElement("span"); text.textContent = t("candidates.expand");
+    const input = document.createElement("input"); input.type = "number"; input.min = "0"; input.step = "1"; input.inputMode = "numeric";
+    const record = currentRecord(); input.max = String(Math.max(0, Number(record?.width) || 0, Number(record?.height) || 0));
+    input.value = String(candidate.expandPx || 0); input.disabled = disabled;
+    input.setAttribute("aria-label", t("candidates.expand"));
+    const suffix = document.createElement("span"); suffix.textContent = t("candidates.px");
+    input.addEventListener("change", async () => {
+      const expandPx = Number(input.value);
+      if (!Number.isInteger(expandPx) || expandPx < 0 || expandPx > Number(input.max)) { input.value = String(candidate.expandPx || 0); return; }
+      const previousExpandPx = candidate.expandPx || 0;
+      if (expandPx === previousExpandPx || isBusy() || state.importing) return;
+      const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
+      candidate.expandPx = expandPx; markMaskDirty(); setReviewed(currentRecord(), false);
+      syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+      await updateCandidate(candidate, candidate.enabled, previousMaskStatus, candidate.forced, previousExpandPx);
+    });
+    label.append(text, input, suffix); return label;
+  };
   const appendManual = (list, role) => {
     const isApply = role === "apply";
     const exists = isApply ? state.manualMaskPresent : presence.hasManualExclude;
@@ -125,8 +145,8 @@ function renderCandidates() {
         syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
       }, deleting || state.candidateBatchPending.has(state.currentId));
-      row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), forced, remove);
-    } else row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), remove);
+      row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), makeExpandInput(candidate, deleting || state.candidateBatchPending.has(state.currentId)), forced, remove);
+    } else row.append(label, enabled, blink, candidateEffectiveToggle(candidate.id), makeExpandInput(candidate, deleting || state.candidateBatchPending.has(state.currentId)), remove);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
@@ -236,6 +256,17 @@ function nextCandidateMutationVersion(key) {
   state.candidateUpdateVersions.set(key, version);
   return version;
 }
+async function refreshCandidateBitmap(candidate, imageId, revision, generation, mutationKey, mutationVersion) {
+  const bitmap = await fetchBitmap(maskUrl(imageId, candidate.id, revision));
+  if (state.currentId !== imageId || !isCurrentGeneration(generation) || state.candidateUpdateVersions.get(mutationKey) !== mutationVersion) {
+    closeBitmap(bitmap); return false;
+  }
+  const previous = state.candidateImages.get(candidate.id);
+  state.candidateImages.set(candidate.id, bitmap);
+  if (previous && previous !== bitmap) closeBitmap(previous);
+  invalidateCandidateBundles(imageId);
+  return true;
+}
 function enqueueCandidateMutation(imageId, send) {
   const previous = state.candidateUpdateChains.get(imageId) || Promise.resolve();
   const queued = previous.then(send, send);
@@ -254,7 +285,7 @@ async function waitForCandidateMutations() {
   }
 }
 
-async function updateCandidate(candidate, previousEnabled, previousMaskStatus, previousForced = candidate.forced) {
+async function updateCandidate(candidate, previousEnabled, previousMaskStatus, previousForced = candidate.forced, previousExpandPx = candidate.expandPx || 0) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   const targetCandidates = [...state.candidates];
@@ -262,15 +293,17 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
   const version = nextCandidateMutationVersion(mutationKey);
   const desired = candidate.enabled;
   const desiredForced = candidate.forced;
+  const desiredExpandPx = candidate.expandPx || 0;
   const send = async () => {
     try {
       const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
-        method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color, ...(candidate.role === "exclude" ? { forced: desiredForced } : {}) }),
+        method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color, ...(desiredExpandPx !== previousExpandPx ? { expandPx: desiredExpandPx } : {}), ...(candidate.role === "exclude" ? { forced: desiredForced } : {}) }),
       });
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
+      if (desiredExpandPx !== previousExpandPx && !await refreshCandidateBitmap(candidate, imageId, result.candidateRevision, generation, mutationKey, version)) return;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
-        if (currentCandidate) { currentCandidate.enabled = desired; currentCandidate.forced = desiredForced; }
+        if (currentCandidate) { currentCandidate.enabled = desired; currentCandidate.forced = desiredForced; currentCandidate.expandPx = desiredExpandPx; }
         retainCurrentCandidateBundle(imageId, result.candidateRevision);
         syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
       } else {
@@ -287,13 +320,13 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
           }
         } catch {
           if (state.currentId === imageId && isCurrentGeneration(generation)) {
-            candidate.enabled = previousEnabled; candidate.forced = previousForced; syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
+            candidate.enabled = previousEnabled; candidate.forced = previousForced; candidate.expandPx = previousExpandPx; syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
             showUserError(error);
             return;
           }
         }
       }
-      candidate.enabled = previousEnabled; candidate.forced = previousForced;
+      candidate.enabled = previousEnabled; candidate.forced = previousForced; candidate.expandPx = previousExpandPx;
       syncCandidateRecord(imageId, targetCandidates);
       if (previousMaskStatus !== undefined) state.maskStatus.set(imageId, previousMaskStatus);
       try {
@@ -565,7 +598,7 @@ function fillAt(point, tool = state.tool) {
   const width = originalCanvas.width; const height = originalCanvas.height;
   const pixels = originalCtx.getImageData(0, 0, width, height).data;
   const x = Math.min(width - 1, Math.max(0, Math.floor(point.x))); const y = Math.min(height - 1, Math.max(0, Math.floor(point.y)));
-  const tolerance = Math.max(0, Math.min(255, Number($("#bucketTolerance").value) || 0));
+  const tolerance = state.settings.editing.fill_color_tolerance;
   const generation = state.imageGeneration; const epoch = state.catalogEpoch; const imageId = state.currentId; const record = currentRecord(); const version = imageAssetVersion(record); const revision = Number(record?.candidateRevision || 0);
   const apply = (spans) => {
     if (!catalogRecordMatches(record, epoch, { version, revision }) || !isCurrentGeneration(generation) || state.currentId !== imageId) { state.fillPending = false; return; }
@@ -625,6 +658,7 @@ function beginManualStroke(point) {
   const excludeDisplayIds = state.tool === "exclude_eraser" ? candidateDisplayIdsForRole("exclude") : [];
   if (state.tool === "exclude_eraser" && excludeDisplayIds.length && excludeDisplayIds.every((id) => candidateDisplayMode(id) === "normal")) setCandidateDisplayMode(["manual:excludeErase"], "normal");
   drawStroke(point, point, state.tool, state.activeStroke.size);
+  requestMosaicPreview();
 }
 
 function appendManualStrokePoint(point) {
@@ -639,6 +673,7 @@ function paintPendingManualStroke() {
   if (!stroke || stroke.paintedPointCount >= stroke.points.length) return;
   paintStrokePath(stroke.points.slice(stroke.paintedPointCount - 1), stroke.tool, stroke.size);
   stroke.paintedPointCount = stroke.points.length;
+  requestMosaicPreview();
 }
 
 function cancelManualStroke() {

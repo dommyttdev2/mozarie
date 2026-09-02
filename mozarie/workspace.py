@@ -204,6 +204,24 @@ class WorkspaceStore:
             cls._decode_png_mask(raw)
 
     @staticmethod
+    def _candidate_row(row: sqlite3.Row) -> dict[str, Any]:
+        """Attach the candidate's PNG-only padding metadata to its hydrated row."""
+        raw = row["mask_png"]
+        if not isinstance(raw, bytes):
+            raise ValueError("workspace candidate mask is not a PNG")
+        with Image.open(io.BytesIO(raw)) as image:
+            value = image.text.get("mozarie_expand_px", "0")
+        try:
+            expand_px = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("workspace candidate expand pixels are invalid") from exc
+        if expand_px < 0 or str(expand_px) != value:
+            raise ValueError("workspace candidate expand pixels are invalid")
+        hydrated = dict(row)
+        hydrated["expand_px"] = expand_px
+        return hydrated
+
+    @staticmethod
     def identity_for_root(root: Path) -> str:
         return hashlib.sha256(str(root.resolve()).casefold().encode("utf-8")).hexdigest()
 
@@ -467,6 +485,9 @@ class WorkspaceStore:
                     db.execute("DELETE FROM candidates WHERE image_id=? AND deleted=1", (image_id,))
                 else:
                     for candidate in candidates:
+                        # Normal candidate controls only alter metadata. Keep
+                        # the durable PNG BLOB untouched instead of rereading
+                        # a potentially lazy cache file.
                         db.execute("UPDATE candidates SET enabled=?,color=?,forced=? WHERE image_id=? AND candidate_id=?", (int(candidate.enabled), candidate.color, int(candidate.forced), image_id, candidate.candidate_id))
                 self._update_manual_candidate_state(db, image_id, revision, {candidate.candidate_id for candidate in candidates}, effective)
                 db.execute("COMMIT")
@@ -486,7 +507,7 @@ class WorkspaceStore:
             if not isinstance(mask, bytes):
                 raise ValueError("workspace candidate mask is not a PNG")
             self._require_png_mask(mask)
-        candidates = [candidate_factory(row, directory / f"{row['candidate_id']}.png") for row in rows]
+        candidates = [candidate_factory(self._candidate_row(row), directory / f"{row['candidate_id']}.png") for row in rows]
         return int(image["candidate_revision"]), candidates
 
     def hydrate_candidates_bulk(self, image_ids: list[str], cache_dir: Path, candidate_factory: Any) -> dict[str, tuple[int, list[Any]]]:
@@ -507,7 +528,7 @@ class WorkspaceStore:
                         raise ValueError("workspace candidate mask is not a PNG")
                     self._require_png_mask(mask)
                     image_id = str(row["image_id"])
-                    candidates.setdefault(image_id, []).append(candidate_factory(row, cache_dir / image_id / f"{row['candidate_id']}.png"))
+                    candidates.setdefault(image_id, []).append(candidate_factory(self._candidate_row(row), cache_dir / image_id / f"{row['candidate_id']}.png"))
         return {image_id: (revision, candidates.get(image_id, [])) for image_id, revision in images.items()}
 
     def valid_candidate_ids(self, image_id: str) -> set[str]:

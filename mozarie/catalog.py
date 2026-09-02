@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, PngImagePlugin, UnidentifiedImageError
 
 from .core import (
     IMAGE_SUFFIXES, IO_CHUNK_BYTES, MAX_BODY_BYTES, PNG_SIGNATURE,
@@ -27,6 +27,7 @@ from .core import (
 )
 from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
+from .masks import expand_mask
 from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 
 class CatalogMixin:
@@ -55,7 +56,7 @@ class CatalogMixin:
         return Candidate(
             candidate_id=str(row["candidate_id"]), label_token=str(row["label_token"]), confidence=row["confidence"], mask_path=path,
             enabled=bool(row["enabled"]), color=str(row["color"]), source=str(row["source"]), origin=str(row["origin"]),
-            refinement=row["refinement"], role=CandidateRole(str(row["role"])), forced=bool(row["forced"]),
+            refinement=row["refinement"], role=CandidateRole(str(row["role"])), forced=bool(row["forced"]), expand_px=int(row["expand_px"]),
         )
 
     def _restore_workspace_candidates(self, records: list[ImageRecord]) -> None:
@@ -114,8 +115,13 @@ class CatalogMixin:
     def _has_active_worker(self) -> bool:
         return self.worker_thread is not None and self.worker_thread.is_alive()
 
-    def _assert_catalog_mutable(self) -> None:
-        if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+    def _assert_catalog_mutable(self, *, allow_terminal_cleanup: bool = False) -> None:
+        worker_cleanup = (
+            allow_terminal_cleanup
+            and self.job.state in {"complete", "cancelled", "error"}
+            and self._has_active_worker()
+        )
+        if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or (self._has_active_worker() and not worker_cleanup):
             raise ClientError("処理が終了するまで画像一覧を変更できません。", "operation_in_progress")
 
     def _job_is_current(self, job_generation: int | None, catalog_generation: int | None) -> bool:
@@ -329,14 +335,14 @@ class CatalogMixin:
             raise ClientError("削除する画像がありません。", "image_not_found")
         with self.import_lock:
             with self.lock:
-                self._assert_catalog_mutable()
+                self._assert_catalog_mutable(allow_terminal_cleanup=True)
                 records = [self.images[image_id] for image_id in requested_ids if image_id in self.images]
             locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
             with ExitStack() as stack:
                 for _image_id, image_lock in sorted(locks):
                     stack.enter_context(image_lock)
                 with self.lock:
-                    self._assert_catalog_mutable()
+                    self._assert_catalog_mutable(allow_terminal_cleanup=True)
                     records = [self.images[record.image_id] for record in records if record.image_id in self.images]
                     removed_ids = [record.image_id for record in records]
                     mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
@@ -1095,6 +1101,7 @@ class CatalogMixin:
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
         with Image.open(io.BytesIO(raw_mask)) as mask_image:
             alpha = mask_image.convert("L").point(lambda value: 255 if value else 0)
+            alpha = Image.fromarray(expand_mask(np.asarray(alpha, dtype=np.uint8), candidate.expand_px))
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
             rgba.putalpha(alpha)
             output = io.BytesIO()
@@ -1122,7 +1129,7 @@ class CatalogMixin:
         candidate.mask_path.write_bytes(raw)
 
     def set_candidate_state(self, image_id: str, candidate_id: str, payload: dict[str, Any]) -> int:
-        self.image_for_id(image_id)
+        record = self.image_for_id(image_id)
         with self.image_io_lock(image_id):
             with self.lock:
                 if self._has_active_worker():
@@ -1131,6 +1138,7 @@ class CatalogMixin:
                 candidate = next((item for item in candidates if item.candidate_id == candidate_id), None)
                 if candidate is None:
                     raise ClientError("検出候補が見つかりません。", "catalog_changed")
+                replace_snapshot = False
                 if "forced" in payload and (candidate.role != CandidateRole.EXCLUDE or not isinstance(payload["forced"], bool)):
                     raise ClientError("除外候補の強制指定が正しくありません。", "input_invalid")
                 if "enabled" in payload:
@@ -1144,7 +1152,24 @@ class CatalogMixin:
                     candidate.color = color
                 if "forced" in payload:
                     candidate.forced = payload["forced"]
-                return self._commit_candidate_snapshot(image_id, candidates, replace=False)
+                if "expandPx" in payload:
+                    expand_px = payload["expandPx"]
+                    max_expand_px = max(record.width, record.height)
+                    if isinstance(expand_px, bool) or not isinstance(expand_px, int) or not 0 <= expand_px <= max_expand_px:
+                        raise ClientError(f"候補の枠pxは0から{max_expand_px}までの整数で指定してください。", "input_invalid")
+                    if candidate.expand_px != expand_px:
+                        self.materialize_candidate_mask(candidate, image_id)
+                        with Image.open(candidate.mask_path) as mask_image:
+                            raw_mask = mask_image.convert("L")
+                            metadata = PngImagePlugin.PngInfo()
+                            metadata.add_text("mozarie_expand_px", str(expand_px))
+                            raw_mask.save(candidate.mask_path, format="PNG", pnginfo=metadata)
+                        candidate.expand_px = expand_px
+                        # This is the only candidate mutation that changes its
+                        # durable PNG bytes. Ordinary metadata toggles must not
+                        # reread the source mask.
+                        replace_snapshot = True
+                return self._commit_candidate_snapshot(image_id, candidates, replace=replace_snapshot)
 
     def batch_update_candidates(self, image_id: str, payload: dict[str, Any]) -> int:
         """Apply one simple bulk operation and advance the revision once."""

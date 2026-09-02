@@ -67,13 +67,13 @@ const state = {
     { id: "apply", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" },
     { id: "exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" },
   ],
-  removedCandidateIds: new Set(), blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
+  removedCandidateIds: new Set(), candidateImages: new Map(), blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
   manualMaskPresent: true, manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: false,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   maskStatus: new Map(), images: [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 0, enabledCandidateCount: 0 }],
   history: [], historyIndex: 0, historyRestoreToken: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(["apply", "exclude"]), historyBaseDirty: false,
   boundaryDrafts: [{ id: "draft", type: "rectangle", roi: { left: 1, top: 2, right: 10, bottom: 12 } }], boundaryActiveId: "draft", boundaryPending: false,
-  importing: false, pendingImageId: null, fillPending: false, tool: "brush", view: { x: 0, y: 0, scale: 1 },
+  importing: false, pendingImageId: null, fillPending: false, tool: "brush", view: { x: 0, y: 0, scale: 1 }, settings: { editing: { fill_color_tolerance: 12 } },
 };
 
 let latestFillWorker = null;
@@ -113,6 +113,7 @@ const context = {
   renderCandidates: () => events.push("candidates"), render: () => events.push("render"), renderCatalogViews: () => events.push("catalog"), updateActionButtons() {},
   updateCandidateBatchButtons(...args) { batchPresences.push(args[2]); },
   syncCurrentCandidateRecord() {}, syncCandidateRecord() {}, retainCurrentCandidateBundle() {}, refreshCandidateRecord: async () => {}, reconcileCurrentCandidates: async () => true,
+  fetchBitmap: async () => ({ close() {} }), maskUrl: (_imageId, candidateId, revision) => `${candidateId}:${revision}`, closeBitmap(bitmap) { bitmap.close(); },
   releaseCandidateBitmap() {}, releaseCandidateBundles() {}, invalidateCandidateBundles: () => events.push("invalidate"), markImagesUnreviewed: () => events.push("unreview"),
   clearBoundaryInteraction: () => events.push("boundary-clear"), updateBoundaryActions() {}, setStatusKey: () => events.push("status"), showUserError: (error) => events.push(`error:${error}`),
   canDetectBoundary: () => true, compareEventSide: () => "right", compareSideOffset: () => 100,
@@ -204,7 +205,9 @@ assert.equal(state.activeStroke, null, "manual paint, fill, cancel, and replay a
 state.currentImage = savedImage;
 
 state.tool = "brush";
+events.length = 0;
 test.beginManualStroke({ x: 4, y: 4 });
+assert.ok(events.includes("preview"), "the initial brush point schedules a live mosaic preview without waiting for pointer movement");
 test.appendManualStrokePoint({ x: 8, y: 8 });
 test.completeManualStroke();
 assert.equal(state.history.length, 1, "a completed brush gesture is retained for undo");
@@ -246,7 +249,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
     state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
-    state.images = [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
+    state.images = [{ id: "image", width: 100, height: 80, assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
     state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(["apply", "exclude"]);
     context.confirmationRequired = () => false; context.confirmAction = async () => true;
     context.isBusy = () => false; context.reconcileCurrentCandidates = async () => false;
@@ -288,17 +291,53 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   await test.updateCandidate(state.candidates[0], true, true);
   assert.deepEqual(candidateCalls, [{ path: "/api/candidate/image/apply", body: { enabled: false, color: "#fff" } }], "a candidate toggle persists its requested enabled state");
   assert.equal(retainedRevision, 9, "a successful mutation retains the returned candidate revision");
+  candidateCalls.length = 0;
+  let oldMaskClosed = 0;
+  const oldMask = { close() { oldMaskClosed += 1; } };
+  const expandedMask = { close() {} };
+  state.candidateImages.set("apply", oldMask);
+  context.fetchBitmap = async (url) => { assert.equal(url, "apply:9", "padding refreshes the candidate mask at the returned revision"); return expandedMask; };
+  state.candidates[0].expandPx = 3;
+  await test.updateCandidate(state.candidates[0], false, true, undefined, 0);
+  assert.deepEqual(candidateCalls, [{ path: "/api/candidate/image/apply", body: { enabled: false, color: "#fff", expandPx: 3 } }], "padding updates send only the new source-image pixel value");
+  assert.equal(state.candidateImages.get("apply"), expandedMask, "padding swaps in the server-expanded candidate bitmap immediately");
+  assert.equal(oldMaskClosed, 1, "padding closes the replaced candidate bitmap exactly once");
+
+  resetCandidateState();
+  const retainedBeforeStaleBitmap = retainedRevision; retainedRevision = null;
+  const currentMask = { close() { throw new Error("the current bitmap must stay owned by the editor"); } };
+  let staleBitmapClosed = 0;
+  const staleBitmap = { close() { staleBitmapClosed += 1; } };
+  state.candidateImages.set("apply", currentMask);
+  state.candidates[0].expandPx = 4;
+  context.api = async () => ({ candidateRevision: 10 });
+  context.fetchBitmap = async () => {
+    state.candidateUpdateVersions.set("image:apply", 99);
+    return staleBitmap;
+  };
+  await test.updateCandidate(state.candidates[0], true, true, undefined, 0);
+  assert.equal(staleBitmapClosed, 1, "a bitmap decoded for a superseded candidate mutation is closed");
+  assert.equal(state.candidateImages.get("apply"), currentMask, "a superseded candidate mutation never replaces the currently displayed bitmap");
+  assert.equal(retainedRevision, null, "a superseded bitmap fetch never publishes the returned candidate revision");
+  retainedRevision = retainedBeforeStaleBitmap;
 
   resetCandidateState();
   test.renderCandidateRows();
   const lastRow = (className) => [...elements.values()].filter((node) => node.className === className).at(-1);
   const controlOrder = (row) => row.children.slice(1).map((node) => node.className);
-  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "apply rows order ON/OFF, detection range, applied range, delete");
-  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-forced", "candidate-delete"], "exclusion rows order ON/OFF, detection range, applied range, force, delete");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-expand", "candidate-delete"], "apply rows retain ON/OFF, detection range, applied range, padding, delete order");
+  assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-expand", "candidate-forced", "candidate-delete"], "exclusion rows retain ON/OFF, detection range, applied range, padding, force, delete order");
   assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "manual apply rows retain the same keyboard tab order");
   assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-forced", "candidate-delete"], "manual exclusion rows retain the same keyboard tab order");
+  const paddingInput = lastRow("candidate-row candidate-row-apply").children.find((node) => node.className === "candidate-expand").children[1];
+  assert.equal(paddingInput.max, "100", "candidate padding cannot exceed the current image long edge");
+  const callsBeforeInvalidPadding = candidateCalls.length;
+  paddingInput.value = "101";
+  await paddingInput.listeners.get("change")();
+  assert.equal(candidateCalls.length, callsBeforeInvalidPadding, "out-of-range padding does not call the candidate API");
+  assert.equal(paddingInput.value, "0", "out-of-range padding restores the persisted value");
   for (const row of [lastRow("candidate-row candidate-row-apply"), lastRow("candidate-row candidate-row-exclude")]) {
-    for (const button of row.children.slice(1)) assert.equal(typeof button.listeners.get("click"), "function", "each ordered candidate control remains keyboard-operable");
+    for (const button of row.children.slice(1).filter((node) => node.className !== "candidate-expand")) assert.equal(typeof button.listeners.get("click"), "function", "each ordered candidate control remains keyboard-operable");
   }
 
   const manualRows = [

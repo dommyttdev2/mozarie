@@ -533,6 +533,60 @@ async function runRemoveAfterSavePartialAndStaleCase() {
   assert.equal(stale.requests.some((request) => request.path === "/api/catalog/remove"), false, "stale saves must remain in the catalog");
 }
 
+async function runRemoveAfterSaveUiCleanupCase() {
+  const first = { id: "image-1", relativePath: "nested/first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const second = { id: "image-2", relativePath: "nested/second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
+  const runtime = createRuntime({
+    initialImages: [first, second],
+    entries: [{ imageId: first.id, relativePath: first.relativePath, candidateRevision: 1, deleteOriginal: false }],
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [first, second] }),
+    removeCatalog: () => jsonResponse({ images: [second], removedImageIds: [first.id] }),
+  });
+  runtime.state.selectedImageIds = new Set([first.id]);
+  runtime.state.selectionAnchorId = first.id;
+  runtime.state.contextMenuImageId = first.id;
+  runtime.state.contextMenuOrigin = runtime.element("#removeImageMenuItem");
+  runtime.state.contextMenuScroll = { gallery: 999, overview: 999 };
+  runtime.state.pendingImageId = first.id;
+  runtime.state.pendingImageKey = "image-1:old";
+  runtime.state.pendingCandidateKey = "image-1:old";
+  const generationForDelayedLoad = runtime.state.imageGeneration;
+  const pendingLoad = { aborted: false, abort() { this.aborted = true; } };
+  runtime.state.catalogLoadControllers.add(pendingLoad);
+  runtime.state.imageInflight.set(first.id, Promise.resolve());
+  runtime.state.sourceAccess.set(first.id, {});
+  runtime.state.drafts.set(first.id, { add: "draft" });
+  runtime.state.maskStatus.set(first.id, true);
+  runtime.state.candidateUpdateVersions.set("image-1:candidate", 1);
+  runtime.state.prefetchQueue = [{ record: first }, { record: second }];
+  runtime.element("#gallery").scrollTop = 43;
+  runtime.element("#overviewGrid").scrollTop = 17;
+
+  await runtime.runBrowserSave([first.id], "_censored", false, "copy", true);
+
+  assert.deepEqual(runtime.state.images, [second], "the committed masked entry is removed in one terminal cleanup");
+  assert.equal(runtime.state.selectedImageIds.has(first.id), false, "removed IDs leave batch selection");
+  assert.equal(runtime.state.selectionAnchorId, null, "removed IDs clear the range-selection anchor");
+  assert.equal(runtime.state.contextMenuImageId, null, "removed IDs close the contextual action target");
+  assert.equal(runtime.state.contextMenuOrigin, null, "removed IDs discard the contextual action origin");
+  assert.equal(runtime.state.contextMenuScroll, null, "removed IDs discard stale context scroll state");
+  assert.equal(runtime.state.pendingImageId, null, "removed IDs clear pending image loads");
+  assert.equal(runtime.state.imageGeneration, generationForDelayedLoad + 1, "removing a pending image invalidates its in-flight generation");
+  assert.equal(pendingLoad.aborted, true, "removing a pending image aborts the outstanding catalog load");
+  assert.equal(runtime.state.catalogLoadControllers.size, 0, "aborted pending loads are released");
+  assert.equal(runtime.state.imageInflight.size, 0, "aborted pending image promises cannot publish a removed image");
+  assert.notEqual(generationForDelayedLoad, runtime.state.imageGeneration, "a delayed image load keeps an obsolete generation after removal");
+  assert.equal(runtime.state.pendingImageKey, null, "removed IDs clear pending image cache keys");
+  assert.equal(runtime.state.pendingCandidateKey, null, "removed IDs clear pending candidate cache keys");
+  assert.equal(runtime.state.sourceAccess.has(first.id), false, "removed IDs release source access");
+  assert.equal(runtime.state.drafts.has(first.id), false, "removed IDs release drafts");
+  assert.equal(runtime.state.maskStatus.has(first.id), false, "removed IDs release mask status");
+  assert.equal(runtime.state.candidateUpdateVersions.has("image-1:candidate"), false, "removed IDs release candidate mutation state");
+  assert.equal(runtime.state.prefetchQueue.length, 0, "removing a pending image cancels every stale prefetch request");
+  assert.equal(runtime.element("#gallery").scrollTop, 43, "gallery scroll restores without forcing an invalid center jump");
+  assert.equal(runtime.element("#overviewGrid").scrollTop, 17, "overview scroll restores without forcing an invalid center jump");
+}
+
 async function runCopyFailureCase() {
   let removed = false;
   const runtime = createRuntime({ deleteOriginal: true, renderBinary: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
@@ -976,6 +1030,7 @@ async function runServerCopyRemovalCases() {
   await runRemoveAfterSaveCase();
   await runRemoveAfterSaveAlreadyAbsentCase();
   await runRemoveAfterSavePartialAndStaleCase();
+  await runRemoveAfterSaveUiCleanupCase();
   await runCopyFailureCase();
   await runCommitFailureCase();
   await runRecoverableCommitFailureCases();

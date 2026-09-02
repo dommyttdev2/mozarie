@@ -107,7 +107,7 @@ function startFixtureServer() {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
-    importing: { parallelism: 3 }, saving: { parallelism: 2 },
+    importing: { parallelism: 3 }, editing: { fill_color_tolerance: 20 }, saving: { parallelism: 2 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
@@ -138,6 +138,7 @@ function startFixtureServer() {
           models: { ...settings.models, ...(submitted.models || {}) },
           display: { ...settings.display, ...(submitted.display || {}) },
           importing: { ...settings.importing, ...(submitted.importing || {}) },
+          editing: { ...settings.editing, ...(submitted.editing || {}) },
           saving: { ...settings.saving, ...(submitted.saving || {}) },
           detection: { ...settings.detection, ...(submitted.detection || {}) },
           shortcuts: { ...settings.shortcuts, ...(submitted.shortcuts || {}) },
@@ -468,7 +469,7 @@ function startCandidateScenarioServer(expanded = false) {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "cpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true },
-    importing: { parallelism: 1 }, saving: { parallelism: 1 },
+    importing: { parallelism: 1 }, editing: { fill_color_tolerance: 20 }, saving: { parallelism: 1 },
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 1, targets: ["penis"] },
     shortcuts: { enabled: true, bindings: {}, actions: {} }, confirmations: expanded ? { candidateDelete: true } : {},
   };
@@ -667,6 +668,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       state.manualMaskPresent = true;
       addCtx.fillRect(0, 0, 2, 2); exclusionCtx.fillRect(2, 0, 2, 2); exclusionEraseCtx.fillRect(3, 0, 2, 2);
       renderCandidates();
+      document.querySelector(".candidate-row-apply .candidate-class").textContent = "Long English candidate label that must stay inside the row";
     });
     for (const width of [1024, 1280, 1920]) {
       await page.setViewportSize({ width, height: 900 });
@@ -674,8 +676,9 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       const apply = rows.find((item) => item.className.includes("candidate-row-manual-apply"));
       const exclude = rows.find((item) => item.className.includes("candidate-row-manual-exclude") && !item.className.includes("erase"));
       const erase = rows.find((item) => item.className.includes("candidate-row-manual-exclude-erase"));
+      const detectedApply = rows.find((item) => item.className.includes("candidate-row-apply") && !item.className.includes("manual"));
       assert.deepEqual([apply?.children, exclude?.children, erase?.children], [5, 6, 5], `real Chromium candidate row control counts are stable at ${width}px`);
-      assert.equal([apply, exclude, erase].every((item) => !item.overflow && item.hit && item.grid.split(" ").length === item.children), true, `real Chromium candidate rows do not wrap, overflow, or lose hits at ${width}px`);
+      assert.equal([detectedApply, apply, exclude, erase].every((item) => !item.overflow && item.hit && item.grid.split(" ").length === item.children), true, `real Chromium candidate rows do not wrap, overflow, or lose hits at ${width}px (${JSON.stringify({ detectedApply, apply, exclude, erase })})`);
     }
 
     await page.locator("#brushTool").click();
@@ -1278,8 +1281,8 @@ async function assertToolRailLayout(page, position) {
     const ids = (selector) => [...document.querySelectorAll(selector)].map((element) => element.id);
     return {
       rail: read("#canvasToolRail"), settings: read(".canvas-settings-bar"), navigation: read(".canvas-navigation-bar"),
-      mosaicTools: ids('[data-i18n-aria-label="editor.mosaicTools"] > button'),
-      exclusionTools: ids('[data-i18n-aria-label="editor.exclusionTools"] > button'),
+      mosaicTools: ids('[data-i18n-aria-label="editor.mosaicTools"] > .tool, [data-i18n-aria-label="editor.mosaicTools"] > .fill-tool-anchor > .tool'),
+      exclusionTools: ids('[data-i18n-aria-label="editor.exclusionTools"] > .tool, [data-i18n-aria-label="editor.exclusionTools"] > .fill-tool-anchor > .tool'),
     };
   });
   assert.equal(overlaps(boxes.rail, boxes.settings), true, "tool settings are integrated into the top editor toolbar");
@@ -2525,8 +2528,26 @@ async function main() {
     await page.locator("#boundaryTool").click();
     await page.locator("#bucketTool").click();
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), true, "bucket tolerance appears for the fill tool");
+    assert.deepEqual(await page.evaluate(() => ({
+      bucket: $("#bucketTool").getAttribute("aria-expanded"), exclude: $("#excludeBucketTool").getAttribute("aria-expanded"),
+      controls: [$("#bucketTool").getAttribute("aria-controls"), $("#excludeBucketTool").getAttribute("aria-controls")],
+      outputFor: $("#bucketToleranceValue").getAttribute("for"),
+    })), { bucket: "true", exclude: "false", controls: ["bucketToleranceControl", "bucketToleranceControl"], outputFor: "bucketTolerance" }, "the active fill button exposes the shared tolerance range semantically");
+    for (const width of [1024, 360]) {
+      await page.setViewportSize({ width, height: 768 });
+      for (const selector of ["#bucketTool", "#excludeBucketTool"]) {
+        await page.locator(selector).click();
+        const panel = await page.locator("#bucketToleranceControl").evaluate((node) => {
+          const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: innerWidth };
+        });
+        assert.ok(panel.left >= 0 && panel.right <= panel.width, `${width}px ${selector} tolerance panel stays within the viewport (${JSON.stringify(panel)})`);
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+    assert.deepEqual(await page.evaluate(() => [$("#bucketTool").getAttribute("aria-expanded"), $("#excludeBucketTool").getAttribute("aria-expanded")]), ["false", "true"], "switching fill controls updates both expanded states");
     await page.locator("#brushTool").click();
     assert.equal(await page.locator("#bucketToleranceControl").isVisible(), false, "bucket tolerance hides when switching away from fill");
+    assert.deepEqual(await page.evaluate(() => [$("#bucketTool").getAttribute("aria-expanded"), $("#excludeBucketTool").getAttribute("aria-expanded")]), ["false", "false"], "leaving the fill tools collapses both tolerance controls");
     for (const selector of ["#removeAndNextButton", "#hideAndNextButton"]) assert.equal(await page.locator(selector).isDisabled(), true, `${selector} is disabled without a selected image`);
     assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions are disabled without a selected image or candidate");
     await selectFixtureImage(page, pageErrors, consoleErrors);
@@ -3458,8 +3479,8 @@ async function main() {
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
     // This deliberately uses real pointer events rather than the canvas helpers.
-    // A stroke updates the effective mask during the drag, but the expensive
-    // mosaic worker receives one confirmed frame after pointerup. Test both a
+    // A stroke updates both the effective mask and mosaic preview during the
+    // drag. The one worker keeps only the newest pending frame. Test both a
     // normal editor image and a 4K image.
     await page.setViewportSize({ width: 1280, height: 900 });
     for (const [width, height] of (browserCoverage ? [[1024, 768]] : [[1024, 768], [3840, 2160]])) {
@@ -3518,7 +3539,7 @@ async function main() {
         preview: [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
           .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]),
       }), geometry);
-      assert.deepEqual(duringBrush, { active: true, mask: true, preview: false }, `${width}x${height} brush defers its mosaic worker frame until pointerup`);
+      assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mosaic preview during the drag`);
       await page.mouse.up();
       await page.waitForFunction(() => !state.activeStroke && state.history.length > 0 && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
       const afterBrushPreview = await page.evaluate(({ logical }) => [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
@@ -3937,7 +3958,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { closeServer, runCandidateBlinkScenario, startFixtureServer };
