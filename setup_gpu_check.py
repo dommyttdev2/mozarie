@@ -17,6 +17,7 @@ SETTINGS_READ_FAILED_MESSAGE = "[Mozarie] Settings could not be read. Setup stop
 PROFILE_UNAVAILABLE_MESSAGE = "[Mozarie] The selected runtime could not be identified. Setup stopped; run setup.bat again. / 選択されたランタイムを確認できませんでした。setup.bat をもう一度実行してください。"
 CUDA_RUNTIME_FAILED_MESSAGE = "[Mozarie] CUDA detection runtime could not start. Setup stopped; check the NVIDIA driver and run setup.bat again. / CUDA検出ランタイムを開始できませんでした。NVIDIAドライバーを確認して、setup.bat をもう一度実行してください。"
 DIRECTML_RUNTIME_FAILED_MESSAGE = "[Mozarie] DirectML detection runtime could not start. Setup stopped; check the GPU driver and run setup.bat again. / DirectML検出ランタイムを開始できませんでした。GPUドライバーを確認して、setup.bat をもう一度実行してください。"
+ROCM_RUNTIME_FAILED_MESSAGE = "[Mozarie] ROCm/DirectML runtime could not start. Setup stopped; check the ROCm packages and GPU driver, then run setup.bat again. / ROCm/DirectMLランタイムを開始できませんでした。ROCmパッケージとGPUドライバーを確認して、setup.bat をもう一度実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -77,14 +78,14 @@ def _save_cpu_provider() -> bool:
     return True
 
 
-def _print_exception_chain(exc: BaseException) -> None:
+def _print_exception_chain(exc: BaseException, label: str = "DirectML") -> None:
     seen: set[int] = set()
     current: BaseException | None = exc
     depth = 0
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         prefix = "cause" if depth else "error"
-        print(f"[Mozarie] DirectML {prefix}: {type(current).__name__}: {current}")
+        print(f"[Mozarie] {label} {prefix}: {type(current).__name__}: {current}")
         current = current.__cause__ or current.__context__
         depth += 1
 
@@ -97,18 +98,20 @@ def main() -> int:
     except Exception:
         print(SETTINGS_READ_FAILED_MESSAGE)
         return 1
-    if profile not in {"cuda", "directml", "cpu"}:
+    if profile not in {"cuda", "directml", "rocm", "cpu"}:
         print(PROFILE_UNAVAILABLE_MESSAGE)
         return 1
-    if profile == "directml":
+    if profile in {"directml", "rocm"}:
+        label = "ROCm/DirectML" if profile == "rocm" else "DirectML"
+        failure_message = ROCM_RUNTIME_FAILED_MESSAGE if profile == "rocm" else DIRECTML_RUNTIME_FAILED_MESSAGE
         try:
             validate(profile, device)
-            print(f"[Mozarie] DirectML GPU {device} is ready.")
+            print(f"[Mozarie] {label} GPU {device} is ready.")
             return 0
         except Exception as exc:
-            print(f"[Mozarie] DirectML setup probe failed for logical GPU {device}.")
-            _print_exception_chain(exc)
-            print(DIRECTML_RUNTIME_FAILED_MESSAGE)
+            print(f"[Mozarie] {label} setup probe failed for logical GPU {device}.")
+            _print_exception_chain(exc, label)
+            print(failure_message)
             return 1
     try:
         runtime = _runtime_modules()

@@ -8,13 +8,14 @@ from pathlib import Path
 import sys
 
 
-PROFILES = {"cuda", "directml", "cpu"}
+PROFILES = {"cuda", "directml", "rocm", "cpu"}
 RUNTIME_DISTRIBUTIONS = {
     "onnxruntime": "cpu",
     "onnxruntime-gpu": "cuda",
     "onnxruntime-directml": "directml",
 }
 MARKER_NAME = ".mozarie-runtime.json"
+CPU_FALLBACK_CONFIG = "session.disable_cpu_ep_fallback"
 
 
 class ProfileError(RuntimeError):
@@ -26,7 +27,9 @@ def normalize_profile(value: str | None) -> str | None:
     if not profile:
         return None
     if profile not in PROFILES:
-        raise ProfileError(f"Unknown MOZARIE_RUNTIME value: {value!r}. Use cuda, directml, or cpu.")
+        raise ProfileError(
+            f"Unknown MOZARIE_RUNTIME value: {value!r}. Use cuda, directml, rocm, or cpu."
+        )
     return profile
 
 
@@ -47,7 +50,7 @@ def read_marker(venv: Path) -> dict[str, object] | None:
 
 def installed_distributions() -> dict[str, str]:
     installed: dict[str, str] = {}
-    for distribution, profile in RUNTIME_DISTRIBUTIONS.items():
+    for distribution in RUNTIME_DISTRIBUTIONS:
         try:
             installed[distribution] = metadata.version(distribution)
         except metadata.PackageNotFoundError:
@@ -62,7 +65,19 @@ def installed_profile() -> str | None:
             "Multiple ONNX Runtime variants are installed. Back up and recreate .venv; "
             "CPU, CUDA, and DirectML variants must not share one environment."
         )
-    return next(iter(profiles), None)
+    profile = next(iter(profiles), None)
+    if profile != "directml":
+        return profile
+    try:
+        metadata.version("torch-directml")
+    except metadata.PackageNotFoundError:
+        try:
+            torch_version = metadata.version("torch")
+        except metadata.PackageNotFoundError:
+            return "directml"
+        if "+rocm" in torch_version.casefold():
+            return "rocm"
+    return "directml"
 
 
 def preflight(profile: str) -> None:
@@ -84,6 +99,7 @@ def preflight(profile: str) -> None:
     expected = {
         "cuda": "CUDAExecutionProvider",
         "directml": "DmlExecutionProvider",
+        "rocm": "DmlExecutionProvider",
         "cpu": "CPUExecutionProvider",
     }[current]
     if expected not in providers:
@@ -105,21 +121,18 @@ def _probe_onnx(
     expected = {
         "cuda": "CUDAExecutionProvider",
         "directml": "DmlExecutionProvider",
+        "rocm": "DmlExecutionProvider",
         "cpu": "CPUExecutionProvider",
     }[profile]
     provider_device = int(gpu_device)
-    if profile == "directml":
+    if profile in {"directml", "rocm"}:
         if directml_identity is None:
             raise ProfileError(
                 "DirectML GPU identity is required to map the selected device to an ONNX Runtime adapter."
             )
         try:
             from .runtime import directml_onnx_device_id
-
-            provider_device = directml_onnx_device_id(
-                gpu_device,
-                module=directml_identity,
-            )
+            provider_device = directml_onnx_device_id(gpu_device, module=directml_identity)
         except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise ProfileError(
                 f"The selected DirectML device {gpu_device} could not be mapped to an ONNX Runtime adapter."
@@ -128,6 +141,8 @@ def _probe_onnx(
     providers: list[object] = [expected]
     if profile in {"cuda", "directml"}:
         providers = [(expected, {"device_id": provider_device}), "CPUExecutionProvider"]
+    elif profile == "rocm":
+        providers = [(expected, {"device_id": provider_device})]
 
     helper = onnx.helper
     tensor_proto = onnx.TensorProto
@@ -141,7 +156,9 @@ def _probe_onnx(
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
     options = ort.SessionOptions()
-    if profile == "directml":
+    if profile == "rocm":
+        options.add_session_config_entry(CPU_FALLBACK_CONFIG, "1")
+    if profile in {"directml", "rocm"}:
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     try:
@@ -154,10 +171,20 @@ def _probe_onnx(
         if not outputs or float(outputs[0][0][0]) != 1.0:
             raise RuntimeError("the identity model returned an unexpected result")
     except Exception as exc:
-        raise ProfileError(
-            f"The ONNX {expected} probe failed on device {gpu_device}: {exc}"
-        ) from exc
+        raise ProfileError(f"The ONNX {expected} probe failed on device {gpu_device}: {exc}") from exc
     return expected
+
+
+def _rocm_directml_identity(torch: object) -> object:
+    cuda = torch.cuda
+    return type(
+        "_RocmDirectmlIdentity",
+        (),
+        {
+            "device_count": staticmethod(cuda.device_count),
+            "device_name": staticmethod(cuda.get_device_name),
+        },
+    )()
 
 
 def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
@@ -180,7 +207,7 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
     devices: list[str] = []
     directml_identity: object | None = None
     if selected == "cuda":
-        if not getattr(torch.version, "cuda", None) or "CUDAExecutionProvider" not in providers:
+        if not getattr(torch.version, "cuda", None) or getattr(torch.version, "hip", None) or "CUDAExecutionProvider" not in providers:
             raise ProfileError("CUDA PyTorch or CUDAExecutionProvider is unavailable.")
         if not torch.cuda.is_available():
             raise ProfileError("CUDA packages are installed, but no usable NVIDIA CUDA device was found.")
@@ -190,6 +217,23 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
         probe = torch.ones(1, device=f"cuda:{gpu_device}") + 1
         if float(probe.cpu().item()) != 2.0:
             raise ProfileError("The CUDA tensor probe failed.")
+    elif selected == "rocm":
+        if "DmlExecutionProvider" not in providers:
+            raise ProfileError("onnxruntime-directml is installed, but DmlExecutionProvider is unavailable.")
+        if not getattr(torch.version, "hip", None) or getattr(torch.version, "cuda", None):
+            raise ProfileError("ROCm/HIP PyTorch is unavailable or a CUDA build was installed instead.")
+        if not torch.cuda.is_available():
+            raise ProfileError("ROCm packages are installed, but no usable HIP device was found.")
+        count = int(torch.cuda.device_count())
+        if count < 1:
+            raise ProfileError("ROCm PyTorch did not find a HIP device.")
+        if gpu_device < 0 or gpu_device >= count:
+            raise ProfileError(f"ROCm device {gpu_device} is unavailable.")
+        devices = [str(torch.cuda.get_device_name(index)) for index in range(count)]
+        probe = torch.ones(1, device=f"cuda:{gpu_device}") + 1
+        if float(probe.cpu().item()) != 2.0:
+            raise ProfileError("The ROCm tensor probe failed.")
+        directml_identity = _rocm_directml_identity(torch)
     elif selected == "directml":
         if "DmlExecutionProvider" not in providers:
             raise ProfileError("onnxruntime-directml is installed, but DmlExecutionProvider is unavailable.")
@@ -216,14 +260,8 @@ def validate(profile: str, gpu_device: int = 0) -> dict[str, object]:
             raise ProfileError("The CPU tensor probe failed.")
 
     onnx_provider = _probe_onnx(
-        ort,
-        onnx,
-        np,
-        selected,
-        gpu_device,
-        directml_identity=directml_identity,
+        ort, onnx, np, selected, gpu_device, directml_identity=directml_identity,
     )
-
     return {
         "schema": 1,
         "profile": selected,

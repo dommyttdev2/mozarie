@@ -18,12 +18,13 @@ from ..runtime import (
     _dxgi_adapter_names,
     directml_module,
     directml_onnx_device_id,
-    runtime_backend,
 )
+from ..runtime_backends import configured_profile, onnx_backend, torch_backend
 
 
 _dll_directory_handles: list[object] = []
 _cuda_runtime_handles: list[object] = []
+_CPU_FALLBACK_CONFIG = "session.disable_cpu_ep_fallback"
 
 
 def _gpu_unavailable_error() -> Exception:
@@ -37,7 +38,7 @@ def _model_load_error() -> Exception:
 
 
 def _register_torch_dll_directory() -> None:
-    """Keep PyTorch's CUDA runtime DLLs visible to ONNX Runtime on Windows."""
+    """Keep PyTorch's CUDA/ROCm runtime DLLs visible to ONNX Runtime on Windows."""
     if os.name != "nt":
         return
     torch_spec = importlib.util.find_spec("torch")
@@ -83,13 +84,32 @@ class Letterbox:
     source_height: int
 
 
+def _rocm_directml_identity(torch: Any) -> object:
+    cuda = torch.cuda
+    return type(
+        "_RocmDirectmlIdentity",
+        (),
+        {
+            "device_count": staticmethod(cuda.device_count),
+            "device_name": staticmethod(cuda.get_device_name),
+        },
+    )()
+
+
 def _directml_onnx_device_id(logical_device_id: int) -> int:
-    """Map a torch-directml selection to one unique DXGI adapter."""
+    """Map the selected Torch GPU identity to one unique DXGI adapter."""
     try:
+        identity_module: object
+        try:
+            import torch
+        except Exception:
+            torch = None
+        if torch is not None and torch_backend(torch_module=torch) == "rocm":
+            identity_module = _rocm_directml_identity(torch)
+        else:
+            identity_module = directml_module()
         return directml_onnx_device_id(
-            int(logical_device_id),
-            module=directml_module(),
-            adapters=_dxgi_adapter_names(),
+            int(logical_device_id), module=identity_module, adapters=_dxgi_adapter_names(),
         )
     except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise _gpu_unavailable_error() from exc
@@ -99,12 +119,15 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
     available = set(ort.get_available_providers())
     if device.lower() == "cpu":
         return ["CPUExecutionProvider"]
-    backend = runtime_backend(ort_module=ort)
+    backend = onnx_backend(ort_module=ort)
     if backend == "directml":
         if "DmlExecutionProvider" not in available:
             raise _gpu_unavailable_error()
         directml_index = _directml_onnx_device_id(int(gpu_device))
-        return [("DmlExecutionProvider", {"device_id": directml_index}), "CPUExecutionProvider"]
+        providers: list[object] = [("DmlExecutionProvider", {"device_id": directml_index})]
+        if configured_profile() != "rocm":
+            providers.append("CPUExecutionProvider")
+        return providers
     if backend != "cuda" or "CUDAExecutionProvider" not in available:
         raise _gpu_unavailable_error()
     options = {
@@ -121,7 +144,9 @@ def available_providers(device: str, gpu_device: int = 0) -> list[object]:
 def _create_session(model: str | bytes, device: str, gpu_device: int) -> ort.InferenceSession:
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    backend = "cpu" if device.lower() == "cpu" else runtime_backend(ort_module=ort)
+    backend = "cpu" if device.lower() == "cpu" else onnx_backend(ort_module=ort)
+    if configured_profile() == "rocm" and device.lower() != "cpu":
+        options.add_session_config_entry(_CPU_FALLBACK_CONFIG, "1")
     if backend == "directml":
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
