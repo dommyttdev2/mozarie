@@ -5,15 +5,27 @@ set "APP_DIR=%~dp0"
 set "VENV=%LOCALAPPDATA%\Mozarie\migraphx-probe-venv"
 set "PYTHON=%VENV%\Scripts\python.exe"
 
+if exist "%PYTHON%" (
+  "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 14) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+  if errorlevel 1 (
+    echo [Mozarie] Recreating the dedicated MIGraphX probe environment with Python 3.11 to 3.13...
+    rmdir /s /q "%VENV%"
+    if exist "%VENV%" (
+      echo [Mozarie] Could not remove the incompatible MIGraphX probe environment.
+      exit /b 1
+    )
+  )
+)
+
 if not exist "%PYTHON%" (
-  for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
-    py -%%V -c "import sys; raise SystemExit(0)" >nul 2>nul
+  for %%V in (3.13-64 3.12-64 3.11-64) do (
+    py -%%V -c "import struct, sys; raise SystemExit(0 if struct.calcsize('P') == 8 else 1)" >nul 2>nul
     if not errorlevel 1 (
       py -%%V -m venv "%VENV%"
       if not errorlevel 1 goto :venv_ready
     )
   )
-  echo [Mozarie] MIGraphX probe needs 64-bit Python 3.11 to 3.14.
+  echo [Mozarie] MIGraphX probe needs 64-bit Python 3.11, 3.12, or 3.13.
   exit /b 1
 )
 

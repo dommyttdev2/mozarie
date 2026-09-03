@@ -1,6 +1,7 @@
 # Dedicated Windows ML / MIGraphX probe environment. Do not install into Mozarie's .venv.
+# Windows ML 2.3.0 requires this exact ONNX Runtime build; its wheels support CPython 3.11-3.13 on Windows x64.
 numpy>=1.26,<3
 onnx>=1.16,<2
-onnxruntime-windowsml==1.28.0.202607272323
+onnxruntime-windowsml==1.25.2.202605110140
 wasdk-Microsoft.Windows.AI.MachineLearning[all]==2.3.0
 wasdk-Microsoft.Windows.ApplicationModel.DynamicDependency.Bootstrap==2.3.0
