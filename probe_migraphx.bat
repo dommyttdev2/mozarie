@@ -4,6 +4,7 @@ setlocal
 set "APP_DIR=%~dp0"
 set "VENV=%LOCALAPPDATA%\Mozarie\migraphx-probe-venv"
 set "PYTHON=%VENV%\Scripts\python.exe"
+set "BASE_PYTHON="
 
 if exist "%PYTHON%" (
   "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 14) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
@@ -18,15 +19,25 @@ if exist "%PYTHON%" (
 )
 
 if not exist "%PYTHON%" (
-  for %%V in (3.13-64 3.12-64 3.11-64) do (
-    py -%%V -c "import struct, sys; raise SystemExit(0 if struct.calcsize('P') == 8 else 1)" >nul 2>nul
-    if not errorlevel 1 (
-      py -%%V -m venv "%VENV%"
-      if not errorlevel 1 goto :venv_ready
-    )
+  call :find_base_python
+  if not defined BASE_PYTHON (
+    echo [Mozarie] MIGraphX probe needs an installed 64-bit Python 3.11, 3.12, or 3.13 runtime.
+    echo [Mozarie] Installed runtimes reported by Python Install Manager:
+    py list
+    exit /b 1
   )
-  echo [Mozarie] MIGraphX probe needs 64-bit Python 3.11, 3.12, or 3.13.
-  exit /b 1
+  "%BASE_PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 14) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+  if errorlevel 1 (
+    echo [Mozarie] Selected Python runtime is not a supported 64-bit Python 3.11 to 3.13 interpreter.
+    exit /b 1
+  )
+  echo [Mozarie] Creating the dedicated MIGraphX probe environment with:
+  "%BASE_PYTHON%" --version
+  "%BASE_PYTHON%" -m venv "%VENV%"
+  if errorlevel 1 (
+    echo [Mozarie] Could not create the dedicated MIGraphX probe environment.
+    exit /b 1
+  )
 )
 
 :venv_ready
@@ -47,3 +58,11 @@ pushd "%APP_DIR%"
 set "RESULT=%ERRORLEVEL%"
 popd
 exit /b %RESULT%
+
+:find_base_python
+for %%V in (3.13 3.12 3.11) do (
+  if not defined BASE_PYTHON for /f "usebackq delims=" %%P in (`py list --one --format=exe %%V 2^>nul`) do (
+    if exist "%%P" set "BASE_PYTHON=%%P"
+  )
+)
+exit /b 0
