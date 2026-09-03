@@ -7,7 +7,13 @@ import sys
 from typing import Any
 
 from . import rocm_probe
-from .runtime import DxgiDevice, _dxgi_adapter_names, _normalize_device_name
+from .directml_identity import physical_adapter_identity
+from .runtime import (
+    DxgiDevice,
+    _dxgi_adapter_names,
+    _normalize_device_name,
+    directml_onnx_device_id,
+)
 
 
 DML_EP = "DmlExecutionProvider"
@@ -24,6 +30,8 @@ def describe_dxgi_adapter(adapter: DxgiDevice) -> dict[str, object]:
 def select_directml_adapter(
     rocm_device_name: str,
     adapters: list[DxgiDevice],
+    *,
+    physical_identity_resolver: Any | None = None,
 ) -> tuple[int, list[dict[str, object]]]:
     inventory = [describe_dxgi_adapter(adapter) for adapter in adapters]
     target = _normalize_device_name(rocm_device_name)
@@ -38,12 +46,36 @@ def select_directml_adapter(
             f"{json.dumps(inventory, ensure_ascii=False)}"
         )
     if len(matches) != 1:
-        raise rocm_probe.ProbeError(
-            "The ROCm GPU name matched multiple DXGI adapters, so the DirectML "
-            "device cannot be selected without guessing. "
-            f"ROCm device: {rocm_device_name!r}; DXGI inventory: "
-            f"{json.dumps(inventory, ensure_ascii=False)}"
-        )
+        if physical_identity_resolver is None:
+            raise rocm_probe.ProbeError(
+                "The ROCm GPU name matched multiple DXGI adapters, so the DirectML "
+                "device cannot be selected without guessing. "
+                f"ROCm device: {rocm_device_name!r}; DXGI inventory: "
+                f"{json.dumps(inventory, ensure_ascii=False)}"
+            )
+        logical_device = type(
+            "_RocmDirectmlIdentity",
+            (),
+            {
+                "device_count": staticmethod(lambda: 1),
+                "device_name": staticmethod(lambda _index: rocm_device_name),
+            },
+        )()
+        try:
+            resolved = directml_onnx_device_id(
+                0,
+                module=logical_device,
+                adapters=adapters,
+                physical_identity_resolver=physical_identity_resolver,
+            )
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise rocm_probe.ProbeError(
+                "The ROCm GPU name matched multiple DXGI adapters, and their physical "
+                "identities could not prove that they are aliases of one GPU. "
+                f"ROCm device: {rocm_device_name!r}; DXGI inventory: "
+                f"{json.dumps(inventory, ensure_ascii=False)}"
+            ) from exc
+        return int(resolved), inventory
     return int(matches[0].index), inventory
 
 
@@ -191,6 +223,7 @@ def probe(
     dml_device_index, dxgi_inventory = select_directml_adapter(
         str(selected["name"]),
         adapters,
+        physical_identity_resolver=physical_adapter_identity,
     )
     directml = run_directml_matmul(
         ort_module,
