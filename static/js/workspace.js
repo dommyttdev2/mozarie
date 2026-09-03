@@ -9,6 +9,10 @@ function queueWorkspaceMutation(imageId, send, rememberFailure = true) {
   const previous = state.workspaceDraftChains.get(imageId) || Promise.resolve();
   const next = previous.catch(() => {}).then(send);
   state.workspaceDraftChains.set(imageId, next);
+  const clearSettledChain = () => {
+    if (state.workspaceDraftChains.get(imageId) === next) state.workspaceDraftChains.delete(imageId);
+  };
+  next.then(clearSettledChain, clearSettledChain);
   if (rememberFailure) next.then(
     () => {},
     (error) => { state.workspaceMutationErrors.set(imageId, error); },
@@ -23,14 +27,80 @@ function queueWorkspaceFlags(imageId, payload) {
 }
 
 const DIRECTORY_DB = "mozarie-directory-catalogs";
+function projectSourceId() { return globalThis.crypto?.randomUUID?.() || `source-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 async function directoryCatalogStore() {
   if (!window.indexedDB) return null;
   return new Promise((resolve) => {
-    const request = indexedDB.open(DIRECTORY_DB, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("directories", { keyPath: "catalogId" });
+    const request = indexedDB.open(DIRECTORY_DB, 2);
+    request.onupgradeneeded = () => {
+      const names = request.result.objectStoreNames;
+      if (!names?.contains?.("directories")) request.result.createObjectStore("directories", { keyPath: "catalogId" });
+      if (!names?.contains?.("projectSources")) request.result.createObjectStore("projectSources", { keyPath: "key" });
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
   });
+}
+
+async function rememberProjectSource(projectId, handle, imageId = null, sourceId = null) {
+  const db = await directoryCatalogStore(); if (!db || !projectId || !handle) return sourceId || projectSourceId();
+  try {
+    const store = db.transaction("projectSources", "readwrite").objectStore("projectSources");
+    const stableId = sourceId || projectSourceId();
+    store.put({ key: `${projectId}:${stableId}:${imageId || "root"}`, projectId, imageId, sourceId: stableId, handle });
+    return stableId;
+  } catch { return sourceId || projectSourceId(); }
+  finally { db.close(); }
+}
+async function rememberedProjectSource(projectId, sourceId = null, imageId = null) {
+  const db = await directoryCatalogStore(); if (!db || !projectId) return null;
+  const rows = await new Promise((resolve) => { const request = db.transaction("projectSources").objectStore("projectSources").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
+  const value = rows.find((row) => row.projectId === projectId && (!sourceId || row.sourceId === sourceId) && (imageId == null ? !row.imageId : row.imageId === imageId));
+  db.close(); return value?.handle || null;
+}
+async function rememberedProjectFileSources(projectId) {
+  const db = await directoryCatalogStore(); if (!db || !projectId) return [];
+  const rows = await new Promise((resolve) => {
+    const request = db.transaction("projectSources").objectStore("projectSources").getAll();
+    request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
+  });
+  db.close();
+  // Preserve the server source ID.  Recreating one on every reopen would
+  // create a second source and duplicate every browser-imported image.
+  return rows.filter((row) => row.projectId === projectId && row.imageId && row.handle?.kind === "file")
+    .map((row) => ({ sourceId: row.sourceId, handle: row.handle }));
+}
+async function rememberedProjectDirectorySources(projectId) {
+  const db = await directoryCatalogStore(); if (!db || !projectId) return [];
+  const rows = await new Promise((resolve) => {
+    const request = db.transaction("projectSources").objectStore("projectSources").getAll();
+    request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
+  });
+  db.close();
+  return rows.filter((row) => row.projectId === projectId && !row.imageId && row.handle?.kind === "directory")
+    .map((row) => ({ sourceId: row.sourceId, handle: row.handle }));
+}
+async function forgetProjectSources(projectId) {
+  const db = await directoryCatalogStore(); if (!db || !projectId) return;
+  try {
+    const rows = await new Promise((resolve) => {
+      const request = db.transaction("projectSources").objectStore("projectSources").getAll();
+      request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
+    });
+    const store = db.transaction("projectSources", "readwrite").objectStore("projectSources");
+    for (const row of rows) if (row.projectId === projectId) store.delete(row.key);
+  } catch { /* Local handle cleanup is best effort and never blocks deletion. */ }
+  finally { db.close(); }
+}
+async function ensureProjectSourcePermission(handle, request = false) {
+  if (!handle?.queryPermission) return Boolean(handle);
+  try {
+    const mode = "read";
+    const current = await handle.queryPermission({ mode });
+    if (current === "granted") return true;
+    if (!request || !handle.requestPermission) return false;
+    return (await handle.requestPermission({ mode })) === "granted";
+  } catch { return false; }
 }
 async function rememberedOutputDirectoryHandle() {
   const db = await directoryCatalogStore();
@@ -50,51 +120,41 @@ async function rememberOutputDirectoryHandle(handle) {
   db.close();
 }
 async function catalogForDirectoryHandle(handle) {
-  const db = await directoryCatalogStore();
-  if (db) {
-    const rows = await new Promise((resolve) => { const request = db.transaction("directories").objectStore("directories").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
-    for (const row of rows) {
-      try {
-        if (await row.handle?.isSameEntry?.(handle)) {
-          // Validate the opaque ID on the server before uploads. A database
-          // reset leaves the handle usable and simply falls back to a new ID.
-          try {
-            const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: row.catalogId }) });
-            db.close();
-            return activated.catalogId || null;
-          } catch {
-            try {
-              await new Promise((resolve) => {
-                const transaction = db.transaction("directories", "readwrite");
-                transaction.objectStore("directories").delete(row.catalogId);
-                transaction.oncomplete = transaction.onerror = transaction.onabort = resolve;
-              });
-            } catch { /* a fresh ID remains safe */ }
-            break;
-          }
-        }
-      } catch {
-        db.transaction("directories", "readwrite").objectStore("directories").delete(row.catalogId);
-      }
-    }
-    db.close();
+  if (state.project?.id) {
+    const activated = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({ catalogId: state.project.id }) });
+    state.pendingDirectorySourceId = await rememberProjectSource(state.project.id, handle);
+    return activated.catalogId || state.project.id;
   }
-  const created = await api("/api/workspace/catalog", { method: "POST", body: JSON.stringify({}) });
-  if (!db || !created.catalogId) return created.catalogId || null;
-  const writeDb = await directoryCatalogStore();
-  if (writeDb) { try { writeDb.transaction("directories", "readwrite").objectStore("directories").put({ catalogId: created.catalogId, handle }); } catch { /* persistence remains optional */ } writeDb.close(); }
-  return created.catalogId;
+  // A folder is never silently matched to a prior project.  Project history
+  // remains explicit; opening an older project is done from its own list.
+  const created = await api("/api/projects", { method: "POST", body: JSON.stringify({}) });
+  state.project = created.project || null;
+  state.projectReadOnly = false;
+  if (!state.project?.id) return null;
+  state.pendingDirectorySourceId = await rememberProjectSource(state.project.id, handle);
+  return state.project.id;
 }
 
 function workspaceDraftPayload(draft) {
   if (!draft) return { add: "", exclusion: "", exclusionErase: "", hasEffectiveMask: false, removedCandidateIds: [], candidateRevision: 0 };
-  return {
+  const incremental = Array.isArray(draft.dirtyLayers);
+  const dirtyLayers = incremental ? draft.dirtyLayers : ["add", "exclusion", "exclusionErase"];
+  const payload = {
     add: draft.add || "", exclusion: draft.exclusion || "", exclusionErase: draft.exclusionErase || "",
     manualEnabled: draft.manualEnabled !== false, manualExclusionEnabled: draft.manualExclusionEnabled !== false,
     manualExclusionEraseEnabled: draft.manualExclusionEraseEnabled !== false, manualExclusionForced: draft.manualExclusionForced !== false,
     hasEffectiveMask: draft.hasEffectiveMask === true,
     removedCandidateIds: draft.removedCandidateIds || [], candidateRevision: Number(draft.candidateRevision || 0),
   };
+  if (incremental) {
+    delete payload.add; delete payload.exclusion; delete payload.exclusionErase;
+    payload.dirtyLayers = dirtyLayers;
+    if (dirtyLayers.includes("add")) payload.add = draft.add || "";
+    if (dirtyLayers.includes("exclusion")) payload.exclusion = draft.exclusion || "";
+    if (dirtyLayers.includes("exclusionErase")) payload.exclusionErase = draft.exclusionErase || "";
+  }
+  if (draft.dirtyRois) payload.dirtyRois = draft.dirtyRois;
+  return payload;
 }
 
 function queueWorkspaceDraft(imageId, immediate = false) {
@@ -108,7 +168,35 @@ function queueWorkspaceDraft(imageId, immediate = false) {
     const request = draft
       ? { method: "POST", body: JSON.stringify(payload) }
       : { method: "DELETE" };
-    return queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
+    const persisted = queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
+    return persisted.then((result) => {
+      if (draft && state.drafts.get(imageId) === draft) {
+        draft.dirtyLayers = [];
+        draft.dirtyRois = {};
+      }
+      if (state.project?.id && state.currentId === imageId) void refreshProjectHistory(imageId);
+      // A project has a durable copy and can reload an inactive draft on
+      // demand.  Projectless sessions have no equivalent recovery path, so
+      // they deliberately keep the in-memory bitmap.
+      if (
+        state.project?.id && state.currentId !== imageId
+        && state.drafts.get(imageId) === draft
+        && !state.workspaceDraftTimers.has(imageId)
+        && !state.draftSaveChains.has(imageId)
+        && !state.workspaceMutationErrors.has(imageId)
+        && (!state.workspaceDraftChains.has(imageId) || state.workspaceDraftChains.get(imageId) === persisted)
+      ) {
+        // Keep the lightweight catalogue scalar before freeing bitmap data, so
+        // filtered save targets remain correct until this draft is rehydrated.
+        if (draft?.hasEffectiveMask === true) {
+          const image = state.images.find((entry) => entry.id === imageId);
+          if (image) image.hasEffectiveMask = true;
+        }
+        state.drafts.delete(imageId);
+        state.maskStatus.delete(imageId);
+      }
+      return result;
+    });
   };
   if (immediate) return write();
   const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { showUserError(error); })), 250)));
@@ -159,7 +247,7 @@ async function flushAllWorkspaceMutations() {
     const results = await Promise.allSettled(chains.map(([, chain]) => chain));
     const failed = results.find((result) => result.status === "rejected");
     if (failed) throw failed.reason;
-    const failedImageId = chains.map(([imageId]) => imageId).find((imageId) => state.workspaceMutationErrors.has(imageId));
+    const failedImageId = [...state.workspaceMutationErrors.keys()][0];
     if (failedImageId) {
       const storedFailure = state.workspaceMutationErrors.get(failedImageId);
       state.workspaceMutationErrors.delete(failedImageId);
@@ -172,7 +260,11 @@ async function flushAllWorkspaceMutations() {
 
 async function loadWorkspaceDraft(imageId) {
   const data = await api(`/api/workspace/manual/${encodeURIComponent(imageId)}`);
-  return data.draft || null;
+  const draft = data.draft;
+  if (!draft) return null;
+  // Project undo is restored by the durable history endpoint. Keeping a
+  // second operation log inside every draft duplicates PNG payloads.
+  return { ...draft, history: [], historyIndex: 0, historyBase: {} };
 }
 
 function scheduleManualWorkspaceSave() {

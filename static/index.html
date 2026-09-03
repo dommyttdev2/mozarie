@@ -11,7 +11,7 @@
 <body>
   <header class="appbar">
     <img class="brand-logo" src="/logo.png" alt="" aria-hidden="true">
-    <div class="appbar-commands"><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button><button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button></div>
+    <div class="appbar-commands"><button id="projectButton" type="button" data-i18n="project.open">プロジェクト</button><button id="pickFolder" type="button" popovertarget="pickerMenu" data-i18n="folder.browse">画像を読み込む</button><button id="detectAllButton" type="button" data-i18n="gallery.detectAll">全画像を自動検出</button><button id="saveAllButton" class="primary" type="button" data-i18n="gallery.saveAll">モザイク画像を一括保存</button></div>
     <div id="pickerMenu" class="picker-menu" popover>
       <label for="folderPath" data-i18n="folder.label">画像フォルダ</label>
       <input id="folderPath" type="text" autocomplete="off" spellcheck="false" placeholder="G:\Images\work">
@@ -28,6 +28,12 @@
     <button id="settingsButton" type="button" data-i18n="settings.open">設定</button>
   </header>
   <button id="updateToast" class="update-toast" type="button" hidden data-i18n="update.available">新しいバージョンがあります</button>
+  <dialog id="projectDialog" class="modal-dialog" aria-labelledby="projectDialogTitle"><section class="dialog-body"><div class="settings-heading"><h2 id="projectDialogTitle" data-i18n="project.title">プロジェクト</h2><button id="projectClose" type="button" data-i18n="dialog.close">閉じる</button></div><p id="projectCurrent" class="muted"></p><p id="projectReadOnlyNotice" class="muted" hidden data-i18n="project.readOnly">完了済みのため閲覧専用です。</p><div class="dialog-actions project-actions"><button id="projectNew" type="button" data-i18n="project.new">新規プロジェクト</button><button id="projectName" type="button" data-i18n="project.name">名前を付けて保存</button><button id="projectOpenList" type="button" data-i18n="project.openList">プロジェクトを開く</button><button id="projectSourceSelect" type="button" data-i18n="project.sourceSelect">画像フォルダーを再指定</button><button id="projectResume" class="primary" type="button" hidden data-i18n="project.resume">作業を再開</button><button id="projectComplete" class="danger" type="button" data-i18n="project.complete">プロジェクトを完了</button><button id="projectMosaicZip" type="button" data-i18n="project.downloadMosaicZip">モザイク範囲をまとめて保存</button><button id="projectExcludeZip" type="button" data-i18n="project.downloadExcludeZip">除外範囲をまとめて保存</button><button id="projectDelete" class="danger" type="button" data-i18n="project.delete">プロジェクトを削除</button><button id="projectCloseWorkspace" type="button" data-i18n="project.close">閉じる</button></div></section></dialog>
+  <dialog id="projectListDialog" class="modal-dialog" aria-labelledby="projectListTitle"><section class="dialog-body"><div class="settings-heading"><h2 id="projectListTitle" data-i18n="project.openList">プロジェクトを開く</h2><button id="projectListClose" type="button" data-i18n="dialog.close">閉じる</button></div><label for="projectSort" data-i18n="project.sort">並び順</label><select id="projectSort"><option value="updated_desc" data-i18n="project.sortUpdatedDesc">更新日時: 新しい順</option><option value="updated_asc" data-i18n="project.sortUpdatedAsc">更新日時: 古い順</option><option value="name_asc" data-i18n="project.sortNameAsc">名前: 昇順</option><option value="name_desc" data-i18n="project.sortNameDesc">名前: 降順</option><option value="created_desc" data-i18n="project.sortCreatedDesc">作成日時: 新しい順</option><option value="created_asc" data-i18n="project.sortCreatedAsc">作成日時: 古い順</option></select><div id="projectList" class="project-list"></div></section></dialog>
+  <dialog id="projectNameDialog" class="modal-dialog" aria-labelledby="projectNameTitle"><form id="projectNameForm" method="dialog" class="dialog-body"><h2 id="projectNameTitle" data-i18n="project.name">名前を付けて保存</h2><label for="projectNameInput" data-i18n="project.nameLabel">プロジェクト名</label><input id="projectNameInput" required maxlength="120" autocomplete="off"><div class="dialog-actions"><button value="cancel" type="button" id="projectNameCancel" data-i18n="dialog.cancel">キャンセル</button><button value="confirm" class="primary" type="submit" data-i18n="dialog.save">保存</button></div></form></dialog>
+  <dialog id="sourceMismatchDialog" class="modal-dialog" aria-labelledby="sourceMismatchTitle"><form id="sourceMismatchForm" method="dialog" class="dialog-body"><h2 id="sourceMismatchTitle" data-i18n="project.sourceChangedTitle">変更された画像</h2><p data-i18n="project.sourceChangedMessage">前回から変更された画像があります。</p><ul id="sourceMismatchList"></ul><label><input id="sourceMismatchClear" type="checkbox"> <span data-i18n="project.sourceChangedClear">選択した画像のモザイク・除外・履歴を削除</span></label><div class="dialog-actions"><button value="cancel" type="button" id="sourceMismatchCancel" data-i18n="dialog.cancel">キャンセル</button><button value="confirm" class="primary" type="submit" data-i18n="dialog.ok">OK</button></div></form></dialog>
+  <dialog id="sameSourceDialog" class="modal-dialog" aria-labelledby="sameSourceTitle"><section class="dialog-body"><h2 id="sameSourceTitle" data-i18n="project.sameSourceTitle">このフォルダーのプロジェクトがあります</h2><p data-i18n="project.sameSourceMessage">同じフォルダーを使うプロジェクトがあります。</p><ul id="sameSourceList"></ul><div class="dialog-actions"><button id="sameSourceOpen" class="primary" type="button" data-i18n="project.sameSourceOpen">既存を開く</button><button id="sameSourceSeparate" type="button" data-i18n="project.sameSourceSeparate">別プロジェクトとして作成</button><button id="sameSourceCancel" type="button" data-i18n="dialog.cancel">キャンセル</button></div></section></dialog>
+  <dialog id="projectDeleteDialog" class="modal-dialog" aria-labelledby="projectDeleteTitle"><section class="dialog-body"><h2 id="projectDeleteTitle" data-i18n="project.deleteTitle">プロジェクトを削除</h2><p data-i18n="project.deleteData">このプロジェクトの操作履歴、モザイク範囲、除外範囲、候補、画像ごとの状態をすべて削除します。</p><p data-i18n="project.deleteSource">元画像は削除しません。</p><p class="danger-text" data-i18n="project.deleteIrreversible">この操作は元に戻せません。</p><div class="dialog-actions"><button id="projectDeleteCancel" type="button" data-i18n="dialog.cancel">キャンセル</button><button id="projectDeleteConfirm" class="danger" type="button" data-i18n="project.deleteConfirm">プロジェクトを削除</button></div></section></dialog>
 
   <main class="studio-grid">
     <aside id="galleryPane" class="gallery-pane" data-i18n-aria-label="gallery.aria">
@@ -59,7 +65,7 @@
         <div id="canvasToolRail" class="canvas-tool-rail" role="toolbar" aria-orientation="horizontal" aria-label="編集ツール" data-i18n-aria-label="editor.tools">
           <div class="tool-pair" role="group" aria-label="モザイク編集" data-i18n-aria-label="editor.mosaicTools">
             <button id="brushTool" class="tool icon-button tool-icon tool-icon-brush active" type="button" data-toolbar-item aria-pressed="true" aria-label="モザイクブラシ" title="モザイクブラシ" data-i18n-aria-label="editor.brush" data-i18n-title="editor.brush"><span aria-hidden="true"></span></button>
-            <div id="bucketToolAnchor" class="fill-tool-anchor"><button id="bucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-controls="bucketToleranceControl" aria-expanded="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button><div id="bucketToleranceControl" class="bucket-tolerance-panel" role="group" aria-label="色の許容範囲" data-i18n-aria-label="editor.fillTolerance" hidden><label for="bucketTolerance" data-i18n="editor.fillTolerance">色の許容範囲</label><input id="bucketTolerance" type="range" min="0" max="255" step="1" value="20" data-i18n-aria-label="editor.fillTolerance" aria-label="色の許容範囲"><div class="bucket-tolerance-scale"><span data-i18n="editor.fillExact">厳密</span><output id="bucketToleranceValue" for="bucketTolerance">20</output><span data-i18n="editor.fillLoose">ゆるい</span></div></div></div>
+            <div id="bucketToolAnchor" class="fill-tool-anchor"><button id="bucketTool" class="tool icon-button" type="button" data-toolbar-item aria-pressed="false" aria-controls="bucketToleranceControl" aria-expanded="false" aria-label="モザイク塗りつぶし" title="モザイク塗りつぶし" data-i18n-aria-label="editor.mosaicFill" data-i18n-title="editor.mosaicFill">▣</button></div>
             <button id="mosaicEraserTool" class="tool icon-button tool-icon tool-icon-eraser" type="button" data-toolbar-item aria-pressed="false" aria-label="モザイク消しゴム" title="モザイク消しゴム" data-i18n-aria-label="editor.mosaicEraser" data-i18n-title="editor.mosaicEraser"><span aria-hidden="true"></span></button>
             <div class="boundary-tool-menu">
               <button id="boundaryTool" class="tool icon-button tool-icon tool-icon-boundary" type="button" data-toolbar-item aria-pressed="false" aria-expanded="false" aria-controls="boundaryModeMenu" aria-label="境界" title="境界" data-i18n-aria-label="editor.boundary" data-i18n-title="editor.boundary"><span aria-hidden="true"></span></button>
@@ -113,6 +119,8 @@
       <div class="inspector-current-actions" aria-label="現在の画像" data-i18n-aria-label="editor.currentActions">
         <button id="detectCurrentButton" type="button" data-i18n="editor.detectCurrent">自動検出</button>
         <button id="saveButton" class="primary" type="button" data-i18n="editor.applyCurrent">ファイル保存</button>
+        <button id="downloadCurrentMosaicMask" type="button" data-i18n="project.downloadMosaic">モザイク範囲を保存</button>
+        <button id="downloadCurrentExcludeMask" type="button" data-i18n="project.downloadExclude">除外範囲を保存</button>
         <button id="clearCurrentMasksButton" type="button" data-i18n="editor.clearMasks">モザイククリア</button>
         <button id="removeCurrentImageButton" type="button" data-i18n="editor.hide">非表示</button>
       </div>
@@ -133,11 +141,11 @@
       </section>
       <output id="candidateStatus" class="muted" hidden data-i18n-dynamic>画像を選択してください</output>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.applyRanges">モザイク範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="apply:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="apply" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-padding-batch="apply" type="button" class="candidate-padding-button" data-i18n="candidates.paddingAll">枠を一括設定</button><button data-candidate-batch="apply:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="candidateList" class="candidate-list"></div>
       </section>
       <section class="candidate-section">
-        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
+        <div class="candidate-section-heading"><h3 data-i18n="candidates.excludeRanges">除外範囲</h3><div class="candidate-section-actions"><button data-candidate-batch="exclude:toggle" type="button" aria-pressed="false" data-i18n="candidates.toggleAll">ON/OFF切替</button><button data-candidate-display-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.show">検出範囲</button><button data-candidate-effective-toggle="exclude" type="button" aria-pressed="false" data-i18n="candidates.applied">適用範囲</button><button data-candidate-padding-batch="exclude" type="button" class="candidate-padding-button" data-i18n="candidates.paddingAll">枠を一括設定</button><button data-candidate-batch="exclude:delete" type="button" data-i18n="candidates.deleteAll">削除</button></div></div>
         <div id="exclusionList" class="candidate-list"></div>
       </section>
       </div>
@@ -179,6 +187,12 @@
     </section>
   </main>
 
+  <div id="bucketToleranceControl" class="bucket-tolerance-panel" popover="auto" role="dialog" aria-labelledby="bucketToleranceLabel">
+    <div class="bucket-tolerance-heading"><label id="bucketToleranceLabel" for="bucketTolerance" data-i18n="editor.fillTolerance">色の許容範囲</label><button id="bucketToleranceClose" class="bucket-tolerance-close" type="button" aria-label="閉じる" title="閉じる" data-i18n-aria-label="dialog.close" data-i18n-title="dialog.close">×</button></div>
+    <input id="bucketTolerance" type="range" min="0" max="255" step="1" value="20" data-i18n-aria-label="editor.fillTolerance" aria-label="色の許容範囲">
+    <div class="bucket-tolerance-scale"><span data-i18n="editor.fillExact">厳密</span><output id="bucketToleranceValue" for="bucketTolerance">20</output><span data-i18n="editor.fillLoose">ゆるい</span></div>
+  </div>
+
   <template id="galleryItemTemplate">
     <button class="gallery-item" type="button" aria-haspopup="menu">
       <img loading="lazy" alt="">
@@ -198,6 +212,23 @@
     <button id="toggleReviewMenuItem" type="button" role="menuitem"></button>
     <button id="copyImagePathMenuItem" type="button" role="menuitem" hidden data-i18n="context.copyPath">パスをコピー</button>
     <button id="removeImageMenuItem" type="button" role="menuitem" data-i18n="editor.hide">非表示</button>
+  </div>
+
+  <div id="candidatePaddingPopover" class="candidate-padding-popover" popover="manual" role="dialog" aria-labelledby="candidatePaddingLabel">
+    <form id="candidatePaddingForm" novalidate>
+      <label id="candidatePaddingLabel" for="candidatePaddingInput" data-i18n="candidates.paddingLabel">枠の広さ</label>
+      <div class="candidate-padding-value">
+        <button id="candidatePaddingDecrease" type="button" aria-label="1 px減らす" title="1 px減らす" data-i18n-aria-label="candidates.paddingDecrease" data-i18n-title="candidates.paddingDecrease">−</button>
+        <input id="candidatePaddingInput" type="number" min="0" step="1" inputmode="numeric" aria-describedby="candidatePaddingValidation">
+        <span data-i18n="candidates.px">px</span>
+        <button id="candidatePaddingIncrease" type="button" aria-label="1 px増やす" title="1 px増やす" data-i18n-aria-label="candidates.paddingIncrease" data-i18n-title="candidates.paddingIncrease">＋</button>
+      </div>
+      <p id="candidatePaddingValidation" class="candidate-padding-validation" aria-live="polite"></p>
+      <div class="candidate-padding-actions">
+        <button id="candidatePaddingReset" type="button" data-i18n="candidates.paddingReset">0に戻す</button>
+        <button id="candidatePaddingConfirm" class="primary" type="submit" data-i18n="candidates.paddingConfirm">確定</button>
+      </div>
+    </form>
   </div>
 
   <dialog id="confirmDialog" class="modal-dialog confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
@@ -240,8 +271,13 @@
           <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50" data-i18n-aria-label="detectDialog.confidenceNumber" aria-label="判定しきい値の数値">
         </span>
        </label>
+       <label class="form-row">
+        <span data-i18n="detectDialog.candidatePadding">候補の枠</span>
+        <span class="inline-field"><input id="detectCandidatePadding" type="number" min="0" max="16384" step="1" value="0" inputmode="numeric" data-i18n-aria-label="detectDialog.candidatePadding" aria-label="候補の枠"><span>px</span></span>
+       </label>
       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
       <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
+      <p id="detectPaddingValidation" class="dialog-result error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
         <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>
@@ -335,7 +371,7 @@
   <dialog id="applyDialog" class="modal-dialog apply-dialog" aria-labelledby="applyDialogTitle" aria-describedby="applyTargetCount">
     <form id="applyForm" class="dialog-body">
       <h2 id="applyDialogTitle" data-i18n="apply.title">ファイルを保存</h2>
-      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
+      <label class="form-row"><span data-i18n="apply.targetMode">保存対象</span><select id="applyTargetMode"><option value="all" data-i18n="apply.targetAll">画像一覧のすべて</option><option value="masked" data-i18n="apply.targetMasked">モザイクあり</option><option value="reviewed" data-i18n="apply.targetReviewed">確認済み</option></select></label>
       <p id="applyTargetCount" class="muted"></p>
       <fieldset id="applySettings">
         <label class="choice-row"><input id="applyCopyMode" type="radio" name="batchSaveMode" value="copy" checked><span data-i18n="apply.copy">コピー保存</span></label>
@@ -347,7 +383,6 @@
           <button id="chooseOutputDirectoryButton" type="button" data-i18n="apply.changeOutputDirectory">保存先を変更</button>
         </div>
         <p id="applyTemporarySourceNote" class="fixed-note" hidden data-i18n="apply.handleSource">参照元への書込み権限がある画像は、上書きとコピー後の削除を利用できます。</p>
-        <label class="choice-row"><input id="removeAfterSave" type="checkbox"><span data-i18n="apply.removeAfterSave">保存できた画像を一覧から削除</span></label>
         <label class="form-row"><span data-i18n="editor.blockSize">モザイク粗さ</span><span class="ratio-control"><span>1 /</span><input id="applyDivisor" type="number" min="1" max="10000" value="100" required><output id="applyBlockSize"></output></span></label>
         <p class="fixed-note" data-i18n="apply.metadata">対応するメタデータを引き継ぎます。同名時は自動連番です。</p>
       </fieldset>

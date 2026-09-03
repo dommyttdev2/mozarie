@@ -99,8 +99,8 @@ function startFixtureServer() {
   const catalogRemoveRequests = [];
   const folderRequests = [];
   const initialCatalog = [
-    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
-    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0 },
+    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false },
+    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false },
   ];
   let catalog = structuredClone(initialCatalog);
   let settings = {
@@ -108,7 +108,7 @@ function startFixtureServer() {
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
     importing: { parallelism: 3 }, editing: { fill_color_tolerance: 20 }, saving: { parallelism: 2 },
-    detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, targets: ["penis", "pussy"] },
+    detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, default_candidate_padding_px: 3, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
       bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
@@ -196,11 +196,34 @@ function startFixtureServer() {
       }));
       return;
     }
+    // Folder imports preflight existing project sources before posting the
+    // selected path.  This fixture has no persisted projects, so it must
+    // explicitly answer the read route rather than turning a normal import
+    // into a spurious project-list error.
+    if (requestPath === "/api/projects" && request.method === "GET") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ projects: [] }));
+      return;
+    }
+    if (requestPath === "/api/project/mismatches" && request.method === "GET") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ images: [] }));
+      return;
+    }
     if (requestPath === "/api/folder" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
       folderRequests.push(JSON.parse(body));
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ images: catalog, root: folderRequests.at(-1).path }));
+      return;
+    }
+    // Folder selection now begins explicit unnamed project work.  Keep this
+    // browser fixture aligned with the real project contract so the picker
+    // flow does not surface a spurious error dialog.
+    if (requestPath === "/api/projects" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume project payload */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ project: { id: "fixture-project", name: null, status: "working", imageCount: catalog.length } }));
       return;
     }
     if (requestPath === "/api/output-directory/pick" && request.method === "POST") {
@@ -288,6 +311,12 @@ function startFixtureServer() {
     if (requestPath === "/api/workspace/catalog/finalize" && request.method === "POST") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ catalogId: "fixture-catalog", imageIds: {}, images: [], workspace: true }));
+      return;
+    }
+    if (requestPath.startsWith("/api/project/history/")) {
+      for await (const _chunk of request) { /* consume an optional undo request */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ canUndo: false, canRedo: false, changedImageIds: [] }));
       return;
     }
     if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
@@ -391,7 +420,7 @@ function startFixtureServer() {
       applyRequests.push(apply);
       currentJob = {
         kind: "apply", state: "running", total: apply.imageIds.length, completed: 0, current: "sample.png",
-        startedAt: Date.now() / 1000, imageIds: apply.imageIds, completedImageIds: [], removeAfterSave: Boolean(apply.removeAfterSave),
+        startedAt: Date.now() / 1000, imageIds: apply.imageIds, completedImageIds: [],
       };
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ ok: true }));
@@ -509,7 +538,10 @@ function startCandidateScenarioServer(expanded = false) {
     if (requestPath === "/api/candidates/batch" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
       const update = JSON.parse(body);
-      candidates.filter((candidate) => candidate.role === update.role).forEach((candidate) => { candidate.enabled = update.operation === "enable"; });
+      candidates.filter((candidate) => candidate.role === update.role).forEach((candidate) => {
+        if (update.operation === "set_padding") candidate.expandPx = update.expandPx;
+        else candidate.enabled = update.operation === "enable";
+      });
       candidateUpdates.push({ batch: update });
       candidateRevision += 1; image.candidateRevision = candidateRevision;
       image.enabledCandidateCount = candidates.filter((item) => item.role === "apply" && item.enabled).length;
@@ -670,6 +702,9 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       renderCandidates();
       document.querySelector(".candidate-row-apply .candidate-class").textContent = "Long English candidate label that must stay inside the row";
     });
+    for (const language of ["ja", "en"]) {
+    await page.evaluate((locale) => loadTranslations(locale), language);
+    await page.locator('[data-candidate-blink-id="candidate-blink-apply"] .candidate-class').evaluate((node) => { node.textContent = "Long English candidate label that must stay inside the row"; });
     for (const width of [1024, 1280, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       const rows = await page.evaluate(() => [...document.querySelectorAll(".candidate-row")].map((node) => ({ className: node.className, children: node.children.length, grid: getComputedStyle(node).gridTemplateColumns, overflow: node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight, hit: [...node.querySelectorAll("button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); }) })));
@@ -677,9 +712,27 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       const exclude = rows.find((item) => item.className.includes("candidate-row-manual-exclude") && !item.className.includes("erase"));
       const erase = rows.find((item) => item.className.includes("candidate-row-manual-exclude-erase"));
       const detectedApply = rows.find((item) => item.className.includes("candidate-row-apply") && !item.className.includes("manual"));
-      assert.deepEqual([apply?.children, exclude?.children, erase?.children], [5, 6, 5], `real Chromium candidate row control counts are stable at ${width}px`);
-      assert.equal([detectedApply, apply, exclude, erase].every((item) => !item.overflow && item.hit && item.grid.split(" ").length === item.children), true, `real Chromium candidate rows do not wrap, overflow, or lose hits at ${width}px (${JSON.stringify({ detectedApply, apply, exclude, erase })})`);
+      const detectedExclude = rows.find((item) => item.className.includes("candidate-row-exclude") && !item.className.includes("manual"));
+      assert.deepEqual([apply?.children, exclude?.children, erase?.children], [2, 2, 2], `real Chromium candidate rows keep one heading and one action row at ${width}px/${language}`);
+      assert.equal([detectedApply, detectedExclude, apply, exclude, erase].filter(Boolean).every((item) => !item.overflow), true, `real Chromium candidate rows wrap actions without overflow at ${width}px/${language} (${JSON.stringify({ detectedApply, detectedExclude, apply, exclude, erase })})`);
+      for (const selector of ['[data-candidate-blink-id="candidate-blink-apply"]', '.candidate-row-manual-apply', '.candidate-row-manual-exclude:not(.candidate-row-manual-exclude-erase)', '.candidate-row-manual-exclude-erase']) {
+        await page.locator(selector).scrollIntoViewIfNeeded();
+        assert.equal(await page.locator(selector).evaluate((node) => [...node.querySelectorAll("button")].every((button) => {
+          const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return target === button || button.contains(target);
+        })), true, `candidate row controls retain their hit targets for ${selector} at ${width}px/${language}`);
+      }
+      if (expanded) {
+        await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-forced').scrollIntoViewIfNeeded();
+        assert.equal(await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-forced').evaluate((button) => {
+        const rect = button.getBoundingClientRect(); const row = button.closest(".candidate-row").getBoundingClientRect();
+        const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return getComputedStyle(button).display !== "none" && rect.width > 0 && rect.height > 0 && rect.left >= row.left && rect.right <= row.right && rect.top >= row.top && rect.bottom <= row.bottom && (target === button || button.contains(target));
+        }), true, `the automatic exclusion force control remains fully visible inside the row at ${width}px/${language}`);
+        assert.deepEqual(await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-row-actions > button').evaluateAll((buttons) => buttons.map((button) => button.className)), ["candidate-display-toggle", "candidate-effective-toggle", "candidate-padding-button", "candidate-forced", "candidate-delete"], `the exclusion actions retain display, effective, padding, force, delete order at ${width}px/${language}`);
+      }
     }
+    }
+    await page.evaluate(() => loadTranslations("ja"));
 
     await page.locator("#brushTool").click();
     const canvas = await page.locator("#editorCanvas").boundingBox();
@@ -719,6 +772,70 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
 
     if (expanded) {
     const excludeRow = page.locator('[data-candidate-blink-id="candidate-blink-exclude"]');
+    const padding = row.locator(".candidate-padding-button");
+    assert.equal(await row.locator('input[type="number"]').count(), 0, "candidate rows do not reserve permanent width for a padding input");
+    assert.equal(await padding.textContent(), "枠 0px", "the compact padding button includes its current value");
+    await padding.click();
+    const paddingPopover = page.locator("#candidatePaddingPopover");
+    const paddingInput = page.locator("#candidatePaddingInput");
+    const maximumPadding = Number(await paddingInput.getAttribute("max"));
+    assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "one shared padding popover opens from the candidate row");
+    assert.equal(await paddingInput.evaluate((node) => document.activeElement === node), true, "opening focuses the numeric value for immediate replacement");
+    const beforeInvalid = scenario.candidateUpdates.length;
+    await page.locator("#candidatePaddingDecrease").click(); assert.equal(await paddingInput.inputValue(), "0", "decrease clamps at zero without persistence");
+    await page.locator("#candidatePaddingIncrease").click(); assert.equal(await paddingInput.inputValue(), "1", "increase changes only the draft value");
+    await page.locator("#candidatePaddingDecrease").click(); assert.equal(await paddingInput.inputValue(), "0", "decrease returns the draft value to zero");
+    assert.equal(scenario.candidateUpdates.length, beforeInvalid, "step buttons do not persist before confirmation");
+    const scrollBeforeArrows = await page.evaluate(() => {
+      const list = document.querySelector("#candidateList"); list.style.height = "40px"; list.style.flex = "0 0 40px"; list.scrollTop = 20;
+      return { list: list.scrollTop, page: scrollY };
+    });
+    for (let index = 0; index < 12; index += 1) await page.keyboard.press("ArrowUp");
+    assert.equal(await paddingInput.inputValue(), "12", "repeated ArrowUp changes only the draft by one step per key");
+    assert.deepEqual(await page.evaluate(() => ({ list: document.querySelector("#candidateList").scrollTop, page: scrollY })), scrollBeforeArrows, "padding arrow keys do not scroll the candidate list or page");
+    assert.equal(scenario.candidateUpdates.length, beforeInvalid, "repeated arrow keys never commit the draft");
+    await paddingInput.fill(""); await page.keyboard.press("ArrowUp"); assert.equal(await paddingInput.inputValue(), "1", "ArrowUp recovers an invalid empty value from the persisted value");
+    await page.locator("#candidatePaddingReset").click();
+    for (const invalid of ["0.1", "-1", String(maximumPadding + 1)]) {
+      await paddingInput.fill(invalid); await page.locator("#candidatePaddingConfirm").click();
+      assert.equal(await paddingInput.getAttribute("aria-invalid"), "true", `padding ${invalid} is exposed as invalid`);
+      assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "invalid padding keeps the editor open");
+      assert.equal(scenario.candidateUpdates.length, beforeInvalid, "invalid padding never reaches the candidate API");
+    }
+    await page.keyboard.press("Escape");
+    assert.equal(await page.evaluate((id) => document.activeElement?.dataset.candidatePaddingId === id, scenario.candidateId), true, "Escape cancels and restores focus to the invoking row");
+    await page.keyboard.press("Space"); assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "Space opens padding from the focused row button");
+    await page.keyboard.press("Escape"); await page.keyboard.press("Enter"); assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "Enter opens padding from the focused row button");
+    await paddingInput.fill("1"); await page.keyboard.press("Enter");
+    await page.waitForFunction((count) => window.fetch && state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === 1, beforeInvalid);
+    assert.equal(scenario.candidateUpdates.length, beforeInvalid + 1, "Enter commits padding exactly once");
+    assert.equal(scenario.candidateUpdates.at(-1).update.expandPx, 1, "one-pixel padding is persisted in source-image pixels");
+    await row.locator(".candidate-padding-button").click(); await paddingInput.fill(String(maximumPadding));
+    await page.locator("#candidatePane .inspector-heading").click();
+    await page.waitForFunction((maximum) => state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === maximum, maximumPadding);
+    assert.equal(scenario.candidateUpdates.length, beforeInvalid + 2, "valid outside-click commits the maximum exactly once");
+    await row.locator(".candidate-padding-button").click(); await page.locator("#candidatePaddingReset").click(); await page.locator("#candidatePaddingConfirm").click();
+    await page.waitForFunction(() => state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === 0);
+    assert.equal(scenario.candidateUpdates.length, beforeInvalid + 3, "reset and confirm commit zero exactly once");
+    const batchPaddingUpdates = scenario.candidateUpdates.length;
+    await page.locator('[data-candidate-padding-batch="apply"]').click();
+    assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "the apply batch padding control opens the shared editor");
+    await paddingInput.fill("2"); await page.locator("#candidatePaddingConfirm").click();
+    await page.waitForFunction(() => state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === 2);
+    assert.equal(scenario.candidateUpdates.length, batchPaddingUpdates + 1, "batch padding makes one API request");
+    assert.deepEqual(await page.evaluate(() => state.candidates.map((candidate) => [candidate.id, candidate.expandPx || 0])), [["candidate-blink-apply", 2], ["candidate-blink-exclude", 0]], "batch padding changes only candidates in its selected role");
+    await page.evaluate(() => { state.projectReadOnly = true; renderCandidates(); });
+    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled for a read-only completed project");
+    assert.equal(await excludeRow.locator(".candidate-forced").isDisabled(), true, "the visible automatic exclusion force control is disabled for a read-only completed project");
+    assert.equal(await excludeRow.locator(".candidate-toggle").isDisabled(), true, "automatic exclusion ON/OFF is disabled for a read-only completed project");
+    assert.equal(await excludeRow.locator(".candidate-delete").isDisabled(), true, "automatic exclusion deletion is disabled for a read-only completed project");
+    await page.evaluate(() => { state.projectReadOnly = false; state.candidateBatchPending.add(state.currentId); renderCandidates(); });
+    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled during a candidate batch mutation");
+    await page.evaluate(() => { state.candidateBatchPending.clear(); state.importing = true; renderCandidates(); });
+    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled during import");
+    await page.evaluate(() => { state.importing = false; state.saving = true; renderCandidates(); });
+    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled while the editor is busy");
+    await page.evaluate(() => { state.saving = false; renderCandidates(); });
     await excludeRow.locator(".candidate-display-toggle").click();
     await page.waitForFunction(() => state.blinkModes.get("candidate-blink-exclude") === "normal");
     await excludeRow.locator(".candidate-effective-toggle").click();
@@ -742,6 +859,9 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     const manualApply = page.locator('[data-candidate-blink-id="manual:apply"]');
     const manualExclude = page.locator('[data-candidate-blink-id="manual:exclude"]');
     const manualErase = page.locator('[data-candidate-blink-id="manual:excludeErase"]');
+    await page.evaluate(() => { state.projectReadOnly = true; renderCandidates(); });
+    assert.equal(await page.locator('.candidate-row-manual .candidate-toggle, .candidate-row-manual .candidate-forced, .candidate-row-manual .candidate-delete').evaluateAll((buttons) => buttons.length >= 7 && buttons.every((button) => button.disabled)), true, "all visible manual mask mutations are disabled without changing state in a read-only completed project");
+    await page.evaluate(() => { state.projectReadOnly = false; renderCandidates(); });
     for (const manualRowControl of [manualApply, manualExclude, manualErase]) {
       await manualRowControl.locator(".candidate-display-toggle").click();
       await manualRowControl.locator(".candidate-effective-toggle").click();
@@ -888,6 +1008,8 @@ async function assertDesktopLayout(page, width, height) {
   assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
   assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
   assert.equal(appbar.noBrandText && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, true, `header uses only the logo at ${width}x${height}`);
+  const unreviewedBadgeColor = await page.locator(".gallery-item:not(.reviewed) .gallery-review-badge").first().evaluate((badge) => getComputedStyle(badge).color);
+  assert.equal(unreviewedBadgeColor, "rgb(216, 255, 243)", `unreviewed gallery status keeps the requested green at ${width}x${height}`);
   await page.locator("#mosaicHelpButton").focus();
   assert.equal(await page.locator("#mosaicHelpButton").evaluate((button) => document.activeElement === button), true, `mosaic help accepts keyboard focus at ${width}x${height}`);
   if (width >= 1280) {
@@ -1568,7 +1690,14 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     pickFolder: (before, after) => assert.equal(after.popovers.pickerMenu, true, "pickFolder must open the image-import menu"),
     pickImages: (before, after) => assert.ok(after.pickers.files > before.pickers.files, "pickImages must invoke the file picker"),
     pickFolderFiles: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "pickFolderFiles must invoke the directory picker"),
-    loadFolderButton: (before, after) => apiChanged(before, after, "loadFolderButton", "/api/folder"),
+    // Project-aware folder imports first ask whether the source belongs to an
+    // existing project.  The decisive import is still the folder request;
+    // wait for it rather than mistaking that harmless preflight for the
+    // control's result.
+    loadFolderButton: async (before) => {
+      await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.url.includes("/api/folder")), before.api.length);
+      apiChanged(before, await snapshot(), "loadFolderButton", "/api/folder");
+    },
     settingsButton: dialog("settingsDialog", true, "settingsButton"), updateToast: dialog("settingsDialog", true, "updateToast"),
     batchMoreButton: (before, after) => assert.equal(after.popovers.batchMoreMenu, true, "batchMoreButton must open the batch menu"),
     clearAllMasksButton: dialog("confirmDialog", true, "clearAllMasksButton"), clearCatalogButton: dialog("confirmDialog", true, "clearCatalogButton"),
@@ -1738,8 +1867,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "30", "pointer dragging fixes the compare split at 30 percent");
   await page.locator("#compareSplitter").focus(); await page.keyboard.press("Shift+ArrowRight");
   assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "35", "Shift+Arrow adjusts the compare split by five percent");
-  await page.keyboard.press("Home"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "20", "Home moves the compare split to its minimum");
-  await page.keyboard.press("End"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "80", "End moves the compare split to its maximum");
+  await page.keyboard.press("Home"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), await page.locator("#compareSplitter").getAttribute("aria-valuemin"), "Home moves the compare split to its dynamic minimum");
+  await page.keyboard.press("End"); assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), await page.locator("#compareSplitter").getAttribute("aria-valuemax"), "End moves the compare split to its dynamic maximum");
   const splitterAfterKeys = await page.locator("#compareSplitter").boundingBox();
   await page.mouse.move(splitterAfterKeys.x + splitterAfterKeys.width / 2, splitterAfterKeys.y + splitterAfterKeys.height / 2); await page.mouse.down(); await page.mouse.move(compareCanvas.x + compareCanvas.width * .5, splitterAfterKeys.y + splitterAfterKeys.height / 2); await page.mouse.up();
   const compareBefore = await page.evaluate(() => ({ history: state.history.length, scale: state.view.scale, x: state.view.x, y: state.view.y, right: state.view.x + stage.clientWidth * state.compareSplit, singlePressed: $("#singleViewButton").getAttribute("aria-pressed"), comparePressed: $("#compareViewButton").getAttribute("aria-pressed") }));
@@ -1817,6 +1946,14 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
       else assert.notDeepEqual(after.state.candidateDisplayModes, prior.state.candidateDisplayModes, `${selector} must change candidate display mode`);
     });
   }
+  await page.evaluate(() => {
+    state.candidates = [{ id: "ledger-padding-candidate", role: "apply", enabled: true, forced: false, expandPx: 0, labelToken: "penis", source: "target", refinement: null, confidence: 1, color: "#ff3d4d" }];
+    state.removedCandidateIds.clear(); renderCandidates(); updateCandidateBatchButtons();
+  });
+  const candidatePaddingBatchBefore = await snapshot();
+  await page.locator("[data-candidate-padding-batch]").first().click();
+  await markDynamic("[data-candidate-padding-batch]", candidatePaddingBatchBefore, (prior, after) => assert.equal(after.popovers.candidatePaddingPopover, true, "candidate batch padding opens its editor"));
+  await page.locator("#candidatePaddingPopover").evaluate((popover) => popover.hidePopover());
   await click("brushTool");
   const ledgerCanvas = await page.locator("#editorCanvas").boundingBox();
   await page.mouse.move(ledgerCanvas.x + ledgerCanvas.width / 2, ledgerCanvas.y + ledgerCanvas.height / 2);
@@ -1858,7 +1995,15 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await setupFixture();
   await click("detectAllButton");
   await input("detectParallelism", "1"); await input("dialogTargetPenis", true); await input("dialogTargetPussy", true); await input("detectConfidenceRange", "0.52"); await input("detectConfidenceNumber", "0.53");
-  await click("detectCancelButton"); await click("detectAllButton"); await click("detectStartButton");
+  await click("detectCancelButton"); await click("detectAllButton");
+  await input("detectCandidatePadding", "9");
+  const paddedSettingsRequestStart = await page.evaluate(() => window.__ledgerApi.length);
+  await click("detectStartButton");
+  await page.waitForFunction(() => state.settings?.detection?.default_candidate_padding_px === 9);
+  const paddedSettingsRequests = await page.evaluate((start) => window.__ledgerApi.slice(start)
+    .filter((request) => request.method === "POST" && request.url.includes("/api/settings"))
+    .map((request) => JSON.parse(request.body)), paddedSettingsRequestStart);
+  assert.equal(paddedSettingsRequests.at(-1)?.detection?.default_candidate_padding_px, 9, "starting detection persists the candidate padding through the settings request");
   await click("processingPauseButton");
   await page.waitForFunction(() => state.processing?.state === "paused");
   await click("processingPauseButton");
@@ -1869,6 +2014,10 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await page.evaluate(() => pollJob());
   await page.waitForFunction(() => !document.querySelector("#processingDialog").open && state.processing === null);
   await closeDialogs(); await setupFixture();
+  await page.waitForFunction(() => state.settings?.detection?.default_candidate_padding_px === 9);
+  await click("detectAllButton");
+  assert.equal(await page.locator("#detectCandidatePadding").inputValue(), "9", "a fresh detection dialog seeds the persisted candidate padding");
+  await click("detectCancelButton");
 
   // Navigation and context menu use their actual selected-image handlers.
   const galleryBefore = await snapshot(); await page.locator('.gallery-item[data-id="sample-two"]').click();
@@ -1923,15 +2072,19 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   for (const [id, value] of [["singleSaveCopyMode", true], ["singleSaveSuffix", "_ledger"], ["singleSaveDeleteOriginal", true]]) await input(id, value);
   await click("singleSaveChooseOutputDirectoryButton");
   await input("singleSaveOverwriteMode", true);
+  // Keep the public save operation observable.  A fast fixture response can
+  // otherwise finish between clicking Start and the state assertion below.
+  holdSaveRender(true);
   await click("singleSaveStartButton");
   await click("confirmAccept");
   await page.waitForFunction(() => state.saving);
+  releaseSaveRenders();
   await page.waitForFunction(() => !state.saving);
   await input("singleSaveCopyMode", true); await click("singleSaveCloseButton");
   await page.evaluate(() => { addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 1, 1); markMaskDirty(); refreshMaskStatus(true); });
   await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled);
   await click("saveAllButton");
-  for (const [id, value] of [["applyTargetMode", "masked"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["removeAfterSave", true], ["applyDivisor", "102"]]) await input(id, value);
+  for (const [id, value] of [["applyTargetMode", "masked"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["applyDivisor", "102"]]) await input(id, value);
   await click("chooseOutputDirectoryButton"); await page.waitForTimeout(50);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await input("applyOverwriteMode", true); await input("applyCopyMode", true); await click("applyCloseButton");
@@ -1939,7 +2092,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   const runningSaveCanvas = await page.locator("#editorCanvas").boundingBox();
   await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2, runningSaveCanvas.y + runningSaveCanvas.height / 2);
   await page.mouse.down(); await page.mouse.move(runningSaveCanvas.x + runningSaveCanvas.width / 2 + 8, runningSaveCanvas.y + runningSaveCanvas.height / 2 + 8); await page.mouse.up();
-  await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled); await click("saveAllButton"); await click("chooseOutputDirectoryButton"); await input("deleteOriginal", false);
+  await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled); await click("saveAllButton"); await click("chooseOutputDirectoryButton");
+  if (await page.locator("#deleteOriginal").isDisabled()) assert.equal(await page.locator("#deleteOriginal").isChecked(), false, "an unavailable source-delete action stays safely unchecked");
+  else await input("deleteOriginal", false);
   holdSaveRender(true); await click("applyStartButton");
   await page.waitForFunction(() => !document.querySelector("#applyPauseButton").hidden);
   await click("applyPauseButton"); await click("applyCancelButton"); releaseSaveRenders(); await page.waitForFunction(() => !state.saving); await click("applyCloseButton");
@@ -2768,17 +2923,8 @@ async function main() {
     await page.locator("#applyDialog").evaluate((dialog) => dialog.showModal());
     assert.equal(await page.locator('#applyDialog [data-i18n="apply.metadata"]').textContent(), "対応するメタデータを引き継ぎます。同名時は自動連番です。", "save dialog describes only supported metadata carryover");
     assert.doesNotMatch(await page.locator('#applyDialog [data-i18n="apply.metadata"]').textContent(), /検証|validated/, "save dialog makes no verification claim");
-    await page.locator("#applyCopyMode").check();
-    await page.locator("#applySuffix").fill("_kept");
-    await page.locator("#applyOverwriteMode").check();
-    assert.equal(await page.locator("#applySuffixRow").isVisible(), false);
-    assert.equal(await page.locator("#deleteOriginalRow").isVisible(), false);
-    assert.equal(await page.locator("#applyOutputDirectoryRow").isVisible(), false);
-    assert.equal(await page.locator("#applyOverwriteNote").count(), 0);
-    await page.locator("#applyCopyMode").check();
-    assert.equal(await page.locator("#applySuffix").inputValue(), "_kept");
+    assert.equal(await page.locator("#applyTargetMode").inputValue(), "all", "the normal batch save target is the complete image list");
     assert.equal(await page.locator("#applySuffix").isDisabled(), false);
-    assert.equal(await page.locator("#removeAfterSave").isVisible(), true);
     await page.locator("#applyDialog").evaluate((dialog) => dialog.close());
 
     await page.locator('.gallery-item[data-id="sample"]').click();
@@ -2789,6 +2935,7 @@ async function main() {
     });
     assert.deepEqual(await page.evaluate(() => ({ currentId: state.currentId, targets: saveTargets("masked"), hasMask: hasEffectiveMask() })), { currentId: "sample", targets: ["sample"], hasMask: true }, "the batch test has one real masked filesystem source");
     await page.locator("#saveAllButton").click();
+    await page.locator("#applyTargetMode").selectOption("masked");
     await page.locator("#applyOverwriteMode").check();
     const saveRequestStart = saveRequests.length;
     await page.locator("#applyStartButton").click();
@@ -2806,7 +2953,7 @@ async function main() {
     await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
     assert.equal(await page.locator("#hideAndNextButton").isDisabled(), false, "hide and next enables after selecting an image");
-    assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.every((button) => button.disabled)), true, "candidate batch actions stay disabled when the selected image has no candidates");
+    assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.some((button) => !button.disabled)), true, "saving preserves the selected image's candidate actions");
     await page.locator("#confidence").evaluate((input) => {
       input.value = "1.00";
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2976,6 +3123,7 @@ async function main() {
     assert.equal(await page.locator("footer.batch-bar").count(), 0, "batch controls must not live below the editor");
     const batchMenu = page.locator("#batchMoreMenu");
     assert.equal(await batchMenu.isVisible(), false, "destructive batch commands should not be visible by default");
+    assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, `folder picker must not leave an error dialog open: ${await page.locator("#errorDialog").textContent()}`);
     await page.locator("#batchMoreButton").evaluate((button) => { button.disabled = false; });
     await page.locator("#batchMoreButton").click();
     assert.equal(await batchMenu.isVisible(), true, "batch menu should reveal destructive commands on demand");
@@ -3398,26 +3546,31 @@ async function main() {
       state.maskStatus.set("sample", true); state.maskStatus.set("sample-two", true);
       await setReviewed(state.images.find((image) => image.id === "sample"), true);
       state.currentId = "sample-two";
-      return ["current", "masked", "reviewed"].map((mode) => ({ mode, ids: saveTargets(mode), count: saveTargets(mode).length }));
+      return ["current", "all", "masked", "reviewed"].map((mode) => ({ mode, ids: saveTargets(mode), count: saveTargets(mode).length }));
     });
-    assert.deepEqual(targetModes, [{ mode: "current", ids: ["sample-two"], count: 1 }, { mode: "masked", ids: ["sample", "sample-two"], count: 2 }, { mode: "reviewed", ids: ["sample"], count: 1 }], "save target modes select explicit current, mosaicked, and reviewed IDs");
+    assert.deepEqual(targetModes, [{ mode: "current", ids: ["sample-two"], count: 1 }, { mode: "all", ids: ["sample", "sample-two"], count: 2 }, { mode: "masked", ids: ["sample", "sample-two"], count: 2 }, { mode: "reviewed", ids: ["sample"], count: 1 }], "save target modes keep the full catalogue as the normal batch target while retaining explicit filters");
     const editorHistoryAndDisplay = await page.evaluate(async () => {
-      const original = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, history: state.history, index: state.historyIndex, baseRemoved: state.historyRemovedCandidateIds, baseCandidates: state.historyCandidateIds, settings: state.settings.confirmations.candidateDelete };
+      // This block verifies the transient editor-history implementation itself.
+      // Folder import now creates a durable project, so isolate the legacy
+      // in-memory history scenario instead of accidentally routing it through
+      // the project's HTTP undo endpoint.
+      const original = { candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds, history: state.history, index: state.historyIndex, baseRemoved: state.historyRemovedCandidateIds, baseCandidates: state.historyCandidateIds, settings: state.settings.confirmations.candidateDelete, project: state.project, projectReadOnly: state.projectReadOnly };
+      state.project = null; state.projectReadOnly = false;
       const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height; mask.getContext("2d").fillRect(0, 0, 16, 16);
       const candidate = { id: "history-candidate", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" };
       state.candidates = [candidate]; state.candidateImages = new Map([[candidate.id, mask]]); state.removedCandidateIds = new Set(); state.settings.confirmations.candidateDelete = false; resetHistoryToCurrentManualMask();
       await deleteCandidate(candidate); const afterDelete = state.removedCandidateIds.has(candidate.id) && state.history.length === 1 && currentRecord().candidateCount === 0;
       restoreSnapshot(0); const undo = !state.removedCandidateIds.has(candidate.id); restoreSnapshot(1); const redo = state.removedCandidateIds.has(candidate.id);
       for (let index = 0; index < 13; index += 1) recordHistoryOperation({ kind: "removeCandidates", ids: [`trim-${index}`] });
-      const trimmed = state.history.length === 12 && state.historyRemovedCandidateIds.has("trim-0");
+      const trimmed = state.history.length > 12 && !state.historyRemovedCandidateIds.has("trim-0");
       state.removedCandidateIds.delete(candidate.id);
       renderCandidates();
       document.querySelector('[data-candidate-effective-toggle="apply"]').click();
       const effective = state.blinkModes.get(candidate.id) === "effective"; state.currentId = "sample"; state.drafts.set("sample-two", { candidateRevision: 0, removedCandidateIds: [] }); await selectImage("sample-two", true); const cleared = state.blinkCandidateIds.size === 0 && state.blinkModes.size === 0;
-      state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings;
+      state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings; state.project = original.project; state.projectReadOnly = original.projectReadOnly;
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
-    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `soft deletion keeps undo/redo and selection failure preserves the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `durable undo/redo and selection failure preserve the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
     const candidateDisplayLifecycle = await page.evaluate(async () => {
       const original = {
         candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds,
@@ -3429,7 +3582,8 @@ async function main() {
         exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
         state.activeStroke = null; state.mosaicPending = false;
       };
-      state.candidates = [candidate]; state.candidateImages = new Map(); state.removedCandidateIds = new Set();
+      const candidateMask = document.createElement("canvas"); candidateMask.width = candidateMask.height = 1;
+      state.candidates = [candidate]; state.candidateImages = new Map([[candidate.id, candidateMask]]); state.removedCandidateIds = new Set();
       state.settings.confirmations.candidateRoleDelete = false; state.tool = "exclude_eraser";
       resetLayers(); exclusionCtx.fillRect(2, 2, 4, 4);
       clearCandidateBlink(); setCandidateDisplayMode([candidate.id, "manual:exclude"], "normal");
@@ -3456,6 +3610,10 @@ async function main() {
     });
     assert.deepEqual(candidateDisplayLifecycle, { joinsNormal: true, joinsManualOnly: true, skipsHiddenManual: true, roleDeleteClearsDisplay: true }, `browser candidate display lifecycle clears deleted ranges and only adds an exclusion erase to a fully normal existing range: ${JSON.stringify(candidateDisplayLifecycle)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
+      // This verifies the in-memory draft/history fallback independently from
+      // the durable-project implementation exercised in the project UI suite.
+      const originalProject = state.project; const originalProjectReadOnly = state.projectReadOnly;
+      state.project = null; state.projectReadOnly = false;
       const draft = (label) => ({
         add: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAF/gL+XwUPpQAAAABJRU5ErkJggg==",
         exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true,
@@ -3474,7 +3632,9 @@ async function main() {
       restoreSnapshot(0); const undo = state.historyIndex === 0;
       restoreSnapshot(1); const redo = state.historyIndex === 1;
       const bulk = draftPayload(["sample", "sample-two"]);
-      return { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
+      const result = { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
+      state.project = originalProject; state.projectReadOnly = originalProjectReadOnly;
+      return result;
     });
     assert.deepEqual(workspaceDraftRetention, { restoredHistory: true, undo: true, redo: true, bulk: ["sample", "sample-two"], retained: [true, true] }, "workspace persistence keeps per-image undo drafts and includes both manual masks in bulk saving");
 
@@ -3519,6 +3679,11 @@ async function main() {
         };
       }, { width, height });
       await page.waitForFunction(() => !state.mosaicWorkerBusy && state.mosaicSourceId && !state.mosaicPreviewRequested, null, { timeout: 15000 });
+      const projectMode = await page.evaluate(() => {
+        const enabled = Boolean(state.project?.id);
+        if (enabled) state.projectHistory.delete(state.currentId);
+        return enabled;
+      });
       const normalCursors = await page.evaluate(() => ["brush", "mosaic_eraser", "eraser", "exclude_eraser", "boundary", "polygon", "boundary_brush", "bucket", "exclude_bucket"].map((tool) => {
         setTool(tool); return getComputedStyle(document.querySelector("#editorCanvas")).cursor;
       }));
@@ -3541,7 +3706,21 @@ async function main() {
       }), geometry);
       assert.deepEqual(duringBrush, { active: true, mask: true, preview: true }, `${width}x${height} brush updates its mosaic preview during the drag`);
       await page.mouse.up();
-      await page.waitForFunction(() => !state.activeStroke && state.history.length > 0 && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
+      const brushPersistence = await page.waitForFunction((projectMode) => {
+        const imageId = state.currentId;
+        if (state.activeStroke || state.mosaicWorkerBusy || state.mosaicPending) return false;
+        if (!projectMode) return state.history.length > 0;
+        const draft = state.drafts.get(imageId);
+        return state.history.length === 0
+          && !state.draftSaveChains.has(imageId)
+          && !state.workspaceDraftTimers.has(imageId)
+          && !state.workspaceDraftChains.has(imageId)
+          && !state.workspaceMutationErrors.has(imageId)
+          && draft?.dirtyLayers?.length === 0
+          && state.projectHistory.has(imageId);
+      }, projectMode, { timeout: 15000 });
+      const brushPersistenceState = await brushPersistence.jsonValue();
+      assert.equal(brushPersistenceState, true, `${width}x${height} brush settles its ${projectMode ? "durable project draft and history status without local history" : "projectless local history"}`);
       const afterBrushPreview = await page.evaluate(({ logical }) => [...mosaicCtx.getImageData(logical.x, logical.y, 1, 1).data]
         .some((value, index) => value !== originalCtx.getImageData(logical.x, logical.y, 1, 1).data[index]), geometry);
       assert.equal(afterBrushPreview, true, `${width}x${height} brush confirms one mosaic worker frame after pointerup`);
@@ -3861,11 +4040,15 @@ async function main() {
     });
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      const folderRequestCount = folderRequests.length;
       await browserSavePage.locator("#pickFolder").click();
       await browserSavePage.locator("#folderPath").fill("G:\\selected-folder");
       await browserSavePage.locator("#loadFolderButton").click();
-      await browserSavePage.waitForFunction(() => state.images.length === 2);
-      assert.deepEqual(folderRequests, [{ path: "G:\\selected-folder" }], "folder selection posts the typed path and reloads the catalogue");
+      // The initial fixture also contains two images.  Wait for the loaded
+      // root instead of that unchanged count: folder preflight is async.
+      await browserSavePage.waitForFunction(() => state.reviewRoot === "g:\\selected-folder");
+      assert.equal(folderRequests.length, folderRequestCount + 1, "folder selection sends exactly one new request");
+      assert.deepEqual(folderRequests.at(-1), { path: "G:\\selected-folder" }, "folder selection posts the typed path and reloads the catalogue");
       await browserSavePage.locator('.gallery-item[data-id="sample"]').click();
       await browserSavePage.waitForFunction(() => state.currentId === "sample" && state.currentImage);
       await browserSavePage.locator("#brushTool").click();
@@ -3891,10 +4074,10 @@ async function main() {
       assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls), [["query", "readwrite"], ["request", "readwrite"]], "single save requests read/write access from the restored handle in its click chain");
       await browserSavePage.locator("#confirmAccept").click();
       await browserSavePage.waitForFunction(() => state.saving, null, { timeout: 5000 });
-      await browserSavePage.waitForFunction(() => !state.saving && state.images.find((image) => image.id === "sample")?.reviewed, null, { timeout: 5000 });
+      await browserSavePage.waitForFunction(() => !state.saving, null, { timeout: 5000 });
       assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "single copy-and-delete drives prepare, render, and commit in order");
       assert.equal(await browserSavePage.evaluate(() => window.__singleSaveFiles.has("sample_検証_1.png")), true, "single save keeps Unicode suffixes and avoids an existing output name");
-      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: true }, "single save reloads and reviews the current image without changing the catalogue");
+      assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: false }, "single save reloads without changing catalogue or reviewed state");
       await browserSavePage.evaluate(() => window.__outputPermission.set("prompt"));
       await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
       await browserSavePage.waitForFunction(() => window.__outputPermission.calls.length === 4);

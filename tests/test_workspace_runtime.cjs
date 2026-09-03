@@ -23,7 +23,7 @@ const context = {
   },
 };
 vm.runInNewContext(source, context, { filename: workspacePath });
-vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,rememberedOutputDirectoryHandle,rememberOutputDirectoryHandle,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};", context, { filename: "test-workspace-exports.js" });
+vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,rememberedOutputDirectoryHandle,rememberOutputDirectoryHandle,rememberedProjectSource,rememberedProjectFileSources,rememberedProjectDirectorySources,forgetProjectSources,ensureProjectSourcePermission,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};", context, { filename: "test-workspace-exports.js" });
 
 (async () => {
   await context.workspaceTest.queueWorkspaceDraft("one", true);
@@ -31,6 +31,56 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   await context.workspaceTest.queueWorkspaceDraft("one", true);
   assert.deepEqual(calls.map(([, method]) => method), ["DELETE", "POST"], "draft snapshots choose DELETE or POST at enqueue time");
 
+  state.project = { id: "project-one" }; state.currentId = null; state.workspaceDraftChains.clear(); state.workspaceDraftTimers.clear(); state.workspaceMutationErrors.clear(); state.draftSaveChains.clear();
+  const durableDraft = { add: "data:image/png;base64,durable", hasEffectiveMask: true };
+  state.drafts.set("one", durableDraft); state.maskStatus = new Map([["one", true]]);
+  await context.workspaceTest.queueWorkspaceDraft("one", true);
+  assert.equal(state.drafts.has("one"), false, "a durable inactive project draft is evicted from the live bitmap cache");
+  assert.equal(state.maskStatus.has("one"), false, "evicting a durable project draft also drops its derived mask state");
+  const originalApiForRestore = context.api;
+  context.api = async () => ({ draft: { add: "data:image/png;base64,durable", hasEffectiveMask: true } });
+  assert.equal((await context.workspaceTest.loadWorkspaceDraft("one")).add, "data:image/png;base64,durable", "revisiting an evicted project draft reloads its durable payload");
+  context.api = originalApiForRestore;
+  state.project = null;
+  state.drafts.set("one", durableDraft); state.maskStatus.set("one", true);
+  await context.workspaceTest.queueWorkspaceDraft("one", true);
+  assert.equal(state.drafts.get("one"), durableDraft, "projectless sessions keep their only in-memory draft copy");
+
+  const manyImages = Array.from({ length: 400 }, (_, index) => ({ id: `many-${index}` }));
+  state.images = manyImages; state.project = { id: "project-many" }; state.currentId = null;
+  state.drafts.clear(); state.maskStatus.clear(); state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear(); calls.length = 0;
+  for (let index = 0; index < manyImages.length; index += 1) {
+    const image = manyImages[index];
+    state.currentId = image.id;
+    state.drafts.set(image.id, { add: `data:image/png;base64,${image.id}`, hasEffectiveMask: true });
+    if (!index) continue;
+    await context.workspaceTest.queueWorkspaceDraft(manyImages[index - 1].id, true);
+    assert.ok(state.drafts.size <= 1, "inactive project draft bitmap data stays bounded while moving through 400 images");
+  }
+  state.currentId = null;
+  await context.workspaceTest.queueWorkspaceDraft(manyImages.at(-1).id, true);
+  assert.equal(state.drafts.size, 0, "400 persisted inactive project drafts are evicted instead of accumulating bitmap state");
+  assert.equal(state.maskStatus.size, 0, "evicted project draft status entries plateau with the bitmap cache");
+  assert.equal(state.workspaceDraftChains.size, 0, "settled project draft write chains do not grow with the catalogue");
+  assert.ok(manyImages.every((image) => image.hasEffectiveMask === true), "draft eviction preserves each durable effective-mask scalar for masked save targets");
+  assert.equal(calls.filter(([, method]) => method === "POST").length, 400, "each inactive project draft is durably saved before eviction");
+  const originalApiForManyRestore = context.api;
+  context.api = async () => ({ draft: { add: "data:image/png;base64,rehydrated", hasEffectiveMask: true } });
+  const rehydrated = await Promise.all(manyImages.map((image) => context.workspaceTest.loadWorkspaceDraft(image.id)));
+  assert.ok(rehydrated.every((draft) => draft?.add === "data:image/png;base64,rehydrated"), "evicted project drafts rehydrate on demand");
+  context.api = originalApiForManyRestore;
+  state.project = null; state.drafts.clear(); state.maskStatus.clear(); state.workspaceDraftChains.clear(); state.currentId = null;
+  for (let index = 0; index < manyImages.length; index += 1) {
+    const image = manyImages[index];
+    state.currentId = image.id;
+    state.drafts.set(image.id, { add: `data:image/png;base64,${image.id}`, hasEffectiveMask: true });
+    if (index) await context.workspaceTest.queueWorkspaceDraft(manyImages[index - 1].id, true);
+  }
+  state.currentId = null;
+  await context.workspaceTest.queueWorkspaceDraft(manyImages.at(-1).id, true);
+  assert.equal(state.drafts.size, 400, "projectless drafts are never evicted because no durable project recovery path exists");
+
+  state.images = [{ id: "one" }];
   calls.length = 0; state.drafts.set("one", { add: "data:image/png;base64,a", hasEffectiveMask: true }); rejectFirst = true;
   const failed = context.workspaceTest.queueWorkspaceDraft("one", true);
   state.drafts.delete("one");
@@ -123,7 +173,7 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
     },
   };
   assert.equal(await context.workspaceTest.directoryCatalogStore(), openedDb, "a directory database creates its store on first open and returns the opened database");
-  assert.equal(createdStores, 1, "the directory database owns one catalog object store");
+  assert.equal(createdStores, 2, "the directory database owns catalog and project-source stores");
   context.indexedDB = context.window.indexedDB = {
     open() {
       const request = {};
@@ -137,6 +187,33 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   assert.equal(await context.workspaceTest.rememberedOutputDirectoryHandle(), null, "browsers without IndexedDB have no remembered output directory");
   await context.workspaceTest.rememberOutputDirectoryHandle({ name: "output" });
 
+  const fileRowsDb = {
+    close() {},
+    transaction() { return { objectStore() { return { getAll() { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
+      { projectId: "project", imageId: "one", sourceId: "source-a", handle: { kind: "file", name: "a.png" } },
+      { projectId: "project", imageId: null, sourceId: "source-a", handle: { kind: "directory", name: "folder" } },
+      { projectId: "other", imageId: "two", sourceId: "source-b", handle: { kind: "file", name: "b.png" } },
+    ]; return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: fileRowsDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  assert.equal((await context.workspaceTest.rememberedProjectSource("project", "source-a", "one")).name, "a.png", "a remembered project source resolves by its durable source and image IDs");
+  assert.equal(JSON.stringify(await context.workspaceTest.rememberedProjectFileSources("project")), JSON.stringify([{ sourceId: "source-a", handle: { kind: "file", name: "a.png" } }]), "browser file handles retain the durable source ID needed to restore the same project images");
+  assert.equal(JSON.stringify(await context.workspaceTest.rememberedProjectDirectorySources("project")), JSON.stringify([{ sourceId: "source-a", handle: { kind: "directory", name: "folder" } }]), "a remembered project directory restores its durable source ID");
+  assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => "granted" }), true, "a granted project source opens without another prompt");
+  assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => "prompt", requestPermission: async () => "granted" }, true), true, "an explicitly requested project source can obtain browser read permission");
+  assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => { throw new Error("denied"); } }), false, "a project source permission failure remains closed");
+
+  const deletedHandleKeys = [];
+  const cleanupDb = {
+    close() {},
+    transaction(_name, mode) { return { objectStore() { return mode === "readwrite" ? { delete(key) { deletedHandleKeys.push(key); } } : { getAll() { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
+      { key: "project:source-a:one", projectId: "project" }, { key: "project:dir:root", projectId: "project" }, { key: "other:source-b:two", projectId: "other" },
+    ]; return request; } }; } }; },
+  };
+  context.indexedDB = context.window.indexedDB = { open() { const request = { result: cleanupDb }; queueMicrotask(() => request.onsuccess()); return request; } };
+  await context.workspaceTest.forgetProjectSources("project");
+  assert.deepEqual(deletedHandleKeys, ["project:source-a:one", "project:dir:root"], "deleting a project removes only its persisted browser handles");
+
   const outputReadErrorDb = {
     close() {},
     transaction() { return { objectStore() { return { get() { const request = {}; queueMicrotask(() => request.onerror()); return request; } }; } }; },
@@ -144,61 +221,16 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   context.indexedDB = context.window.indexedDB = { open() { const request = { result: outputReadErrorDb }; queueMicrotask(() => request.onsuccess()); return request; } };
   assert.equal(await context.workspaceTest.rememberedOutputDirectoryHandle(), null, "an unreadable remembered output directory is treated as absent");
 
-  const sameEntry = { isSameEntry: async () => true };
   const directoryEvents = [];
-  const existingDb = {
-    close() { directoryEvents.push("close-existing"); },
-    transaction() { return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "known", handle: sameEntry }] }; queueMicrotask(() => request.onsuccess()); return request; } }; } }; },
+  context.state.project = null;
+  context.api = async (url) => {
+    assert.equal(url, "/api/projects", "a directory creates explicit unnamed project work");
+    return { project: { id: "fresh", name: null, status: "working" } };
   };
-  context.indexedDB = context.window.indexedDB = { open() { const request = { result: existingDb }; queueMicrotask(() => request.onsuccess()); return request; } };
-  context.api = async (_url, options) => JSON.parse(options.body).catalogId === "known" ? { catalogId: "known" } : { catalogId: "fresh" };
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "known", "a server-accepted remembered folder catalog is reused");
-  assert.deepEqual(directoryEvents, ["close-existing"], "a reused catalog closes its IndexedDB handle before returning");
-
-  context.api = async () => ({});
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), null, "a successful catalog activation without an ID returns no catalog instead of inventing one");
-
-  const brokenHandleDb = {
-    close() { directoryEvents.push("close-broken"); },
-    transaction() { return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "bad", handle: { isSameEntry: async () => { throw new Error("permission lost"); } } }] }; queueMicrotask(() => request.onsuccess()); return request; }, delete() { directoryEvents.push("delete-broken"); } }; } }; },
-  };
-  const writeDb = { close() { directoryEvents.push("close-write"); }, transaction() { return { objectStore() { return { put() { throw new Error("quota"); } }; } }; } };
-  let opens = 0;
-  context.indexedDB = context.window.indexedDB = { open() { const request = { result: opens++ ? writeDb : brokenHandleDb }; queueMicrotask(() => request.onsuccess()); return request; } };
-  context.api = async () => ({ catalogId: "fresh" });
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "fresh", "a broken remembered folder falls back to a new catalog even if optional persistence fails");
-  assert.ok(directoryEvents.includes("delete-broken") && directoryEvents.includes("close-write"), "a broken handle is discarded and a failed optional replacement write is closed");
-
-  const errorReadDb = {
-    close() { directoryEvents.push("close-read-error"); },
-    transaction() { return { objectStore() { return { getAll() { const request = {}; queueMicrotask(() => request.onerror()); return request; } }; } }; },
-  };
-  context.indexedDB = context.window.indexedDB = { open() { const request = { result: errorReadDb }; queueMicrotask(() => request.onsuccess()); return request; } };
-  context.api = async () => ({ catalogId: "from-read-error" });
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "from-read-error", "an unreadable directory cache creates a fresh server catalog");
-
-  const emptyReadDb = {
-    close() { directoryEvents.push("close-read-empty"); },
-    transaction() { return { objectStore() { return { getAll() { const request = { result: null }; queueMicrotask(() => request.onsuccess()); return request; } }; } }; },
-  };
-  context.indexedDB = context.window.indexedDB = { open() { const request = { result: emptyReadDb }; queueMicrotask(() => request.onsuccess()); return request; } };
-  context.api = async () => ({ catalogId: "from-empty-read" });
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "from-empty-read", "an empty IndexedDB read is treated as an empty catalog list");
-
-  const deletionFailureDb = {
-    close() { directoryEvents.push("close-delete-error"); },
-    transaction(_name, mode) {
-      if (mode === "readwrite") throw new Error("cache deletion blocked");
-      return { objectStore() { return { getAll() { const request = { result: [{ catalogId: "expired", handle: sameEntry }] }; queueMicrotask(() => request.onsuccess()); return request; } }; } };
-    },
-  };
-  context.indexedDB = context.window.indexedDB = { open() { const request = { result: deletionFailureDb }; queueMicrotask(() => request.onsuccess()); return request; } };
-  context.api = async (_url, options) => JSON.parse(options.body).catalogId === "expired" ? Promise.reject(new Error("server reset")) : ({ catalogId: "after-delete-error" });
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "after-delete-error", "a cache deletion failure still creates a fresh catalog");
-
-  context.indexedDB = context.window.indexedDB = undefined;
-  context.api = async () => ({});
-  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), null, "a server response without a catalog ID remains an explicit no-catalog result");
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "fresh", "a remembered directory never silently reopens old work");
+  context.state.project = { id: "fresh" };
+  context.api = async (url) => { assert.equal(url, "/api/workspace/catalog", "an active project activates its existing workspace catalog"); return { catalogId: "active" }; };
+  assert.equal(await context.workspaceTest.catalogForDirectoryHandle({}), "active", "a selected directory activates the current project rather than creating another one");
 
   state.currentId = null; state.draftDirty = false; state.draftSaveChains.clear(); state.workspaceDraftChains.clear(); state.workspaceMutationErrors.clear(); state.workspaceDraftTimers.clear();
   assert.equal(JSON.stringify(context.workspaceTest.workspaceDraftPayload({})), JSON.stringify({ add: "", exclusion: "", exclusionErase: "", manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: true, hasEffectiveMask: false, removedCandidateIds: [], candidateRevision: 0 }), "a partially initialized manual draft receives the persisted defaults");

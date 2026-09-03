@@ -64,8 +64,209 @@ async function copyCommand(commandId, resultId) {
   } catch (error) { showUserError(error); }
 }
 
+let projectNameMode = "name";
+let sameSourceProjects = [];
+let sameSourcePath = "";
+let projectDeleteId = "";
+
+function projectTitle(project) { return project?.name || t("project.unnamed"); }
+function projectDate(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return t("project.noDate");
+  const language = state.settings?.general?.language === "en" ? "en" : "ja-JP";
+  return new Intl.DateTimeFormat(language, { dateStyle: "short", timeStyle: "short" }).format(new Date(Math.floor(timestamp / 1000000)));
+}
+function projectSource(project) { return project?.sourceRoot || t("project.noSource"); }
+function renderProjectCurrent() {
+  const project = state.project;
+  $("#projectCurrent").textContent = project ? `${projectTitle(project)} · ${t(`project.${project.status}`)}` : t("project.unnamed");
+  $("#projectName").disabled = !project || state.projectReadOnly;
+  $("#projectComplete").disabled = !project || state.projectReadOnly;
+  $("#projectResume").hidden = !state.projectReadOnly;
+  $("#projectResume").disabled = !project;
+  $("#projectReadOnlyNotice").hidden = !state.projectReadOnly;
+  $("#projectSourceSelect").disabled = !project || state.projectReadOnly;
+  $("#projectMosaicZip").disabled = !project || !(project.imageCount > 0);
+  $("#projectExcludeZip").disabled = !project || !(project.imageCount > 0);
+  $("#projectDelete").disabled = !project;
+}
+function openProjectNameDialog(mode) {
+  projectNameMode = mode; $("#projectNameInput").value = mode === "name" ? (state.project?.name || "") : "";
+  showModalFromInvoker($("#projectNameDialog")); focusElement($("#projectNameInput"));
+}
+async function showProjectList() {
+  const sort = $("#projectSort").value;
+  const data = await api(`/api/projects?sort=${encodeURIComponent(sort)}`);
+  const list = $("#projectList"); list.replaceChildren();
+  for (const project of data.projects || []) {
+    const row = document.createElement("div"); row.className = "project-list-item";
+    const open = document.createElement("button"); open.type = "button"; open.textContent = projectTitle(project);
+    open.addEventListener("click", () => { void openProject(project); });
+    const status = document.createElement("small");
+    status.textContent = `${t(`project.${project.status}`)} · ${t("project.imageCount", { count: project.imageCount || 0 })}`;
+    const details = document.createElement("small"); details.className = "project-list-details";
+    details.textContent = `${t("project.source")}: ${projectSource(project)} · ${t("project.updated")}: ${projectDate(project.updatedAt)}`;
+    const action = document.createElement("button"); action.type = "button"; action.textContent = t("project.openAction");
+    action.addEventListener("click", () => { void openProject(project); });
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger"; remove.textContent = t("project.delete");
+    remove.addEventListener("click", () => openProjectDeleteDialog(project.id));
+    row.append(open, action, remove, status, details); list.append(row);
+  }
+  showModalFromInvoker($("#projectListDialog"));
+}
+async function showSourceMismatches() {
+  const data = await api("/api/project/mismatches"); const images = data.images || [];
+  if (!images.length) return;
+  const list = $("#sourceMismatchList"); list.replaceChildren();
+  for (const image of images) {
+    const item = document.createElement("li");
+    item.textContent = image.dimensionsChanged ? `${image.relativePath} · ${t("project.dimensionsChanged")}` : image.relativePath;
+    list.append(item);
+  }
+  $("#sourceMismatchClear").checked = false;
+  const dialog = $("#sourceMismatchDialog");
+  dialog.dataset.imageIds = JSON.stringify(images.map((image) => image.id));
+  showModalFromInvoker(dialog);
+}
+async function openProject(project, resume = false) {
+  try {
+    if (state.candidateUpdateChains?.size) await waitForCandidateMutations();
+    await flushAllWorkspaceMutations();
+    if (resume) await api("/api/project/resume", { method: "POST", body: JSON.stringify({ projectId: project.id }) });
+    const data = await api("/api/project/open", { method: "POST", body: JSON.stringify({ projectId: project.id }) });
+    state.project = data.project; state.projectReadOnly = data.project?.status === "completed";
+    $("#projectListDialog").close(); $("#projectDialog").close();
+    if (data.needsSource) {
+      const files = await rememberedProjectFileSources(project.id);
+      const directories = await rememberedProjectDirectorySources(project.id);
+      // Keep the native portion visible while browser handles are restored.
+      resetCatalog(data.images || [], data.project?.sourceRoot || "");
+      applyProjectSnapshot(await api("/api/images"));
+      const handles = [...directories.map((item) => item.handle), ...files.map((item) => item.handle)].filter(Boolean);
+      const granted = await Promise.all(handles.map((handle) => ensureProjectSourcePermission(handle, true)));
+      for (let index = 0; index < directories.length; index += 1) {
+        if (granted[index]) await importProjectDirectoryHandle(directories[index].handle, project.id, directories[index].sourceId);
+      }
+      if (files.length && granted.slice(directories.length).every(Boolean)) await importProjectFileHandles(files, project.id);
+      if (!handles.length || granted.some((ok) => !ok)) showUserError({ code: "project_source_unavailable" });
+      await showSourceMismatches();
+    } else {
+      resetCatalog(data.images || [], data.project?.sourceRoot || "");
+      applyProjectSnapshot(await api("/api/images")); await showSourceMismatches();
+    }
+  } catch (error) { showUserError(error); }
+}
+
+async function downloadProjectArtifact(path, filename) {
+  try {
+    if (state.candidateUpdateChains?.size) await waitForCandidateMutations();
+    await flushAllWorkspaceMutations();
+    const response = await fetch(path, { headers: { "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" } });
+    if (!response.ok) throw responseError(response, await response.json().catch(() => ({})));
+    const link = document.createElement("a"); link.href = URL.createObjectURL(await response.blob()); link.download = filename;
+    document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  } catch (error) { showUserError(error); }
+}
+
+async function resumeCurrentProject() {
+  if (!state.project?.id) return;
+  try {
+    const data = await api("/api/project/resume", { method: "POST", body: JSON.stringify({ projectId: state.project.id }) });
+    state.project = data.project; state.projectReadOnly = false; renderProjectCurrent(); updateActionButtons();
+  } catch (error) { showUserError(error); }
+}
+
+function openProjectDeleteDialog(projectId) {
+  if (!projectId) return;
+  projectDeleteId = projectId;
+  showModalFromInvoker($("#projectDeleteDialog"));
+}
+
+async function discardProjectWorkspaceChanges() {
+  // Deletion intentionally discards local, unsaved work. Do not turn this
+  // into a flush: that would create data solely to delete it a moment later.
+  for (const timer of state.workspaceDraftTimers?.values?.() || []) clearTimeout(timer);
+  state.workspaceDraftTimers?.clear?.();
+  state.draftDirty = false;
+  const pending = [
+    ...(state.workspaceDraftChains?.values?.() || []),
+    ...(state.candidateUpdateChains?.values?.() || []),
+  ];
+  await Promise.allSettled(pending);
+  state.workspaceDraftChains?.clear?.(); state.workspaceMutationErrors?.clear?.();
+  state.candidateUpdateChains?.clear?.(); state.candidateBatchPending?.clear?.();
+}
+
+async function deleteProject(projectId) {
+  if (!projectId) return;
+  try {
+    await discardProjectWorkspaceChanges();
+    await api(`/api/project/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    await forgetProjectSources(projectId);
+    if (state.project?.id === projectId) {
+      resetCatalog([], ""); state.project = null; state.projectReadOnly = false; renderProjectCurrent(); updateActionButtons();
+      $("#projectDialog").close();
+    }
+    $("#projectDeleteDialog").close();
+    if ($("#projectListDialog").open) await showProjectList();
+  } catch (error) { showUserError(error); }
+}
+
+async function openSameSourceDialog(path) {
+  const data = await api("/api/projects?sort=updated_desc");
+  const normalized = String(path || "").replace(/[\\/]+$/, "").toLocaleLowerCase();
+  sameSourceProjects = (data.projects || []).filter((project) => project.id !== state.project?.id
+    && String(project.sourceRoot || "").replace(/[\\/]+$/, "").toLocaleLowerCase() === normalized);
+  if (!sameSourceProjects.length) return false;
+  sameSourcePath = path;
+  const list = $("#sameSourceList"); list.replaceChildren();
+  for (const project of sameSourceProjects) {
+    const item = document.createElement("li");
+    item.textContent = `${projectTitle(project)} · ${t(`project.${project.status}`)} · ${t("project.imageCount", { count: project.imageCount || 0 })}`;
+    list.append(item);
+  }
+  showModalFromInvoker($("#sameSourceDialog"));
+  return true;
+}
+
 function bindEvents() {
+  initCandidatePaddingPopover();
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("keydown", trapModalTab));
+  $("#projectButton").addEventListener("click", () => { renderProjectCurrent(); showModalFromInvoker($("#projectDialog")); });
+  $("#projectClose").addEventListener("click", () => $("#projectDialog").close());
+  $("#projectNew").addEventListener("click", () => openProjectNameDialog("new"));
+  $("#projectName").addEventListener("click", () => openProjectNameDialog("name"));
+  $("#projectOpenList").addEventListener("click", () => { void showProjectList(); });
+  $("#projectListClose").addEventListener("click", () => $("#projectListDialog").close());
+  $("#projectSort").addEventListener("change", () => { void showProjectList(); });
+  $("#projectResume").addEventListener("click", () => { void resumeCurrentProject(); });
+  $("#projectSourceSelect").addEventListener("click", () => { void (async () => {
+    if (!state.project?.id) return;
+    try { await importProjectDirectoryHandle(await window.showDirectoryPicker({ mode: "read", id: "mozarie-project-source" }), state.project.id); }
+    catch (error) { if (error?.name !== "AbortError") showUserError(error); }
+  })(); });
+  $("#projectMosaicZip").addEventListener("click", () => { void downloadProjectArtifact("/api/project/masks/mosaic", "mosaic-masks.zip"); });
+  $("#projectExcludeZip").addEventListener("click", () => { void downloadProjectArtifact("/api/project/masks/exclude", "exclude-masks.zip"); });
+  $("#projectDelete").addEventListener("click", () => openProjectDeleteDialog(state.project?.id));
+  $("#projectCloseWorkspace").addEventListener("click", () => { void (async () => { try { await flushAllWorkspaceMutations(); await api("/api/project/close", { method: "POST", body: "{}" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; $("#projectDialog").close(); } catch (error) { showUserError(error); } })(); });
+  $("#projectComplete").addEventListener("click", () => { void (async () => { if (!await confirmAction(t("project.complete"), t("project.completeConfirm"))) return; try { await flushAllWorkspaceMutations(); await api("/api/project/complete", { method: "POST", body: "{}" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; $("#projectDialog").close(); } catch (error) { showUserError(error); } })(); });
+  $("#projectNameCancel").addEventListener("click", () => $("#projectNameDialog").close());
+  $("#projectDeleteCancel").addEventListener("click", () => { projectDeleteId = ""; $("#projectDeleteDialog").close(); });
+  $("#projectDeleteConfirm").addEventListener("click", () => { const projectId = projectDeleteId; projectDeleteId = ""; void deleteProject(projectId); });
+  $("#projectNameForm").addEventListener("submit", (event) => { event.preventDefault(); void (async () => { try { const name = $("#projectNameInput").value.trim(); if (projectNameMode === "new") { if (state.candidateUpdateChains?.size) await waitForCandidateMutations(); await flushAllWorkspaceMutations(); } const data = projectNameMode === "new" ? await api("/api/projects", { method: "POST", body: JSON.stringify({ name }) }) : await api("/api/project/name", { method: "POST", body: JSON.stringify({ name }) }); state.project = data.project; state.projectReadOnly = false; $("#projectNameDialog").close(); if (projectNameMode === "new") resetCatalog([], ""); renderProjectCurrent(); } catch (error) { showUserError(error); } })(); });
+  $("#sourceMismatchCancel").addEventListener("click", () => $("#sourceMismatchDialog").close());
+  $("#sourceMismatchForm").addEventListener("submit", (event) => { event.preventDefault(); void (async () => { try { const ids = JSON.parse($("#sourceMismatchDialog").dataset.imageIds || "[]"); const snapshot = await api("/api/project/mismatches", { method: "POST", body: JSON.stringify({ imageIds: ids, clearMasks: $("#sourceMismatchClear").checked }) }); state.images = snapshot.images || state.images; applyProjectSnapshot(snapshot); $("#sourceMismatchDialog").close(); renderCatalogViews(); } catch (error) { showUserError(error); } })(); });
+  $("#sameSourceCancel").addEventListener("click", () => $("#sameSourceDialog").close());
+  $("#sameSourceOpen").addEventListener("click", () => { const project = sameSourceProjects[0]; $("#sameSourceDialog").close(); if (project) void openProject(project); });
+  $("#sameSourceSeparate").addEventListener("click", () => { void (async () => {
+    try {
+      if (state.candidateUpdateChains?.size) await waitForCandidateMutations();
+      await flushAllWorkspaceMutations();
+      const data = await api("/api/projects", { method: "POST", body: JSON.stringify({}) });
+      state.project = data.project; state.projectReadOnly = false; $("#sameSourceDialog").close(); renderProjectCurrent();
+      await loadFolder({ skipSameSourceWarning: true, path: sameSourcePath });
+    } catch (error) { showUserError(error); }
+  })(); });
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("close", () => {
     const invoker = modalInvokers.get(dialog);
     modalInvokers.delete(dialog);
@@ -165,32 +366,70 @@ function bindEvents() {
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
   $("#detectCurrentButton").addEventListener("click", () => state.currentId && runDetection([state.currentId], detectionConfidence(), 1, detectionTargets()));
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#singleViewButton").addEventListener("click", () => setDisplayMode("single")); $("#compareViewButton").addEventListener("click", () => setDisplayMode("compare")); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
+  $("#downloadCurrentMosaicMask").addEventListener("click", () => { if (state.currentId) void downloadProjectArtifact(`/api/project/mask/${encodeURIComponent(state.currentId)}/mosaic`, "mosaic-mask.png"); });
+  $("#downloadCurrentExcludeMask").addEventListener("click", () => { if (state.currentId) void downloadProjectArtifact(`/api/project/mask/${encodeURIComponent(state.currentId)}/exclude`, "exclude-mask.png"); });
   $("#bucketTolerance").addEventListener("input", (event) => setFillColorTolerance(event.currentTarget.value));
   $("#bucketTolerance").addEventListener("change", () => { void saveFillColorTolerance(); });
+  $("#bucketToleranceClose").addEventListener("click", () => closeFillToleranceControl({ focus: true }));
+  $("#bucketToleranceControl").addEventListener("toggle", (event) => {
+    if (event.newState === "open") return;
+    fillToleranceSession = null;
+    $("#bucketTool").setAttribute("aria-expanded", "false");
+    $("#excludeBucketTool").setAttribute("aria-expanded", "false");
+  });
   const splitter = $("#compareSplitter");
+  let compareDrag = null;
   const setCompareSplit = (clientX) => {
     const rect = canvas.getBoundingClientRect();
-    state.compareSplit = Math.max(.2, Math.min(.8, (clientX - rect.left) / rect.width));
+    state.compareSplit = clampCompareSplit((clientX - rect.left) / rect.width, rect.width);
     updateCompareSplitter(); render(); updateBrushCursor();
   };
+  const flushCompareDrag = () => {
+    if (!compareDrag) return;
+    compareDrag.frame = 0;
+    if (compareDrag.latestX !== null) { const latestX = compareDrag.latestX; compareDrag.latestX = null; setCompareSplit(latestX); }
+  };
+  const scheduleCompareDrag = (clientX) => {
+    if (!compareDrag) return;
+    compareDrag.latestX = clientX;
+    if (!compareDrag.frame) compareDrag.frame = requestAnimationFrame(flushCompareDrag);
+  };
+  const finishCompareDrag = (event, commit) => {
+    if (!compareDrag || compareDrag.pointerId !== event.pointerId) return;
+    if (compareDrag.frame) cancelAnimationFrame(compareDrag.frame);
+    const initial = compareDrag.initial;
+    compareDrag.frame = 0;
+    if (commit) setCompareSplit(event.clientX);
+    else { state.compareSplit = initial; updateCompareSplitter(); render(); updateBrushCursor(); }
+    compareDrag = null; splitter.classList.remove("dragging");
+    if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
+    if (commit) persistCompareSplit();
+  };
   splitter.addEventListener("pointerdown", (event) => {
-    if (state.displayMode !== "compare" || event.button !== 0) return;
-    event.preventDefault(); splitter.setPointerCapture(event.pointerId); setCompareSplit(event.clientX);
+    if (state.displayMode !== "compare" || event.button !== 0 || compareSplitLimits().fixed) return;
+    event.preventDefault(); compareDrag = { pointerId: event.pointerId, initial: state.compareSplit, latestX: null, frame: 0 };
+    splitter.classList.add("dragging"); splitter.setPointerCapture(event.pointerId); scheduleCompareDrag(event.clientX);
   });
   splitter.addEventListener("pointermove", (event) => {
-    if (splitter.hasPointerCapture(event.pointerId)) setCompareSplit(event.clientX);
+    if (compareDrag?.pointerId === event.pointerId && splitter.hasPointerCapture(event.pointerId)) scheduleCompareDrag(event.clientX);
   });
-  const releaseCompareSplitterPointer = (event) => { if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId); };
-  splitter.addEventListener("pointerup", releaseCompareSplitterPointer);
-  splitter.addEventListener("pointercancel", releaseCompareSplitterPointer);
+  splitter.addEventListener("pointerup", (event) => finishCompareDrag(event, true));
+  splitter.addEventListener("pointercancel", (event) => finishCompareDrag(event, false));
+  splitter.addEventListener("lostpointercapture", (event) => finishCompareDrag(event, false));
+  splitter.addEventListener("dblclick", () => {
+    if (compareSplitLimits().fixed) return;
+    state.compareSplit = .5; updateCompareSplitter(); render(); updateBrushCursor(); persistCompareSplit();
+  });
   splitter.addEventListener("keydown", (event) => {
+    const limits = compareSplitLimits();
+    if (limits.fixed) return;
     const step = event.shiftKey ? .05 : .01;
-    if (event.key === "ArrowLeft") state.compareSplit = Math.max(.2, state.compareSplit - step);
-    else if (event.key === "ArrowRight") state.compareSplit = Math.min(.8, state.compareSplit + step);
-    else if (event.key === "Home") state.compareSplit = .2;
-    else if (event.key === "End") state.compareSplit = .8;
+    if (event.key === "ArrowLeft") state.compareSplit = clampCompareSplit(state.compareSplit - step);
+    else if (event.key === "ArrowRight") state.compareSplit = clampCompareSplit(state.compareSplit + step);
+    else if (event.key === "Home") state.compareSplit = limits.minimum;
+    else if (event.key === "End") state.compareSplit = limits.maximum;
     else return;
-    event.preventDefault(); updateCompareSplitter(); render(); updateBrushCursor();
+    event.preventDefault(); updateCompareSplitter(); render(); updateBrushCursor(); persistCompareSplit();
   });
   $("#removeCurrentImageButton").addEventListener("click", () => { const image = currentRecord(); if (image) void setHidden(image, !isHidden(image)); });
   $("#clearCurrentMasksButton").addEventListener("click", () => state.currentId && clearMasks([state.currentId], "confirm.clearCurrent.title", "confirm.clearCurrent.message"));
@@ -235,8 +474,11 @@ function bindEvents() {
   $("#boundaryTool").addEventListener("click", () => {
     setBoundaryModeMenuOpen($("#boundaryModeMenu").hidden);
   });
-  $("#bucketTool").addEventListener("click", () => setTool("bucket"));
-  $("#excludeBucketTool").addEventListener("click", () => setTool("exclude_bucket"));
+  for (const [selector, tool] of [["#bucketTool", "bucket"], ["#excludeBucketTool", "exclude_bucket"]]) {
+    $(selector).addEventListener("pointerdown", () => rememberFillToleranceTrigger(tool));
+    $(selector).addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") rememberFillToleranceTrigger(tool); });
+    $(selector).addEventListener("click", () => setTool(tool));
+  }
   $("#rectangleTool").addEventListener("click", () => setTool("boundary"));
   $("#polygonTool").addEventListener("click", () => setTool("polygon"));
   $("#boundaryBrushTool").addEventListener("click", () => setTool("boundary_brush"));
@@ -266,7 +508,7 @@ function bindEvents() {
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
-  $("#undoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex - 1)); $("#redoButton").addEventListener("click", () => restoreSnapshot(state.historyIndex + 1));
+  $("#undoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("undo"); else restoreSnapshot(state.historyIndex - 1); }); $("#redoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("redo"); else restoreSnapshot(state.historyIndex + 1); });
   const grid = $(".studio-grid");
   const setPaneCollapsed = (side, collapsed) => {
     const isGallery = side === "gallery";
@@ -365,6 +607,7 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; updateBrushCursor(); return;
     }
     if (event.button !== 0) return;
+    if (state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) return;
     canvas.setPointerCapture(event.pointerId);
     state.gestureDisplaySide = compareEventSide(event);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
@@ -534,7 +777,7 @@ async function initialise() {
     showUserError(error);
     return;
   }
-  await loadTranslations(); bindEvents();
+  await loadTranslations(); restoreCompareSplit(); bindEvents();
   state.outputDirectoryHandle = await rememberedOutputDirectoryHandle();
   renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
@@ -543,6 +786,7 @@ async function initialise() {
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = await api("/api/images");
+    if (typeof applyProjectSnapshot === "function") applyProjectSnapshot(data);
     if (data.images.length) {
       $("#folderPath").value = data.root || "";
       resetCatalog(data.images, data.root);

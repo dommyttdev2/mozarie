@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import tempfile
 import time
 from contextlib import ExitStack
@@ -26,24 +25,28 @@ from .image_io import (
 from .masks import compose_masks, expand_mask
 
 class SavingMixin:
-    @staticmethod
-    def _sha256_file(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(IO_CHUNK_BYTES):
-                digest.update(chunk)
-        return digest.hexdigest()
+    # StudioState resolves these to CatalogMixin's guarded implementations.
+    # Keeping no-op mixin fallbacks makes the saving primitives independently
+    # reusable in focused tests and command-line integrations.
+    def _assert_catalog_mutable(self) -> None:
+        return None
+
+    def _assert_image_editable(self, image_id: str) -> None:
+        del image_id
+        return None
+
     def start_apply(
         self,
         image_ids: list[str],
         divisor: int,
         drafts: dict[str, dict[str, Any]],
-        remove_after_save: bool = False,
         copy_to_default: bool = False,
         suffix: str = "_censored",
     ) -> bool:
         if not image_ids:
             return False
+        with self.lock:
+            self._assert_catalog_mutable()
         records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
         if not copy_to_default and any(record.source_kind != "filesystem" for record in records):
             raise ClientError("一時画像はコピー保存を選んでください。", "save_state_changed")
@@ -65,7 +68,7 @@ class SavingMixin:
         self._start_job(
             "apply", records, self._apply_worker, divisor, drafts, copy_to_default, suffix,
             saving_parallelism, output_directory,
-            expected_catalog_generation=catalog_generation, remove_after_save=remove_after_save,
+            expected_catalog_generation=catalog_generation,
         )
         return True
 
@@ -91,6 +94,8 @@ class SavingMixin:
         suffix: str,
         delete_original: bool,
     ) -> list[dict[str, Any]]:
+        with self.lock:
+            self._assert_catalog_mutable()
         records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
         _read_mosaic_divisor(divisor)
         _read_save_suffix(suffix)
@@ -119,6 +124,7 @@ class SavingMixin:
         copy_to_browser: bool = False,
         suffix: str = "_censored",
     ) -> BrowserSaveRender:
+        self._assert_image_editable(image_id)
         record = self.image_snapshot(image_id)
         if draft is None:
             draft = self.workspace_store.manual(image_id, self._encode_workspace_mask)
@@ -210,7 +216,12 @@ class SavingMixin:
                         raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。", "save_write_failed") from exc
                     finally:
                         self._release_output_destination(output_path)
-                else:
+                elif not copy_to_browser:
+                    # Browser copies stream the render straight to the chosen
+                    # File System Access destination.  Keeping a second cache
+                    # file until the browser acknowledges the commit made large
+                    # batches both memory- and disk-bound for no benefit.  An
+                    # overwrite still needs this staged replacement.
                     rendered_dir = self.cache_dir / "browser-save"
                     rendered_dir.mkdir(parents=True, exist_ok=True)
                     with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=record.path.suffix.lower(), delete=False) as handle:
@@ -241,6 +252,7 @@ class SavingMixin:
                 output_path.unlink(missing_ok=True)
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
+        self._assert_image_editable(image_id)
         if not isinstance(save_token, str) or not save_token:
             raise ClientError("保存確認トークンがありません。保存をやり直してください。", "save_state_changed")
         if source_action not in {"keep", "overwrite", "deleted"}:
@@ -350,15 +362,14 @@ class SavingMixin:
                             raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
                         current_revision = self._candidate_revision(image_id)
                         deleted = source_action == "deleted"
+                        # A save only writes an image. It must retain the
+                        # candidate/manual workspace and both image flags.
                         cleared = revision == current_revision
-                        source_hash = self._sha256_file(record_snapshot.path) if source_action == "overwrite" and record.source_kind == "session" else None
                         self.workspace_store.commit_save(
                             image_id,
                             mtime_ns=record_snapshot.mtime_ns if source_action == "overwrite" else None,
                             size_bytes=record_snapshot.size_bytes if source_action == "overwrite" else None,
-                            source_hash=source_hash,
-                            candidate_revision=current_revision + 1 if cleared else None,
-                            clear_workspace=deleted or cleared,
+                            clear_workspace=deleted,
                             delete_image=deleted,
                         )
                 except Exception:
@@ -384,11 +395,6 @@ class SavingMixin:
                         self.candidate_revisions.pop(image_id, None)
                         self.candidates.pop(image_id, None)
                         self._image_io_locks.pop(image_id, None)
-                    elif cleared:
-                        mask_paths = [candidate.mask_path for candidate in self.candidates.get(image_id, [])]
-                        candidate_dirs = [self.cache_dir / image_id]
-                        self.candidates[image_id] = []
-                        self._touch_candidates(image_id)
                     self.browser_save_tokens.pop(save_token, None)
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, time.monotonic())
                     rendered_path = token_details.rendered_path
@@ -494,8 +500,8 @@ class SavingMixin:
                     else:
                         source_stage = _stage_save_with_mask(record, mask, calculate_block_size(record.width, record.height, divisor))
                         output_stat = record.path.stat()
-                    # Files are fully written before the state mutation. A failed
-                    # record therefore keeps its masks, while successful records clear once.
+                    # Files are fully written before the state mutation. Saving
+                    # never clears candidates or manual workspace.
                     try:
                         with self.lock:
                             if not self._job_is_current(job_generation, catalog_generation):
@@ -506,17 +512,13 @@ class SavingMixin:
                                 record.image_id,
                                 mtime_ns=None if copy_to_default else output_stat.st_mtime_ns,
                                 size_bytes=None if copy_to_default else output_stat.st_size,
-                                candidate_revision=self._candidate_revision(record.image_id) + 1,
-                                clear_workspace=True,
+                                clear_workspace=False,
                             )
                             if not copy_to_default:
                                 live_record = self.images[record.image_id]
                                 live_record.mtime_ns = output_stat.st_mtime_ns
                                 live_record.size_bytes = output_stat.st_size
                                 live_record.asset_revision += 1
-                            mask_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, [])]
-                            self.candidates[record.image_id] = []
-                            self._touch_candidates(record.image_id)
                             self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
                     except Exception:
                         if source_stage is not None:
@@ -528,7 +530,6 @@ class SavingMixin:
                         raise
                     if not copy_to_default:
                         source_stage.finalize()
-                    self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id])
                     self.invalidate_sam_image(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
 

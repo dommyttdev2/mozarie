@@ -164,6 +164,10 @@ class ImageRecord:
     asset_revision: int = 0
     hidden: bool = False
     reviewed: bool = False
+    # A project may combine independent folders or browser selections.  The
+    # opaque source id keeps identical relative paths distinct.
+    source_id: str | None = None
+    source_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -232,7 +236,6 @@ class Job:
     active_count: int = 0
     parallelism: int = 0
     preparing_models: int = 0
-    remove_after_save: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         active_elapsed = 0.0
@@ -254,7 +257,6 @@ class Job:
             "activeCount": self.active_count,
             "parallelism": self.parallelism,
             "phase": "preparing_models" if self.preparing_models else "",
-            "removeAfterSave": self.remove_after_save,
             "cancelRequested": self.cancel_requested,
         }
 

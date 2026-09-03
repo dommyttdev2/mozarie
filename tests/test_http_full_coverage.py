@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import io
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -34,6 +35,35 @@ def handler(*, headers: dict[str, str] | None = None, body: bytes = b"") -> http
 
 
 class HttpBoundaryCoverageTests(unittest.TestCase):
+    def test_workspace_recovery_page_and_recreate_cover_locale_and_failure_paths(self) -> None:
+        # The lightweight page selects its locale from browser storage and
+        # never exposes the regular app while the workspace is unavailable.
+        page = handler(); emitted: list[tuple[bytes, str]] = []
+        page._binary = lambda data, content_type, *_args, **_kwargs: emitted.append((data, content_type))
+        page._send_workspace_recovery_page()
+        self.assertEqual(emitted[0][1], "text/html; charset=utf-8")
+        self.assertIn(b"localStorage.getItem('mozarie-language')==='en'?'en':'ja'", emitted[0][0])
+        self.assertIn(b"/api/workspace/recreate", emitted[0][0])
+
+        unavailable = handler(); unavailable.path = "/api/workspace/recovery"; unavailable._require_local_host = lambda: "127.0.0.1:9876"
+        unavailable._json = Mock()
+        with patch.object(http_module, "STATE", None):
+            unavailable.do_GET()
+        unavailable._json.assert_called_once_with({"required": True, "errorCode": "workspace_recreate_required"})
+
+        restored = Mock(); success = handler(); success.path = "/api/workspace/recreate"; success._require_recovery_request = lambda: None; success._read_json_body = lambda: {}
+        success._json = Mock()
+        with patch.object(http_module, "STATE", None), patch.object(http_module.state_module, "recreate_workspace", return_value=restored):
+            success.do_POST()
+            self.assertIs(http_module.STATE, restored)
+        success._json.assert_called_once_with({"ok": True})
+
+        failed = handler(); failed.path = "/api/workspace/recreate"; failed._require_recovery_request = lambda: None; failed._read_json_body = lambda: {}
+        errors: list[tuple[object, object]] = []; failed._client_error = lambda error, status, *_args: errors.append((error, status))
+        with patch.object(http_module, "STATE", None), patch.object(http_module.state_module, "recreate_workspace", side_effect=sqlite3.DatabaseError("locked")):
+            failed.do_POST()
+        self.assertEqual(errors[0][1], http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def test_picker_os_failures_and_invalid_native_result_are_reported(self) -> None:
         state = SimpleNamespace(native_picker_lock=threading.Lock())
         with patch("mozarie.http.Path.is_file", return_value=True), patch(
@@ -82,12 +112,26 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
 
         self.assertEqual([getattr(error, "error_code", None) for error, _status in failures], ["gpu_oom", None, None])
 
+    def test_project_delete_uses_a_single_delete_api_route(self) -> None:
+        state = Mock()
+        request = handler(); request.path = "/api/project/project-id"; request._require_mutation_request = lambda: None; request._json = Mock()
+        with patch.object(http_module, "STATE", state):
+            request.do_DELETE()
+        state.delete_project.assert_called_once_with("project-id")
+        request._json.assert_called_once_with({"deleted": True})
+
+        missing = handler(); missing.path = "/api/project/"; missing._require_mutation_request = lambda: None
+        errors: list[tuple[object, object]] = []; missing._client_error = lambda error, status, *_args: errors.append((error, status))
+        with patch.object(http_module, "STATE", state):
+            missing.do_DELETE()
+        self.assertEqual(getattr(errors[0][0], "error_code", None), "project_not_found")
+
     def test_upload_catalog_conflicts_and_provisional_fallback_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory) / "upload.png"
             staged.write_bytes(b"fixture")
 
-            def run_upload(*, catalog_id: str | None, requested: str, source_hash: str) -> tuple[Mock, list[object]]:
+            def run_upload(*, catalog_id: str | None, requested: str) -> tuple[Mock, list[object]]:
                 state = Mock()
                 state.catalog_id = catalog_id
                 state.browser_catalog_provisional = False
@@ -102,19 +146,18 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
                 request._read_binary_body_to_file = lambda: staged
                 request._client_error = lambda error, *_args, **_kwargs: emitted.append(error)
                 request._json = lambda payload, *_args, **_kwargs: emitted.append(payload)
-                with patch.object(http_module, "STATE", state), patch("mozarie.http._file_sha256", return_value=source_hash):
+                with patch.object(http_module, "STATE", state):
                     request.do_POST()
                 return state, emitted
 
-            conflict, emitted = run_upload(catalog_id="active", requested="other", source_hash="hash")
+            conflict, emitted = run_upload(catalog_id="active", requested="other")
             self.assertEqual(getattr(emitted[0], "error_code", None), "operation_in_progress")
             conflict.end_import_transfer.assert_called_once()
 
             staged.write_bytes(b"fixture")
-            fallback, emitted = run_upload(catalog_id=None, requested="", source_hash="")
+            fallback, emitted = run_upload(catalog_id=None, requested="")
             self.assertEqual(emitted[-1]["catalogId"], "provisional")
             self.assertTrue(fallback.browser_catalog_provisional)
-            self.assertNotIn("source_hash", fallback.import_image_file_for_api.call_args.kwargs)
 
     def test_post_optional_error_and_response_paths_have_stable_results(self) -> None:
         request = handler(); request._require_json_request = lambda: None

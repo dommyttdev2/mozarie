@@ -90,6 +90,27 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.hydrate_candidates_bulk([image_id], root / "cache", lambda *_: None)
 
+    def test_delete_project_cascades_all_workspace_state_but_not_source_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"; source.write_bytes(png("RGB"))
+            store, catalog_id, image_id = self.make_store(root)
+            source_id = store.ensure_project_source(catalog_id, kind="native-folder", display_name="source", identity=str(root))
+            store.reconcile_images(catalog_id, [SimpleNamespace(relative_path="source.png", size_bytes=source.stat().st_size, mtime_ns=source.stat().st_mtime_ns, width=4, height=4)], source_id)
+            mask_path = root / "candidate.png"; mask_path.write_bytes(png())
+            store.commit_candidate_state(image_id, 1, [Candidate("candidate", "penis", .8, mask_path)], True, replace=True)
+            store.save_manual(image_id, {"add": png(), "exclusion": png(), "exclusionErase": None, "removedCandidateIds": [], "hasEffectiveMask": True}, lambda value: value)
+            with store._connect() as db:
+                self.assertGreater(db.execute("SELECT COUNT(*) FROM history_entries WHERE catalog_id=?", (catalog_id,)).fetchone()[0], 0)
+            store.delete_project(catalog_id)
+            self.assertIsNone(store.project(catalog_id))
+            self.assertTrue(source.is_file(), "deleting project state never deletes the original image")
+            with store._connect() as db:
+                for table in ("project_sources", "images", "candidates", "manual_edits", "candidate_metadata", "history_entries", "history_candidate_refs", "history_cursors", "history_groups"):
+                    self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+            with self.assertRaises(ValueError):
+                store.delete_project(catalog_id)
+
     def test_restored_candidate_keeps_its_durable_mask(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -150,7 +171,7 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
                 if sql == "PRAGMA table_info(catalogs)":
                     self.catalog_info_calls += 1
                     rows = list(self.db.execute(sql))
-                    if self.bad_primary and self.catalog_info_calls == 2:
+                    if self.bad_primary and self.catalog_info_calls == 1:
                         return [{**dict(row), "pk": 0} for row in rows]
                     return rows
                 if self.bad_foreign and sql == "PRAGMA foreign_key_list(images)":
@@ -328,6 +349,29 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
             self.assertIsNotNone(module.STATE_STARTUP_ERROR)
         finally:
             sys.modules.pop(spec.name, None)
+
+    def test_workspace_recreate_replaces_or_preserves_the_recovery_state(self) -> None:
+        previous_state, previous_error = state_module.STATE, state_module.STATE_STARTUP_ERROR
+        restored = Mock()
+        try:
+            with patch.object(state_module.WorkspaceStore, "recreate") as recreate, \
+                    patch.object(state_module, "StudioState", return_value=restored), \
+                    patch.object(state_module.atexit, "register") as register:
+                self.assertIs(state_module.recreate_workspace(), restored)
+            recreate.assert_called_once_with(state_module.APP_DIR / "data")
+            register.assert_called_once_with(restored.shutdown)
+            self.assertIs(state_module.STATE, restored)
+            self.assertIsNone(state_module.STATE_STARTUP_ERROR)
+
+            failure = WorkspaceOpenError("database remains unavailable")
+            with patch.object(state_module.WorkspaceStore, "recreate"), \
+                    patch.object(state_module, "StudioState", side_effect=failure):
+                with self.assertRaises(WorkspaceOpenError):
+                    state_module.recreate_workspace()
+            self.assertIsNone(state_module.STATE)
+            self.assertIs(state_module.STATE_STARTUP_ERROR, failure)
+        finally:
+            state_module.STATE, state_module.STATE_STARTUP_ERROR = previous_state, previous_error
 
     def test_stale_cleanup_os_errors_are_ignored_and_gpu_reset_releases_once(self) -> None:
         self.state.settings["models"]["provider"] = "gpu"
@@ -698,7 +742,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(staged)
         catalog_id = self.state.activate_browser_catalog()
         images, imported = self.state.import_image_file_for_api(
-            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="client-1", source_hash="source-a",
+            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="client-1",
         )
         self.assertEqual(len(images), 1)
         self.assertEqual(imported[0]["clientKey"], "client-1")

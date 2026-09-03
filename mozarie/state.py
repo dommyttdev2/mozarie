@@ -87,9 +87,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.settings_store = SettingsStore(APP_DIR)
         self.workspace_store = WorkspaceStore(APP_DIR / "data")
         self.catalog_id: str | None = None
-        self.browser_import_hashes: dict[str, str] = {}
+        self.project_read_only = False
+        self.source_mismatches: dict[str, bool] = {}
         self.browser_catalog_provisional = False
         self.settings = self.settings_store.load()
+        self._active_detection_default_padding = int(self.settings["detection"]["default_candidate_padding_px"])
         self.lock = threading.RLock()
         self.import_lock = threading.RLock()
         self.active_import_count = 0
@@ -107,6 +109,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.session_imports_dir: Path | None = None
         self._session_lock_handle: Any | None = None
         self.root: Path | None = None
+        self.source_roots: dict[str, Path] = {}
         self.images: dict[str, ImageRecord] = {}
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
@@ -497,3 +500,21 @@ except (WorkspaceOpenError, sqlite3.DatabaseError) as exc:
     STATE_STARTUP_ERROR = exc
 else:
     atexit.register(STATE.shutdown)
+
+
+def recreate_workspace() -> StudioState:
+    """Explicit recovery action; source images are never part of this deletion."""
+    global STATE, STATE_STARTUP_ERROR
+    try:
+        WorkspaceStore.recreate(APP_DIR / "data")
+        restored = StudioState()
+    except (WorkspaceOpenError, sqlite3.DatabaseError) as exc:
+        # Keep the recovery screen active if recreating the local store itself
+        # fails; leaving a stale state here would make the next request lie.
+        STATE = None
+        STATE_STARTUP_ERROR = exc
+        raise
+    STATE = restored
+    STATE_STARTUP_ERROR = None
+    atexit.register(STATE.shutdown)
+    return STATE

@@ -8,9 +8,10 @@ let transfer;
 let contextFailure = 0;
 let contextCalls = 0;
 let sourceDraws = 0;
+const canvases = [];
 const self = { postMessage(value, transferList) { response = value; transfer = transferList; } };
 class OffscreenCanvas {
-  constructor(width, height) { this.width = width; this.height = height; this.pixels = new Uint8ClampedArray(width * height * 4); }
+  constructor(width, height) { this.width = width; this.height = height; this.pixels = new Uint8ClampedArray(width * height * 4); canvases.push(this); }
   getContext() { contextCalls += 1; if (contextFailure === contextCalls) return null; return { clearRect: () => this.pixels.fill(0), drawImage: (image) => { if (image.sourceTag) sourceDraws += 1; this.pixels.set(image.pixels); }, getImageData: () => ({ data: this.pixels.slice() }), putImageData: (image) => this.pixels.set(image.data) }; }
   transferToImageBitmap() { return { width: this.width, height: this.height, pixels: this.pixels.slice(), close() { this.closed = true; } }; }
 }
@@ -43,6 +44,7 @@ assert.deepEqual([...averaged], [50, 50, 0, 255, 50, 50, 0, 255, 9, 9, 9, 255], 
 assert.equal(response.generation, 7, "the generation is returned unchanged");
 assert.equal(transfer.length, 1, "the worker transfers one output buffer");
 assert.equal(transfer[0], response.output, "the transferred bitmap is the response output");
+assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, "full-frame scratch canvases are released after their frame transfers");
 
 const transparent = render([30, 40, 50, 0], [255], 1, 1, 1, 8);
 assert.deepEqual([...transparent], [30, 40, 50, 0], "a fully transparent masked pixel does not invent an RGB colour");
@@ -55,6 +57,39 @@ const sparse = render([
   10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0, 255, 40, 0, 0, 255, 50, 0, 0, 255,
 ], [255, 0, 0, 0, 255], 5, 1, 2, 10);
 assert.deepEqual([...sparse], [10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0, 255, 40, 0, 0, 255, 50, 0, 0, 255], "sparse masks skip empty blocks inside their bounding rectangle");
+
+// Drag previews transfer only an aligned patch.  The worker must use the
+// source coordinates (not patch-local block coordinates) and leave unmasked
+// pixels unchanged.
+self.onmessage({ data: { type: "source", sourceId: "patch", source: { width: 4, height: 2, pixels: new Uint8ClampedArray([
+  10, 0, 0, 255, 30, 0, 0, 255, 50, 0, 0, 255, 70, 0, 0, 255,
+  20, 0, 0, 255, 40, 0, 0, 255, 60, 0, 0, 255, 80, 0, 0, 255,
+]) }, generation: 10 } });
+self.onmessage({ data: { type: "patch", sourceId: "patch", left: 2, top: 0, width: 2, height: 2, blockSize: 2, generation: 11,
+  mask: { width: 2, height: 2, pixels: new Uint8ClampedArray([0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0]), close() { this.closed = true; } },
+} });
+assert.equal(response.patch, true, "a drag preview returns a patch instead of a full frame");
+assert.deepEqual([...response.output.pixels], [55, 0, 0, 255, 70, 0, 0, 255, 55, 0, 0, 255, 80, 0, 0, 255], "patch mosaic averages only the aligned masked source block");
+assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, "patch scratch canvases are released after their frame transfers");
+
+// Each completion drops scratch state. The next patch must recreate it rather
+// than reuse a retained full-frame allocation.
+self.onmessage({ data: { type: "source", sourceId: "scratch-cycles", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([4, 5, 6, 255]) }, generation: 12 } });
+const scratchStart = canvases.length;
+for (const generation of [13, 14, 15]) {
+  self.onmessage({ data: { type: "patch", sourceId: "scratch-cycles", left: 0, top: 0, width: 1, height: 1, blockSize: 1, generation,
+    mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]), close() {} },
+  } });
+  assert.equal(response.generation, generation, `scratch cycle ${generation} returns its patch`);
+  assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, `scratch cycle ${generation} returns to the released plateau`);
+}
+assert.ok(canvases.length >= scratchStart + 6, "three patch cycles recreate two scratch canvases per completed frame");
+
+response = undefined;
+const wrongPatchMask = { close() { this.closed = true; } };
+self.onmessage({ data: { type: "patch", sourceId: "other-patch", left: 0, top: 0, width: 1, height: 1, blockSize: 1, generation: 12, mask: wrongPatchMask } });
+assert.equal(response.type, "error", "a patch for another source reports the preview failure");
+assert.equal(wrongPatchMask.closed, true, "a patch for another source closes its transferred mask");
 
 const releasable = { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]), close() { this.closed = true; } };
 self.onmessage({ data: { type: "source", sourceId: "releasable", source: releasable, generation: 10 } });
@@ -86,10 +121,34 @@ self.onmessage({ data: { type: "render", sourceId: "render-failure", mask: badMa
 assert.equal(response.type, "error", "a malformed mask reports the preview failure");
 assert.equal(badMask.closed, true, "a failed render still closes its transferred mask bitmap");
 
+response = undefined;
+self.onmessage({ data: { type: "render", sourceId: "render-failure", mask: null, width: 1, height: 1, blockSize: 1, generation: 14 } });
+assert.equal(response.type, "error", "a missing full-frame mask reports the preview failure");
+response = undefined;
+const outOfBoundsPatch = { close() { this.closed = true; } };
+self.onmessage({ data: { type: "patch", sourceId: "render-failure", mask: outOfBoundsPatch, left: -1, top: 0, width: 1, height: 1, blockSize: 1, generation: 14 } });
+assert.equal(response.type, "error", "an out-of-bounds drag patch reports the preview failure");
+assert.equal(outOfBoundsPatch.closed, true, "an invalid drag patch still closes its transferred mask bitmap");
+response = undefined;
+const wrongSizeMask = { close() { this.closed = true; } };
+self.onmessage({ data: { type: "render", sourceId: "render-failure", mask: wrongSizeMask, width: 2, height: 1, blockSize: 1, generation: 14 } });
+assert.equal(response.type, "error", "a full frame with dimensions different from its source reports the preview failure");
+assert.equal(wrongSizeMask.closed, true, "a wrong-size full-frame mask is released after failure");
+
 contextCalls = 0; contextFailure = 3;
 self.onmessage({ data: { type: "source", sourceId: "missing-output-context", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 15 } });
 self.onmessage({ data: { type: "render", sourceId: "missing-output-context", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, width: 1, height: 1, blockSize: 1, generation: 15 } });
 assert.equal(response.type, "error", "a missing output context reports the preview failure");
+
+contextCalls = 0; contextFailure = 3;
+self.onmessage({ data: { type: "source", sourceId: "missing-patch-output-context", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 15 } });
+self.onmessage({ data: { type: "patch", sourceId: "missing-patch-output-context", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, left: 0, top: 0, width: 1, height: 1, blockSize: 1, generation: 15 } });
+assert.equal(response.type, "error", "a missing drag-patch output context reports the preview failure");
+
+contextCalls = 0; contextFailure = 0;
+self.onmessage({ data: { type: "source", sourceId: "transparent-patch", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([30, 40, 50, 0]) }, generation: 15 } });
+self.onmessage({ data: { type: "patch", sourceId: "transparent-patch", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]) }, left: 0, top: 0, width: 1, height: 1, blockSize: 1, generation: 15 } });
+assert.deepEqual([...response.output.pixels], [30, 40, 50, 0], "a transparent drag-patch pixel retains its source colour when it has no alpha weight");
 
 contextCalls = 0; contextFailure = 0;
 self.onmessage({ data: { type: "source", sourceId: "reused", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 16 } });
@@ -110,6 +169,10 @@ self.postMessage = (value, transferList) => {
 self.onmessage({ data: { type: "source", sourceId: "post-failure", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 18 } });
 self.onmessage({ data: { type: "render", sourceId: "post-failure", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]), close() { this.closed = true; } }, width: 1, height: 1, blockSize: 1, generation: 18 } });
 assert.equal(response.type, "error", "a rejected frame transfer reports the preview failure");
+self.onmessage({ data: { type: "source", sourceId: "patch-post-failure", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([1, 2, 3, 255]) }, generation: 19 } });
+rejectFrame = true;
+self.onmessage({ data: { type: "patch", sourceId: "patch-post-failure", mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]), close() { this.closed = true; } }, left: 0, top: 0, width: 1, height: 1, blockSize: 1, generation: 19 } });
+assert.equal(response.type, "error", "a rejected drag-patch transfer reports the preview failure");
 self.postMessage = postMessage;
 
 console.log("test_masked_mosaic_worker: passed");

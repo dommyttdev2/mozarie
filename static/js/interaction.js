@@ -1,5 +1,8 @@
 function setTool(tool) {
   if (isBusy() || state.importing) return;
+  const previousTool = state.tool;
+  const toggleTolerance = fillToleranceToggleRequest === tool;
+  fillToleranceToggleRequest = null;
   const focusedInBoundaryMenu = closeBoundaryModeMenu();
   const boundaryTools = new Set(["boundary", "polygon", "boundary_brush"]);
   if (!boundaryTools.has(tool)) clearBoundaryInteraction();
@@ -10,21 +13,52 @@ function setTool(tool) {
   }
   $("#boundaryTool").classList.toggle("active", boundaryTools.has(tool));
   $("#boundaryTool").setAttribute("aria-pressed", String(boundaryTools.has(tool)));
-  const tolerancePanel = $("#bucketToleranceControl");
   const toleranceAnchor = tool === "bucket" ? $("#bucketToolAnchor") : (tool === "exclude_bucket" ? $("#excludeBucketToolAnchor") : null);
-  tolerancePanel.style.left = ""; tolerancePanel.style.right = "";
-  if (toleranceAnchor && tolerancePanel.parentElement !== toleranceAnchor) toleranceAnchor.append?.(tolerancePanel);
-  tolerancePanel.hidden = !toleranceAnchor;
-  if (toleranceAnchor) {
-    const anchor = toleranceAnchor.getBoundingClientRect(); const panel = tolerancePanel.getBoundingClientRect();
-    const overflow = anchor.left + panel.width - window.innerWidth + 8;
-    if (overflow > 0) tolerancePanel.style.left = `${-overflow}px`;
-  }
-  $("#bucketTool").setAttribute("aria-expanded", String(tool === "bucket"));
-  $("#excludeBucketTool").setAttribute("aria-expanded", String(tool === "exclude_bucket"));
+  if (toleranceAnchor && previousTool === tool && (toggleTolerance || (fillToleranceSession?.anchor === toleranceAnchor && $("#bucketToleranceControl").matches?.(":popover-open")))) closeFillToleranceControl({ focus: true });
+  else if (toleranceAnchor) openFillToleranceControl(toleranceAnchor);
+  else closeFillToleranceControl();
+  const toleranceOpen = $("#bucketToleranceControl").matches?.(":popover-open") === true;
+  $("#bucketTool").setAttribute("aria-expanded", String(toleranceOpen && tool === "bucket"));
+  $("#excludeBucketTool").setAttribute("aria-expanded", String(toleranceOpen && tool === "exclude_bucket"));
   canvas.style.cursor = "default";
   updateBoundaryActions(); render(); updateBrushCursor();
   if (focusedInBoundaryMenu) focusCanvas();
+}
+
+let fillToleranceSession = null;
+let fillToleranceToggleRequest = null;
+
+function rememberFillToleranceTrigger(tool) {
+  const anchor = tool === "bucket" ? $("#bucketToolAnchor") : $("#excludeBucketToolAnchor");
+  fillToleranceToggleRequest = state.tool === tool && fillToleranceSession?.anchor === anchor && $("#bucketToleranceControl").matches?.(":popover-open") ? tool : null;
+}
+
+function positionFillToleranceControl(anchor) {
+  const panel = $("#bucketToleranceControl");
+  const anchorRect = anchor.getBoundingClientRect(); const panelRect = panel.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - panelRect.width - 8, anchorRect.left));
+  const below = anchorRect.bottom + 5;
+  const top = below + panelRect.height <= window.innerHeight - 8 ? below : Math.max(8, anchorRect.top - panelRect.height - 5);
+  panel.style.left = `${left}px`; panel.style.top = `${top}px`;
+}
+
+function openFillToleranceControl(anchor) {
+  const panel = $("#bucketToleranceControl");
+  if (panel.matches?.(":popover-open") && fillToleranceSession?.anchor === anchor) return;
+  if (fillToleranceSession) closeFillToleranceControl();
+  fillToleranceSession = { anchor };
+  panel.showPopover(); positionFillToleranceControl(anchor);
+}
+
+function closeFillToleranceControl({ focus = false } = {}) {
+  const session = fillToleranceSession;
+  if (!session) return;
+  fillToleranceSession = null;
+  const panel = $("#bucketToleranceControl");
+  if (panel.matches?.(":popover-open")) panel.hidePopover();
+  $("#bucketTool").setAttribute("aria-expanded", "false");
+  $("#excludeBucketTool").setAttribute("aria-expanded", "false");
+  if (focus && session.anchor?.isConnected) session.anchor.querySelector("button")?.focus();
 }
 
 function setBoundaryModeMenuOpen(open) {
@@ -292,6 +326,7 @@ function rememberImportedSource(result) {
       fileHandle: result.entry.fileHandle, parentHandle: result.entry.parentHandle || null,
       name: result.entry.file.name, size: result.entry.file.size, lastModified: result.entry.file.lastModified,
     });
+    if (state.project?.id) void rememberProjectSource(state.project.id, result.entry.fileHandle, imported.imageId, result.sourceId);
   }
 }
 
@@ -324,10 +359,10 @@ async function importFiles(files) {
         if (!isSupportedImageFile(file)) continue;
         const entry = { ...descriptor, file, relativePath: descriptor.relativePath || file.name };
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
-        const data = await importSingleFile(entry, clientKey, session.catalogId);
+        const data = await importSingleFile(entry, clientKey, session.catalogId, session.sourceId, session.sourceKind);
         if (!session.catalogId && data.catalogId) session.catalogId = data.catalogId;
         session.provisional ||= data.provisional === true;
-        const result = { entry, clientKey, data };
+        const result = { entry, clientKey, data, sourceId: session.sourceId };
         // Keep source access for each committed upload, including a later
         // cancellation or an unrelated upload failure.
         rememberImportedSource(result);
@@ -357,6 +392,7 @@ async function importFiles(files) {
     }
     const latest = await api("/api/images");
     state.images = latest.images;
+    applyProjectSnapshot(latest);
     loadReviewedPaths();
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
   } catch (error) {
@@ -369,7 +405,7 @@ async function importFiles(files) {
   finally { finishImportSession(session); }
 }
 
-async function importSingleFile(entry, clientKey, catalogId = null) {
+async function importSingleFile(entry, clientKey, catalogId = null, sourceId = null, sourceKind = null) {
   const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   const response = await fetch("/api/import/file", {
     method: "POST",
@@ -379,6 +415,10 @@ async function importSingleFile(entry, clientKey, catalogId = null) {
       "X-Mozarie-Name": encodeURIComponent(entry.file.name),
       "X-Mozarie-Relative-Path": encodeURIComponent(entry.relativePath),
       "X-Mozarie-Client-Key": encodeURIComponent(clientKey),
+      "X-Mozarie-File-Mtime": String(Math.max(0, Number(entry.file.lastModified || 0))),
+      "X-Mozarie-File-Size": String(Math.max(0, Number(entry.file.size || 0))),
+      ...(sourceId ? { "X-Mozarie-Source-Id": encodeURIComponent(sourceId) } : {}),
+      ...(sourceKind ? { "X-Mozarie-Source-Kind": sourceKind } : {}),
       ...(catalogId ? { "X-Mozarie-Catalog-Id": encodeURIComponent(catalogId) } : {}),
     },
     body: entry.file,
@@ -390,7 +430,7 @@ async function importSingleFile(entry, clientKey, catalogId = null) {
 
 function beginImportSession() {
   if (isBusy() || state.importing) return null;
-  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0, catalogId: null, provisional: false };
+  const session = { id: newClientKey(), epoch: beginCatalogEpoch(), paused: false, cancelled: false, completed: 0, total: 0, catalogId: null, provisional: false, sourceId: null, sourceKind: "browser-files" };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
@@ -428,6 +468,8 @@ async function importHandleEntries(entries, session) {
 
 async function importFileHandles(handles, session = beginImportSession()) {
   if (!session) return;
+  session.sourceId ||= crypto.randomUUID();
+  session.sourceKind = "browser-files";
   await importHandleEntries(handles.map((handle) => ({ handle, relativePath: handle.name, parentHandle: null })), session);
 }
 
@@ -435,6 +477,9 @@ async function importDirectoryHandle(directoryHandle, session = beginImportSessi
   if (!session) return;
   await flushAllWorkspaceMutations();
   session.catalogId = await catalogForDirectoryHandle(directoryHandle);
+  session.sourceId = await rememberProjectSource(session.catalogId, directoryHandle, null, state.pendingDirectorySourceId || session.sourceId);
+  session.sourceKind = "browser-directory";
+  state.pendingDirectorySourceId = null;
   const entries = [];
   showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
   async function collect(handle, relativePath = "", parentHandle = null) {
@@ -446,6 +491,50 @@ async function importDirectoryHandle(directoryHandle, session = beginImportSessi
   for await (const handle of directoryHandle.values()) await collect(handle, "", directoryHandle);
   if (!await waitForImportSession(session)) return finishImportSession(session);
   await importHandleEntries(entries, session);
+}
+
+async function importProjectDirectoryHandle(directoryHandle, projectId, sourceId = null) {
+  const session = beginImportSession(); if (!session) return;
+  try {
+    await flushAllWorkspaceMutations();
+    session.catalogId = projectId;
+    session.sourceId = await rememberProjectSource(projectId, directoryHandle, null, sourceId);
+    session.sourceKind = "browser-directory";
+    const entries = [];
+    showProcessing({ kind: "import", state: "running", total: 1, completed: 0, current: directoryHandle.name || "" });
+    async function collect(handle, relativePath = "", parentHandle = null) {
+      if (!await waitForImportSession(session)) return;
+      const path = relativePath ? `${relativePath}/${handle.name}` : handle.name;
+      if (handle.kind === "file") entries.push({ handle, relativePath: path, parentHandle });
+      else for await (const child of handle.values()) await collect(child, path, handle);
+    }
+    for await (const handle of directoryHandle.values()) await collect(handle, "", directoryHandle);
+    if (await waitForImportSession(session)) await importHandleEntries(entries, session);
+  } catch (error) { if (error?.name !== "AbortError") showUserError(error); }
+  finally { finishImportSession(session); }
+}
+
+async function importProjectFileHandles(sources, projectId) {
+  // File handles are stored one row per image.  Restore them in their original
+  // source groups so their durable image IDs, masks, and history are reused.
+  const groups = new Map();
+  for (const source of sources) {
+    const handle = source?.handle || source;
+    if (!handle) continue;
+    const sourceId = source?.sourceId || crypto.randomUUID();
+    const handles = groups.get(sourceId) || [];
+    handles.push(handle); groups.set(sourceId, handles);
+  }
+  for (const [sourceId, handles] of groups) {
+    const session = beginImportSession(); if (!session) return;
+    try {
+      await flushAllWorkspaceMutations();
+      session.catalogId = projectId;
+      session.sourceId = sourceId;
+      session.sourceKind = "browser-files";
+      await importFileHandles(handles, session);
+    } finally { finishImportSession(session); }
+  }
 }
 
 async function pickImageFiles() {

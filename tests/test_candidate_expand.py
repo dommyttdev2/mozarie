@@ -1,5 +1,6 @@
 import io
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from PIL import Image, PngImagePlugin
 
 from mozarie.catalog import CatalogMixin
 from mozarie.detection import _save_binary_mask
-from mozarie.domain import Candidate
+from mozarie.domain import Candidate, CandidateRole
 from mozarie.masks import compose_masks, expand_mask
 from mozarie.workspace import WorkspaceStore
 
@@ -36,7 +37,22 @@ class CandidateExpandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             expand_mask(source, -1)
         with self.assertRaises(ValueError):
-            expand_mask(source, 8)
+            expand_mask(source, 10)
+
+    def test_large_padding_uses_image_space_and_saturates_without_a_large_kernel(self):
+        source = np.zeros((17, 31), dtype=np.uint8)
+        source[8, 15] = 255
+        self.assertTrue(np.all(expand_mask(source, 34) == 255))
+        self.assertFalse(np.any(expand_mask(np.zeros_like(source), 34)))
+
+    def test_4k_large_padding_uses_a_bounded_image_space_operation(self):
+        source = np.zeros((2160, 3840), dtype=np.uint8)
+        source[1080, 1920] = 255
+        started = time.perf_counter()
+        expanded = expand_mask(source, 129)
+        self.assertLess(time.perf_counter() - started, 3.0)
+        self.assertEqual(expanded.shape, source.shape)
+        self.assertEqual(int(expanded[1080, 1920]), 255)
 
     def test_new_candidate_png_records_zero_padding_without_changing_pixels(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,12 +80,14 @@ class CandidateExpandTests(unittest.TestCase):
             mask_path = root / "candidate.png"
             raw = self._png(3)
             mask_path.write_bytes(raw)
-            candidate = Candidate("candidate", "penis", .9, mask_path, expand_px=3)
+            candidate = Candidate("candidate", "penis", .9, mask_path, role=CandidateRole.EXCLUDE, forced=True, expand_px=3)
             store.commit_candidate_state(image_id, 1, [candidate], True, replace=True)
             reopened = WorkspaceStore(root)
             revision, hydrated = reopened.hydrate_candidates(image_id, root / "cache", CatalogMixin._candidate_from_workspace)
             self.assertEqual(revision, 1)
             self.assertEqual(hydrated[0].expand_px, 3)
+            self.assertEqual(hydrated[0].role, CandidateRole.EXCLUDE)
+            self.assertTrue(hydrated[0].forced)
             self.assertEqual(reopened.candidate_png(image_id, "candidate"), raw)
 
     def test_workspace_defaults_existing_pngs_to_zero_without_modifying_them(self):

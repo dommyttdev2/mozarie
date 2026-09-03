@@ -23,7 +23,7 @@ class Element {
   matches(value) { return value === ":popover-open" && this.open; }
   showPopover() { this.open = true; }
   hidePopover() { this.open = false; }
-  getBoundingClientRect() { return { left: 10, top: 20, width: 80, height: 40 }; }
+  getBoundingClientRect() { return { left: 10, right: 90, top: 20, bottom: 60, width: 80, height: 40 }; }
   close(value = "") { this.returnValue = value; this.open = false; this.listeners.get("close")?.(); }
 }
 
@@ -105,7 +105,7 @@ const context = {
   setHidden: async (image, value) => { image.hidden = value; }, setReviewed: async (image, value) => { if (value) state.reviewedPaths.add(image.id); },
   openDetectionDialog: () => calls.push(["detect"]), importParallelism: () => 2,
   showProcessing: () => {}, closeProcessing: () => {}, remapImportedImageIds: undefined, loadReviewedPaths: () => {},
-  catalogForDirectoryHandle: async () => "directory-catalog",
+  catalogForDirectoryHandle: async () => "directory-catalog", rememberProjectSource: async (_projectId, _handle, _imageId, sourceId) => sourceId || "remembered-source",
   fetch: async () => ({ ok: true, status: 200, json: async () => ({ imported: [], catalogId: "final", provisional: false }) }),
   setGalleryDropOverlay: undefined, shortcutFromEvent: (event) => event.binding, isEditableTarget: () => editable, hasOpenDialog: () => dialogOpen,
   isGestureActive: () => gesture, moveCurrentBy: () => {}, setViewMode: (mode) => { state.viewMode = mode; }, reviewAndMoveNext: () => {}, restoreSnapshot: () => {},
@@ -114,7 +114,7 @@ const context = {
 const interactionPath = path.join(__dirname, "..", "static", "js", "interaction.js");
 const source = fs.readFileSync(interactionPath, "utf8");
 vm.runInNewContext(source, context, { filename: interactionPath });
-vm.runInNewContext("globalThis.interactionTest={setTool,setBoundaryModeMenuOpen,closeBoundaryModeMenu,updateBrushSize,updateBlockSizeDisplay,confirmAction,confirmationRequired,resetCurrentDraft,clearMasks,clearCatalog,closeCatalogContextMenu,positionCatalogContextMenu,openCatalogContextMenu,copyContextMenuImagePath,clearReviewForRemovedImage,removeImageFromCatalog,runSelectionAction,droppedFile,directFilesFromDrop,isSupportedImageFile,newClientKey,pruneSourceAccess,rememberImportedSource,importFiles,importSingleFile,beginImportSession,remapImportedImageIds,finishImportSession,waitForImportSession,importHandleEntries,importFileHandles,importDirectoryHandle,pickImageFiles,pickImageDirectory,importDroppedFiles,setGalleryDropOverlay,handleEditorKeydown,navigationShortcutAction,handleNavigationKeydown,handleWindowKeydown};", context, { filename: "test-interaction-exports.js" });
+vm.runInNewContext("globalThis.interactionTest={setTool,setBoundaryModeMenuOpen,closeBoundaryModeMenu,updateBrushSize,updateBlockSizeDisplay,rememberFillToleranceTrigger,confirmAction,confirmationRequired,resetCurrentDraft,clearMasks,clearCatalog,closeCatalogContextMenu,positionCatalogContextMenu,openCatalogContextMenu,copyContextMenuImagePath,clearReviewForRemovedImage,removeImageFromCatalog,runSelectionAction,droppedFile,directFilesFromDrop,isSupportedImageFile,newClientKey,pruneSourceAccess,rememberImportedSource,importFiles,importSingleFile,beginImportSession,remapImportedImageIds,finishImportSession,waitForImportSession,importHandleEntries,importFileHandles,importDirectoryHandle,importProjectDirectoryHandle,importProjectFileHandles,pickImageFiles,pickImageDirectory,importDroppedFiles,setGalleryDropOverlay,handleEditorKeydown,navigationShortcutAction,handleNavigationKeydown,handleWindowKeydown};", context, { filename: "test-interaction-exports.js" });
 
 const test = context.interactionTest;
 const event = (binding, type = "keydown") => ({ binding, type, currentTarget: element("#origin"), clientX: 30, clientY: 40, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } });
@@ -127,16 +127,18 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   assert.match(indexSource, /id="bucketTool"[^>]*aria-controls="bucketToleranceControl"[^>]*aria-expanded="false"/, "the mosaic fill control owns its tolerance popover semantically");
   assert.match(indexSource, /id="excludeBucketTool"[^>]*aria-controls="bucketToleranceControl"[^>]*aria-expanded="false"/, "the exclusion fill control owns the shared tolerance popover semantically");
   assert.match(indexSource, /<output id="bucketToleranceValue" for="bucketTolerance">/, "the displayed tolerance is associated with its range input");
-  assert.match(tolerancePanelCss, /left:\s*0;/, "the tolerance panel anchors to the left edge on a narrow viewport");
+  assert.match(indexSource, /id="bucketToleranceControl"[^>]*popover="auto"/, "fill tolerance uses native outside-click and Escape dismissal");
+  assert.match(tolerancePanelCss, /position:\s*fixed;/, "the top-layer tolerance panel is positioned against the viewport");
   assert.doesNotMatch(tolerancePanelCss, /transform:\s*translateX\(-50%\)/, "the tolerance panel does not overflow left by centering itself");
   test.setTool("bucket");
+  test.rememberFillToleranceTrigger("bucket");
   assert.equal(element("#bucketTool").getAttribute("aria-expanded"), "true", "mosaic fill marks its tolerance control expanded");
   assert.equal(element("#excludeBucketTool").getAttribute("aria-expanded"), "false", "only the active fill control is expanded");
-  assert.equal(element("#bucketToleranceControl").parentElement, element("#bucketToolAnchor"), "mosaic fill places the shared tolerance panel under its anchor");
+  const toleranceParent = element("#bucketToleranceControl").parentElement;
   test.setTool("exclude_bucket");
   assert.equal(element("#bucketTool").getAttribute("aria-expanded"), "false", "changing to exclusion fill collapses mosaic fill semantics");
   assert.equal(element("#excludeBucketTool").getAttribute("aria-expanded"), "true", "exclusion fill marks its tolerance control expanded");
-  assert.equal(element("#bucketToleranceControl").parentElement, element("#excludeBucketToolAnchor"), "exclusion fill moves the shared tolerance panel to its anchor");
+  assert.equal(element("#bucketToleranceControl").parentElement, toleranceParent, "the shared top-layer panel does not move in the DOM when its anchor changes");
   test.setTool("boundary"); test.setTool("brush");
   assert.equal(element("#excludeBucketTool").getAttribute("aria-expanded"), "false", "leaving fill tools collapses the tolerance control");
   element("#boundaryModeMenu").hidden = false; document.activeElement = element("#boundaryModeMenu");
@@ -200,8 +202,27 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   context.fetch = originalFetch;
   const importSession = test.beginImportSession(); assert.ok(importSession); test.finishImportSession(importSession); assert.equal(await test.waitForImportSession({ paused: false, cancelled: false }), false);
   const handles = [{ name: "a.png", getFile: async () => file("a.png") }]; await test.importFileHandles(handles);
+  // A restored browser project must upload each old source under the same
+  // durable source ID; otherwise its masks/history would be duplicated.
+  const sourceIds = [];
+  const apiBeforeProjectRestore = context.api;
+  context.fetch = async (_url, options) => {
+    sourceIds.push(options.headers["X-Mozarie-Source-Id"]);
+    return { ok: true, status: 200, json: async () => ({ imported: [], catalogId: "project", provisional: false }) };
+  };
+  context.api = async (url) => url === "/api/images" ? { images } : {};
+  state.importing = false; state.importSession = null;
+  await test.importProjectFileHandles([
+    { sourceId: "source-a", handle: { name: "a.png", getFile: async () => file("a.png") } },
+    { sourceId: "source-a", handle: { name: "b.png", getFile: async () => file("b.png") } },
+    { sourceId: "source-b", handle: { name: "c.png", getFile: async () => file("c.png") } },
+  ], "project");
+  assert.deepEqual(sourceIds, ["source-a", "source-a", "source-b"], "reopening browser files keeps their original source groups and does not duplicate project images");
+  context.fetch = originalFetch; context.api = apiBeforeProjectRestore;
   const nestedDirectory = { name: "folder", kind: "directory", async *values() { yield directory; } };
   await test.importDirectoryHandle(nestedDirectory);
+  state.importing = false; state.importSession = null;
+  await test.importProjectDirectoryHandle(nestedDirectory, "project", "source-directory");
   context.window.showOpenFilePicker = async () => handles; await test.pickImageFiles();
   context.window.showOpenFilePicker = async () => { const error = new Error(); error.name = "AbortError"; throw error; }; await test.pickImageFiles();
   context.window.showDirectoryPicker = async () => directory; await test.pickImageDirectory();

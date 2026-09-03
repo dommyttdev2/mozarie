@@ -48,7 +48,6 @@ function syncApplyMode() {
   $("#applyOutputDirectoryStatus").value = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
-  $("#removeAfterSave").disabled = state.applyRunning;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
   $("#applyOverwriteRow").classList.toggle("muted", !canOverwrite);
   const restriction = applyRestrictionMessage();
@@ -147,8 +146,9 @@ function singleOutputName(relativePath, suffix, sequence = 0) {
 async function writeSingleOutput(handle, relativePath, suffix, response) {
   if (!navigator.locks || typeof navigator.locks.request !== "function") throw codedError("output_write_unsupported");
   let entered = false;
+  let reservation;
   try {
-    return await navigator.locks.request("mozarie-output-write", { mode: "exclusive" }, async () => {
+    reservation = await navigator.locks.request("mozarie-output-name", { mode: "exclusive" }, async () => {
       entered = true;
       let fileHandle; let name; let created = false;
       for (let sequence = 0; sequence < 10000; sequence += 1) {
@@ -160,34 +160,35 @@ async function writeSingleOutput(handle, relativePath, suffix, response) {
         }
       }
       if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
-      let stream;
-      try {
-        try { stream = await fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
-        catch (error) {
-          if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("output_write_unsupported");
-          throw error;
-        }
-        await response.body.pipeTo(stream);
-      } catch (error) {
-        try { await stream?.abort?.(); } catch {}
-        if (created) {
-          try { await handle.removeEntry(name); }
-          catch (cleanupError) {
-            const cleanupFailure = codedError("output_cleanup_failed");
-            cleanupFailure.cause = error;
-            cleanupFailure.cleanupCause = cleanupError;
-            throw cleanupFailure;
-          }
-        }
-        throw error;
-      }
-      return { name, fileHandle };
+      return { name, fileHandle, created };
     });
   } catch (error) {
     if (!entered) {
       const lockFailure = codedError("output_write_unsupported");
       lockFailure.cause = error;
       throw lockFailure;
+    }
+    throw error;
+  }
+  let stream;
+  try {
+    try { stream = await reservation.fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
+    catch (error) {
+      if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("output_write_unsupported");
+      throw error;
+    }
+    await response.body.pipeTo(stream);
+    return reservation;
+  } catch (error) {
+    try { await stream?.abort?.(); } catch {}
+    if (reservation.created) {
+      try { await handle.removeEntry(reservation.name); }
+      catch (cleanupError) {
+        const cleanupFailure = codedError("output_cleanup_failed");
+        cleanupFailure.cause = error;
+        cleanupFailure.cleanupCause = cleanupError;
+        throw cleanupFailure;
+      }
     }
     throw error;
   }
@@ -242,13 +243,20 @@ async function startSingleSave(event) {
       if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) await restoreSourceHandle(access, sourceSnapshot, deleteOriginal);
       if (output) await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
       throw error;
+    } finally {
+      sourceSnapshot = null;
     }
-    const latest = await api("/api/images"); state.images = latest.images;
-    const savedImage = state.images.find((item) => item.id === save.imageId);
-    if (savedImage) await setReviewed(savedImage, true);
-    state.drafts.delete(save.imageId); state.maskStatus.delete(save.imageId); pruneSourceAccess();
-    if (savedImage && state.currentId === save.imageId) await selectImage(save.imageId, true, { saveCurrentDraft: false });
-    renderCatalogViews();
+    // A copy that retains its source does not change the catalogue. Avoid the
+    // expensive image reload (and forced editor reload) in that common path.
+    // Overwrites and source deletion do need authoritative reconciliation.
+    if (!copying || deleteOriginal) {
+      const latest = await api("/api/images"); state.images = latest.images;
+      const savedImage = state.images.find((item) => item.id === save.imageId);
+      pruneSourceAccess();
+      if (deleteOriginal) reconcileBrowserSaveState();
+      else if (savedImage && state.currentId === save.imageId) await selectImage(save.imageId, true, { saveCurrentDraft: false });
+      renderCatalogViews();
+    }
     setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${state.outputDirectoryHandle.name}/${output.name}` : t("apply.complete", { completed: 1 }));
     } catch (error) {
       if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
@@ -460,85 +468,27 @@ async function restoreSourceHandle(access, snapshot, deleted) {
   access.name = file.name; access.size = file.size; access.lastModified = file.lastModified;
 }
 
-async function removeCompletedImagesFromCatalog(imageIds, initialOrder, recordsById) {
-  if (!imageIds.length) return null;
-  const currentId = state.currentId;
-  const currentIndex = initialOrder.indexOf(currentId);
-  const scroll = [["#gallery", $("#gallery")], ["#overviewGrid", $("#overviewGrid")]]
-    .map(([selector, container]) => [selector, container ? Number(container.scrollTop) || 0 : null]);
-  const data = await api("/api/catalog/remove", { method: "POST", body: JSON.stringify({ imageIds }) });
-  state.images = data.images;
-  const remainingIds = new Set(state.images.map((image) => image.id));
-  const removedIds = new Set([
-    ...(data.removedImageIds || []),
-    ...imageIds.filter((imageId) => !remainingIds.has(imageId)),
-  ]);
-  if (!removedIds.size) return null;
-  const cleanupGeneration = state.imageGeneration;
-  const removesPendingImage = Boolean(state.pendingImageId && removedIds.has(state.pendingImageId));
-  if (removesPendingImage) { ++state.imageGeneration; abortCatalogLoads(); }
-
-  for (const imageId of removedIds) {
-    state.selectedImageIds.delete(imageId);
-    if (state.selectionAnchorId === imageId) state.selectionAnchorId = null;
-    releaseImageCaches(imageId);
-    state.sourceAccess.delete(imageId);
-    state.drafts.delete(imageId);
-    state.maskStatus.delete(imageId);
-    clearCandidateMutationState(imageId);
-    state.prefetchQueue = state.prefetchQueue.filter((entry) => entry.record.id !== imageId);
-    if (state.pendingImageId === imageId) {
-      state.pendingImageId = null;
-      state.pendingImageKey = null;
-      state.pendingCandidateKey = null;
-    }
-    const image = recordsById.get(imageId);
-    if (image) clearReviewForRemovedImage(image);
-  }
-  if (state.contextMenuImageId && removedIds.has(state.contextMenuImageId)) closeCatalogContextMenu({ restoreFocus: false });
-  if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
-
-  let selectedReplacement = false;
-  if (currentId && removedIds.has(currentId)) {
-    releaseCandidateBundles(currentId);
-    state.currentId = null;
-    state.currentImage = null;
-    state.pendingImageId = null;
-    state.candidates = [];
-    clearEditor();
-  }
-  pruneSourceAccess();
-  renderCatalogViews();
-  for (const [selector, top] of scroll) {
-    if (top === null) continue;
-    const container = $(selector);
-    if (!container) continue;
-    const height = Number(container.scrollHeight);
-    const viewport = Number(container.clientHeight);
-    const maximum = height > 0 && viewport >= 0 ? Math.max(0, height - viewport) : Number(top) || 0;
-    container.scrollTop = Math.max(0, Math.min(Number(top) || 0, maximum));
-  }
-  updateSelectionActionBar();
-
-  if (currentId && removedIds.has(currentId)) {
-    const survivors = new Set(state.images.map((image) => image.id));
-    const nextId = [...initialOrder.slice(currentIndex + 1), ...initialOrder.slice(0, currentIndex).reverse()]
-      .find((imageId) => survivors.has(imageId));
-    if (nextId) { selectedReplacement = true; await selectImage(nextId, true, { saveCurrentDraft: false }); }
-    else updateNavigationControls();
-  }
-  updateActionButtons();
-  return cleanupGeneration + Number(removesPendingImage) + Number(selectedReplacement);
-}
-
-async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeAfterSave = false) {
+async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
+  const inputs = {
+    imageIds: [...imageIds],
+    divisor: Number($("#applyDivisor").value),
+    suffix,
+    deleteOriginal,
+    mode,
+    outputDirectoryHandle: state.outputDirectoryHandle,
+    parallelism: Math.min(8, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2))),
+    drafts: new Map(Object.entries(draftPayload(imageIds))),
+    sources: new Map(imageIds.map((imageId) => [imageId, {
+      image: state.images.find((image) => image.id === imageId),
+      access: sourceAccessFor(imageId) ? { ...sourceAccessFor(imageId) } : null,
+    }])),
+  };
   const result = await api("/api/save/prepare", {
     method: "POST",
-    body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false }),
+    body: JSON.stringify({ imageIds: inputs.imageIds, divisor: inputs.divisor, suffix: inputs.suffix, deleteOriginal: false }),
   });
   const save = {
-    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false, removeAfterSave,
-    removableImageIds: new Set(), reviewedImageIds: new Set(), initialOrder: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])),
+    entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false,
     catalogEpoch: state.catalogEpoch,
   };
   state.browserSave = save;
@@ -553,95 +503,114 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
   updateActionButtons();
   try {
     {
+      const serializeBrowserHandleMutation = (work) => {
+        const previous = save.browserHandleMutationChain || Promise.resolve();
+        const next = previous.catch(() => {}).then(work);
+        save.browserHandleMutationChain = next;
+        return next;
+      };
       const saveEntry = async (entry) => {
         showBrowserSaveProgress(save, entry);
-        const draft = draftPayload([entry.imageId])[entry.imageId] || null;
-        const sourceImage = state.images.find((image) => image.id === entry.imageId);
-        const access = sourceAccessFor(entry.imageId);
+        const draft = inputs.drafts.get(entry.imageId) || null;
+        const source = inputs.sources.get(entry.imageId) || {};
+        const sourceImage = source.image;
+        const access = source.access;
         let sourceAction = "keep";
-        let sourceSnapshot = null;
-        let sourceChanged = false;
-        if (mode === "copy") {
-          const response = await renderSingleSave({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
-            divisor: Number($("#applyDivisor").value), draft, copyToBrowser: true, suffix });
-          const output = await writeSingleOutput(state.outputDirectoryHandle, entry.relativePath, suffix, response);
+        if (inputs.mode === "copy") {
+          let response;
+          try {
+            response = await renderSingleSave({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
+              divisor: inputs.divisor, draft, copyToBrowser: true, suffix: inputs.suffix });
+          } finally { inputs.drafts.delete(entry.imageId); }
           const saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
           if (!saveToken) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
-          if (deleteOriginal) {
-            if (access?.fileHandle) {
+          let output;
+          try {
+            output = await writeSingleOutput(inputs.outputDirectoryHandle, entry.relativePath, inputs.suffix, response);
+          } catch (error) {
+            await cancelBrowserSave(entry, saveToken);
+            throw error;
+          }
+          const commitCopy = async () => {
+            let sourceSnapshot = null;
+            let sourceChanged = false;
+            if (inputs.deleteOriginal && access?.fileHandle) {
               await ensureHandlePermission(access, true);
               sourceSnapshot = await snapshotSourceHandle(access);
               await removeSourceHandle(access);
               sourceChanged = true;
             }
-            sourceAction = "deleted";
-          }
-          let committed;
-          try { committed = await commitBrowserSaveWithRetry({
-            imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken,
-          }); }
-          catch (error) {
-            if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
-            if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, true); } catch { throw codedError("source_restore_failed"); }
-            await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
-            throw error;
-          }
+            const sourceAction = inputs.deleteOriginal ? "deleted" : "keep";
+            try { return await commitBrowserSaveWithRetry({
+              imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken,
+            }); }
+            catch (error) {
+              if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
+              if (sourceChanged && (isDefinitiveCommitRejection(error) || error.saveState === "pending")) try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, true); } catch { throw codedError("source_restore_failed"); }
+              await inputs.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
+              throw error;
+            } finally { sourceSnapshot = null; }
+          };
+          sourceAction = inputs.deleteOriginal ? "deleted" : "keep";
+          const committed = inputs.deleteOriginal && access?.fileHandle
+            ? await serializeBrowserHandleMutation(commitCopy)
+            : await commitCopy();
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else if (access?.fileHandle) {
-          const binary = await fetch("/api/save/render", {
+          let binary;
+          try {
+            binary = await fetch("/api/save/render", {
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
-            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
-          });
+            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft }),
+            });
+          } finally { inputs.drafts.delete(entry.imageId); }
           if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
-          await ensureHandlePermission(access, true);
-          sourceSnapshot = await snapshotSourceHandle(access);
-          await writeSourceHandle(access, binary);
-          sourceChanged = true;
-          sourceAction = "overwrite";
-          let committed;
-          try { committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken }); }
-          catch (error) {
-            if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
-            if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, false); } catch { throw codedError("source_restore_failed"); }
-            throw error;
-          }
-          return finishBrowserSaveEntry(committed, entry, save, sourceAction);
+          return serializeBrowserHandleMutation(async () => {
+            let sourceSnapshot = null;
+            await ensureHandlePermission(access, true);
+            sourceSnapshot = await snapshotSourceHandle(access);
+            await writeSourceHandle(access, binary);
+            sourceAction = "overwrite";
+            try {
+              const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken });
+              const liveAccess = sourceAccessFor(entry.imageId);
+              if (liveAccess) Object.assign(liveAccess, access);
+              return finishBrowserSaveEntry(committed, entry, save, sourceAction);
+            } catch (error) {
+              if (error.saveState === "pending") await cancelBrowserSave(entry, saveToken);
+              if (isDefinitiveCommitRejection(error) || error.saveState === "pending") try { if (sourceSnapshot === null) throw new Error(); await restoreSourceHandle(access, sourceSnapshot, false); } catch { throw codedError("source_restore_failed"); }
+              throw error;
+            } finally { sourceSnapshot = null; }
+          });
         } else if (sourceImage?.sourceKind === "filesystem") {
-          const binary = await fetch("/api/save/render", {
+          let binary;
+          try {
+            binary = await fetch("/api/save/render", {
             method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
-            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: Number($("#applyDivisor").value), draft }),
-          });
+            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft }),
+            });
+          } finally { inputs.drafts.delete(entry.imageId); }
           if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = "overwrite";
-          const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal, sourceAction, saveToken });
+          const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken });
           return finishBrowserSaveEntry(committed, entry, save, sourceAction);
         } else {
           throw codedError("source_action_unavailable");
         }
       };
       const finishBrowserSaveEntry = (committed, entry, save, sourceAction) => {
-        if (committed.cleared) {
-          state.drafts.delete(entry.imageId);
-          if (state.currentId === entry.imageId) {
-            releaseCandidateBundles(entry.imageId);
-            state.candidates = [];
-            state.manualMaskPresent = false;
-            state.manualEnabled = true;
-            resetCurrentDraft();
-          }
-        }
-        if (save.removeAfterSave && committed.cleared && !committed.stale) save.removableImageIds.add(entry.imageId);
-        if (!committed.deleted) save.reviewedImageIds.add(entry.imageId);
+        // Saving is output-only: no candidate, manual, review, hidden, or
+        // list state may be reset as a side effect.
         if (committed.stale) save.stale += 1;
         if (sourceAction === "overwrite" && state.currentId === entry.imageId) save.reloadCurrent = true;
-        pruneSourceAccess();
+        if (sourceAction !== "keep") save.needsCatalogReconcile = true;
         save.completed += 1;
         showBrowserSaveProgress(save, entry);
       };
       let nextEntry = 0;
-      const parallelism = mode === "copy" ? 1 : Math.min(save.entries.length, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 1)));
+      const parallelism = Math.min(save.entries.length, inputs.parallelism);
       const settled = await Promise.allSettled(Array.from({ length: parallelism }, async () => {
         while (true) {
           // Cancellation is observed only before an entry starts. Once an output or source has
@@ -666,30 +635,26 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
       ? t("apply.cancelled", { completed: save.completed })
       : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed })));
   } finally {
+    inputs.drafts.clear();
+    inputs.sources.clear();
     try {
       let catalogCurrent = false;
-      try {
-        // Commits may resolve out of order; apply one authoritative catalogue
-        // snapshot only after every started entry has settled.
-        const latest = await api("/api/images");
-        catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
-        if (catalogCurrent) state.images = latest.images;
-      } catch (error) {
-        showApplyError(error);
-      }
-      if (catalogCurrent) {
-        await Promise.all([...save.reviewedImageIds].map(async (imageId) => {
-          const image = state.images.find((entry) => entry.id === imageId);
-          if (image) await setReviewed(image, true);
-        }));
+      if (save.needsCatalogReconcile) {
         try {
-          await removeCompletedImagesFromCatalog([...save.removableImageIds], save.initialOrder, save.recordsById);
+          // Commits may resolve out of order; apply one authoritative catalogue
+          // snapshot only after every started entry has settled.
+          const latest = await api("/api/images");
+          catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
+          if (catalogCurrent) state.images = latest.images;
         } catch (error) {
           showApplyError(error);
         }
-        reconcileBrowserSaveState();
-        if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
-          await selectImage(state.currentId, true, { saveCurrentDraft: false });
+        if (catalogCurrent) {
+          pruneSourceAccess();
+          reconcileBrowserSaveState();
+          if (save.reloadCurrent && state.currentId && state.images.some((image) => image.id === state.currentId)) {
+            await selectImage(state.currentId, true, { saveCurrentDraft: false });
+          }
         }
       }
     } finally {
@@ -757,7 +722,7 @@ async function startApplyFromDialog(event) {
     if (state.importing) return;
     await flushDraftSaves(imageIds);
     state.saveStarting = false;
-    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, $("#removeAfterSave").checked);
+    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode);
   } catch (error) {
     showApplyError(error);
     if (!state.saveStarting) {
@@ -815,8 +780,6 @@ async function finishApplyJob(job) {
   const catalogEpoch = state.catalogEpoch;
   try {
     const keepCurrent = state.currentId;
-    const previousOrder = state.images.map((image) => image.id);
-    const previousImagesById = new Map(state.images.map((image) => [image.id, image]));
     const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
     const completedImageIds = Array.isArray(job.completedImageIds)
       ? job.completedImageIds
@@ -826,32 +789,9 @@ async function finishApplyJob(job) {
     if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     state.images = data.images;
     pruneSourceAccess();
-    const reloadedImagesById = new Map(state.images.map((image) => [image.id, image]));
-    for (const imageId of completedImageIds) {
-      const previousImage = previousImagesById.get(imageId);
-      const reloadedImage = reloadedImagesById.get(imageId);
-      if (previousImage && reloadedImage) void moveReviewedPathAfterApply(previousImage, reloadedImage);
-    }
-    state.maskStatus.clear();
-    for (const imageId of completedImageIds) state.drafts.delete(imageId);
     state.applyTargetIds = requestedImageIds;
-    const removableImageIds = completedImageIds;
-    if (job.removeAfterSave && removableImageIds.length) {
-      const expectedGeneration = await removeCompletedImagesFromCatalog(removableImageIds, previousOrder, previousImagesById);
-      if (expectedGeneration !== null) generation = expectedGeneration;
-      if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
-    }
-    const removedAfterSave = Boolean(job.removeAfterSave && removableImageIds.length);
-    if (removedAfterSave) {
-      // removeCompletedImagesFromCatalog already selects the next surviving image.
-    } else if (reloadCurrent) {
-      releaseCandidateBundles(keepCurrent);
-      state.candidates = [];
-    }
     const reloadedCurrent = reloadCurrent && state.images.some((image) => image.id === keepCurrent);
-    if (removedAfterSave) {
-      // The batch cleanup above has restored either a neighboring image or an empty editor.
-    } else if (reloadedCurrent) {
+    if (reloadedCurrent) {
       await selectImage(keepCurrent, true, { saveCurrentDraft: false });
     } else if (keepCurrent && state.images.some((image) => image.id === keepCurrent)) {
       refreshMaskStatus();

@@ -185,7 +185,7 @@ class MozarieTests(unittest.TestCase):
             manual = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
             state.save_manual_workspace(image_id, {"add": manual, "exclusion": "", "exclusionErase": "", "removedCandidateIds": ["candidate"], "candidateRevision": 1, "hasEffectiveMask": True})
             replacement = self.new_state()
-            restored = replacement.set_root(str(root))[0]
+            restored = replacement.open_project(state.catalog_id)["images"][0]
             self.assertEqual(restored["id"], image_id)
             self.assertTrue(restored["hidden"])
             self.assertTrue(restored["reviewed"])
@@ -206,6 +206,62 @@ class MozarieTests(unittest.TestCase):
                     state.set_image_flags(image_id, {"hidden": True, "reviewed": True})
             self.assertFalse(record.hidden)
             self.assertFalse(record.reviewed)
+
+    def test_detector_prepare_rolls_back_when_catalog_reloads_before_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            candidate = Candidate("candidate", "penis", .9, mask_path)
+            generation = state.catalog_generation
+            prepare = state.workspace_store.prepare_candidate_state
+
+            def prepare_then_reload(*args, **kwargs):
+                pending = prepare(*args, **kwargs)
+                # Preserve the same image ID/revision while exercising the real
+                # catalogue replacement path (including lock-map clearing).
+                state._replace_catalog(record.path.parent, [record])
+                return pending
+
+            with state.image_io_lock(image_id), patch.object(state.workspace_store, "prepare_candidate_state", side_effect=prepare_then_reload):
+                with self.assertRaises(ClientError):
+                    state._commit_candidate_snapshot_outside_state_lock(
+                        image_id, [candidate], replace=True, expected_revision=0, expected_catalog_generation=generation,
+                    )
+            self.assertEqual(state.workspace_store.hydrate_candidates(image_id, state.cache_dir, lambda *_: None), (0, []))
+            self.assertEqual(state.candidates.get(image_id, []), [])
+
+    def test_detector_preparation_does_not_block_catalog_polling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 16), 255).save(mask_path)
+            candidate = Candidate("candidate", "penis", .9, mask_path)
+            entered, release = threading.Event(), threading.Event()
+            original = state.workspace_store.prepare_candidate_state
+            errors = []
+            def delayed_prepare(*args, **kwargs):
+                entered.set(); self.assertTrue(release.wait(5)); return original(*args, **kwargs)
+            def commit() -> None:
+                try:
+                    with state.image_io_lock(image_id):
+                        state._commit_candidate_snapshot_outside_state_lock(
+                            image_id, [candidate], replace=True, expected_revision=0,
+                            expected_catalog_generation=state.catalog_generation,
+                        )
+                except Exception as exc: errors.append(exc)
+            with patch.object(state.workspace_store, "prepare_candidate_state", side_effect=delayed_prepare), \
+                 patch.object(state, "_effective_mask_for_draft", return_value=True):
+                worker = threading.Thread(target=commit); worker.start()
+                self.assertTrue(entered.wait(2))
+                started = time.perf_counter(); snapshot = state.catalog_snapshot(); elapsed = time.perf_counter() - started
+                self.assertEqual(snapshot["images"][0]["id"], image_id)
+                self.assertLess(elapsed, .25, f"catalog poll was blocked for {elapsed:.3f}s")
+                release.set(); worker.join(5)
+            self.assertFalse(worker.is_alive()); self.assertEqual(errors, [])
 
     def test_flag_change_does_not_publish_after_the_catalog_changes_during_a_write(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -242,7 +298,7 @@ class MozarieTests(unittest.TestCase):
 
             replacement = self.new_state()
             with self.assertRaisesRegex(ValueError, "PNG"):
-                replacement.set_root(str(root))
+                replacement.open_project(state.catalog_id)
             self.assertEqual(replacement.candidates, {})
 
     def test_workspace_restore_rejects_invalid_candidate_metadata(self):
@@ -263,7 +319,7 @@ class MozarieTests(unittest.TestCase):
 
             replacement = self.new_state()
             with self.assertRaisesRegex(ValueError, "not-a-role"):
-                replacement.set_root(str(root))
+                replacement.open_project(state.catalog_id)
             self.assertEqual(replacement.candidates, {})
 
     def test_lazy_workspace_candidates_survive_toggle_and_delete_after_restart(self):
@@ -282,12 +338,12 @@ class MozarieTests(unittest.TestCase):
             self.commit_candidates(state, image_id)
 
             reopened = self.new_state()
-            reopened.set_root(str(root))
+            reopened.open_project(state.catalog_id)
             self.assertFalse(any(candidate.mask_path.is_file() for candidate in reopened.candidates[image_id]))
             reopened.set_candidate_state(image_id, "first", {"enabled": False})
 
             after_toggle = self.new_state()
-            after_toggle.set_root(str(root))
+            after_toggle.open_project(state.catalog_id)
             # Listing metadata must not fetch the lazy PNG BLOBs.
             with patch.object(after_toggle.workspace_store, "candidate_png", side_effect=AssertionError("BLOB read")):
                 restored = {candidate["id"]: candidate for candidate in after_toggle.candidate_snapshot(image_id)["candidates"]}
@@ -298,7 +354,7 @@ class MozarieTests(unittest.TestCase):
 
             self.assertTrue(after_toggle.delete_candidate(image_id, "first"))
             after_delete = self.new_state()
-            after_delete.set_root(str(root))
+            after_delete.open_project(state.catalog_id)
             self.assertEqual([candidate["id"] for candidate in after_delete.candidate_snapshot(image_id)["candidates"]], ["second"])
 
     def test_candidate_mutation_does_not_publish_when_workspace_write_fails(self):
@@ -336,11 +392,11 @@ class MozarieTests(unittest.TestCase):
             Image.new("L", (16, 10), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             self.commit_candidates(state, image_id)
-            with self.assertRaisesRegex(ClientError, "0から16") as raised:
-                state.set_candidate_state(image_id, "candidate", {"expandPx": 17})
+            with self.assertRaisesRegex(ClientError, "0から18") as raised:
+                state.set_candidate_state(image_id, "candidate", {"expandPx": 19})
             self.assertEqual(raised.exception.error_code, "input_invalid")
 
-    def test_candidate_padding_updates_the_durable_png_without_source_readback(self):
+    def test_candidate_padding_updates_metadata_without_rewriting_the_durable_png(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             Image.new("RGB", (16, 10), "white").save(root / "source.png")
@@ -351,12 +407,179 @@ class MozarieTests(unittest.TestCase):
             Image.new("L", (16, 10), 255).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             self.commit_candidates(state, image_id)
+            before_png = state.workspace_store.candidate_png(image_id, "candidate")
             revision = state.set_candidate_state(image_id, "candidate", {"expandPx": 3})
             self.assertEqual(state.candidates[image_id][0].expand_px, 3)
             self.assertGreater(revision, 1)
-            with Image.open(io.BytesIO(state.workspace_store.candidate_png(image_id, "candidate"))) as mask:
-                self.assertEqual(mask.text.get("mozarie_expand_px"), "3")
+            self.assertEqual(state.workspace_store.candidate_png(image_id, "candidate"), before_png)
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT expand_px FROM candidate_metadata WHERE image_id=? AND candidate_id=?", (image_id, "candidate")).fetchone()["expand_px"], 3)
             self.assertGreater(state.set_candidate_state(image_id, "candidate", {"expandPx": 3}), revision)
+
+    def test_batch_candidate_padding_updates_one_role_without_rewriting_pngs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 10), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            paths = []
+            for candidate_id, role in (("apply", CandidateRole.APPLY), ("exclude", CandidateRole.EXCLUDE)):
+                path = state.cache_dir / image_id / f"{candidate_id}.png"; path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (16, 10), 255).save(path); paths.append(path)
+                state.candidates.setdefault(image_id, []).append(Candidate(candidate_id, "penis" if role == CandidateRole.APPLY else "hand", .9, path, role=role))
+            self.commit_candidates(state, image_id)
+            before = [state.workspace_store.candidate_png(image_id, candidate_id) for candidate_id in ("apply", "exclude")]
+            revision = state.batch_update_candidates(image_id, {"role": "apply", "operation": "set_padding", "expandPx": 4})
+            self.assertGreater(revision, 1)
+            self.assertEqual([candidate.expand_px for candidate in state.candidates[image_id]], [4, 0])
+            self.assertEqual([state.workspace_store.candidate_png(image_id, candidate_id) for candidate_id in ("apply", "exclude")], before)
+            for value in (True, 1.5, "4", -1, 19):
+                with self.subTest(value=value), self.assertRaises(ClientError):
+                    state.batch_update_candidates(image_id, {"role": "apply", "operation": "set_padding", "expandPx": value})
+
+    def test_batch_candidate_padding_rejects_an_empty_role_and_skips_an_identical_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (16, 10), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "apply.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (16, 10), 255).save(mask_path)
+            state.candidates[image_id] = [Candidate("apply", "penis", .9, mask_path, expand_px=4)]
+            revision = self.commit_candidates(state, image_id)
+            with self.assertRaisesRegex(ClientError, "更新する候補") as missing:
+                state.batch_update_candidates(image_id, {"role": "exclude", "operation": "set_padding", "expandPx": 4})
+            self.assertEqual(missing.exception.error_code, "candidate_not_found")
+            self.assertEqual(state.batch_update_candidates(image_id, {"role": "apply", "operation": "set_padding", "expandPx": 4}), revision)
+            self.assertEqual(state.candidates[image_id][0].expand_px, 4)
+
+    def test_batch_candidate_padding_undo_redo_and_restart_restore_only_its_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (20, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            candidates = []
+            for candidate_id, label, role in (("apply-one", "penis", CandidateRole.APPLY), ("apply-two", "pussy", CandidateRole.APPLY), ("exclude", "hand", CandidateRole.EXCLUDE)):
+                path = state.cache_dir / image_id / f"{candidate_id}.png"; path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (20, 12), 255).save(path)
+                candidates.append(Candidate(candidate_id, label, .9, path, role=role, expand_px=2 if role == CandidateRole.EXCLUDE else 0))
+            state.candidates[image_id] = candidates; self.commit_candidates(state, image_id)
+            state.save_manual_workspace(image_id, {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": state._candidate_revision(image_id), "hasEffectiveMask": True})
+            state.batch_update_candidates(image_id, {"role": "apply", "operation": "set_padding", "expandPx": 5})
+            self.assertEqual([item.expand_px for item in state.candidates[image_id]], [5, 5, 2])
+            state.restore_project_history(image_id, "undo")
+            self.assertEqual([item.expand_px for item in state.candidates[image_id]], [0, 0, 2])
+            state.restore_project_history(image_id, "redo")
+            self.assertEqual([item.expand_px for item in state.candidates[image_id]], [5, 5, 2])
+            reopened = self.new_state(); reopened.open_project(state.catalog_id)
+            self.assertEqual([item.expand_px for item in reopened.candidates[image_id]], [5, 5, 2])
+
+    def test_batch_candidate_padding_hundred_candidates_writes_one_history_and_no_png(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (64, 64), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            candidates = []
+            for index in range(100):
+                candidate_id = f"candidate-{index}"; path = state.cache_dir / image_id / f"{candidate_id}.png"; path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (64, 64), 255).save(path)
+                candidates.append(Candidate(candidate_id, "penis", .9, path))
+            state.candidates[image_id] = candidates; self.commit_candidates(state, image_id)
+            before_pngs = [hashlib.sha256(state.workspace_store.candidate_png(image_id, item.candidate_id)).digest() for item in candidates]
+            with state.workspace_store._connect() as db:
+                history_before = db.execute("SELECT COUNT(*) AS count FROM history_entries WHERE image_id=?", (image_id,)).fetchone()["count"]
+            revision = state._candidate_revision(image_id)
+            self.assertEqual(state.batch_update_candidates(image_id, {"role": "apply", "operation": "set_padding", "expandPx": 7}), revision + 1)
+            self.assertTrue(all(item.expand_px == 7 for item in state.candidates[image_id]))
+            self.assertEqual([hashlib.sha256(state.workspace_store.candidate_png(image_id, item.candidate_id)).digest() for item in candidates], before_pngs)
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) AS count FROM history_entries WHERE image_id=?", (image_id,)).fetchone()["count"], history_before + 1)
+
+    def test_detect_and_boundary_candidates_receive_the_current_padding_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (20, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]; record = state.image_for_id(image_id)
+            state.settings["detection"]["default_candidate_padding_px"] = 4; state._active_detection_default_padding = 4
+            mask = np.full((12, 20), 255, dtype=np.uint8)
+            segments = [{"class_name": "penis", "confidence": .9, "mask": mask, "source": "target",
+                         "image_exclusions": {"hand": mask}, "metadata_exclusions": {"fluid": mask}, "exclusions": {"hand": mask}}]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
+                 patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                detected = state._detect_image(Mock(), record, .5)
+            self.assertEqual([(item.role.value, item.label_token, item.expand_px) for item in detected], [
+                ("exclude", "hand", 4), ("exclude", "fluid", 4), ("apply", "penis", 4), ("exclude", "hand", 4),
+            ])
+            state.settings["detection"]["default_candidate_padding_px"] = 7; state._active_detection_default_padding = 7
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                 patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
+                 patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                refreshed = state._detect_image(Mock(), record, .5)
+            self.assertTrue(all(item.expand_px == 4 for item in detected))
+            self.assertTrue(all(item.expand_px == 7 for item in refreshed))
+            predictor = Mock(); predictor.predict.return_value = (np.asarray([mask > 0]), np.asarray([.9]), None)
+            boundary_segment = [{"class_name": "penis", "mask": mask, "source": "boundary", "image_exclusions": {"hand": mask}, "exclusions": {"fluid": mask}}]
+            with patch.object(state, "_sam_predictor_for", return_value=predictor), \
+                 patch.object(state, "_boundary_hand_boxes", return_value=[]), \
+                 patch.object(state, "_finalize_exclusions", return_value=boundary_segment):
+                boundary = state.add_boundary_candidate(image_id, {"roi": {"left": 0, "top": 0, "right": 20, "bottom": 12}, "point": {"x": 10, "y": 6}})
+            self.assertEqual([(item["role"], item["labelToken"], item["expandPx"]) for item in boundary["candidates"]], [
+                ("apply", "boundary", 7), ("exclude", "hand", 7), ("exclude", "fluid", 7),
+            ])
+
+    def test_detector_epoch_stat_and_explicit_padding_guards_preserve_catalogue_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (20, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            pending = state.cache_dir / image_id / ".mozarie-pending-stale.tmp"
+            pending.parent.mkdir(parents=True, exist_ok=True); Image.new("L", (20, 12), 255).save(pending, format="PNG")
+            candidate = Candidate("stale", "penis", .9, pending)
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=Mock(), auxiliaries=[])), \
+                    patch.object(state, "_detect_image", return_value=[candidate]), \
+                    patch.object(state, "_job_is_current", return_value=True), \
+                    patch.object(state, "_assert_record_stat_matches", side_effect=ClientError("changed", "stale_asset")), \
+                    patch.object(state, "_fail_job") as failed:
+                state._detect_worker([record], .5, 1, catalog_generation=None)
+            self.assertEqual(failed.call_args.args[0].error_code, "stale_asset")
+            self.assertFalse(pending.exists())
+            self.assertEqual(state.candidates.get(image_id, []), [])
+
+            # No durable pending transaction exists for a just-removed image,
+            # but publication must still reject an old catalogue epoch.
+            with patch.object(state.workspace_store, "has_image", return_value=False), \
+                    self.assertRaises(ClientError) as stale:
+                state._commit_candidate_snapshot_outside_state_lock(
+                    image_id, [], replace=True, expected_revision=0,
+                    expected_catalog_generation=state.catalog_generation - 1,
+                )
+            self.assertEqual(stale.exception.error_code, "catalog_changed")
+            self.assertEqual(state.candidates.get(image_id, []), [])
+
+            state._active_detection_default_padding = 9
+            mask = np.ones((12, 20), dtype=np.uint8)
+            segments = [{"class_name": "penis", "confidence": .9, "mask": mask, "source": "target"}]
+            with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
+                    patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
+                    patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
+                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                explicit = state._detect_image(Mock(), record, .5, default_padding=2)
+            self.assertEqual([item.expand_px for item in explicit], [2])
+            for item in explicit:
+                item.mask_path.unlink(missing_ok=True)
+
+    def test_detector_discards_before_publish_when_catalogue_changes_after_stat_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); Image.new("RGB", (12, 12), "white").save(root / "source.png")
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]; record = state.image_for_id(image_id)
+            pending = state.cache_dir / image_id / ".mozarie-pending-race.tmp"; pending.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (12, 12), 255).save(pending, format="PNG")
+            candidate = Candidate("race", "penis", .9, pending)
+            def remove_record(_record):
+                state.images.pop(image_id); return None
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=Mock(), auxiliaries=[])), \
+                    patch.object(state, "_detect_image", return_value=[candidate]), \
+                    patch.object(state, "_job_is_current", return_value=True), \
+                    patch.object(state, "_assert_record_stat_matches", side_effect=remove_record):
+                state._detect_worker([record], .5, 1, catalog_generation=state.catalog_generation)
+            self.assertFalse(pending.exists())
+            self.assertNotIn(image_id, state.candidates)
 
     def test_candidate_mutation_updates_manual_revision_removed_ids_and_effective_together(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -448,7 +671,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual({item["id"]: item["hasEffectiveMask"] for item in state.catalog_snapshot()["images"]}, expected)
 
             reopened = self.new_state()
-            reopened.set_root(str(root))
+            reopened.open_project(state.catalog_id)
             with patch.object(reopened.workspace_store, "manual", side_effect=AssertionError("manual draft read")):
                 self.assertEqual({item["id"]: item["hasEffectiveMask"] for item in reopened.catalog_snapshot()["images"]}, expected)
 
@@ -471,7 +694,7 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
             state.set_candidate_state(image_id, "apply", {"enabled": False})
             self.assertFalse(state.catalog_snapshot()["images"][0]["hasEffectiveMask"])
-            reopened = self.new_state(); reopened.set_root(str(root))
+            reopened = self.new_state(); reopened.open_project(state.catalog_id)
             self.assertFalse(reopened.catalog_snapshot()["images"][0]["hasEffectiveMask"])
 
     def test_session_import_path_collision_keeps_native_image_state(self):
@@ -515,7 +738,7 @@ class MozarieTests(unittest.TestCase):
             state.save_manual_workspace(image_id, {"add": draft, "exclusion": draft, "exclusionErase": draft, "removedCandidateIds": ["old"], "candidateRevision": 0, "hasEffectiveMask": False})
             state.clear_masks([image_id])
             reopened = self.new_state()
-            reopened.set_root(str(root))
+            reopened.open_project(state.catalog_id)
             self.assertIsNone(reopened.manual_workspace(image_id))
 
     def _import_browser_manifest(self, state, files, catalog_id=None):
@@ -533,33 +756,24 @@ class MozarieTests(unittest.TestCase):
                 upload.write_bytes(raw)
                 _images, items = state.import_image_file_for_api(
                     upload, name=Path(relative_path).name, relative_path=relative_path,
-                    client_key=f"manifest-{index}", include_images=False,
-                    source_hash=hashlib.sha256(raw).hexdigest(),
+                    client_key=f"manifest-{index}", include_images=False, mtime_ns=20, size_bytes=len(raw),
                 )
                 imported[relative_path] = items[0]["imageId"]
         return imported
 
-    def test_browser_manifest_reuses_changed_first_folder_and_preserves_unmodified_state(self):
+    def test_browser_import_creates_explicit_project_without_content_reuse(self):
         def png(color):
             buffer = io.BytesIO(); Image.new("RGB", (12, 12), color).save(buffer, format="PNG"); return buffer.getvalue()
 
         initial = [("a.png", png("red")), ("b.png", png("green")), ("nested/c.png", png("blue"))]
         first = self.new_state()
-        first_ids = self._import_browser_manifest(first, initial)
+        self._import_browser_manifest(first, initial)
         first_catalog, _ = first.finalize_browser_catalog()
-        first.set_image_flags(first_ids["b.png"], {"hidden": True, "reviewed": True})
-
-        # The first lexicographic image changed.  Reuse must wait for b/c,
-        # rather than permanently creating a fresh catalogue at a.png.
         second = self.new_state()
-        second_ids = self._import_browser_manifest(second, [("a.png", png("yellow")), *initial[1:]])
+        self._import_browser_manifest(second, [("a.png", png("yellow")), *initial[1:]])
         second_catalog, remapped = second.finalize_browser_catalog()
-        self.assertEqual(second_catalog, first_catalog)
-        self.assertNotEqual(second_ids["b.png"], remapped[second_ids["b.png"]])
-        restored = {item["relativePath"]: item for item in second.list_images()}
-        self.assertTrue(restored["b.png"]["hidden"])
-        self.assertTrue(restored["b.png"]["reviewed"])
-        self.assertFalse(restored["a.png"]["reviewed"])
+        self.assertNotEqual(second_catalog, first_catalog)
+        self.assertEqual(remapped, {})
 
     def test_browser_manifest_add_delete_and_same_name_content_are_isolated(self):
         def png(color):
@@ -570,12 +784,10 @@ class MozarieTests(unittest.TestCase):
         self._import_browser_manifest(first, files)
         first_catalog, _ = first.finalize_browser_catalog()
 
-        # Deleting one file and adding another preserves the two immutable
-        # images, so the existing catalogue remains the sole safe match.
         second = self.new_state()
         self._import_browser_manifest(second, [files[0], files[1], ("folder/new.png", png("white"))])
         second_catalog, _ = second.finalize_browser_catalog()
-        self.assertEqual(second_catalog, first_catalog)
+        self.assertNotEqual(second_catalog, first_catalog)
 
         # Same paths/folder names but different bytes cannot cross-contaminate.
         isolated = self.new_state()
@@ -623,10 +835,7 @@ class MozarieTests(unittest.TestCase):
             native = self.new_state()
             native_ids = native.set_root(str(root))
             native_records = [native.image_for_id(item["id"]) for item in native_ids]
-            native.workspace_store.reconcile_images(
-                native.catalog_id, native_records,
-                {relative_path: hashlib.sha256(raw).hexdigest() for relative_path, raw in files},
-            )
+            native.workspace_store.reconcile_images(native.catalog_id, native_records)
             native_catalog = native.catalog_id
 
             browser = self.new_state()
@@ -634,21 +843,19 @@ class MozarieTests(unittest.TestCase):
             browser_catalog, _ = browser.finalize_browser_catalog()
             self.assertNotEqual(browser_catalog, native_catalog)
 
-    def test_browser_manifest_requires_strict_majority_and_handles_single_or_ambiguous(self):
+    def test_browser_manifest_is_never_content_matched(self):
         buffer = io.BytesIO(); Image.new("RGB", (8, 8), "teal").save(buffer, format="PNG")
         raw = buffer.getvalue()
         many = [(f"root/{index:03}.png", raw) for index in range(100)]
         target = self.new_state()
         self._import_browser_manifest(target, many)
         target_catalog, _ = target.finalize_browser_catalog()
-        hashes = [(relative_path, hashlib.sha256(content).hexdigest()) for relative_path, content in many]
-        self.assertIsNone(target.workspace_store.best_catalog_for_manifest(hashes[:2], "f" * 32))
+        self.assertIsNone(target.workspace_store.best_catalog_for_manifest([], "f" * 32))
 
         one = [("only.png", raw)]
         single = self.new_state(); self._import_browser_manifest(single, one)
         single_catalog, _ = single.finalize_browser_catalog()
-        one_hash = [("only.png", hashlib.sha256(raw).hexdigest())]
-        self.assertEqual(single.workspace_store.best_catalog_for_manifest(one_hash, "e" * 32), single_catalog)
+        self.assertIsNone(single.workspace_store.best_catalog_for_manifest([], "e" * 32))
 
         clone = self.new_state()
         clone_id = clone.workspace_store.ensure_catalog()
@@ -1984,7 +2191,7 @@ class MozarieTests(unittest.TestCase):
             with (
                 patch.object(state, "_ensure_models", return_value=[]),
                 patch.object(state, "_detect_image", side_effect=detect_image),
-                patch.object(state, "_commit_candidate_snapshot", side_effect=OSError("database write failed")),
+                patch.object(state, "_commit_candidate_snapshot_outside_state_lock", side_effect=OSError("database write failed")),
             ):
                 state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
 
@@ -5354,6 +5561,14 @@ class MozarieTests(unittest.TestCase):
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[first_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = self.commit_candidates(state, first_id)
+            state.set_image_flags(first_id, {"hidden": True, "reviewed": True})
+            manual_png = io.BytesIO(); Image.new("L", (16, 16), 255).save(manual_png, format="PNG")
+            manual = "data:image/png;base64," + base64.b64encode(manual_png.getvalue()).decode("ascii")
+            state.save_manual_workspace(first_id, {
+                "add": manual, "exclusion": "", "exclusionErase": "", "removedCandidateIds": [],
+                "candidateRevision": revision, "hasEffectiveMask": True, "manualEnabled": False,
+            })
             state.job = core_module.Job(kind="apply", state="running", total=2, image_ids=(first_id, second_id))
 
             state._apply_worker([first_record, second_record], 100, {})
@@ -5364,7 +5579,11 @@ class MozarieTests(unittest.TestCase):
                 [os.path.normcase(str(Path(output).resolve())) for output in state.job.outputs],
                 [os.path.normcase(str(first.resolve()))],
             )
-            self.assertEqual(state.candidates[first_id], [])
+            self.assertEqual([candidate.candidate_id for candidate in state.candidates[first_id]], ["candidate"])
+            self.assertTrue(mask_path.is_file())
+            self.assertEqual(state.manual_workspace(first_id)["add"], manual)
+            self.assertFalse(state.manual_workspace(first_id)["manualEnabled"])
+            self.assertEqual(state.workspace_store.image_state(first_id), (True, True))
             self.assertEqual(second.read_bytes(), original_second)
 
     def test_apply_all_empty_masks_completes_without_changing_images(self):
@@ -6321,10 +6540,10 @@ class MozarieTests(unittest.TestCase):
         self.assertTrue(committed["cleared"])
         self.assertFalse(rendered_path.exists())
         self.assertEqual(Image.open(record.path).text["prompt"], '{"seed": 9}')
-        self.assertEqual(state.candidates.get(image_id, []), [])
+        self.assertEqual(len(state.candidates.get(image_id, [])), 1)
         with state.workspace_store._connect() as db:
-            stored_hash = db.execute("SELECT source_hash FROM images WHERE image_id=?", (image_id,)).fetchone()["source_hash"]
-        self.assertEqual(stored_hash, state._sha256_file(record.path))
+            stored = db.execute("SELECT size_bytes,mtime_ns FROM images WHERE image_id=?", (image_id,)).fetchone()
+        self.assertEqual(int(stored["size_bytes"]), record.path.stat().st_size)
 
     def test_browser_save_database_failure_restores_source_and_keeps_token_for_retry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6347,9 +6566,9 @@ class MozarieTests(unittest.TestCase):
             self.assertIn(token, state.browser_save_tokens)
             self.assertNotIn(token, state.browser_save_claims)
             self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
-            self.assertEqual(state._candidate_revision(image_id), revision + 1)
+            self.assertEqual(state._candidate_revision(image_id), revision)
             with state.workspace_store._connect() as db:
-                self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], revision + 1)
+                self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], 0)
 
     def test_pending_browser_copy_token_can_be_checked_and_cancelled(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6542,6 +6761,54 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.commit_browser_save(image_id, rendered_revision, token, "keep")["cleared"], committed["cleared"])
             write_copy.assert_called_once()
 
+    def test_browser_file_system_copy_token_keeps_no_backend_render_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_browser=True)
+            details = state.browser_save_tokens[rendered.save_token]
+
+            self.assertTrue(rendered.output)
+            self.assertIsNone(rendered.output_path)
+            self.assertIsNone(details.rendered_path)
+            self.assertTrue(details.allow_copy_action)
+            self.assertFalse((state.cache_dir / "browser-save").exists())
+            self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
+
+    def test_browser_file_system_400_copies_write_no_backend_temp_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+
+            output_bytes = 0
+            for _index in range(400):
+                rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_browser=True)
+                output_bytes += len(rendered.output)
+                self.assertIsNone(rendered.output_path)
+                self.assertIsNone(state.browser_save_tokens[rendered.save_token].rendered_path)
+                self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
+
+            self.assertGreater(output_bytes, 0)
+            self.assertFalse((state.cache_dir / "browser-save").exists())
+            self.assertEqual(state.browser_save_tokens, {})
+
     def test_browser_copy_render_keeps_source_and_candidates_when_output_sync_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -6572,7 +6839,7 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse((output_directory / "source_censored.png").exists())
             self.assertEqual(list(output_directory.glob("*.mozarie.tmp")), [])
 
-    def test_browser_save_renders_then_clears_only_matching_revision(self):
+    def test_browser_save_renders_and_keeps_the_matching_workspace_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.png"
@@ -6594,7 +6861,8 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(Image.open(io.BytesIO(output)).text["prompt"], '{"seed": 1}')
             committed = state.commit_browser_save(image_id, revision, save_token, "overwrite")
             self.assertTrue(committed["cleared"])
-            self.assertEqual(state.candidates.get(image_id, []), [])
+            self.assertEqual(len(state.candidates.get(image_id, [])), 1)
+            self.assertTrue(mask_path.exists())
 
     def test_browser_save_does_not_clear_candidates_changed_after_render(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7081,7 +7349,7 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
             first = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             retried = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
-            self.assertFalse(mask_path.exists())
+            self.assertTrue(mask_path.exists())
             self.assertEqual(retried["cleared"], first["cleared"])
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()
@@ -7486,6 +7754,11 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             source_bytes = source.read_bytes()
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
+            mask_path = state.cache_dir / record.image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            candidate = Candidate("candidate", "penis", 0.9, mask_path)
+            state.candidates[record.image_id] = [candidate]
+            revision = state._touch_candidates(record.image_id)
 
             with patch.object(saving_module, "render_with_mask", wraps=saving_module.render_with_mask) as render, \
                  patch.object(saving_module, "write_rendered_copy") as write_copy:
@@ -7493,6 +7766,9 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             write_copy.assert_called_once()
             self.assertEqual(render.call_count, 1)
             self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertEqual(state.candidates[record.image_id], [candidate])
+            self.assertEqual(state._candidate_revision(record.image_id), revision)
+            self.assertTrue(mask_path.is_file())
 
     def test_background_copy_database_failure_removes_output_and_keeps_masks(self):
         with tempfile.TemporaryDirectory() as directory:
