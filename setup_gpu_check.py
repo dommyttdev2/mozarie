@@ -18,6 +18,7 @@ PROFILE_UNAVAILABLE_MESSAGE = "[Mozarie] The selected runtime could not be ident
 CUDA_RUNTIME_FAILED_MESSAGE = "[Mozarie] CUDA detection runtime could not start. Setup stopped; check the NVIDIA driver and run setup.bat again. / CUDA検出ランタイムを開始できませんでした。NVIDIAドライバーを確認して、setup.bat をもう一度実行してください。"
 DIRECTML_RUNTIME_FAILED_MESSAGE = "[Mozarie] DirectML detection runtime could not start. Setup stopped; check the GPU driver and run setup.bat again. / DirectML検出ランタイムを開始できませんでした。GPUドライバーを確認して、setup.bat をもう一度実行してください。"
 ROCM_RUNTIME_FAILED_MESSAGE = "[Mozarie] ROCm/DirectML runtime could not start. Setup stopped; check the ROCm packages and GPU driver, then run setup.bat again. / ROCm/DirectMLランタイムを開始できませんでした。ROCmパッケージとGPUドライバーを確認して、setup.bat をもう一度実行してください。"
+ROCM_DEVICE_SAVE_FAILED_MESSAGE = "[Mozarie] The ROCm GPU selection passed validation but could not be saved. Setup stopped; check config/local.json and run setup again. / ROCm GPUの選択確認はできましたが、設定を保存できませんでした。config/local.jsonを確認して、setup.bat をもう一度実行してください。"
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -90,9 +91,32 @@ def _print_exception_chain(exc: BaseException, label: str = "DirectML") -> None:
         depth += 1
 
 
+def _resolve_rocm_setup_device(configured_device: int) -> tuple[int, str, bool]:
+    """Resolve an invalid saved device only when ROCm exposes one unique GPU."""
+    import torch
+
+    if not getattr(getattr(torch, "version", None), "hip", None):
+        raise RuntimeError("ROCm/HIP PyTorch is unavailable.")
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        raise RuntimeError("ROCm packages are installed, but no usable HIP device was found.")
+    count = int(cuda.device_count())
+    if count < 1:
+        raise RuntimeError("ROCm PyTorch did not find a HIP device.")
+    if 0 <= configured_device < count:
+        return configured_device, str(cuda.get_device_name(configured_device)), False
+    if count == 1:
+        return 0, str(cuda.get_device_name(0)), True
+    raise RuntimeError(
+        f"Configured logical GPU {configured_device} is unavailable and {count} ROCm devices are present; "
+        "the replacement device is ambiguous."
+    )
+
+
 def main() -> int:
     try:
-        settings = SettingsStore(APP_DIR).load()
+        store = SettingsStore(APP_DIR)
+        settings = store.load()
         device = int(settings["models"].get("gpu_device", 0))
         profile = selected_profile(APP_DIR / ".venv")
     except Exception:
@@ -104,12 +128,32 @@ def main() -> int:
     if profile in {"directml", "rocm"}:
         label = "ROCm/DirectML" if profile == "rocm" else "DirectML"
         failure_message = ROCM_RUNTIME_FAILED_MESSAGE if profile == "rocm" else DIRECTML_RUNTIME_FAILED_MESSAGE
+        resolved_device = device
+        device_name = ""
+        migrated = False
         try:
-            validate(profile, device)
-            print(f"[Mozarie] {label} GPU {device} is ready.")
+            if profile == "rocm":
+                resolved_device, device_name, migrated = _resolve_rocm_setup_device(device)
+            validate(profile, resolved_device)
+            if migrated:
+                try:
+                    store.save({"models": {"gpu_device": resolved_device}})
+                except Exception as exc:
+                    print(
+                        f"[Mozarie] ROCm GPU selection migration from logical GPU {device} "
+                        f"to {resolved_device} ({device_name}) could not be saved."
+                    )
+                    _print_exception_chain(exc, label)
+                    print(ROCM_DEVICE_SAVE_FAILED_MESSAGE)
+                    return 1
+                print(
+                    f"[Mozarie] ROCm GPU selection migrated from logical GPU {device} "
+                    f"to {resolved_device} ({device_name})."
+                )
+            print(f"[Mozarie] {label} GPU {resolved_device} is ready.")
             return 0
         except Exception as exc:
-            print(f"[Mozarie] {label} setup probe failed for logical GPU {device}.")
+            print(f"[Mozarie] {label} setup probe failed for logical GPU {resolved_device}.")
             _print_exception_chain(exc, label)
             print(failure_message)
             return 1
