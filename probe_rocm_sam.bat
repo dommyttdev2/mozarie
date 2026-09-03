@@ -15,7 +15,10 @@ if not exist "%PYTHON%" (
   exit /b 1
 )
 
-"%PYTHON%" -m pip install --disable-pip-version-check -r "%APP_DIR%requirements-rocm-sam-probe.txt"
+rem Install torchvision from the same AMD gfx103X-all repository as PyTorch.
+rem segment-anything is pinned to Mozarie's production commit and does not
+rem declare a PyTorch dependency of its own.
+"%PYTHON%" -m pip install --disable-pip-version-check --index-url https://repo.amd.com/rocm/whl/gfx103X-all/ -r "%APP_DIR%requirements-rocm-sam-probe.txt"
 if errorlevel 1 exit /b 1
 "%PYTHON%" -m pip check
 if errorlevel 1 exit /b 1
