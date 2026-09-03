@@ -4,8 +4,7 @@ setlocal
 set "APP_DIR=%~dp0"
 set "VENV=%LOCALAPPDATA%\Mozarie\migraphx-probe-venv"
 set "PYTHON=%VENV%\Scripts\python.exe"
-set "PY_SELECTOR="
-set "PYTHON_MANAGER_AUTOMATIC_INSTALL=0"
+set "BASE_PYTHON="
 
 if exist "%PYTHON%" (
   "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 14) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
@@ -27,17 +26,17 @@ goto :create_venv
 
 :create_venv
 call :find_base_python
-if not defined PY_SELECTOR goto :missing_python
+if not defined BASE_PYTHON goto :missing_python
 
 echo [Mozarie] Selected Python runtime:
-py -V:%PY_SELECTOR% --version
-py -V:%PY_SELECTOR% -c "import struct, sys; print(sys.executable); print(str(struct.calcsize('P') * 8) + '-bit')"
+"%BASE_PYTHON%" --version
+"%BASE_PYTHON%" -c "import struct, sys; print(sys.executable); print(str(struct.calcsize('P') * 8) + '-bit')"
 if errorlevel 1 (
   echo [Mozarie] Selected Python runtime could not be launched.
   exit /b 1
 )
 
-py -V:%PY_SELECTOR% -m venv "%VENV%"
+"%BASE_PYTHON%" -m venv "%VENV%"
 if errorlevel 1 (
   echo [Mozarie] Could not create the dedicated MIGraphX probe environment.
   exit /b 1
@@ -71,10 +70,15 @@ popd
 exit /b %RESULT%
 
 :find_base_python
-for %%V in (3.13 3.12 3.11) do (
-  if not defined PY_SELECTOR (
-    py -V:%%V -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 14) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
-    if not errorlevel 1 set "PY_SELECTOR=%%V"
-  )
+call :try_python 3.13
+if defined BASE_PYTHON exit /b 0
+call :try_python 3.12
+if defined BASE_PYTHON exit /b 0
+call :try_python 3.11
+exit /b 0
+
+:try_python
+for /f "usebackq delims=" %%P in (`py list --one --format=exe %1 2^>nul`) do (
+  if exist "%%P" set "BASE_PYTHON=%%P"
 )
 exit /b 0
