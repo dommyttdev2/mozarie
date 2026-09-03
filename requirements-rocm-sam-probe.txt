@@ -1,0 +1,4 @@
+# Additional dependencies for the Windows ROCm SAM probe.
+# PyTorch itself is installed by probe_rocm.bat from AMD's gfx103X-all repository.
+numpy>=1.26,<3
+segment-anything @ https://github.com/facebookresearch/segment-anything/archive/dca509fe793f601edb92606367a655c15ac00fdf.tar.gz
