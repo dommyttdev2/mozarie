@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import sys
-import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -47,23 +44,25 @@ class _Helper:
 
 
 class _SessionOptions:
-    pass
+    def __init__(self) -> None:
+        self.config_entries: dict[str, str] = {}
+
+    def add_session_config_entry(self, key: str, value: str) -> None:
+        self.config_entries[key] = value
 
 
 class _Session:
     active = [probe.DML_EP, "CPUExecutionProvider"]
     output = np.full((1, 64), 64.0, dtype=np.float32)
-    profile_events = [
-        {"args": {"op_name": "MatMul", "provider": probe.DML_EP}},
-    ]
     create_error: Exception | None = None
+    last: "_Session | None" = None
 
     def __init__(self, _model, *, sess_options, providers):
         if self.create_error is not None:
             raise self.create_error
         self.options = sess_options
         self.providers = providers
-        self._profile_file = None
+        type(self).last = self
 
     @staticmethod
     def disable_fallback():
@@ -74,18 +73,6 @@ class _Session:
 
     def run(self, _outputs, _feeds):
         return [self.output]
-
-    def end_profiling(self):
-        handle = tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".json",
-            encoding="utf-8",
-            delete=False,
-        )
-        json.dump(self.profile_events, handle)
-        handle.close()
-        self._profile_file = handle.name
-        return handle.name
 
 
 def _ort(session_type=_Session, providers=None):
@@ -110,10 +97,8 @@ class RocmDirectmlProbeTests(unittest.TestCase):
     def tearDown(self) -> None:
         _Session.active = [probe.DML_EP, "CPUExecutionProvider"]
         _Session.output = np.full((1, 64), 64.0, dtype=np.float32)
-        _Session.profile_events = [
-            {"args": {"op_name": "MatMul", "provider": probe.DML_EP}},
-        ]
         _Session.create_error = None
+        _Session.last = None
 
     def test_dxgi_inventory_and_fail_closed_selection(self) -> None:
         adapter = DxgiDevice(3, " AMD Radeon RX 6600M ", (1, 2))
@@ -139,27 +124,15 @@ class RocmDirectmlProbeTests(unittest.TestCase):
                 [DxgiDevice(0, "GPU"), DxgiDevice(1, "gpu")],
             )
 
-    def test_directml_provider_and_profile_detection(self) -> None:
+    def test_directml_provider_validation(self) -> None:
         self.assertEqual(
             probe.validate_directml_runtime(_ort()),
             [probe.DML_EP, "CPUExecutionProvider"],
         )
         with self.assertRaisesRegex(probe.rocm_probe.ProbeError, "does not expose"):
             probe.validate_directml_runtime(_ort(providers=["CPUExecutionProvider"]))
-        self.assertFalse(probe._profile_uses_directml_matmul({}))
-        self.assertFalse(probe._profile_uses_directml_matmul([1, {"args": 1}]))
-        self.assertFalse(
-            probe._profile_uses_directml_matmul(
-                [{"args": {"op_name": "Add", "provider": probe.DML_EP}}]
-            )
-        )
-        self.assertTrue(
-            probe._profile_uses_directml_matmul(
-                [{"args": {"op_name": "MatMul", "provider": probe.DML_EP}}]
-            )
-        )
 
-    def test_directml_matmul_success_and_failure_modes(self) -> None:
+    def test_directml_matmul_disables_cpu_ep_fallback(self) -> None:
         result = probe.run_directml_matmul(_ort(), ONNX, np, 2)
         self.assertEqual(
             result,
@@ -168,10 +141,27 @@ class RocmDirectmlProbeTests(unittest.TestCase):
                 "deviceIndex": 2,
                 "shape": [1, 64],
                 "verified": True,
-                "profileVerified": True,
+                "cpuFallbackDisabled": True,
             },
         )
+        session = _Session.last
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(
+            session.providers,
+            [(probe.DML_EP, {"device_id": 2})],
+        )
+        self.assertEqual(
+            session.options.config_entries,
+            {probe.CPU_FALLBACK_CONFIG: "1"},
+        )
+        self.assertFalse(session.options.enable_mem_pattern)
+        self.assertEqual(
+            session.options.execution_mode,
+            _ort().ExecutionMode.ORT_SEQUENTIAL,
+        )
 
+    def test_directml_matmul_failure_modes(self) -> None:
         _Session.active = ["CPUExecutionProvider"]
         with self.assertRaisesRegex(probe.rocm_probe.ProbeError, "instead of"):
             probe.run_directml_matmul(_ort(), ONNX, np, 0)
@@ -180,26 +170,6 @@ class RocmDirectmlProbeTests(unittest.TestCase):
         _Session.output = np.zeros((1, 64), dtype=np.float32)
         with self.assertRaisesRegex(probe.rocm_probe.ProbeError, "unexpected result"):
             probe.run_directml_matmul(_ort(), ONNX, np, 0)
-
-        _Session.output = np.full((1, 64), 64.0, dtype=np.float32)
-        _Session.profile_events = [{"args": {"op_name": "MatMul", "provider": "CPUExecutionProvider"}}]
-        with self.assertRaisesRegex(probe.rocm_probe.ProbeError, "did not report"):
-            probe.run_directml_matmul(_ort(), ONNX, np, 0)
-
-        class BadProfileSession(_Session):
-            def end_profiling(self):
-                handle = tempfile.NamedTemporaryFile(
-                    mode="w",
-                    suffix=".json",
-                    encoding="utf-8",
-                    delete=False,
-                )
-                handle.write("{")
-                handle.close()
-                return handle.name
-
-        with self.assertRaisesRegex(probe.rocm_probe.ProbeError, "profiling output"):
-            probe.run_directml_matmul(_ort(BadProfileSession), ONNX, np, 0)
 
         class EmptyOutputSession(_Session):
             def run(self, _outputs, _feeds):
@@ -239,7 +209,7 @@ class RocmDirectmlProbeTests(unittest.TestCase):
                     "deviceIndex": 7,
                     "shape": [1, 64],
                     "verified": True,
-                    "profileVerified": True,
+                    "cpuFallbackDisabled": True,
                 },
             ) as directml,
         ):
@@ -252,6 +222,7 @@ class RocmDirectmlProbeTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["directml"]["deviceIndex"], 7)
+        self.assertTrue(result["directml"]["cpuFallbackDisabled"])
         self.assertTrue(result["rocmAfterDirectml"]["verified"])
         directml.assert_called_once()
         rocm_after.assert_called_once_with(torch, 0)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
 from typing import Any
 
@@ -17,6 +16,7 @@ from .runtime import (
 
 
 DML_EP = "DmlExecutionProvider"
+CPU_FALLBACK_CONFIG = "session.disable_cpu_ep_fallback"
 
 
 def describe_dxgi_adapter(adapter: DxgiDevice) -> dict[str, object]:
@@ -88,20 +88,6 @@ def validate_directml_runtime(ort: Any) -> list[str]:
     return providers
 
 
-def _profile_uses_directml_matmul(events: Any) -> bool:
-    if not isinstance(events, list):
-        return False
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        args = event.get("args")
-        if not isinstance(args, dict):
-            continue
-        if args.get("op_name") == "MatMul" and args.get("provider") == DML_EP:
-            return True
-    return False
-
-
 def run_directml_matmul(
     ort: Any,
     onnx: Any,
@@ -130,15 +116,13 @@ def run_directml_matmul(
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     options.enable_mem_pattern = False
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    options.enable_profiling = True
-    profile_path: Path | None = None
+    options.add_session_config_entry(CPU_FALLBACK_CONFIG, "1")
     try:
         session = ort.InferenceSession(
             model.SerializeToString(),
             sess_options=options,
             providers=[
                 (DML_EP, {"device_id": int(device_index)}),
-                "CPUExecutionProvider",
             ],
         )
         session.disable_fallback()
@@ -155,31 +139,17 @@ def run_directml_matmul(
             np.allclose(outputs[0], np.full((1, 64), 64.0, dtype=np.float32))
         ):
             raise rocm_probe.ProbeError("DirectML MatMul returned an unexpected result.")
-        profile_path = Path(session.end_profiling())
-        try:
-            events = json.loads(profile_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise rocm_probe.ProbeError(
-                f"DirectML profiling output could not be read: {exc}"
-            ) from exc
-        if not _profile_uses_directml_matmul(events):
-            raise rocm_probe.ProbeError(
-                "The ONNX MatMul did not report DmlExecutionProvider execution."
-            )
         return {
             "provider": DML_EP,
             "deviceIndex": int(device_index),
             "shape": [1, 64],
             "verified": True,
-            "profileVerified": True,
+            "cpuFallbackDisabled": True,
         }
     except rocm_probe.ProbeError:
         raise
     except Exception as exc:
         raise rocm_probe.ProbeError(f"DirectML MatMul probe failed: {exc}") from exc
-    finally:
-        if profile_path is not None:
-            profile_path.unlink(missing_ok=True)
 
 
 def probe(
