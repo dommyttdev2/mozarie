@@ -1,0 +1,3 @@
+# Dedicated Windows ROCm/HIP probe for AMD RDNA2 (gfx103X-all).
+# Keep isolated from the application's DirectML environment.
+torch==2.11.0+rocm7.13.0
