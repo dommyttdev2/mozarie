@@ -1,0 +1,6 @@
+# Dedicated Windows ML / MIGraphX probe environment. Do not install into Mozarie's .venv.
+numpy>=1.26,<3
+onnx>=1.16,<2
+onnxruntime-windowsml==1.28.0.202607272323
+wasdk-Microsoft.Windows.AI.MachineLearning[all]==2.3.0
+wasdk-Microsoft.Windows.ApplicationModel.DynamicDependency.Bootstrap==2.3.0
