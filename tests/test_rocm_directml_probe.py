@@ -11,6 +11,10 @@ from mozarie import rocm_directml_probe as probe
 from mozarie.runtime import DxgiDevice
 
 
+ORT_ENABLE_ALL = object()
+ORT_SEQUENTIAL = object()
+
+
 class _Model:
     @staticmethod
     def SerializeToString() -> bytes:
@@ -81,8 +85,8 @@ def _ort(session_type=_Session, providers=None):
             providers if providers is not None else [probe.DML_EP, "CPUExecutionProvider"]
         ),
         SessionOptions=_SessionOptions,
-        GraphOptimizationLevel=types.SimpleNamespace(ORT_ENABLE_ALL=object()),
-        ExecutionMode=types.SimpleNamespace(ORT_SEQUENTIAL=object()),
+        GraphOptimizationLevel=types.SimpleNamespace(ORT_ENABLE_ALL=ORT_ENABLE_ALL),
+        ExecutionMode=types.SimpleNamespace(ORT_SEQUENTIAL=ORT_SEQUENTIAL),
         InferenceSession=session_type,
     )
 
@@ -156,10 +160,8 @@ class RocmDirectmlProbeTests(unittest.TestCase):
             {probe.CPU_FALLBACK_CONFIG: "1"},
         )
         self.assertFalse(session.options.enable_mem_pattern)
-        self.assertEqual(
-            session.options.execution_mode,
-            _ort().ExecutionMode.ORT_SEQUENTIAL,
-        )
+        self.assertIs(session.options.execution_mode, ORT_SEQUENTIAL)
+        self.assertIs(session.options.graph_optimization_level, ORT_ENABLE_ALL)
 
     def test_directml_matmul_failure_modes(self) -> None:
         _Session.active = ["CPUExecutionProvider"]
