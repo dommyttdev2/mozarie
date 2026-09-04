@@ -95,6 +95,17 @@ class WindowsRocmRuntimeProfileTests(unittest.TestCase):
                 patch.object(runtime_profile.metadata, "version", side_effect=runtime_profile.metadata.PackageNotFoundError):
             self.assertEqual(runtime_profile.installed_profile(), "directml")
 
+        def cpu_torch_version(name: str) -> str:
+            if name == "torch-directml":
+                raise runtime_profile.metadata.PackageNotFoundError
+            if name == "torch":
+                return "2.11.0"
+            raise AssertionError(name)
+
+        with patch.object(runtime_profile, "installed_distributions", return_value={"onnxruntime-directml": "1.24.4"}), \
+                patch.object(runtime_profile.metadata, "version", side_effect=cpu_torch_version):
+            self.assertEqual(runtime_profile.installed_profile(), "directml")
+
     def test_preflight_rocm_requires_directml_ep(self) -> None:
         good = SimpleNamespace(get_available_providers=lambda: ["DmlExecutionProvider"])
         with patch.object(runtime_profile, "installed_profile", return_value="rocm"), patch.dict(sys.modules, {"onnxruntime": good}):
@@ -201,6 +212,7 @@ class WindowsRocmRuntimeProfileTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
                 patch.object(setup_gpu_check, "selected_profile", return_value="rocm"), \
+                patch.object(setup_gpu_check, "_resolve_rocm_setup_device", return_value=(0, "AMD Radeon RX 6600M", False)), \
                 patch.object(setup_gpu_check, "validate") as validate, redirect_stdout(output):
             self.assertEqual(setup_gpu_check.main(), 0)
         validate.assert_called_once_with("rocm", 0)
@@ -209,6 +221,7 @@ class WindowsRocmRuntimeProfileTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(setup_gpu_check, "SettingsStore", return_value=store), \
                 patch.object(setup_gpu_check, "selected_profile", return_value="rocm"), \
+                patch.object(setup_gpu_check, "_resolve_rocm_setup_device", return_value=(0, "AMD Radeon RX 6600M", False)), \
                 patch.object(setup_gpu_check, "validate", side_effect=RuntimeError("bad")), redirect_stdout(output):
             self.assertEqual(setup_gpu_check.main(), 1)
         self.assertIn("ROCm/DirectML runtime could not start", output.getvalue())

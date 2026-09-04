@@ -48,13 +48,19 @@ def _is_api_path(path: str) -> bool:
     return path == "/api" or path.startswith("/api/")
 
 
-def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
+def health_device(
+    provider: str,
+    gpu_device: int,
+    gpus: list[dict[str, object]],
+    *,
+    runtime_backend: str | None = None,
+) -> dict[str, object]:
     """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
         return {"provider": "cpu", "runtimeBackend": "cpu", "gpuDevice": None, "device": "CPU"}
     selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
     name = str(selected["name"]) if selected else "unavailable"
-    backend = str(selected.get("backend", "cuda")) if selected else "unavailable"
+    backend = runtime_backend or (str(selected.get("backend", "cuda")) if selected else "unavailable")
     return {"provider": "gpu", "runtimeBackend": backend, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
 
 
@@ -223,7 +229,16 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "modelsConfigured": configured,
                 }
                 if provider == "gpu":
-                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), status["gpus"]))
+                    payload.update(health_device(
+                        provider,
+                        int(models.get("gpu_device", 0)),
+                        status["gpus"],
+                        runtime_backend=(
+                            str(status["runtimeBackend"])
+                            if status.get("runtimeBackend")
+                            else None
+                        ),
+                    ))
                 else:
                     payload.update(health_device(provider, 0, []))
                 self._json(payload)

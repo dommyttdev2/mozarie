@@ -142,6 +142,22 @@ class OnnxAdapterTests(unittest.TestCase):
             self.assertEqual(options.execution_mode, 0)
             self.assertEqual(create.call_args.kwargs["providers"], [("DmlExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"])
 
+    def test_rocm_onnx_session_disables_cpu_ep_fallback(self) -> None:
+        options = SimpleNamespace(add_session_config_entry=Mock())
+        session = Mock()
+        session.get_providers.return_value = ["DmlExecutionProvider"]
+        with patch.dict(os.environ, {"MOZARIE_RUNTIME": "rocm"}), \
+                patch.object(onnx_module.ort, "SessionOptions", return_value=options), \
+                patch.object(onnx_module, "onnx_backend", return_value="directml"), \
+                patch.object(onnx_module, "available_providers", return_value=["DmlExecutionProvider"]), \
+                patch.object(onnx_module.ort, "InferenceSession", return_value=session):
+            self.assertIs(onnx_module._create_session(b"model", "gpu", 0), session)
+        options.add_session_config_entry.assert_called_once_with(
+            onnx_module._CPU_FALLBACK_CONFIG,
+            "1",
+        )
+        session.disable_fallback.assert_called_once_with()
+
     def test_gpu_session_keeps_model_loading_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"

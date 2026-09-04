@@ -25,6 +25,23 @@ class RuntimeContractTests(unittest.TestCase):
             {"provider": "gpu", "runtimeBackend": "cuda", "gpuDevice": 1, "gpuName": "second", "device": "GPU 1: second"},
         )
 
+    def test_health_uses_the_resolved_rocm_backend(self):
+        self.assertEqual(
+            health_device(
+                "gpu",
+                0,
+                [{"id": 0, "name": "AMD Radeon RX 6600M"}],
+                runtime_backend="rocm",
+            ),
+            {
+                "provider": "gpu",
+                "runtimeBackend": "rocm",
+                "gpuDevice": 0,
+                "gpuName": "AMD Radeon RX 6600M",
+                "device": "GPU 0: AMD Radeon RX 6600M",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
