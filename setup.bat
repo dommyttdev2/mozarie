@@ -24,6 +24,7 @@ if not defined RUNTIME if exist "%APP_DIR%.venv\.mozarie-runtime.json" for /f "u
 if not defined RUNTIME for /f "usebackq delims=" %%R in (`powershell.exe -NoProfile -Command "$gpu=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -like 'PCI*' }); if ($gpu.PNPDeviceID -match 'VEN_10DE') { 'cuda' } elseif ($gpu.PNPDeviceID -match 'VEN_1002') { 'directml' } else { 'cuda' }"`) do set "RUNTIME=%%R"
 if /i "%RUNTIME%"=="cuda" goto :runtime_ready
 if /i "%RUNTIME%"=="directml" goto :runtime_ready
+if /i "%RUNTIME%"=="rocm" goto :runtime_ready
 if /i "%RUNTIME%"=="cpu" goto :runtime_ready
 goto :invalid_runtime
 
@@ -49,6 +50,7 @@ if exist "%APP_DIR%.venv\.mozarie-ready" goto :ready_marker_remove_failed
 echo [Mozarie] Runtime: %RUNTIME%
 set "REQUIREMENTS=%APP_DIR%requirements.txt"
 if /i "%RUNTIME%"=="directml" set "REQUIREMENTS=%APP_DIR%mozarie\requirements-directml.txt"
+if /i "%RUNTIME%"=="rocm" set "REQUIREMENTS=%APP_DIR%mozarie\requirements-rocm.txt"
 if /i "%RUNTIME%"=="cpu" set "REQUIREMENTS=%APP_DIR%mozarie\requirements-cpu.txt"
 "%PYTHON%" -m pip install --disable-pip-version-check --progress-bar on -r "%REQUIREMENTS%"
 if errorlevel 1 goto :requirements_failed
@@ -75,6 +77,7 @@ exit /b 0
 exit /b 1
 
 :create_venv
+if /i "%RUNTIME%"=="rocm" goto :create_rocm_venv
 if /i "%RUNTIME%"=="directml" goto :create_directml_venv
 if /i "%RUNTIME%"=="cpu" goto :create_directml_venv
 for %%V in (3.14-64 3.13-64 3.12-64 3.11-64) do (
@@ -90,13 +93,23 @@ for %%V in (3.12-64 3.11-64) do (
 )
 exit /b 1
 
+:create_rocm_venv
+for /f "usebackq delims=" %%P in (`py list --one --format=exe 3.12 2^>nul`) do (
+  if exist "%%P" (
+    "%%P" -m venv "%APP_DIR%.venv" >nul 2>nul
+    if not errorlevel 1 goto :venv_ready
+  )
+)
+exit /b 1
+
 :venv_ready
 if not exist "%PYTHON%" exit /b 1
 exit /b 0
 
 :validate_python
 if /i "%RUNTIME%"=="cuda" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 15) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
-if /i not "%RUNTIME%"=="cuda" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 13) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+if /i "%RUNTIME%"=="rocm" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
+if /i not "%RUNTIME%"=="cuda" if /i not "%RUNTIME%"=="rocm" "%PYTHON%" -c "import struct, sys; raise SystemExit(0 if (3, 11) <= sys.version_info < (3, 13) and struct.calcsize('P') == 8 else 1)" >nul 2>nul
 exit /b %ERRORLEVEL%
 
 :pip_upgrade_failed
@@ -140,7 +153,7 @@ pause
 exit /b 1
 
 :running_check_failed
-echo [Mozarie] Mozarie status could not be checked. Check the message above, then run setup.bat again. / Mozarieの起動状態を確認できませんでした。上のメッセージを確認してから setup.bat を再実行してください。
+echo [Mozarie] Mozarie status could not be checked. Check the message above, then run setup.bat again. / Mozarieの起動状態を確認できませんでした。上のメッセージを確認してから setup.bat を実行してください。
 pause
 exit /b 1
 
@@ -156,12 +169,13 @@ exit /b 1
 
 :python_too_old
 if /i "%RUNTIME%"=="cuda" echo [Mozarie] CUDA needs 64-bit Python 3.11 to 3.14. Remove .venv and run setup.bat again.
-if /i not "%RUNTIME%"=="cuda" echo [Mozarie] DirectML and CPU need 64-bit Python 3.11 or 3.12. Remove .venv and run setup.bat again.
+if /i "%RUNTIME%"=="rocm" echo [Mozarie] ROCm needs 64-bit Python 3.12. Remove .venv and run setup.bat again.
+if /i not "%RUNTIME%"=="cuda" if /i not "%RUNTIME%"=="rocm" echo [Mozarie] DirectML and CPU need 64-bit Python 3.11 or 3.12. Remove .venv and run setup.bat again.
 pause
 exit /b 1
 
 :invalid_runtime
-echo [Mozarie] MOZARIE_RUNTIME must be cuda, directml, or cpu.
+echo [Mozarie] MOZARIE_RUNTIME must be cuda, directml, rocm, or cpu.
 pause
 exit /b 1
 

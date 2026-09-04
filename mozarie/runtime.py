@@ -8,7 +8,7 @@ from types import MethodType
 from typing import Any
 
 
-BACKENDS = {"cuda", "directml", "cpu"}
+BACKENDS = {"cuda", "directml", "rocm", "cpu"}
 _DXGI_ERROR_NOT_FOUND = -2005270526
 
 
@@ -41,8 +41,19 @@ def configured_backend() -> str | None:
 
 
 def runtime_backend(*, ort_module: Any | None = None, torch_module: Any | None = None) -> str:
+    """Legacy compatibility resolver while ONNX/Torch call sites are split.
+
+    The Windows ``rocm`` profile is intentionally heterogeneous: ONNX Runtime
+    remains DirectML while PyTorch uses ROCm/HIP. Callers that provide the
+    relevant runtime module therefore receive the backend for that stack.
+    """
     configured = configured_backend()
     if configured is not None:
+        if configured == "rocm":
+            if ort_module is not None:
+                return "directml"
+            if torch_module is not None:
+                return "rocm"
         return configured
     if ort_module is not None:
         providers = set(ort_module.get_available_providers())
@@ -51,6 +62,8 @@ def runtime_backend(*, ort_module: Any | None = None, torch_module: Any | None =
         if "DmlExecutionProvider" in providers:
             return "directml"
     if torch_module is not None and getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)():
+        if getattr(getattr(torch_module, "version", None), "hip", None):
+            return "rocm"
         return "cuda"
     try:
         directml = importlib.import_module("torch_directml")
@@ -265,9 +278,6 @@ def directml_onnx_device_id(
                     "Unable to map the selected DirectML GPU to one physical DXGI adapter"
                 ) from exc
             if all(identity is not None for identity in identities) and len(set(identities)) == 1:
-                # DXGI enumeration order is the ONNX Runtime DirectML device order.
-                # The matching entries are proven aliases of one physical GPU;
-                # use the first enumerated alias, never a numeric-index heuristic.
                 return matches[0].index
     raise RuntimeError("Unable to map the selected DirectML GPU to one physical DXGI adapter")
 
@@ -289,7 +299,7 @@ def torch_device(torch: Any, provider: str, device_id: int = 0, *, backend: str 
     if provider.lower() == "cpu":
         return "cpu"
     selected = backend or runtime_backend(torch_module=torch)
-    if selected == "cuda":
+    if selected in {"cuda", "rocm"}:
         return f"cuda:{int(device_id)}"
     if selected == "directml":
         directml = directml_module()

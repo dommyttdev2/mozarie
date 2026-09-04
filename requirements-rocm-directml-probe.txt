@@ -1,0 +1,5 @@
+# Additional dependencies for the combined Windows ROCm + DirectML probe.
+# torch-directml is intentionally absent: production ROCm must not mix it with ROCm PyTorch.
+numpy>=1.26,<3
+onnx>=1.16,<2
+onnxruntime-directml==1.24.4

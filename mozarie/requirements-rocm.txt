@@ -1,0 +1,11 @@
+--extra-index-url https://repo.amd.com/rocm/whl/gfx103X-all/
+numpy>=1.26,<3
+Pillow>=11.3,<13
+opencv-python>=4.8,<5
+onnx>=1.12,<2
+onnxruntime-directml==1.24.4
+torch==2.11.0+rocm7.13.0
+torchvision==0.26.0+rocm7.13.0
+segment-anything @ https://github.com/facebookresearch/segment-anything/archive/dca509fe793f601edb92606367a655c15ac00fdf.tar.gz
+safetensors>=0.4,<1
+ultralytics==8.4.75
