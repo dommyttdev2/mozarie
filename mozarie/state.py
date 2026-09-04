@@ -72,6 +72,40 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     return devices
 
 
+def rocm_device_statuses(torch: Any) -> list[dict[str, object]]:
+    """List HIP devices exposed by the installed ROCm PyTorch build."""
+    if not getattr(getattr(torch, "version", None), "hip", None):
+        return []
+    cuda = torch.cuda
+    if not cuda.is_available():
+        return []
+    get_arch_list = getattr(cuda, "get_arch_list", None)
+    compiled_arches = {
+        str(architecture).split(":", 1)[0].strip().casefold()
+        for architecture in (get_arch_list() if callable(get_arch_list) else [])
+        if str(architecture).strip()
+    }
+    devices: list[dict[str, object]] = []
+    for index in range(int(cuda.device_count())):
+        properties = cuda.get_device_properties(index)
+        raw_architecture = str(
+            getattr(properties, "gcnArchName", None)
+            or getattr(properties, "gcn_arch_name", None)
+            or ""
+        ).strip()
+        architecture = raw_architecture.split(":", 1)[0]
+        devices.append({
+            "id": index,
+            "name": str(cuda.get_device_name(index)),
+            "architecture": architecture,
+            "totalMemory": int(properties.total_memory),
+            "supported": bool(architecture) and (
+                not compiled_arches or architecture.casefold() in compiled_arches
+            ),
+        })
+    return devices
+
+
 def gpu_device_statuses(torch: Any) -> list[dict[str, object]]:
     backend = runtime_backend(torch_module=torch)
     if backend == "directml":
@@ -79,6 +113,8 @@ def gpu_device_statuses(torch: Any) -> list[dict[str, object]]:
             return directml_devices()
         except (ImportError, OSError, RuntimeError):
             return []
+    if backend == "rocm":
+        return rocm_device_statuses(torch)
     return cuda_device_statuses(torch) if backend == "cuda" else []
 
 
