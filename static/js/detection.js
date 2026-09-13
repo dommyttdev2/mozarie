@@ -50,6 +50,10 @@ function normaliseImportParallelism(value) {
   return Number.isFinite(number) ? Math.max(1, Math.round(number)) : 3;
 }
 
+function importParallelism() {
+  return normaliseImportParallelism(state.settings?.importing?.parallelism);
+}
+
 function openDetectionDialog(imageIds) {
   const ids = new Set(processableImages().map((image) => image.id));
   imageIds = [...new Set(imageIds)].filter((imageId) => ids.has(imageId));
