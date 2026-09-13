@@ -381,7 +381,6 @@ function renderProjectTable() {
 async function showProjectList({ focusProjectId = "", focusTarget = null, sort = projectListSort, keepClosed = false } = {}) {
   if (state.projectOperationPending || state.catalogTransition) return;
   const data = await api(`/api/projects?sort=${encodeURIComponent(`${sort.key}_${sort.direction}`)}`);
-  await forgetOrphanedProjectSources(new Set((data.projects || []).map((project) => project.id)));
   projectListProjects = new Map((data.projects || []).map((project) => [project.id, project]));
   projectListSort = sort;
   renderProjectTable();
