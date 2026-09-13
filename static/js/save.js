@@ -163,8 +163,7 @@ async function openSingleSaveDialog(imageId = state.currentId) {
   const image = state.images.find((entry) => entry.id === imageId);
   if (!isProcessableImage(image) || isBusy() || state.importing || currentImageActionPending() || state.currentId !== imageId || !isCurrentGeneration(generation)
     || !state.currentImage || state.projectReadOnly || image.sourceDimensionsChanged) return;
-  state.singleSave = { imageId, generation, divisor: Number($("#divisor").value), draft: draftPayload([imageId])[imageId] || null,
-    projectId: state.project?.id || null, catalogGeneration: state.serverCatalogGeneration, invoker };
+  state.singleSave = { imageId, generation, divisor: Number($("#divisor").value), draft: draftPayload([imageId])[imageId] || null, invoker };
   $("#singleSaveTarget").textContent = t("apply.singleTarget", { name: image.relativePath });
   $("#singleSaveCopyMode").checked = true;
   $("#singleSaveDeleteOriginal").checked = false;
@@ -970,8 +969,6 @@ async function finishApplyJob(job) {
   let reconciled = false;
   let generation = ++state.imageGeneration;
   const catalogEpoch = state.catalogEpoch;
-  const expectedProjectId = state.project?.id || null;
-  const expectedCatalogGeneration = state.serverCatalogGeneration;
   try {
     const keepCurrent = state.currentId;
     const requestedImageIds = Array.isArray(job.imageIds) ? job.imageIds : state.applyTargetIds;
@@ -1027,8 +1024,6 @@ async function finishDetectionJob(job) {
   const invoker = modalInvokers.get($("#processingDialog"));
   const generation = ++state.imageGeneration;
   const catalogEpoch = state.catalogEpoch;
-  const expectedProjectId = state.project?.id || null;
-  const expectedCatalogGeneration = state.serverCatalogGeneration;
   const keepCurrent = state.currentId;
   const requestedIds = Array.isArray(job.imageIds) && job.imageIds.length ? job.imageIds : state.detectionTargetIds;
   const targetIds = Array.isArray(job.completedImageIds) && job.completedImageIds.length
