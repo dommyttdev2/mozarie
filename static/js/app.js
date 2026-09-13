@@ -80,6 +80,55 @@ let projectListSort = { key: "updated", direction: "desc" };
 let projectListSortPending = false;
 let nativeRelinkSourceId = "";
 let nativeRelinkBusy = false;
+let pendingBrowserProjectSources = [];
+const browserSourceRestoreBusy = new Set();
+let browserSourceRestoreGeneration = 0;
+function clearPendingBrowserProjectSources() { browserSourceRestoreGeneration += 1; pendingBrowserProjectSources = []; browserSourceRestoreBusy.clear(); }
+async function restoreBrowserProjectSourcesForCurrentCatalog() {
+  const projectId = state.project?.id; const epoch = state.catalogEpoch; const restoreGeneration = ++browserSourceRestoreGeneration;
+  if (!projectId) return;
+  let remembered;
+  try { remembered = await rememberedProjectSources(projectId); }
+  catch { return; }
+  const { files, directories } = remembered;
+  if (!isCurrentCatalogEpoch(epoch) || state.project?.id !== projectId) return;
+  const stagedAccess = new Map();
+  const pending = [];
+  const imagesById = new Map(state.images.map((image) => [image.id, image]));
+  for (const source of files) {
+    const image = imagesById.get(source.imageId);
+    if (await ensureProjectSourcePermission(source.handle)) {
+      if (image) stagedAccess.set(source.imageId, {
+        fileHandle: source.handle, sourceId: source.sourceId, clientKey: source.clientKey, relativePath: source.relativePath,
+        sourceKind: "browser-files", size: image.sizeBytes, lastModified: Math.floor(Number(image.mtimeNs) / 1000000),
+      });
+      continue;
+    }
+    pending.push({ ...source, projectId, kind: "file", key: `file:${source.sourceId}:${source.clientKey || source.relativePath}` });
+  }
+  for (const source of directories) {
+    if (!await ensureProjectSourcePermission(source.handle)) { pending.push({ ...source, projectId, kind: "directory", key: `directory:${source.sourceId}` }); continue; }
+    const images = new Map(state.images.filter((image) => image.sourceId === source.sourceId).map((image) => [image.relativePath, image]));
+    async function collect(handle, parent = "", parentHandle = null) {
+      for await (const child of handle.values()) {
+        const relativePath = parent ? `${parent}/${child.name}` : child.name;
+        if (child.kind === "file") {
+          const image = images.get(relativePath);
+          if (image) stagedAccess.set(image.id, {
+            fileHandle: child, parentHandle, name: child.name, sourceId: source.sourceId, relativePath,
+            sourceKind: "browser-directory", size: image.sizeBytes, lastModified: Math.floor(Number(image.mtimeNs) / 1000000),
+          });
+        } else await collect(child, relativePath, handle);
+      }
+    }
+    try { await collect(source.handle, "", source.handle); }
+    catch { pending.push({ ...source, projectId, kind: "directory", key: `directory:${source.sourceId}` }); }
+  }
+  if (restoreGeneration === browserSourceRestoreGeneration && isCurrentCatalogEpoch(epoch) && state.project?.id === projectId) {
+    state.sourceAccess = stagedAccess;
+    pendingBrowserProjectSources = pending; renderProjectCurrent();
+  }
+}
 
 function syncFlipControls() {
   const record = currentRecord();
@@ -130,8 +179,9 @@ function syncProjectNameDialogControls() {
   $("#projectNameForm").querySelector('[type="submit"]').disabled = disabled;
 }
 function beginProjectOperation() {
-  if (state.projectOperationPending) return false;
+  if (state.projectOperationPending || state.catalogTransition) return false;
   state.projectOperationPending = true;
+  state.catalogTransition = { epoch: beginCatalogEpoch(), controller: new AbortController() };
   updateActionButtons();
   renderProjectCurrent();
   syncProjectNameDialogControls();
@@ -141,6 +191,7 @@ function beginProjectOperation() {
 }
 function endProjectOperation() {
   state.projectOperationPending = false;
+  if (state.catalogTransition) state.catalogTransition = null;
   updateActionButtons();
   renderProjectCurrent();
   syncProjectNameDialogControls();
@@ -164,7 +215,7 @@ function renderProjectCurrent() {
     : t("project.unnamed");
   $("#projectName").dataset.i18n = project ? "project.rename" : "project.saveCurrent";
   $("#projectName").textContent = t($("#projectName").dataset.i18n);
-  const pending = state.projectOperationPending;
+  const pending = state.projectOperationPending || Boolean(state.catalogTransition);
   $("#projectName").disabled = pending || state.projectReadOnly || (!project && state.images.length === 0);
   $("#projectNew").disabled = pending;
   $("#projectOpenList").disabled = pending;
@@ -179,6 +230,37 @@ function renderProjectCurrent() {
   $("#projectCloseWorkspace").dataset.i18n = project ? "project.close" : "project.closeWork";
   $("#projectCloseWorkspace").textContent = t($("#projectCloseWorkspace").dataset.i18n);
   $("#projectCloseWorkspace").disabled = pending || (!project && state.images.length === 0);
+  const browserRestore = $("#projectBrowserRestore");
+  const list = $("#projectBrowserRestoreList");
+  const sources = pendingBrowserProjectSources.filter((source) => source.projectId === project?.id);
+  browserRestore.hidden = !project || !sources.length;
+  list.replaceChildren(...sources.map((source) => {
+    const item = document.createElement("div"); item.setAttribute("role", "listitem");
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = `${source.handle?.name || source.relativePath || t("project.noSource")} · ${t("project.sourceRestore")}`;
+    button.disabled = pending || browserSourceRestoreBusy.has(source.key);
+    button.addEventListener("click", () => { void restoreBrowserProjectSource(source); });
+    item.append(button); return item;
+  }));
+}
+
+async function restoreBrowserProjectSource(source) {
+  if (!state.project?.id || source.projectId !== state.project.id || browserSourceRestoreBusy.has(source.key) || !beginProjectOperation()) return;
+  browserSourceRestoreGeneration += 1;
+  browserSourceRestoreBusy.add(source.key); renderProjectCurrent();
+  try {
+    // Call requestPermission directly from this click handler. A project open
+    // has already awaited IndexedDB and cannot retain user activation.
+    if (!await requestProjectSourcePermission(source.handle)) return;
+    if (source.kind === "directory") await importProjectDirectoryHandle(source.handle, state.project.id, source.sourceId, "restore");
+    else if ((await importProjectFileHandles([source], state.project.id)).length) throw codedError("project_source_unavailable");
+    pendingBrowserProjectSources = pendingBrowserProjectSources.filter((item) => item.key !== source.key || item.projectId !== source.projectId);
+    await showSourceMismatches();
+  } catch (error) { showUserError(error); }
+  finally {
+    browserSourceRestoreBusy.delete(source.key);
+    endProjectOperation(); renderProjectCurrent();
+  }
 }
 function missingNativeSources(sources) {
   return (sources || []).filter((source) => source.kind === "native-folder" && !source.exists);
@@ -235,8 +317,8 @@ function renderProjectSortHeaders() {
 }
 
 function renderProjectTableControls() {
-  const blocked = isBusy() || state.importing || projectListSortPending || state.projectOperationPending;
-  $("#projectListClose").disabled = projectListSortPending || state.projectOperationPending;
+  const blocked = isBusy() || state.importing || projectListSortPending || state.projectOperationPending || state.catalogTransition;
+  $("#projectListClose").disabled = projectListSortPending || state.projectOperationPending || Boolean(state.catalogTransition);
   for (const row of projectTableRows()) {
     const project = projectListProjects.get(row.dataset.projectId);
     const exportDisabled = blocked || !project || !(project.imageCount > 0) || projectExportBusy.has(project.id);
@@ -297,7 +379,7 @@ function renderProjectTable() {
 }
 
 async function showProjectList({ focusProjectId = "", focusTarget = null, sort = projectListSort, keepClosed = false } = {}) {
-  if (state.projectOperationPending) return;
+  if (state.projectOperationPending || state.catalogTransition) return;
   const data = await api(`/api/projects?sort=${encodeURIComponent(`${sort.key}_${sort.direction}`)}`);
   projectListProjects = new Map((data.projects || []).map((project) => [project.id, project]));
   projectListSort = sort;
@@ -317,7 +399,7 @@ async function showProjectList({ focusProjectId = "", focusTarget = null, sort =
 }
 
 async function sortProjectList(key, focusTarget) {
-  if (state.projectOperationPending || projectListSortPending) return;
+  if (state.projectOperationPending || state.catalogTransition || projectListSortPending) return;
   const previousSort = projectListSort;
   const direction = key === previousSort.key ? (previousSort.direction === "asc" ? "desc" : "asc") : "asc";
   projectListSortPending = true; renderProjectSortHeaders(); renderProjectTableControls();
@@ -346,36 +428,51 @@ async function showSourceMismatches() {
 async function openProject(project, resume = false) {
   if (!beginProjectOperation()) return;
   try {
-    await flushAllImageMutations();
-    await flushAllWorkspaceMutations();
-    if (resume) await api("/api/project/resume", { method: "POST", body: JSON.stringify({ projectId: project.id }) });
-    const data = await api("/api/project/open", { method: "POST", body: JSON.stringify({ projectId: project.id }) });
-    state.project = data.project; state.projectReadOnly = data.project?.status === "completed";
-    if (data.needsSource) {
-      const files = await rememberedProjectFileSources(project.id);
-      const directories = await rememberedProjectDirectorySources(project.id);
-      // Keep the native portion visible while browser handles are restored.
-      resetCatalog(data.images || [], data.project?.sourceRoot || "");
-      applyProjectSnapshot(await api("/api/images"));
-      const handles = [...directories.map((item) => item.handle), ...files.map((item) => item.handle)].filter(Boolean);
-      const granted = await Promise.all(handles.map((handle) => ensureProjectSourcePermission(handle, true)));
-      for (let index = 0; index < directories.length; index += 1) {
-        if (granted[index]) await importProjectDirectoryHandle(directories[index].handle, project.id, directories[index].sourceId, "restore");
+    await runCatalogTransition(async ({ epoch, signal }) => {
+      await flushAllImageMutations();
+      await flushAllWorkspaceMutations();
+      clearPendingBrowserProjectSources();
+      const data = await catalogApi("/api/project/open", { projectId: project.id, resume }, { method: "POST", signal, resyncOnFailure: false });
+      if (!isCurrentCatalogEpoch(epoch)) return;
+      state.project = data.project; state.projectReadOnly = data.project?.status === "completed";
+      resetCatalog(data.images || [], data.root || data.project?.sourceRoot || "");
+      applyProjectSnapshot(data);
+      const restoreFailures = [];
+      let files = [];
+      let directories = [];
+      if (data.needsSource) {
+        ({ files, directories } = await rememberedProjectSources(project.id));
+        if (!isCurrentCatalogEpoch(epoch)) return;
+        for (const source of directories) {
+          if (!await ensureProjectSourcePermission(source.handle)) { restoreFailures.push({ ...source, projectId: project.id, kind: "directory", key: `directory:${source.sourceId}` }); continue; }
+          try {
+            await importProjectDirectoryHandle(source.handle, project.id, source.sourceId, "restore");
+          } catch (error) { restoreFailures.push({ ...source, projectId: project.id, kind: "directory", key: `directory:${source.sourceId}` }); }
+          if (!isCurrentCatalogEpoch(epoch)) return;
+        }
+        const allowedFiles = [];
+        for (const source of files) {
+          if (await ensureProjectSourcePermission(source.handle)) allowedFiles.push(source);
+          else restoreFailures.push({ ...source, projectId: project.id, kind: "file", key: `file:${source.sourceId}:${source.clientKey || source.relativePath}` });
+        }
+        const failedFiles = await importProjectFileHandles(allowedFiles, project.id);
+        restoreFailures.push(...failedFiles.map((source) => ({ ...source, projectId: project.id, kind: "file", key: `file:${source.sourceId}:${source.clientKey || source.relativePath}` })));
+        if (!isCurrentCatalogEpoch(epoch)) return;
       }
-      if (files.length && granted.slice(directories.length).every(Boolean)) await importProjectFileHandles(files, project.id);
-      const requiresBrowserSource = (data.sources || []).some((source) => source.kind !== "native-folder");
-      if (requiresBrowserSource && (!handles.length || granted.some((ok) => !ok))) showUserError({ code: "project_source_unavailable" });
-    } else {
-      resetCatalog(data.images || [], data.project?.sourceRoot || "");
-      applyProjectSnapshot(await api("/api/images"));
-    }
-    state.missingNativeSources = missingNativeSources(data.sources);
-    renderProjectCurrent();
-    modalInvokers.delete($("#projectListDialog"));
-    modalInvokers.delete($("#projectDialog"));
-    $("#projectListDialog").close(); $("#projectDialog").close();
-    focusElement($("#projectButton"));
-    await showSourceMismatches();
+      pendingBrowserProjectSources = restoreFailures;
+      state.missingNativeSources = missingNativeSources(data.sources);
+      renderProjectCurrent();
+      modalInvokers.delete($("#projectListDialog"));
+      $("#projectListDialog").close();
+      if (pendingBrowserProjectSources.length) {
+        showModalFromInvoker($("#projectDialog"), $("#projectButton"));
+        focusElement($("#projectBrowserRestoreList button"));
+      } else {
+        modalInvokers.delete($("#projectDialog"));
+        $("#projectDialog").close(); focusElement($("#projectButton"));
+      }
+      await showSourceMismatches();
+    }, { allowNested: true });
   } catch (error) { showUserError(error); }
   finally { endProjectOperation(); }
 }
@@ -416,8 +513,11 @@ async function resumeCurrentProject() {
   if (!state.project?.id) return;
   if (!beginProjectOperation()) return;
   try {
-    const data = await api("/api/project/resume", { method: "POST", body: JSON.stringify({ projectId: state.project.id }) });
-    state.project = data.project; state.projectReadOnly = false; renderProjectCurrent(); renderCandidates(); updateActionButtons();
+    await runCatalogTransition(async ({ epoch, signal }) => {
+      const data = await catalogApi("/api/project/resume", { projectId: state.project.id }, { method: "POST", signal, resyncOnFailure: false });
+      if (!isCurrentCatalogEpoch(epoch)) return;
+      state.project = data.project; state.projectReadOnly = false; renderProjectCurrent(); renderCandidates(); updateActionButtons();
+    }, { allowNested: true });
   } catch (error) { showUserError(error); }
   finally { endProjectOperation(); }
 }
@@ -437,6 +537,7 @@ function openProjectDeleteDialog(projectId) {
 async function deleteProject(projectId) {
   if (!projectId || projectDeleteBusy || !beginProjectOperation()) return;
   projectDeleteBusy = true;
+  let cleanupIntent = null;
   $("#projectDeleteConfirm").disabled = true;
   $("#projectDeleteCancel").disabled = true;
   try {
@@ -448,7 +549,8 @@ async function deleteProject(projectId) {
       await flushAllImageMutations();
       await flushAllWorkspaceMutations();
     }
-    await api(`/api/project/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    cleanupIntent = await rememberProjectSourceCleanup(projectId);
+    await catalogApi(`/api/project/${encodeURIComponent(projectId)}`, {}, { method: "DELETE" });
     await forgetProjectSources(projectId);
     if (deletingCurrentProject) {
       resetCatalog([], ""); state.project = null; state.projectReadOnly = false; state.missingNativeSources = []; renderProjectCurrent(); updateActionButtons();
@@ -469,7 +571,10 @@ async function deleteProject(projectId) {
         focusElement($("#projectListBody").querySelector(`tr[data-project-id="${focusProjectId}"] [data-project-action="open"]`));
       }
     }
-  } catch (error) { showUserError(error); }
+  } catch (error) {
+    if (cleanupIntent && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
+    showUserError(error);
+  }
   finally {
     projectDeleteBusy = false;
     if ($("#projectDeleteDialog").open) {
@@ -571,7 +676,7 @@ function bindEvents() {
       await flushAllImageMutations();
       await flushAllWorkspaceMutations();
       const imageIds = state.images.filter((image) => image.sourceId === source.id).map((image) => image.id);
-      const snapshot = await api("/api/project/source/relink", { method: "POST", body: JSON.stringify({ projectId: state.project.id, sourceId: source.id, path: input.value.trim() }) });
+      const snapshot = await catalogApi("/api/project/source/relink", { projectId: state.project.id, sourceId: source.id, path: input.value.trim() }, { method: "POST" });
       await refreshWorkspaceImages(snapshot, imageIds);
       state.missingNativeSources = missingNativeSources(snapshot.sources);
       renderProjectCurrent();
@@ -584,8 +689,8 @@ function bindEvents() {
       $("#nativeRelinkSources").querySelectorAll("button").forEach((button) => { button.disabled = false; });
     }
   })(); });
-  $("#projectCloseWorkspace").addEventListener("click", () => { void (async () => { if (!beginProjectOperation()) return; try { await flushAllImageMutations(); await flushAllWorkspaceMutations(); await api("/api/project/close", { method: "POST", body: "{}" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; state.missingNativeSources = []; $("#projectDialog").close(); } catch (error) { showUserError(error); } finally { endProjectOperation(); } })(); });
-  $("#projectComplete").addEventListener("click", () => { void (async () => { if (state.projectOperationPending || !await confirmAction(t("project.complete"), t("project.completeConfirm")) || !beginProjectOperation()) return; try { await flushAllImageMutations(); await flushAllWorkspaceMutations(); await api("/api/project/complete", { method: "POST", body: "{}" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; state.missingNativeSources = []; $("#projectDialog").close(); } catch (error) { showUserError(error); } finally { endProjectOperation(); } })(); });
+  $("#projectCloseWorkspace").addEventListener("click", () => { void (async () => { if (!beginProjectOperation()) return; try { await flushAllImageMutations(); await flushAllWorkspaceMutations(); await catalogApi("/api/project/close", {}, { method: "POST" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; state.missingNativeSources = []; $("#projectDialog").close(); } catch (error) { showUserError(error); } finally { endProjectOperation(); } })(); });
+  $("#projectComplete").addEventListener("click", () => { void (async () => { if (state.projectOperationPending || !await confirmAction(t("project.complete"), t("project.completeConfirm")) || !beginProjectOperation()) return; try { await flushAllImageMutations(); await flushAllWorkspaceMutations(); await catalogApi("/api/project/complete", {}, { method: "POST" }); resetCatalog([], ""); state.project = null; state.projectReadOnly = false; state.missingNativeSources = []; $("#projectDialog").close(); } catch (error) { showUserError(error); } finally { endProjectOperation(); } })(); });
   $("#projectNameCancel").addEventListener("click", () => { if (!state.projectOperationPending) $("#projectNameDialog").close(); });
   $("#projectNameDialog").addEventListener("cancel", (event) => { if (state.projectOperationPending) event.preventDefault(); });
   $("#projectDeleteCancel").addEventListener("click", () => { if (projectDeleteBusy) return; projectDeleteId = ""; $("#projectDeleteDialog").close(); });
@@ -600,8 +705,8 @@ function bindEvents() {
     let data;
     try {
       data = mode === "new"
-      ? await api("/api/projects", { method: "POST", body: JSON.stringify({ name }) })
-      : await api("/api/project/name", { method: "POST", body: JSON.stringify({ name, projectId }) });
+      ? await catalogApi("/api/projects", { name }, { method: "POST" })
+      : await catalogApi("/api/project/name", { name, projectId }, { method: "POST" });
     } catch (error) {
       if (projectlessSave && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) await forgetProjectSources(projectId);
       throw error;
@@ -614,7 +719,7 @@ function bindEvents() {
     $("#projectNameDialog").close(); if (mode === "new") { resetCatalog([], ""); state.missingNativeSources = []; } renderProjectCurrent();
   } catch (error) { showUserError(error); } finally { endProjectOperation(); } })(); });
   $("#sourceMismatchCancel").addEventListener("click", () => $("#sourceMismatchDialog").close());
-  $("#sourceMismatchForm").addEventListener("submit", (event) => { event.preventDefault(); void (async () => { try { const ids = JSON.parse($("#sourceMismatchDialog").dataset.imageIds || "[]"); const clearWorkspace = $("#sourceMismatchClear").checked; await flushAllImageMutations(); await flushAllWorkspaceMutations(); const snapshot = await api("/api/project/mismatches", { method: "POST", body: JSON.stringify({ imageIds: ids, clearMasks: clearWorkspace }) }); await refreshWorkspaceImages(snapshot, ids, { clearWorkspace, resetWorkspace: true }); $("#sourceMismatchDialog").close(); } catch (error) { showUserError(error); } })(); });
+  $("#sourceMismatchForm").addEventListener("submit", (event) => { event.preventDefault(); void (async () => { try { const ids = JSON.parse($("#sourceMismatchDialog").dataset.imageIds || "[]"); const clearWorkspace = $("#sourceMismatchClear").checked; await flushAllImageMutations(); await flushAllWorkspaceMutations(); const snapshot = await catalogApi("/api/project/mismatches", { imageIds: ids, clearMasks: clearWorkspace }, { method: "POST" }); await refreshWorkspaceImages(snapshot, ids, { clearWorkspace, resetWorkspace: true }); $("#sourceMismatchDialog").close(); } catch (error) { showUserError(error); } })(); });
   $("#sameSourceCancel").addEventListener("click", () => { if (!sameSourceBusy) $("#sameSourceDialog").close(); });
   $("#sameSourceDialog").addEventListener("cancel", (event) => { if (sameSourceBusy) event.preventDefault(); });
   $("#sameSourceOpen").addEventListener("click", () => { const project = sameSourceProjects.find((item) => item.id === sameSourceSelectedProjectId) || sameSourceProjects[0]; $("#sameSourceDialog").close(); if (project) void openProject(project); });
@@ -636,9 +741,9 @@ function bindEvents() {
       }
       await flushAllImageMutations();
       await flushAllWorkspaceMutations();
-      const data = await api("/api/projects", { method: "POST", body: JSON.stringify({}) });
+      const data = await catalogApi("/api/projects", {}, { method: "POST" });
       state.project = data.project; state.projectReadOnly = false; $("#sameSourceDialog").close(); renderProjectCurrent();
-      await loadFolder({ skipSameSourceWarning: true, path: sameSourcePath });
+      await loadFolder({ skipSameSourceWarning: true, path: sameSourcePath, allowDuringCatalogTransition: true });
     } catch (error) { showUserError(error); }
     finally {
       sameSourceBusy = false;
@@ -823,9 +928,31 @@ function bindEvents() {
   $("#clearCurrentMasksButton").addEventListener("click", () => { const imageId = state.currentId; if (!currentImageActionPending() && imageId) void clearMasks([imageId], "confirm.clearCurrent.title", "confirm.clearCurrent.message", imageId, state.imageGeneration); });
   $("#clearAllMasksButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearMasks(state.images.map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message"); });
   $("#clearCatalogButton").addEventListener("click", () => { closeBatchMoreMenus(); void clearCatalog(); });
-  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"], ["#selectionActionsMenu", "#selectionActionsButton"]]) {
-    $(menuId).addEventListener("toggle", () => $(buttonId).setAttribute("aria-expanded", String($(menuId).matches(":popover-open"))));
+  const positionFilterPopover = (menu, button) => {
+    const margin = 8;
+    const trigger = button.getBoundingClientRect();
+    const popover = menu.getBoundingClientRect();
+    const left = Math.max(margin, Math.min(innerWidth - popover.width - margin, trigger.left));
+    const below = trigger.bottom + 5;
+    const top = below + popover.height <= innerHeight - margin ? below : Math.max(margin, trigger.top - popover.height - 5);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  };
+  const filterMenus = [["#galleryFilterMenu", "#galleryFilterButton"], ["#overviewFilterMenu", "#overviewFilterButton"]];
+  for (const [menuId, buttonId] of [["#batchMoreMenu", "#batchMoreButton"], ["#selectionActionsMenu", "#selectionActionsButton"], ...filterMenus]) {
+    const menu = $(menuId); const button = $(buttonId);
+    menu.addEventListener("toggle", () => {
+      const open = menu.matches(":popover-open");
+      button.setAttribute("aria-expanded", String(open));
+      if (open && filterMenus.some(([id]) => id === menuId)) positionFilterPopover(menu, button);
+    });
   }
+  window.addEventListener("resize", () => {
+    for (const [menuId, buttonId] of filterMenus) {
+      const menu = $(menuId);
+      if (menu.matches(":popover-open")) positionFilterPopover(menu, $(buttonId));
+    }
+  });
   document.querySelectorAll("[data-gallery-filter]").forEach((input) => input.addEventListener("change", () => {
     if (isBusy() || state.importing) return;
     state.galleryFilter = new Set([...document.querySelectorAll("[data-gallery-filter]:checked")].map((item) => item.dataset.galleryFilter));
@@ -990,6 +1117,7 @@ function bindEvents() {
     const content = $(isGallery ? "#galleryPaneContent" : "#candidatePaneContent");
     const button = $(isGallery ? "#collapseGalleryButton" : "#collapseInspectorButton");
     const className = isGallery ? "gallery-collapsed" : "inspector-collapsed";
+    if (collapsed) closeFilterPopovers();
     state[isGallery ? "galleryCollapsed" : "inspectorCollapsed"] = collapsed;
     grid.classList.toggle(className, collapsed);
     content.inert = collapsed;
@@ -1093,6 +1221,7 @@ function bindEvents() {
     }
     if (event.button !== 0) return;
     if (state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) return;
+    if (catalogStagingEditsActive() && ["boundary", "polygon", "boundary_brush"].includes(state.tool)) return;
     canvas.setPointerCapture(event.pointerId);
     state.gestureDisplaySide = compareEventSide(event);
     const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
@@ -1267,17 +1396,26 @@ async function initialise() {
   renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
-  document.addEventListener("visibilitychange", () => scheduleJobPoll(document.visibilityState === "visible"));
+  document.addEventListener("visibilitychange", () => {
+    scheduleJobPoll(document.visibilityState === "visible");
+    if (document.visibilityState === "visible") void syncCatalogOnReturn();
+  });
+  window.addEventListener("pageshow", (event) => { if (event.persisted) void syncCatalogOnReturn(); });
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
-    const data = await api("/api/images");
-    if (typeof applyProjectSnapshot === "function") applyProjectSnapshot(data);
+    const data = catalogResponse(await api("/api/images"));
+    $("#folderPath").value = data.root || "";
+    resetCatalog(data.images || [], data.root || "");
+    applyProjectSnapshot(data);
+    state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
+    if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
     if (data.images.length) {
-      $("#folderPath").value = data.root || "";
-      resetCatalog(data.images, data.root);
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
   } catch (error) { showUserError(error); }
+  void api("/api/projects?sort=updated_desc")
+    .then((data) => retryProjectSourceCleanup(new Set((data.projects || []).map((project) => project.id))))
+    .catch(() => {});
   if (document.visibilityState === "visible") setTimeout(() => { void checkForUpdate({ silent: true }); }, 1000);
 }
 

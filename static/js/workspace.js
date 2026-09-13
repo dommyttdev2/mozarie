@@ -27,18 +27,29 @@ function queueWorkspaceFlags(imageId, payload) {
 }
 
 const DIRECTORY_DB = "mozarie-directory-catalogs";
+const PROJECT_SOURCE_CLEANUP_KEY = "project-source-cleanup";
 function projectSourceId() { return globalThis.crypto?.randomUUID?.() || `source-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 async function directoryCatalogStore() {
   if (!window.indexedDB) return null;
   return new Promise((resolve) => {
-    const request = indexedDB.open(DIRECTORY_DB, 2);
+    const request = indexedDB.open(DIRECTORY_DB, 3);
     request.onupgradeneeded = () => {
       const names = request.result.objectStoreNames;
       if (!names?.contains?.("directories")) request.result.createObjectStore("directories", { keyPath: "catalogId" });
-      if (!names?.contains?.("projectSources")) request.result.createObjectStore("projectSources", { keyPath: "key" });
+      const sources = names?.contains?.("projectSources")
+        ? request.transaction.objectStore("projectSources")
+        : request.result.createObjectStore("projectSources", { keyPath: "key" });
+      if (!sources.indexNames.contains("projectId")) sources.createIndex("projectId", "projectId", { unique: false });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
+  });
+}
+
+function projectSourceRows(db, projectId) {
+  return new Promise((resolve) => {
+    const request = db.transaction("projectSources").objectStore("projectSources").index("projectId").getAll(IDBKeyRange.only(projectId));
+    request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
   });
 }
 
@@ -103,19 +114,21 @@ async function forgetProjectImageSources(projectId, imageIds) {
   const removed = new Set(imageIds || []);
   if (!db || !projectId || !removed.size) return;
   try {
-    const rows = await new Promise((resolve) => {
-      const request = db.transaction("projectSources").objectStore("projectSources").getAll();
-      request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
-    });
     await new Promise((resolve, reject) => {
       const transaction = db.transaction("projectSources", "readwrite");
       const store = transaction.objectStore("projectSources");
-      for (const row of rows) if (row.projectId === projectId && removed.has(row.imageId)) store.delete(row.key);
+      const request = store.index("projectId").getAll(IDBKeyRange.only(projectId));
+      request.onsuccess = () => { for (const row of request.result || []) if (removed.has(row.imageId)) store.delete(row.key); };
+      request.onerror = () => reject(request.error);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error);
     });
-  } catch { /* Local handle cleanup is best effort. */ }
+    return true;
+  } catch {
+    await Promise.all([...removed].map((imageId) => rememberProjectImageSourceCleanup(projectId, imageId)));
+    return false;
+  }
   finally { db.close(); }
 }
 
@@ -132,31 +145,22 @@ async function rememberProjectlessPromotionSources(projectId) {
 }
 async function rememberedProjectSource(projectId, sourceId = null, imageId = null) {
   const db = await directoryCatalogStore(); if (!db || !projectId) return null;
-  const rows = await new Promise((resolve) => { const request = db.transaction("projectSources").objectStore("projectSources").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); });
+  const rows = await projectSourceRows(db, projectId);
   const value = rows.find((row) => row.projectId === projectId && (!sourceId || row.sourceId === sourceId) && (imageId == null ? !row.imageId : row.imageId === imageId));
   db.close(); return value?.handle || null;
 }
-async function rememberedProjectFileSources(projectId) {
-  const db = await directoryCatalogStore(); if (!db || !projectId) return [];
-  const rows = await new Promise((resolve) => {
-    const request = db.transaction("projectSources").objectStore("projectSources").getAll();
-    request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
-  });
+async function rememberedProjectSources(projectId) {
+  const db = await directoryCatalogStore(); if (!db || !projectId) return { files: [], directories: [] };
+  const rows = await projectSourceRows(db, projectId);
   db.close();
   // Preserve the server source ID.  Recreating one on every reopen would
   // create a second source and duplicate every browser-imported image.
-  return rows.filter((row) => row.projectId === projectId && (row.imageId || row.clientKey) && row.handle?.kind === "file")
-    .map((row) => ({ sourceId: row.sourceId, clientKey: row.clientKey || null, relativePath: row.relativePath || row.handle.name, handle: row.handle }));
-}
-async function rememberedProjectDirectorySources(projectId) {
-  const db = await directoryCatalogStore(); if (!db || !projectId) return [];
-  const rows = await new Promise((resolve) => {
-    const request = db.transaction("projectSources").objectStore("projectSources").getAll();
-    request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
-  });
-  db.close();
-  return rows.filter((row) => row.projectId === projectId && !row.imageId && row.handle?.kind === "directory")
-    .map((row) => ({ sourceId: row.sourceId, handle: row.handle }));
+  return {
+    files: rows.filter((row) => (row.imageId || row.clientKey) && row.handle?.kind === "file")
+      .map((row) => ({ imageId: row.imageId || null, sourceId: row.sourceId, clientKey: row.clientKey || null, relativePath: row.relativePath || row.handle.name, handle: row.handle })),
+    directories: rows.filter((row) => !row.imageId && row.handle?.kind === "directory")
+      .map((row) => ({ sourceId: row.sourceId, handle: row.handle })),
+  };
 }
 async function matchingProjectDirectorySources(handle) {
   const db = await directoryCatalogStore(); if (!db || !handle?.isSameEntry) return [];
@@ -174,17 +178,119 @@ async function matchingProjectDirectorySources(handle) {
     return matches;
   } finally { db.close(); }
 }
-async function forgetProjectSources(projectId) {
+async function rememberProjectSourceCleanup(projectId) {
+  const intentId = projectSourceId();
+  const db = await directoryCatalogStore(); if (!db || !projectId) return null;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("directories", "readwrite");
+      const store = transaction.objectStore("directories");
+      const request = store.get(PROJECT_SOURCE_CLEANUP_KEY);
+      request.onsuccess = () => {
+        const intents = request.result?.intents || (request.result?.projectIds || []).map((id) => ({ projectId: id, intentId: `legacy:${id}` }));
+        intents.push({ projectId, intentId });
+        store.put({ ...request.result, catalogId: PROJECT_SOURCE_CLEANUP_KEY, intents });
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    return intentId;
+  } catch { return null; }
+  finally { db.close(); }
+}
+async function rememberProjectImageSourceCleanup(projectId, imageId) {
+  const intentId = projectSourceId();
+  const db = await directoryCatalogStore(); if (!db || !projectId || !imageId) return null;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("directories", "readwrite");
+      const store = transaction.objectStore("directories");
+      const request = store.get(PROJECT_SOURCE_CLEANUP_KEY);
+      request.onsuccess = () => {
+        const value = request.result || { catalogId: PROJECT_SOURCE_CLEANUP_KEY };
+        const imageIntents = value.imageIntents || [];
+        imageIntents.push({ projectId, imageId, intentId });
+        store.put({ ...value, catalogId: PROJECT_SOURCE_CLEANUP_KEY, imageIntents });
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
+    });
+    return intentId;
+  } catch { return null; }
+  finally { db.close(); }
+}
+async function clearProjectSourceCleanup({ projectIds = [], intentIds = [] } = {}) {
+  const removedProjects = new Set(projectIds);
+  const removedIntents = new Set(intentIds);
+  if (!removedProjects.size && !removedIntents.size) return;
+  const db = await directoryCatalogStore(); if (!db) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("directories", "readwrite");
+      const store = transaction.objectStore("directories");
+      const request = store.get(PROJECT_SOURCE_CLEANUP_KEY);
+      request.onsuccess = () => {
+        const intents = request.result?.intents || (request.result?.projectIds || []).map((projectId) => ({ projectId, intentId: `legacy:${projectId}` }));
+        store.put({ ...request.result, catalogId: PROJECT_SOURCE_CLEANUP_KEY,
+          intents: intents.filter((intent) => !removedProjects.has(intent.projectId) && !removedIntents.has(intent.intentId)),
+          imageIntents: (request.result?.imageIntents || []).filter((intent) => !removedProjects.has(intent.projectId) && !removedIntents.has(intent.intentId)),
+        });
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } catch { /* A later retry keeps the intent until it can be removed. */ }
+  finally { db.close(); }
+}
+async function forgetProjectSources(projectId, { rememberFailure = true, clearIntent = true } = {}) {
   const db = await directoryCatalogStore(); if (!db || !projectId) return;
   try {
-    const rows = await new Promise((resolve) => {
-      const request = db.transaction("projectSources").objectStore("projectSources").getAll();
-      request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]);
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("projectSources", "readwrite");
+      const store = transaction.objectStore("projectSources");
+      const request = store.index("projectId").getAll(IDBKeyRange.only(projectId));
+      request.onsuccess = () => { for (const row of request.result || []) store.delete(row.key); };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
     });
-    const store = db.transaction("projectSources", "readwrite").objectStore("projectSources");
-    for (const row of rows) if (row.projectId === projectId) store.delete(row.key);
-  } catch { /* Local handle cleanup is best effort and never blocks deletion. */ }
+    if (clearIntent) await clearProjectSourceCleanup({ projectIds: [projectId] });
+    return true;
+  } catch {
+    if (rememberFailure) await rememberProjectSourceCleanup(projectId);
+    return false;
+  }
   finally { db.close(); }
+}
+async function retryProjectSourceCleanup(existingProjectIds) {
+  if (!(existingProjectIds instanceof Set)) return;
+  const db = await directoryCatalogStore();
+  if (!db) return;
+  try {
+    const pending = await new Promise((resolve) => {
+      const request = db.transaction("directories").objectStore("directories").get(PROJECT_SOURCE_CLEANUP_KEY);
+      request.onsuccess = () => resolve(request.result || {}); request.onerror = () => resolve({});
+    });
+    const projectIntents = pending.intents || (pending.projectIds || []).map((projectId) => ({ projectId, intentId: `legacy:${projectId}` }));
+    const resolved = [];
+    for (const projectId of new Set(projectIntents.map((intent) => intent.projectId))) {
+      if (!existingProjectIds.has(projectId) && await forgetProjectSources(projectId, { rememberFailure: false, clearIntent: false })) resolved.push(projectId);
+    }
+    await clearProjectSourceCleanup({ projectIds: resolved });
+    for (const intent of pending.imageIntents || []) {
+      try {
+        const status = await api(`/api/project/source-status?projectId=${encodeURIComponent(intent.projectId)}&imageId=${encodeURIComponent(intent.imageId)}`, { resyncOnStale: false });
+        if (!status.exists && await forgetProjectImageSources(intent.projectId, [intent.imageId])) {
+          await clearProjectSourceCleanup({ intentIds: [intent.intentId] });
+        }
+      } catch { /* Keep ambiguous cleanup intents for the next startup. */ }
+    }
+  } finally { db.close(); }
 }
 async function ensureProjectSourcePermission(handle, request = false) {
   if (!handle?.queryPermission) return Boolean(handle);
@@ -195,6 +301,11 @@ async function ensureProjectSourcePermission(handle, request = false) {
     if (!request || !handle.requestPermission) return false;
     return (await handle.requestPermission({ mode })) === "granted";
   } catch { return false; }
+}
+async function requestProjectSourcePermission(handle) {
+  if (!handle?.requestPermission) return Boolean(handle);
+  try { return (await handle.requestPermission({ mode: "read" })) === "granted"; }
+  catch { return false; }
 }
 async function rememberedOutputDirectoryHandle() {
   const db = await directoryCatalogStore();

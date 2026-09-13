@@ -242,18 +242,20 @@ async function writeSingleOutput(handle, relativePath, suffix, response, format 
 
 async function renderSingleSave(payload) {
   const response = await fetch("/api/save/render", {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+    method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (response.ok) return response;
-  const body = await response.json().catch(() => ({})); const error = new Error("save_render_failed"); error.code = body.error_code || "internal_error"; error.status = response.status; throw error;
+  const error = responseError(response, await response.json().catch(() => ({})));
+  await resyncAfterStaleCatalog(error);
+  throw error;
 }
 
 async function startSingleSave(event) {
   event.preventDefault();
   const save = state.singleSave;
   const image = state.images.find((entry) => entry.id === save?.imageId);
-  if (!save || !image || state.saving || state.saveStarting || isBusy() || state.importing || currentImageActionPending()
+  if (!save || !image || state.saving || state.saveStarting || isBusy() || state.importing || catalogStagingEditsActive() || currentImageActionPending()
     || state.currentId !== save.imageId || !isCurrentGeneration(save.generation) || !state.currentImage || state.projectReadOnly || image.sourceDimensionsChanged) return;
   const mode = selectedSingleSaveMode(); const copying = mode === "copy";
   const deleteOriginal = copying && $("#singleSaveDeleteOriginal").checked;
@@ -268,7 +270,8 @@ async function startSingleSave(event) {
     if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
     if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
     state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
-    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null;
+    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let cleanupIntent = null;
+    const cleanupProjectId = state.project?.id || null;
     try {
     await flushWorkspaceDraft(save.imageId);
     const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false, format, keepMetadata }) });
@@ -298,6 +301,7 @@ async function startSingleSave(event) {
           await ensureHandlePermission(access, false);
         }
       }
+      if (sourceAction === "deleted" && cleanupProjectId) cleanupIntent = await rememberProjectImageSourceCleanup(cleanupProjectId, save.imageId);
       commitStarted = true;
       committed = await commitBrowserSaveWithRetry({ imageId: save.imageId, candidateRevision: entry.candidateRevision, saveToken, sourceAction, ...(sourceAction === "overwrite" && access?.fileHandle ? sourceCommitMetadata(access) : {}) });
     }
@@ -316,13 +320,15 @@ async function startSingleSave(event) {
     // expensive image reload (and forced editor reload) in that common path.
     // Overwrites and source deletion do need authoritative reconciliation.
     if ((sourceAction === "overwrite") || deleteOriginal) {
-      const previousImageIds = new Set(state.images.map((item) => item.id));
-      const latest = await api("/api/images"); state.images = latest.images;
+      const capturedProjectId = state.project?.id || null;
+      const capturedCatalogGeneration = state.serverCatalogGeneration;
+      const latest = await api("/api/images");
+      reconcileCatalogSnapshot(latest, capturedProjectId, capturedCatalogGeneration); state.images = latest.images;
       loadReviewedPaths();
       const savedImage = state.images.find((item) => item.id === save.imageId);
-      if (deleteOriginal && state.project?.id) {
-        await forgetProjectImageSources(state.project.id, [...previousImageIds]
-          .filter((imageId) => !state.images.some((item) => item.id === imageId)));
+      if (deleteOriginal && cleanupProjectId && !state.images.some((item) => item.id === save.imageId)
+        && await forgetProjectImageSources(cleanupProjectId, [save.imageId]) && cleanupIntent) {
+        await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
       }
       pruneSourceAccess();
       if (deleteOriginal) reconcileBrowserSaveState();
@@ -333,6 +339,7 @@ async function startSingleSave(event) {
     setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${state.outputDirectoryHandle.name}/${output.name}` : t("apply.complete", { completed: 1 }));
     } catch (error) {
       if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
+      if (cleanupIntent && isDefinitiveCommitRejection(error)) await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
       setSingleSaveResult(t(`errorCode.${userErrorCode(error)}`), true); showUserError(error, $("#singleSaveStartButton"));
     } finally {
       state.saving = false; updateActionButtons(); syncSingleSaveMode();
@@ -595,6 +602,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
     deleteOriginal,
     mode,
     outputDirectoryHandle: state.outputDirectoryHandle,
+    projectId: state.project?.id || null,
     parallelism: Math.min(8, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2))),
     drafts: new Map(Object.entries(draftPayload(imageIds))),
     sources: new Map(imageIds.map((imageId) => [imageId, {
@@ -608,7 +616,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   });
   const save = {
     entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false,
-    catalogEpoch: state.catalogEpoch,
+    catalogEpoch: state.catalogEpoch, cleanupIntents: new Map(),
   };
   state.browserSave = save;
   state.saving = true;
@@ -654,6 +662,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
             let sourceSnapshot = null;
             const sourceAction = inputs.deleteOriginal ? "deleted" : "keep";
             let commitStarted = false;
+            let cleanupIntent = null;
             try {
               if (access?.fileHandle) {
                 await ensureHandlePermission(access, inputs.deleteOriginal);
@@ -662,10 +671,15 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
                   await removeSourceHandle(access);
                 }
               }
+              if (sourceAction === "deleted" && inputs.projectId) {
+                cleanupIntent = await rememberProjectImageSourceCleanup(inputs.projectId, entry.imageId);
+                if (cleanupIntent) save.cleanupIntents.set(entry.imageId, cleanupIntent);
+              }
               commitStarted = true;
-              return await commitBrowserSaveWithRetry({
+              const committed = await commitBrowserSaveWithRetry({
                 imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken,
               });
+              return committed;
             }
             catch (error) {
               const reconcile = !commitStarted || isDefinitiveCommitRejection(error) || error.saveState === "pending";
@@ -679,6 +693,10 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
                 await cancelBrowserSave(entry, saveToken);
                 await inputs.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
               }
+              if (cleanupIntent && isDefinitiveCommitRejection(error)) {
+                await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
+                save.cleanupIntents.delete(entry.imageId);
+              }
               throw error;
             } finally { sourceSnapshot = null; }
           };
@@ -691,11 +709,15 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
           let binary;
           try {
             binary = await fetch("/api/save/render", {
-            method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+            method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft, format: inputs.format, keepMetadata: inputs.keepMetadata }),
             });
           } finally { inputs.drafts.delete(entry.imageId); }
-          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
+          if (!binary.ok) {
+            const error = responseError(binary, await binary.json().catch(() => ({})));
+            await resyncAfterStaleCatalog(error);
+            throw error;
+          }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           const noEffect = binary.headers?.get("X-Mozarie-No-Effect") === "1";
           return serializeBrowserHandleMutation(async () => {
@@ -727,11 +749,15 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
           let binary;
           try {
             binary = await fetch("/api/save/render", {
-            method: "POST", headers: { "Content-Type": "application/json", "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" },
+            method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft, format: inputs.format, keepMetadata: inputs.keepMetadata }),
             });
           } finally { inputs.drafts.delete(entry.imageId); }
-          if (!binary.ok) throw responseError(binary, await binary.json().catch(() => ({})));
+          if (!binary.ok) {
+            const error = responseError(binary, await binary.json().catch(() => ({})));
+            await resyncAfterStaleCatalog(error);
+            throw error;
+          }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = binary.headers?.get("X-Mozarie-No-Effect") === "1" ? "keep" : "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken });
@@ -788,14 +814,20 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
         try {
           // Commits may resolve out of order; apply one authoritative catalogue
           // snapshot only after every started entry has settled.
+          const capturedProjectId = state.project?.id || null;
+          const capturedCatalogGeneration = state.serverCatalogGeneration;
           const latest = await api("/api/images");
+          reconcileCatalogSnapshot(latest, capturedProjectId, capturedCatalogGeneration);
           catalogCurrent = isCurrentCatalogEpoch(save.catalogEpoch);
           if (catalogCurrent) {
             state.images = latest.images; loadReviewedPaths();
-            if (state.project?.id) {
+            if (inputs.projectId) {
               const previousImageIds = state.applyCatalogSnapshot?.order || [];
-              await forgetProjectImageSources(state.project.id, previousImageIds
-                .filter((imageId) => !state.images.some((item) => item.id === imageId)));
+              const removed = previousImageIds.filter((imageId) => !state.images.some((item) => item.id === imageId));
+              if (removed.length && await forgetProjectImageSources(inputs.projectId, removed)) {
+                await clearProjectSourceCleanup({ intentIds: removed.map((imageId) => save.cleanupIntents.get(imageId)).filter(Boolean) });
+                removed.forEach((imageId) => save.cleanupIntents.delete(imageId));
+              }
             }
           }
         } catch (error) {
@@ -855,7 +887,7 @@ function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.sta
 async function startApplyFromDialog(event) {
   event.preventDefault();
   const imageIds = [...state.applyTargetIds];
-  if (!imageIds.length || state.saveStarting || isBusy() || state.importing) return;
+  if (!imageIds.length || state.saveStarting || isBusy() || state.importing || catalogStagingEditsActive()) return;
   const mode = selectedSaveMode();
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value;
@@ -938,7 +970,10 @@ async function finishApplyJob(job) {
       ? job.completedImageIds
       : [];
     const reloadCurrent = Boolean(keepCurrent && completedImageIds.includes(keepCurrent));
+    const capturedProjectId = state.project?.id || null;
+    const capturedCatalogGeneration = state.serverCatalogGeneration;
     const data = await api("/api/images");
+    reconcileCatalogSnapshot(data, capturedProjectId, capturedCatalogGeneration);
     if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
     state.images = data.images;
     for (const imageId of completedImageIds) state.maskStatus.delete(imageId);
@@ -988,7 +1023,10 @@ async function finishDetectionJob(job) {
   const targetIds = Array.isArray(job.completedImageIds) && job.completedImageIds.length
     ? job.completedImageIds
     : (job.state === "complete" ? requestedIds : []);
+  const capturedProjectId = state.project?.id || null;
+  const capturedCatalogGeneration = state.serverCatalogGeneration;
   const data = await api("/api/images");
+  reconcileCatalogSnapshot(data, capturedProjectId, capturedCatalogGeneration);
   if (!isCurrentGeneration(generation) || !isCurrentCatalogEpoch(catalogEpoch)) return;
   state.images = data.images;
   loadReviewedPaths();

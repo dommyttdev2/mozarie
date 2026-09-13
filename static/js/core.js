@@ -12,7 +12,7 @@ const state = {
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
-  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, viewGeneration: 0, historyRestoreToken: 0, translations: {},
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreToken: 0, translations: {},
   applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
   outputDirectoryPicking: false, outputDirectoryHandle: null, singleSave: null,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
@@ -189,26 +189,59 @@ function responseError(response, payload) {
   return error;
 }
 
-function api(path, options = {}) {
+function catalogRequestHeaders(headers = {}) {
   const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
-  return fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", "X-Mozarie-Token": token, ...(options.headers || {}) },
-  })
-    .then(async (response) => {
-      if (state.status?.connectionFailure) clearStatus();
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw responseError(response, data);
-      }
-      return data;
-    })
-    .catch((error) => {
-      if (error?.code) throw error;
-      const safeError = new Error();
-      safeError.code = "connection_lost";
-      throw safeError;
+  const expectedCatalogGeneration = state.serverCatalogGeneration;
+  return {
+    "X-Mozarie-Token": token,
+    "X-Mozarie-Expected-Project-Id": encodeURIComponent(state.project?.id || ""),
+    ...(Number.isSafeInteger(expectedCatalogGeneration) ? { "X-Mozarie-Expected-Catalog-Generation": String(expectedCatalogGeneration) } : {}),
+    ...headers,
+  };
+}
+
+let catalogResync = null;
+
+async function resyncCurrentCatalog(epoch = state.catalogEpoch) {
+  if (!catalogResync || catalogResync.epoch !== epoch) {
+    const promise = resyncCatalog(epoch).finally(() => {
+      if (catalogResync?.promise === promise) catalogResync = null;
     });
+    catalogResync = { epoch, promise };
+  }
+  return catalogResync.promise;
+}
+
+async function resyncAfterStaleCatalog(error, epoch = state.catalogEpoch) {
+  if (error?.code !== "stale_catalog" || error.catalogResynced) return;
+  try { await resyncCurrentCatalog(epoch); } catch { /* Keep the original operation error. */ }
+  error.catalogResynced = true;
+}
+function catalogFailureMayHaveCommitted(error) {
+  return !Number.isInteger(error?.status) || error.status >= 500 || error?.code === "stale_catalog";
+}
+
+async function api(path, options = {}) {
+  const { resyncOnStale = true, ...requestOptions } = options;
+  try {
+    const response = await fetch(path, {
+    ...requestOptions,
+    headers: catalogRequestHeaders({ "Content-Type": "application/json", ...(options.headers || {}) }),
+    });
+    if (state.status?.connectionFailure) clearStatus();
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw responseError(response, data);
+    applyCatalogGeneration(data);
+    return data;
+  } catch (error) {
+    if (error?.code) {
+      if (resyncOnStale && error?.name !== "AbortError") await resyncAfterStaleCatalog(error);
+      throw error;
+    }
+    const safeError = new Error();
+    safeError.code = "connection_lost";
+    throw safeError;
+  }
 }
 
 function showConnectionFailure() {
@@ -319,7 +352,18 @@ function renderLocalizedDynamicState() {
   syncApplyMode();
   updateProgress(state.job);
   renderStatus();
+  updateFilterMenuButtons();
   if (typeof renderProjectTable === "function") renderProjectTable();
+}
+
+function updateFilterMenuButtons() {
+  for (const [buttonId, filter] of [["#galleryFilterButton", state.galleryFilter], ["#overviewFilterButton", state.overviewFilter]]) {
+    const button = $(buttonId); if (!button) continue;
+    const count = filter?.size || 0;
+    const label = count ? t("filters.selected", { count }) : t("filters.button");
+    button.textContent = label;
+    button.setAttribute("aria-label", label);
+  }
 }
 
 function currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; }
@@ -347,6 +391,140 @@ function isBusy() {
 }
 function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
+function catalogStagingEditsActive() { return state.catalogTransition?.allowEdits === true; }
+function catalogExpectation(payload = {}) {
+  return {
+    ...payload,
+    expectedProjectId: state.project?.id || null,
+    expectedCatalogGeneration: state.serverCatalogGeneration,
+  };
+}
+function applyCatalogGeneration(snapshot) {
+  const generation = snapshot?.catalogGeneration;
+  if (!Number.isSafeInteger(generation)) return true;
+  if (state.serverCatalogGeneration !== null && generation < state.serverCatalogGeneration) return false;
+  state.serverCatalogGeneration = generation;
+  return true;
+}
+function isCompleteCatalogSnapshot(snapshot) {
+  return Array.isArray(snapshot?.images)
+    && Object.prototype.hasOwnProperty.call(snapshot, "project")
+    && Object.prototype.hasOwnProperty.call(snapshot, "readOnly");
+}
+function catalogResponse(snapshot) {
+  if (!applyCatalogGeneration(snapshot)) throw codedError("stale_catalog");
+  if (isCompleteCatalogSnapshot(snapshot) && typeof applyProjectSnapshot === "function") applyProjectSnapshot(snapshot);
+  return snapshot;
+}
+function reconcileCatalogSnapshot(snapshot, expectedProjectId, expectedCatalogGeneration) {
+  const projectId = snapshot?.project?.id || null;
+  const replaced = isCompleteCatalogSnapshot(snapshot)
+    && (projectId !== (expectedProjectId || null) || snapshot.catalogGeneration !== expectedCatalogGeneration);
+  catalogResponse(snapshot);
+  if (replaced) {
+    resetCatalog(snapshot.images || [], snapshot.root || "");
+    applyProjectSnapshot(snapshot);
+    state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
+    if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+  }
+  return replaced;
+}
+async function catalogApi(path, payload = {}, options = {}) {
+  const { resyncOnFailure = true, ...requestOptions } = options;
+  const expectedProjectId = state.project?.id || null;
+  const expectedCatalogGeneration = state.serverCatalogGeneration;
+  const requestEpoch = state.catalogEpoch;
+  try {
+    return catalogResponse(await api(path, {
+      ...requestOptions,
+      resyncOnStale: false,
+      body: JSON.stringify(catalogExpectation(payload)),
+      headers: {
+        "X-Mozarie-Expected-Project-Id": state.project?.id || "",
+        ...(Number.isSafeInteger(expectedCatalogGeneration) ? { "X-Mozarie-Expected-Catalog-Generation": String(expectedCatalogGeneration) } : {}),
+        ...(requestOptions.headers || {}),
+      },
+    }));
+  } catch (error) {
+    const ambiguous = catalogFailureMayHaveCommitted(error);
+    if (resyncOnFailure && ambiguous && !error.catalogResynced && error?.name !== "AbortError") {
+      const snapshot = await api("/api/images", { resyncOnStale: false }).catch(() => null);
+      if (snapshot && isCurrentCatalogEpoch(requestEpoch)) {
+        reconcileCatalogSnapshot(snapshot, expectedProjectId, expectedCatalogGeneration);
+        if (error?.code === "stale_catalog") error.catalogResynced = true;
+      }
+    }
+    throw error;
+  }
+}
+async function resyncCatalog(epoch = state.catalogEpoch, signal = undefined) {
+  const snapshot = await api("/api/images", { signal, resyncOnStale: false });
+  if (!isCurrentCatalogEpoch(epoch)) return null;
+  catalogResponse(snapshot);
+  resetCatalog(snapshot.images || [], snapshot.root || "");
+  applyProjectSnapshot(snapshot);
+  state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
+  if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+  return snapshot;
+}
+async function syncCatalogOnReturn() {
+  if (document.visibilityState !== "visible" || state.catalogTransition || state.importing) return;
+  state.catalogRefreshController?.abort();
+  const controller = new AbortController();
+  state.catalogRefreshController = controller;
+  const epoch = state.catalogEpoch;
+  const knownGeneration = state.serverCatalogGeneration;
+  const knownProjectId = state.project?.id || null;
+  try {
+    const snapshot = await api("/api/images", { signal: controller.signal });
+    if (controller.signal.aborted || !isCurrentCatalogEpoch(epoch)) return;
+    const changed = (Number.isSafeInteger(snapshot.catalogGeneration) && snapshot.catalogGeneration !== knownGeneration)
+      || (snapshot?.project?.id || null) !== knownProjectId;
+    catalogResponse(snapshot);
+    if (changed) {
+      resetCatalog(snapshot.images || [], snapshot.root || "");
+      state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
+      if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") showUserError(error);
+  } finally {
+    if (state.catalogRefreshController === controller) state.catalogRefreshController = null;
+  }
+}
+async function runCatalogTransition(work, { allowEdits = false, allowNested = false } = {}) {
+  if (state.catalogTransition) {
+    if (!allowNested) return null;
+    const active = state.catalogTransition;
+    try { return await work(active); }
+    catch (error) {
+      if (isCurrentCatalogEpoch(active.epoch) && catalogFailureMayHaveCommitted(error) && !error.catalogResynced && error?.name !== "AbortError") {
+        await resyncCurrentCatalog(active.epoch).catch(() => {});
+        if (error?.code === "stale_catalog") error.catalogResynced = true;
+      }
+      throw error;
+    }
+  }
+  const ownsProjectOperation = !allowEdits && !state.projectOperationPending;
+  if (ownsProjectOperation && typeof beginProjectOperation === "function" && !beginProjectOperation()) return null;
+  const transition = state.catalogTransition || { epoch: beginCatalogEpoch(), controller: new AbortController(), allowEdits };
+  state.catalogTransition = transition;
+  updateActionButtons();
+  const { epoch, controller } = transition;
+  try {
+    return await work({ epoch, signal: controller.signal });
+  } catch (error) {
+    if (isCurrentCatalogEpoch(epoch) && catalogFailureMayHaveCommitted(error) && !error.catalogResynced && error?.name !== "AbortError") {
+      await resyncCurrentCatalog(epoch).catch(() => {});
+      if (error?.code === "stale_catalog") error.catalogResynced = true;
+    }
+    throw error;
+  } finally {
+    if (state.catalogTransition?.epoch === epoch) state.catalogTransition = null;
+    if (ownsProjectOperation && typeof endProjectOperation === "function") endProjectOperation();
+    else updateActionButtons();
+  }
+}
 function catalogRecordMatches(record, epoch, { version = imageAssetVersion(record), revision = null } = {}) {
   const current = state.images.find((image) => image.id === record?.id);
   return Boolean(record) && isCurrentCatalogEpoch(epoch) && current === record && imageAssetVersion(current) === version
@@ -514,6 +692,7 @@ function setNavigationShortcutsEnabled(enabled) {
 
 function updateActionButtons() {
   const running = isBusy();
+  const catalogStaging = catalogStagingEditsActive();
   const sourceIncompatible = Boolean(currentRecord()?.sourceDimensionsChanged);
   const busyLocked = running || state.importing;
   const mutationLocked = state.projectReadOnly || sourceIncompatible || state.projectOperationPending;
@@ -525,6 +704,7 @@ function updateActionButtons() {
   const current = currentRecord();
   const hasImage = Boolean(state.currentId && state.currentImage && current);
   const candidateLocked = candidateControlLocked(state.currentId);
+  const filterLocked = busyLocked || catalogStaging;
   const candidateViewLocked = busyLocked || switchingImages || candidateLocked;
   const candidateControlsLocked = mutationLocked || candidateViewLocked;
   const presence = hasImage && !candidateViewLocked ? manualLayerPresence()
@@ -537,29 +717,32 @@ function updateActionButtons() {
       delete control.dataset.disabledByLock;
     }
   }
-  $("#pickFolder").disabled = busyLocked || mutationLocked;
+  $("#pickFolder").disabled = busyLocked || mutationLocked || catalogStaging;
   const detectAllButton = $("#detectAllButton");
   detectAllButton.textContent = t("gallery.detectAll");
-  detectAllButton.disabled = busyLocked || mutationLocked || state.images.length === 0;
-  $("#detectCurrentButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
-  $("#clearCurrentMasksButton").disabled = busyLocked || mutationLocked || switchingImages || candidateLocked || !hasImage
+  detectAllButton.disabled = busyLocked || mutationLocked || catalogStaging || state.images.length === 0;
+  $("#detectCurrentButton").disabled = busyLocked || mutationLocked || catalogStaging || switchingImages || !hasImage;
+  $("#clearCurrentMasksButton").disabled = busyLocked || mutationLocked || catalogStaging || switchingImages || candidateLocked || !hasImage
     || !(current.candidateCount || state.manualMaskPresent || presence?.hasManualExclude || presence?.hasManualExclusionErase || imageHasMask(current));
   const visibilityButton = $("#removeCurrentImageButton");
   visibilityButton.disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
   const visibilityLabel = t(current && isHidden(current) ? "editor.show" : "editor.hide");
   visibilityButton.textContent = visibilityLabel; visibilityButton.title = visibilityLabel; visibilityButton.setAttribute("aria-label", visibilityLabel);
-  for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = busyLocked || mutationLocked || state.images.length === 0;
+  for (const id of ["#galleryFilterButton", "#overviewFilterButton"]) $(id).disabled = filterLocked;
+  for (const input of document.querySelectorAll("[data-gallery-filter], [data-overview-filter]")) input.disabled = filterLocked;
+  if (filterLocked) closeFilterPopovers();
+  for (const id of ["#clearAllMasksButton", "#clearCatalogButton", "#batchMoreButton"]) $(id).disabled = busyLocked || mutationLocked || catalogStaging || state.images.length === 0;
   $("#batchModeButton").disabled = busyLocked || mutationLocked || state.images.length === 0;
-  $("#saveAllButton").disabled = busyLocked || mutationLocked || mutatingCandidates || state.images.length === 0;
-  const currentSaveDisabled = busyLocked || mutationLocked || switchingImages || mutatingCandidates || !hasImage;
+  $("#saveAllButton").disabled = busyLocked || mutationLocked || catalogStaging || mutatingCandidates || state.images.length === 0;
+  const currentSaveDisabled = busyLocked || mutationLocked || catalogStaging || switchingImages || mutatingCandidates || !hasImage;
   $("#saveButton").disabled = currentSaveDisabled;
-  $("#applyStartButton").disabled = busyLocked || mutationLocked || mutatingCandidates || state.applyTargetIds.length === 0
+  $("#applyStartButton").disabled = busyLocked || mutationLocked || catalogStaging || mutatingCandidates || state.applyTargetIds.length === 0
     || Boolean(applyRestrictionMessage()) || (selectedSaveMode() === "copy" && !state.outputDirectoryHandle);
   $("#overviewButton").disabled = busyLocked || state.images.length === 0;
   $("#previousImageButton").disabled = busyLocked || switchingImages || imageIndex() <= 0;
   $("#nextImageButton").disabled = busyLocked || switchingImages || imageIndex() < 0 || imageIndex() >= state.images.length - 1;
   $("#reviewAndNextButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
-  $("#removeAndNextButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
+  $("#removeAndNextButton").disabled = busyLocked || mutationLocked || catalogStaging || switchingImages || !hasImage;
   $("#hideAndNextButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
   $("#downloadCurrentMosaicMask").disabled = switchingImages || !hasImage || !state.project;
   $("#downloadCurrentExcludeMask").disabled = switchingImages || !hasImage || !state.project;
@@ -567,7 +750,17 @@ function updateActionButtons() {
     if (!control.disabled) control.dataset.disabledByLock = "true";
     control.disabled = true;
   }
-  updateCandidateBatchButtons(hasImage, candidateControlsLocked, presence, candidateViewLocked);
+  updateCandidateBatchButtons(hasImage, candidateControlsLocked || catalogStaging, presence, candidateViewLocked || catalogStaging);
+  for (const button of document.querySelectorAll("[data-selection-action]")) {
+    if (["hide", "show", "reviewed", "unreviewed"].includes(button.dataset.selectionAction)) continue;
+    if (catalogStaging && !button.disabled) { button.dataset.disabledByCatalogStaging = "true"; button.disabled = true; }
+    if (!catalogStaging && button.dataset.disabledByCatalogStaging === "true") { button.disabled = false; delete button.dataset.disabledByCatalogStaging; }
+  }
+  for (const id of ["#boundaryTool", "#rectangleTool", "#polygonTool", "#boundaryBrushTool", "#boundaryDetectButton", "#boundaryCancelButton"]) {
+    const button = $(id);
+    if (catalogStaging && !button.disabled) { button.dataset.disabledByCatalogStaging = "true"; button.disabled = true; }
+    if (!catalogStaging && button.dataset.disabledByCatalogStaging === "true") { button.disabled = false; delete button.dataset.disabledByCatalogStaging; }
+  }
   updateHistoryButtons();
   if (typeof syncFlipControls === "function") syncFlipControls();
   if (busyLocked) {
@@ -583,7 +776,7 @@ function updateActionButtons() {
       "projectButton", "projectClose", "projectOpenList", "projectListClose", "projectResume", "projectCloseWorkspace", "projectNew",
       "downloadCurrentMosaicMask", "downloadCurrentExcludeMask",
       "singleViewButton", "compareViewButton", "fitButton", "mosaicPreviewButton", "previousImageButton", "nextImageButton",
-      "overviewButton", "collapseGalleryButton", "collapseInspectorButton", "settingsButton", "settingsCloseButton", "errorDialogClose",
+      "overviewButton", "galleryFilterButton", "overviewFilterButton", "collapseGalleryButton", "collapseInspectorButton", "settingsButton", "settingsCloseButton", "errorDialogClose",
       "closeOverviewButton", "overviewQuery", "overviewFolder", "sourceMismatchCancel", "detectCancelButton",
       "projectDeleteCancel", "projectDeleteConfirm", "copyImagePathMenuItem",
     ]);
@@ -602,6 +795,7 @@ function updateActionButtons() {
   canvas.style.pointerEvents = busyLocked || mutationLocked || switchingImages ? "none" : "";
   canvas.setAttribute("aria-disabled", String(busyLocked || mutationLocked || switchingImages));
   syncDetectionActions();
+  if (typeof renderProjectCurrent === "function") renderProjectCurrent();
   if (typeof renderProjectTableControls === "function") renderProjectTableControls();
 }
 
@@ -680,6 +874,7 @@ function setMosaicPreviewEnabled(enabled) {
 }
 
 function resetCatalog(images, root) {
+  if (typeof clearPendingBrowserProjectSources === "function") clearPendingBrowserProjectSources();
   ++state.imageGeneration;
   closeBoundaryModeMenu({ restoreFocus: true });
   closeCatalogContextMenu();
@@ -729,25 +924,27 @@ function updateProgress(job) {
   updateActionButtons();
 }
 
-async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = null } = {}) {
-  if (isBusy() || state.importing) return;
+async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = null, allowDuringCatalogTransition = false } = {}) {
+  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) return;
   const path = suppliedPath || $("#folderPath").value.trim();
   if (!path) return setStatusKey("status.enterFolder");
   if (!skipSameSourceWarning && typeof openSameSourceDialog === "function" && await openSameSourceDialog(path)) return;
   const picker = $("#pickerMenu");
   if (picker?.matches?.(":popover-open")) picker.hidePopover();
-  const catalogEpoch = beginCatalogEpoch();
-  ++state.imageGeneration;
-  setStatusKey("status.loadingImages", {}, "running");
   try {
-    await flushAllImageMutations();
-    await flushAllWorkspaceMutations();
-    const data = await api("/api/folder", { method: "POST", body: JSON.stringify({ path }) });
-    if (!isCurrentCatalogEpoch(catalogEpoch)) return;
-    resetCatalog(data.images, path);
-    setStatusKey("status.imagesLoaded", { count: state.images.length });
-    const snapshot = await api("/api/images");
-    applyProjectSnapshot(snapshot);
-    if (typeof showSourceMismatches === "function") await showSourceMismatches();
-  } catch (error) { if (isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
+    await runCatalogTransition(async ({ epoch, signal }) => {
+      ++state.imageGeneration;
+      setStatusKey("status.loadingImages", {}, "running");
+      await flushAllImageMutations();
+      await flushAllWorkspaceMutations();
+      const data = await catalogApi("/api/folder", { path }, { method: "POST", signal, resyncOnFailure: false });
+      if (!isCurrentCatalogEpoch(epoch)) return;
+      resetCatalog(data.images || [], data.root || path);
+      applyProjectSnapshot(data);
+      state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
+      if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+      setStatusKey("status.imagesLoaded", { count: state.images.length });
+      if (typeof showSourceMismatches === "function") await showSourceMismatches();
+    }, { allowEdits: true, allowNested: allowDuringCatalogTransition });
+  } catch (error) { showUserError(error); }
 }

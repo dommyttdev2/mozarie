@@ -193,6 +193,30 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if content_type != "application/octet-stream":
             self._reject_unread_request(ClientError("画像バイナリのリクエストだけを受け付けます。", "session_expired"))
 
+    def _catalog_expectation(self, payload: dict[str, Any] | None = None) -> tuple[str | None, int]:
+        """Read the catalogue epoch carried by every mutating browser request."""
+        payload = payload or {}
+        raw_project = payload.get("expectedProjectId", self.headers.get("X-Mozarie-Expected-Project-Id"))
+        raw_generation = payload.get("expectedCatalogGeneration", self.headers.get("X-Mozarie-Expected-Catalog-Generation"))
+        if raw_project is None: raw_project = ""
+        if not isinstance(raw_project, str) or raw_generation is None:
+            raise ClientError("プロジェクト一覧の版番号がありません。再読み込みしてください。", "stale_catalog")
+        if isinstance(raw_generation, str) and raw_generation.isdigit(): raw_generation = int(raw_generation)
+        if isinstance(raw_generation, bool) or not isinstance(raw_generation, int) or raw_generation < 0:
+            raise ClientError("プロジェクト一覧の版番号が正しくありません。", "input_invalid")
+        return (raw_project or None, raw_generation)
+
+    def _catalog_mutation(self, expected_project_id: str | None, expected_catalog_generation: int, operation: Any) -> Any:
+        """Keep one request's catalogue epoch available at its state commit."""
+        with STATE.catalog_request(expected_project_id, expected_catalog_generation):
+            return operation()
+
+    def _catalog_transition_snapshot(self, operation: Any) -> tuple[Any, dict[str, Any]]:
+        """Capture a transition result and its catalogue version without interleaving another transition."""
+        with STATE.import_lock:
+            result = operation()
+            return result, STATE.catalog_snapshot()
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._require_local_host()
@@ -245,6 +269,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/project/source-check":
                 raw_path = parse_qs(parsed.query).get("path", [""])[0]
                 self._json({"projects": STATE.projects_for_source_root(raw_path)})
+            elif path == "/api/project/source-status":
+                query = parse_qs(parsed.query)
+                project_id = query.get("projectId", [""])[0]
+                image_id = query.get("imageId", [""])[0]
+                self._json({"exists": bool(project_id and image_id and STATE.workspace_store.project_has_image(project_id, image_id))})
             elif path.startswith("/api/project/history/"):
                 self._json(STATE.project_history_status(path.removeprefix("/api/project/history/")))
             elif path == "/api/job":
@@ -297,7 +326,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
         except ForbiddenClientError as exc:
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # Keep tracebacks in the terminal, not in browser.
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("GET リクエストでGPUメモリが不足: %s", self.path)
@@ -336,6 +365,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 source_identity = unquote(self.headers.get("X-Mozarie-Source-Id", ""))
                 source_kind = self.headers.get("X-Mozarie-Source-Kind", "browser-files")
                 import_intent = self.headers.get("X-Mozarie-Import-Intent", "")
+                import_session_id = self.headers.get("X-Mozarie-Import-Session", "")
                 raw_mtime = self.headers.get("X-Mozarie-File-Mtime", "0")
                 raw_size = self.headers.get("X-Mozarie-File-Size", "0")
                 if (source_identity and (len(source_identity) > 128 or not source_identity.replace("-", "").isalnum())
@@ -343,10 +373,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
                         or import_intent not in {"add", "restore"}
                         or not raw_mtime.isdigit() or not raw_size.isdigit()):
                     raise ClientError("画像の更新情報が正しくありません。", "input_invalid")
+                expected_project_id, expected_catalog_generation = self._catalog_expectation()
                 try:
-                    STATE.begin_import_transfer()
+                    STATE.begin_import_transfer(import_session_id, expected_project_id, expected_catalog_generation)
                 except ClientError as exc:
                     self._reject_unread_request(exc)
+                response = None
                 try:
                     with STATE.import_staging_gate:
                         staged_path = self._read_binary_body_to_file()
@@ -365,6 +397,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             import_args = {
                                 "name": name, "relative_path": relative_path, "client_key": client_key,
                                 "include_images": False, "transfer_active": True,
+                                "import_session_id": import_session_id,
+                                "import_project_id": expected_project_id,
+                                "import_catalog_generation": expected_catalog_generation,
                                 "source_identity": source_identity or None,
                                 "source_kind": source_kind,
                                 "intent": import_intent,
@@ -374,61 +409,106 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
                         finally:
                             staged_path.unlink(missing_ok=True)
-                    self._json({"imported": imported, "catalogId": STATE.catalog_id})
+                    response = {"imported": imported, "catalogId": STATE.catalog_id,
+                                "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
                 finally:
-                    STATE.end_import_transfer()
+                    STATE.end_import_transfer(import_session_id)
+                self._json(response)
                 return
             self._require_json_request()
             payload = self._read_json_body()
-            if path == "/api/folder":
-                images = STATE.set_root(str(payload.get("path", "")))
-                self._json({"images": images, "workspace": True})
+            expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
+            if path == "/api/import/finish":
+                self._json(STATE.finish_import_session(str(payload.get("sessionId", "")), expected_project_id,
+                                                        expected_catalog_generation))
+            elif path == "/api/folder":
+                _result, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
+                                           expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json(snapshot)
             elif path == "/api/projects":
-                self._json({"project": STATE.create_project(payload.get("name"))})
+                project, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.create_project(payload.get("name"), expected_project_id=expected_project_id,
+                                                 expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"project": project, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/name":
-                self._json({"project": STATE.name_current_project(str(payload.get("name", "")), str(payload.get("projectId", "")))})
+                project, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.name_current_project(str(payload.get("name", "")), str(payload.get("projectId", "")),
+                                                       expected_project_id=expected_project_id,
+                                                       expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"project": project, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/complete":
-                self._json({"project": STATE.complete_project()})
+                project, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.complete_project(expected_project_id=expected_project_id,
+                                                   expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"project": project, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/close":
-                STATE.close_project(); self._json({"ok": True})
+                _result, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.close_project(expected_project_id=expected_project_id,
+                                                expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"ok": True, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/open":
-                self._json(STATE.open_project(str(payload.get("projectId", ""))))
+                data, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.open_project(str(payload.get("projectId", "")), expected_project_id=expected_project_id,
+                                              expected_catalog_generation=expected_catalog_generation,
+                                              resume=bool(payload.get("resume")))
+                )
+                self._json({**data, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/resume":
-                self._json({"project": STATE.resume_project(str(payload.get("projectId", "")))})
+                project, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.resume_project(str(payload.get("projectId", "")), expected_project_id=expected_project_id,
+                                               expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"project": project, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path == "/api/project/mismatches":
                 ids = payload.get("imageIds", [])
                 if not isinstance(ids, list):
                     raise ClientError("画像IDの一覧が正しくありません。", "input_invalid")
-                STATE.resolve_source_mismatches(ids, bool(payload.get("clearMasks")))
-                self._json(STATE.catalog_snapshot())
+                _result, snapshot = self._catalog_transition_snapshot(
+                    lambda: self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.resolve_source_mismatches(ids, bool(payload.get("clearMasks"))))
+                )
+                self._json(snapshot)
             elif path == "/api/project/source-check":
                 self._json({"projects": STATE.projects_for_source_root(str(payload.get("path", "")))})
             elif path == "/api/project/source/relink":
-                self._json(STATE.relink_project_native_source(
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.relink_project_native_source(
                     str(payload.get("projectId", "")), str(payload.get("sourceId", "")), str(payload.get("path", "")),
-                ))
+                )))
             elif path.startswith("/api/project/history/"):
                 image_id, action = _route_ids(path, "/api/project/history/")
                 if action not in {"undo", "redo"}:
                     raise ClientError("履歴の操作が正しくありません。", "input_invalid")
-                self._json(STATE.restore_project_history(image_id, action))
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.restore_project_history(image_id, action)))
             elif path == "/api/catalog/clear":
-                STATE.clear_catalog()
-                self._json({"images": []})
+                generation = self._catalog_mutation(expected_project_id, expected_catalog_generation, STATE.clear_catalog)
+                self._json({"images": [], "catalogGeneration": generation})
             elif path.startswith("/api/workspace/image/"):
-                self._json(STATE.set_image_flags(path.removeprefix("/api/workspace/image/"), payload))
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.set_image_flags(path.removeprefix("/api/workspace/image/"), payload)))
             elif path == "/api/workspace/images":
-                self._json({"flags": STATE.set_image_flags_bulk(payload)})
+                self._json({"flags": self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                              lambda: STATE.set_image_flags_bulk(payload))})
             elif path.startswith("/api/workspace/manual/"):
-                STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload)
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload))
                 self._json({"ok": True})
             elif path.startswith("/api/images/") and path.endswith("/transform"):
                 image_id = path.removeprefix("/api/images/").removesuffix("/transform").rstrip("/")
-                self._json(STATE.set_image_transform(image_id, payload))
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.set_image_transform(image_id, payload)))
             elif path == "/api/catalog/remove":
-                self._json(STATE.remove_images_from_catalog(payload.get("imageIds", [])))
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.remove_images_from_catalog(payload.get("imageIds", []))))
             elif path == "/api/masks/clear":
-                self._json({"cleared": STATE.clear_masks(payload.get("imageIds", []))})
+                self._json({"cleared": self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                                lambda: STATE.clear_masks(payload.get("imageIds", [])))})
             elif path == "/api/detect":
                 detect_args = (
                     payload.get("imageIds", []),
@@ -436,9 +516,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
                 if "targetClasses" in payload:
-                    STATE.start_detection(*detect_args, _read_target_classes(payload["targetClasses"]))
+                    self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                           lambda: STATE.start_detection(*detect_args, _read_target_classes(payload["targetClasses"])))
                 else:
-                    STATE.start_detection(*detect_args)
+                    self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                           lambda: STATE.start_detection(*detect_args))
                 self._json({"ok": True})
             elif path == "/api/candidates/batch":
                 image_id = str(payload.get("imageId", ""))
@@ -446,10 +528,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 if image_ids is not None:
                     if not isinstance(image_ids, list):
                         raise ClientError("画像IDの一覧が正しくありません。", "input_invalid")
-                    revisions = STATE.batch_update_candidates_many(image_ids, payload)
+                    revisions = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                       lambda: STATE.batch_update_candidates_many(image_ids, payload))
                     self._json({"ok": True, "candidateRevisions": revisions})
                 else:
-                    revision = STATE.batch_update_candidates(image_id, payload)
+                    revision = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                      lambda: STATE.batch_update_candidates(image_id, payload))
                     self._json({"ok": True, "candidateRevision": revision})
             elif path == "/api/settings":
                 settings = STATE.update_settings(payload)
@@ -488,19 +572,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 threading.Thread(target=_start_update_after_response, args=(self.server,), daemon=True).start()
             elif path == "/api/boundary":
                 image_id = str(payload.get("imageId", ""))
-                self._json(STATE.add_boundary_candidate(image_id, payload))
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.add_boundary_candidate(image_id, payload)))
             elif path == "/api/save/prepare":
-                entries = STATE.prepare_browser_save(
+                entries = self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.prepare_browser_save(
                     payload.get("imageIds", []),
                     _read_mosaic_divisor(payload.get("divisor")),
                     str(payload.get("suffix", "_censored")),
                     _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
-                )
+                ))
                 self._json({"entries": entries})
             elif path == "/api/save/render":
                 copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
                 copy_to_browser = _read_bool(payload.get("copyToBrowser", False), "ブラウザ保存")
-                rendered = STATE.render_browser_save(
+                rendered = self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     _read_mosaic_divisor(payload.get("divisor")),
@@ -510,7 +595,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                     output_format=str(payload.get("format", "original")),
                     keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
-                )
+                ))
                 output, record, revision, save_token = rendered
                 if copy_to_default:
                     self._json({"output": str(rendered.output_path), "candidateRevision": revision, "saveToken": save_token})
@@ -531,50 +616,54 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     raise ClientError("保存後の元画像情報が正しくありません。", "input_invalid")
                 if source_size_bytes is not None and (not isinstance(source_size_bytes, int) or isinstance(source_size_bytes, bool) or source_size_bytes < 0):
                     raise ClientError("保存後の元画像情報が正しくありません。", "input_invalid")
-                self._json(STATE.commit_browser_save(
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.commit_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
                     payload.get("saveToken"),
                     payload.get("sourceAction"),
                     source_mtime_ns=source_mtime_ms * 1_000_000 if source_mtime_ms is not None else None,
                     source_size_bytes=source_size_bytes,
-                ))
+                )))
             elif path == "/api/save/status":
-                self._json(STATE.browser_save_status(
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.browser_save_status(
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
                     str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
-                ))
+                )))
             elif path == "/api/save/cancel":
-                self._json(STATE.cancel_browser_save(
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.cancel_browser_save(
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
                     str(payload.get("saveToken", "")),
-                ))
+                )))
             elif path == "/api/apply":
                 divisor = _read_mosaic_divisor(payload.get("divisor"))
-                started = STATE.start_apply(
+                started = self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.start_apply(
                     payload.get("imageIds", []), divisor, payload.get("drafts", {}),
                     _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー"),
                     _read_save_suffix(payload.get("suffix", "_censored")),
                     str(payload.get("format", "original")),
                     _read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
-                )
+                ))
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
-                self._json(STATE.request_pause().as_dict())
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.request_pause().as_dict()))
             elif path == "/api/job/resume":
-                self._json(STATE.resume_job().as_dict())
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.resume_job().as_dict()))
             elif path == "/api/job/cancel":
-                self._json(STATE.request_cancel().as_dict())
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.request_cancel().as_dict()))
             elif path.startswith("/api/candidate/"):
                 image_id, candidate_id = _route_ids(path, "/api/candidate/")
-                revision = STATE.set_candidate_state(image_id, candidate_id, payload)
+                revision = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                  lambda: STATE.set_candidate_state(image_id, candidate_id, payload))
                 self._json({"ok": True, "candidateRevision": revision})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             # Recovery can fail while no state exists.  It is not a GPU error,
             # and must still return the normal structured server error.
@@ -596,28 +685,35 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self._client_error(ClientError("ページが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
                 return
             self._require_mutation_request()
+            expected_project_id, expected_catalog_generation = self._catalog_expectation()
             if path.startswith("/api/catalog/image/"):
                 image_id = path.removeprefix("/api/catalog/image/")
-                self._json({"images": STATE.remove_image_from_catalog(image_id)})
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.remove_image_from_catalog(image_id)))
             elif path.startswith("/api/project/"):
                 project_id = path.removeprefix("/api/project/")
                 if not project_id or "/" in project_id:
                     raise ClientError("プロジェクトが見つかりません。", "project_not_found")
-                STATE.delete_project(project_id)
-                self._json({"deleted": True})
+                _result, snapshot = self._catalog_transition_snapshot(
+                    lambda: STATE.delete_project(project_id, expected_project_id=expected_project_id,
+                                                 expected_catalog_generation=expected_catalog_generation)
+                )
+                self._json({"deleted": True, "catalogGeneration": snapshot["catalogGeneration"]})
             elif path.startswith("/api/candidate/"):
                 image_id, candidate_id = _route_ids(path, "/api/candidate/")
-                deleted = STATE.delete_candidate(image_id, candidate_id)
+                deleted = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                  lambda: STATE.delete_candidate(image_id, candidate_id))
                 self._json({"deleted": deleted, "candidateRevision": STATE._candidate_revision(image_id)})
             elif path.startswith("/api/workspace/manual/"):
-                STATE.delete_manual_workspace(path.removeprefix("/api/workspace/manual/"))
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.delete_manual_workspace(path.removeprefix("/api/workspace/manual/")))
                 self._json({"ok": True})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
         except ForbiddenClientError as exc:
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.BAD_REQUEST)
+            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("DELETE リクエストでGPUメモリが不足: %s", self.path)
