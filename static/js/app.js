@@ -534,15 +534,6 @@ function openProjectDeleteDialog(projectId) {
   focusElement($("#projectDeleteCancel"));
 }
 
-async function resolveProjectSourceCleanup(projectId) {
-  const data = await api("/api/projects?sort=updated_desc");
-  if ((data.projects || []).some((project) => project.id === projectId)) {
-    await clearProjectSourceCleanup(projectId);
-  } else {
-    await forgetProjectSources(projectId);
-  }
-}
-
 async function deleteProject(projectId) {
   if (!projectId || projectDeleteBusy || !beginProjectOperation()) return;
   projectDeleteBusy = true;
