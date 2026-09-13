@@ -1667,10 +1667,10 @@ class CatalogMixin:
         import_project_id=import_project_id, import_catalog_generation=import_catalog_generation,
         source_identity=source_identity, source_kind=source_kind, intent=intent)
 
-    def _clear_cache(self) -> None:
+    def _clear_cache(self, *, keep_names: set[str] | None = None) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         for child in self.cache_dir.iterdir():
-            if child.name == ".active.lock":
+            if child.name == ".active.lock" or child.name in (keep_names or set()):
                 continue
             try:
                 if child.is_dir():
