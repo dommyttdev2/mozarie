@@ -466,7 +466,7 @@ async function importFiles(files) {
         const stagedSource = Boolean(session.catalogId && session.sourceKind === "browser-files" && entry.fileHandle);
         if (stagedSource) await rememberProjectSource(session.catalogId, entry.fileHandle, null, session.sourceId, clientKey, entry.relativePath);
         let data;
-        try { data = await importSingleFile(entry, clientKey, session.catalogId, session.sourceId, session.sourceKind, session.importIntent, session.expectedCatalogGeneration); }
+        try { data = await importSingleFile(entry, clientKey, session.catalogId, session.sourceId, session.sourceKind, session.importIntent, session); }
         catch (error) {
           if (stagedSource && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) {
             await forgetPendingProjectSource(session.catalogId, session.sourceId, clientKey);
@@ -521,7 +521,7 @@ async function importFiles(files) {
   }
 }
 
-async function importSingleFile(entry, clientKey, catalogId = null, sourceId = null, sourceKind = null, importIntent = "add", expectedCatalogGeneration = null) {
+async function importSingleFile(entry, clientKey, catalogId = null, sourceId = null, sourceKind = null, importIntent = "add", session = null) {
   const token = document.querySelector('meta[name="mozarie-token"]')?.content || "";
   const response = await fetch("/api/import/file", {
     method: "POST",
@@ -536,6 +536,7 @@ async function importSingleFile(entry, clientKey, catalogId = null, sourceId = n
       ...(sourceId ? { "X-Mozarie-Source-Id": encodeURIComponent(sourceId) } : {}),
       ...(sourceKind ? { "X-Mozarie-Source-Kind": sourceKind } : {}),
       "X-Mozarie-Import-Intent": importIntent,
+      "X-Mozarie-Import-Session": session?.id || "",
       ...(catalogId ? { "X-Mozarie-Catalog-Id": encodeURIComponent(catalogId) } : {}),
       "X-Mozarie-Expected-Project-Id": encodeURIComponent(session?.expectedProjectId ?? state.project?.id ?? ""),
       ...(Number.isSafeInteger(session?.expectedCatalogGeneration) ? { "X-Mozarie-Expected-Catalog-Generation": String(session.expectedCatalogGeneration) } : {}),
