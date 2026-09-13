@@ -292,6 +292,7 @@ class SavingMixin:
 
         with self.import_lock, ExitStack() as exit_stack:
             with self.lock:
+                self._assert_request_catalog_expectation()
                 receipt = self.browser_save_receipts.get(save_token)
                 if receipt is not None:
                     if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
@@ -310,6 +311,7 @@ class SavingMixin:
             image_lock = self.image_io_lock(image_id)
             with image_lock:
                 with self.lock:
+                    self._assert_request_catalog_expectation()
                     receipt = self.browser_save_receipts.get(save_token)
                     if receipt is not None:
                         if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
@@ -469,6 +471,7 @@ class SavingMixin:
     def browser_save_status(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         """Report only the finite state of one opaque save token."""
         with self.lock:
+            self._assert_request_catalog_expectation()
             receipt = self.browser_save_receipts.get(save_token)
             if receipt is not None:
                 if receipt.image_id == image_id and receipt.candidate_revision == revision and receipt.source_action == source_action:

@@ -181,6 +181,16 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         finally:
             self._request_catalog_expectation.value = previous
 
+    @contextmanager
+    def catalog_request(self, expected_project_id: str | None, expected_catalog_generation: int):
+        """Make one HTTP mutation verify its captured catalogue at commit points."""
+        previous = getattr(self._request_catalog_expectation, "value", None)
+        self._request_catalog_expectation.value = (expected_project_id, expected_catalog_generation)
+        try:
+            yield
+        finally:
+            self._request_catalog_expectation.value = previous
+
     def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
         """Persist user-selected options and release only model objects that changed."""
         if not isinstance(update, dict):
