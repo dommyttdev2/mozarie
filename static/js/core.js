@@ -435,16 +435,18 @@ async function catalogApi(path, payload = {}, options = {}) {
   const expectedCatalogGeneration = state.serverCatalogGeneration;
   const requestEpoch = state.catalogEpoch;
   try {
-    return catalogResponse(await api(path, {
+    const request = {
       ...requestOptions,
       resyncOnStale: false,
-      body: JSON.stringify(catalogExpectation(payload)),
       headers: {
         "X-Mozarie-Expected-Project-Id": state.project?.id || "",
         ...(Number.isSafeInteger(expectedCatalogGeneration) ? { "X-Mozarie-Expected-Catalog-Generation": String(expectedCatalogGeneration) } : {}),
         ...(requestOptions.headers || {}),
       },
-    }));
+    };
+    if ((requestOptions.method || "POST").toUpperCase() === "DELETE") delete request.body;
+    else request.body = JSON.stringify(catalogExpectation(payload));
+    return catalogResponse(await api(path, request));
   } catch (error) {
     const ambiguous = catalogFailureMayHaveCommitted(error);
     if (resyncOnFailure && ambiguous && !error.catalogResynced && error?.name !== "AbortError") {
@@ -692,6 +694,12 @@ function setNavigationShortcutsEnabled(enabled) {
   updateNavigationControls();
   focusCanvas();
 }
+function canRemoveCurrentImage() {
+  const current = currentRecord();
+  return Boolean(state.currentId && state.currentImage && current)
+    && !isBusy() && !state.importing && !state.projectReadOnly && !current.sourceDimensionsChanged
+    && !state.projectOperationPending && !catalogStagingEditsActive() && !currentImageActionPending();
+}
 
 function updateActionButtons() {
   const running = isBusy();
@@ -747,7 +755,7 @@ function updateActionButtons() {
   $("#previousImageButton").disabled = busyLocked || switchingImages || visibleImages.length === 0 || visibleIndex === 0;
   $("#nextImageButton").disabled = busyLocked || switchingImages || visibleImages.length === 0 || visibleIndex === visibleImages.length - 1;
   $("#reviewAndNextButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
-  $("#removeAndNextButton").disabled = busyLocked || mutationLocked || catalogStaging || switchingImages || !hasImage;
+  $("#removeAndNextButton").disabled = !canRemoveCurrentImage();
   $("#hideAndNextButton").disabled = busyLocked || mutationLocked || switchingImages || !hasImage;
   $("#downloadCurrentMosaicMask").disabled = switchingImages || !hasImage || !state.project;
   $("#downloadCurrentExcludeMask").disabled = switchingImages || !hasImage || !state.project;
