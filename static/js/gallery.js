@@ -106,7 +106,8 @@ function setCatalogNode(windowState, image, index, layout, rowNode) {
     else if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) { event.preventDefault?.(); event.stopPropagation?.(); openCatalogContextMenu(event, image.id); }
     else { const targetIndex = catalogMoveIndex(windowState, index, event); if (targetIndex >= 0) { event.preventDefault?.(); event.stopPropagation?.(); focusCatalogIndex(windowState, targetIndex, event); } }
   };
-  if (cell.parentNode !== rowNode) rowNode.append(cell);
+  const expectedCell = rowNode.children[column];
+  if (expectedCell !== cell) rowNode.insertBefore(cell, expectedCell || null);
 }
 
 function catalogMoveIndex(windowState, index, event) {
@@ -146,8 +147,11 @@ function renderCatalogWindow(windowState) {
   const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
   for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode.remove(); nodes.delete(id); }
   for (const [row, rowNode] of windowState.rows) if (row < firstRow || row >= lastRow) { rowNode.remove(); windowState.rows.delete(row); }
+  let previousRow = spacer;
   for (let row = firstRow; row < lastRow; row += 1) {
     const rowNode = catalogRow(windowState, row, layout); const rowStart = row * layout.columns;
+    if (rowNode.previousElementSibling !== previousRow) container.insertBefore(rowNode, previousRow.nextElementSibling);
+    previousRow = rowNode;
     for (let index = rowStart; index < Math.min(windowState.images.length, rowStart + layout.columns); index += 1) setCatalogNode(windowState, windowState.images[index], index, layout, rowNode);
   }
   for (const item of nodes.values()) item.style.visibility = "";
@@ -211,6 +215,20 @@ function imageMatchesStateFilter(image, filters) {
 function imageMatchesGalleryFilter(image) {
   return imageMatchesStateFilter(image, state.galleryFilter);
 }
+function galleryFilteredImages() { return state.images.filter(imageMatchesGalleryFilter); }
+function nextVisibleImage(images, imageId, { excludedImageIds = new Set(), fallback = false } = {}) {
+  const index = images.findIndex((image) => image.id === imageId);
+  const next = images.slice(index < 0 ? 0 : index + 1).find((image) => !excludedImageIds.has(image.id));
+  if (next || index < 0 || !fallback) return next || null;
+  return images.slice(0, index).reverse().find((image) => !excludedImageIds.has(image.id)) || null;
+}
+function nextGalleryFilteredImage(imageId, options = {}) { return nextVisibleImage(galleryFilteredImages(), imageId, options); }
+function clearCurrentImageSelection() {
+  state.currentId = null; state.currentImage = null; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
+  state.candidates = []; state.candidateImages = new Map(); clearEditor();
+  updateGalleryCurrent();
+  if (state.viewMode === "overview") renderOverview();
+}
 
 function updateGalleryCurrent() {
   for (const item of state.galleryNodes.values()) {
@@ -241,6 +259,13 @@ function overviewImages() {
     if (folder && path !== folder && !path.startsWith(`${folder}/`)) return false;
     return !query || path.toLowerCase().includes(query);
   });
+}
+function reconcileOverviewSelection(visibleImages = overviewImages()) {
+  if (!state.batchMode) return;
+  const visibleIds = new Set(visibleImages.map((image) => image.id));
+  state.selectedImageIds = new Set([...state.selectedImageIds].filter((imageId) => visibleIds.has(imageId)));
+  if (!visibleIds.has(state.selectionAnchorId)) state.selectionAnchorId = null;
+  updateSelectionActionBar();
 }
 function syncOverviewFolders() {
   const select = $("#overviewFolder");
@@ -280,6 +305,7 @@ function renderOverview(force = false) {
   if (!grid) return;
   syncOverviewFolders();
   const visibleImages = overviewImages();
+  reconcileOverviewSelection(visibleImages);
   $("#overviewCount").textContent = t("overview.count", { visible: visibleImages.length, total: state.images.length });
   document.querySelectorAll("[data-overview-filter]").forEach((input) => { input.checked = state.overviewFilter.has(input.dataset.overviewFilter); });
   updateFilterMenuButtons();
@@ -315,17 +341,16 @@ function setViewMode(mode, refreshGallery = true) {
 }
 function moveCurrentBy(offset) {
   if (isGestureActive()) return;
-  const visible = state.images.filter((image) => !isHidden(image)); const index = visible.findIndex((image) => image.id === state.currentId);
-  const target = visible[index + offset];
+  const visible = galleryFilteredImages(); const index = visible.findIndex((image) => image.id === state.currentId);
+  const target = index < 0 ? (offset < 0 ? visible.at(-1) : visible[0]) : visible[index + offset];
   if (target) void selectImage(target.id);
 }
 async function reviewAndMoveNext() {
   const current = currentRecord();
   if (isGestureActive() || currentImageActionPending() || !current) return null;
   const currentId = current.id;
-  const filteredImages = state.images.filter(imageMatchesGalleryFilter);
-  const currentIndex = filteredImages.findIndex((image) => image.id === currentId);
-  const target = currentIndex < 0 ? filteredImages[0] || null : filteredImages[currentIndex + 1] || null;
+  const filteredImages = galleryFilteredImages();
+  const target = nextVisibleImage(filteredImages, currentId, { fallback: true });
   const reviewed = await queueImageMutation(currentId, async () => {
     const scroll = state.contextMenuScroll;
     return saveWorkspaceFlagNow(current, "reviewed", true, () => {
@@ -333,25 +358,33 @@ async function reviewAndMoveNext() {
     });
   }, { lockCandidateControls: true });
   if (!reviewed) return null;
-  if (target && state.currentId === currentId) void selectImage(target.id);
-  return target;
+  if (state.currentId !== currentId) return target;
+  if (target && state.images.some((image) => image.id === target.id)) {
+    await selectImage(target.id);
+    return target;
+  }
+  clearCurrentImageSelection();
+  return null;
 }
 async function hideAndMoveNext() {
   if (isGestureActive() || currentImageActionPending()) return;
   const current = currentRecord();
   if (!current) return;
   const currentId = current.id;
-  const target = state.images.slice(imageIndex(currentId) + 1).find((image) => !isHidden(image)) || null;
+  const target = nextGalleryFilteredImage(currentId, { fallback: true });
   if (!await setHidden(current, true)) return;
-  if (target && state.currentId === currentId) await selectImage(target.id);
+  if (state.currentId !== currentId) return;
+  if (target) await selectImage(target.id);
+  else clearCurrentImageSelection();
 }
 async function runNavigationAction(action) {
   await action();
   focusCanvas();
 }
 function updateNavigationControls() {
-  const index = imageIndex();
-  const position = index < 0 ? "- / -" : `${index + 1} / ${state.images.length}`;
+  const visibleImages = galleryFilteredImages();
+  const index = visibleImages.findIndex((image) => image.id === state.currentId);
+  const position = index < 0 ? `- / ${visibleImages.length}` : `${index + 1} / ${visibleImages.length}`;
   $("#imagePosition").textContent = position;
   const status = $("#reviewStatus");
   const record = currentRecord();
