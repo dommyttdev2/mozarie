@@ -93,11 +93,15 @@ class SavingMixin:
         with self.lock:
             self._assert_catalog_mutable()
         records, _catalog_generation = self._records_for_ids_with_catalog(image_ids)
+        for record in records:
+            self._assert_image_editable(record.image_id)
         _read_mosaic_divisor(divisor)
         _read_save_suffix(suffix)
         with self.lock:
             if any(self.images.get(record.image_id) is not record for record in records):
                 raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
+            for record in records:
+                self._assert_image_editable(record.image_id)
             return [
                 {
                     "imageId": record.image_id,
@@ -145,6 +149,7 @@ class SavingMixin:
             # not block requests for other images.
             with image_lock:
                 with self.lock:
+                    self._assert_image_editable(image_id)
                     current_record = self.images.get(image_id)
                     if current_record is None or current_record.path != record.path:
                         raise ClientError("画像が見つかりません。フォルダを再読込してください。", "image_not_found")
@@ -236,6 +241,7 @@ class SavingMixin:
                         handle.flush()
 
                 with self.lock:
+                    self._assert_image_editable(image_id)
                     _assert_source_stat_matches(record, source_fingerprint)
                     if (
                         self.images.get(image_id) is None

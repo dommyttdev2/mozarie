@@ -123,6 +123,8 @@ function resetCurrentDraft() {
 }
 
 async function clearMasks(imageIds, titleKey, messageKey, expectedImageId = null, expectedGeneration = null) {
+  const ids = new Set(processableImages().map((image) => image.id));
+  imageIds = [...new Set(imageIds)].filter((imageId) => ids.has(imageId));
   if (!imageIds.length || isBusy() || state.importing || catalogStagingEditsActive() || currentImageActionPending()) return;
   if (!await confirmAction(t(titleKey, { count: imageIds.length }), t(messageKey, { count: imageIds.length }), "clearMasks")) return;
   if (expectedImageId && (state.currentId !== expectedImageId || !isCurrentGeneration(expectedGeneration) || currentImageActionPending())) return;
@@ -325,8 +327,8 @@ async function runSelectionAction(action) {
     finally { state.catalogMutation = false; updateActionButtons(); }
     return;
   }
-  if (action === "detect") return openDetectionDialog(ids);
-  if (action === "clear") return clearMasks(ids, "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
+  if (action === "detect") return openDetectionDialog(images.filter(isProcessableImage).map((image) => image.id));
+  if (action === "clear") return clearMasks(images.filter(isProcessableImage).map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
   if (action === "remove") {
     if (!await confirmAction(t("confirm.removeImages.title"), t("confirm.removeImages.message", { count: ids.length }), "removeImage")) return;
     const epoch = beginCatalogEpoch(); state.catalogMutation = true; updateActionButtons();
@@ -732,7 +734,7 @@ function handleEditorKeydown(event) {
   const binding = shortcutFromEvent(event);
   const shortcuts = state.settings?.shortcuts?.bindings || { undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
   const enabled = state.settings?.shortcuts?.actions || {};
-  if (!currentImageActionPending() && !state.projectReadOnly && !currentRecord()?.sourceDimensionsChanged
+  if (!currentImageActionPending() && !state.projectReadOnly && isProcessableImage(currentRecord()) && !currentRecord()?.sourceDimensionsChanged
     && ((binding === shortcuts.undo && enabled.undo !== false) || (binding === shortcuts.redo && enabled.redo !== false))) {
     event.preventDefault();
     void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
@@ -753,7 +755,9 @@ function navigationShortcutAction(event) {
   if (state.viewMode !== "edit") return null;
   if (actionForBinding === "removeImage" && event.repeat) return "removeImageRepeat";
   if (actionForBinding === "removeImage" && !canRemoveCurrentImage()) return null;
-  if ((currentImageActionPending() || state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) && ["reviewAndNext", "undo", "redo"].includes(actionForBinding)) return null;
+  if ((currentImageActionPending() || state.projectReadOnly || currentRecord()?.sourceDimensionsChanged
+    || (!isProcessableImage(currentRecord()) && ["undo", "redo"].includes(actionForBinding)))
+    && ["reviewAndNext", "undo", "redo"].includes(actionForBinding)) return null;
   return actionForBinding;
 }
 
