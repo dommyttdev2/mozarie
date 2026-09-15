@@ -260,21 +260,51 @@ async function restoreDeletionSelection(snapshot, imageIds) {
   if (!imageId) clearCurrentImageSelection();
   else if (!(state.currentId === imageId && state.currentImage)) await selectImage(imageId, true, { saveCurrentDraft: false });
 }
+function browserDeleteEntry(image) {
+  const access = sourceAccessFor(image.id);
+  return access?.fileHandle && access?.parentHandle ? {
+    imageId: image.id, name: access.fileHandle.name || access.name, fileHandle: access.fileHandle, parentHandle: access.parentHandle,
+    sizeBytes: image.sizeBytes, mtimeNs: image.mtimeNs, state: "ready",
+  } : null;
+}
+async function requestBrowserDeletePermissions(images) {
+  const parents = new Map();
+  for (const image of images) {
+    if (image.sourceKind !== "filesystem") {
+      const entry = browserDeleteEntry(image); if (entry) parents.set(entry.parentHandle, entry.parentHandle);
+    }
+  }
+  // Start every request in the delete-confirm click's activation turn, before
+  // flushing drafts or making network requests. removeEntry needs the parent,
+  // not the file handle, to be read/write.
+  try {
+    const requests = [...parents.values()].map((parentHandle) => parentHandle.requestPermission?.({ mode: "readwrite" }));
+    const granted = await Promise.all(requests);
+    return granted.every((permission) => !permission || permission === "granted");
+  } catch { return false; }
+}
+async function browserDeleteHandle(entry, image) {
+  const options = { mode: "readwrite" };
+  const permission = await entry.parentHandle.queryPermission?.(options);
+  if (permission && permission !== "granted") throw codedError("source_permission_denied");
+  const resolved = await entry.parentHandle.getFileHandle(entry.name);
+  if (resolved.isSameEntry && !await resolved.isSameEntry(entry.fileHandle)) throw codedError("stale_asset");
+  const file = await resolved.getFile();
+  if (file.size !== image.sizeBytes || file.lastModified * 1_000_000 !== image.mtimeNs) throw codedError("stale_asset");
+  await entry.parentHandle.removeEntry(entry.name);
+}
 async function preflightBrowserSourceDelete(images) {
   const ready = []; const failed = [];
   for (const image of images) {
     if (image.sourceKind === "filesystem") { ready.push(image); continue; }
-    const access = sourceAccessFor(image.id);
     try {
       if (!sourceCanDelete(image)) throw codedError("source_action_unavailable");
-      await ensureHandlePermission(access, true);
-      const directoryOptions = { mode: "readwrite" };
-      let directoryPermission = await access.parentHandle.queryPermission?.(directoryOptions);
-      if (directoryPermission !== "granted") directoryPermission = await access.parentHandle.requestPermission?.(directoryOptions);
+      const entry = browserDeleteEntry(image); if (!entry) throw codedError("source_action_unavailable");
+      const directoryPermission = await entry.parentHandle.queryPermission?.({ mode: "readwrite" });
       if (directoryPermission && directoryPermission !== "granted") throw codedError("source_permission_denied");
-      const resolved = await access.parentHandle.getFileHandle(access.fileHandle.name || access.name);
-      if (resolved.isSameEntry && !await resolved.isSameEntry(access.fileHandle)) throw codedError("stale_asset");
-      const file = await access.fileHandle.getFile();
+      const resolved = await entry.parentHandle.getFileHandle(entry.name);
+      if (resolved.isSameEntry && !await resolved.isSameEntry(entry.fileHandle)) throw codedError("stale_asset");
+      const file = await resolved.getFile();
       if (file.size !== image.sizeBytes || file.lastModified * 1_000_000 !== image.mtimeNs) throw codedError("stale_asset");
       ready.push(image);
     } catch (error) { failed.push({ imageId: image.id, reason: error?.code || "source_delete_failed" }); }
@@ -282,13 +312,16 @@ async function preflightBrowserSourceDelete(images) {
   return { ready, failed };
 }
 
-async function deleteBrowserSources(images, onDeleted = null) {
+async function deleteBrowserSources(images, entries, onChanged = null) {
   const deleted = []; const failed = [];
   for (const image of images) {
     if (image.sourceKind === "filesystem") continue;
     try {
-      await removeSourceHandle(sourceAccessFor(image.id)); deleted.push(image.id);
-      if (onDeleted) { try { await onDeleted(image.id, deleted); } catch { /* The in-flight commit still completes below. */ } }
+      const entry = entries.find((candidate) => candidate.imageId === image.id);
+      if (!entry) throw codedError("source_action_unavailable");
+      entry.state = "deleting"; await onChanged?.();
+      await browserDeleteHandle(entry, image); entry.state = "deleted"; deleted.push(image.id);
+      await onChanged?.();
     }
     catch (error) { failed.push({ imageId: image.id, reason: error?.code || "source_delete_failed" }); }
   }
@@ -310,13 +343,31 @@ async function acknowledgeSourceDelete(deleteToken) {
   await forgetPendingSourceDelete(deleteToken);
 }
 
+async function recoverPendingBrowserDeletes(pending) {
+  const entries = Array.isArray(pending.browserEntries) ? pending.browserEntries : [];
+  if (!entries.length) return pending.browserDeletedImageIds || [];
+  for (const entry of entries.filter((candidate) => candidate.state === "deleting")) {
+    try {
+      await entry.parentHandle.getFileHandle(entry.name);
+      entry.state = "ready";
+    } catch (error) {
+      if (error?.name === "NotFoundError") entry.state = "deleted";
+      else entry.state = "ready";
+    }
+  }
+  pending.browserDeletedImageIds = entries.filter((entry) => entry.state === "deleted").map((entry) => entry.imageId);
+  await rememberPendingSourceDelete(pending);
+  return pending.browserDeletedImageIds;
+}
+
 async function resumePendingSourceDeletes() {
   for (const pending of await pendingSourceDeletes()) {
     try {
       const status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
-      if (status.state === "prepared" && (pending.browserDeletedImageIds || []).length) {
+      const browserDeletedImageIds = status.state === "prepared" ? await recoverPendingBrowserDeletes(pending) : (pending.browserDeletedImageIds || []);
+      if (status.state === "prepared" && browserDeletedImageIds.length) {
         await commitSourceDeleteWithRetry({ imageIds: pending.imageIds, deleteToken: pending.deleteToken,
-          browserDeletedImageIds: pending.browserDeletedImageIds });
+          browserDeletedImageIds });
       } else if (status.state === "prepared") {
         await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
       }
@@ -341,24 +392,40 @@ async function permanentlyDeleteImages(images, visibleImages) {
   const token = crypto.randomUUID();
   state.catalogMutation = true; invalidatePendingImage(); updateActionButtons();
   try {
+    await requestBrowserDeletePermissions(images);
     await flushAllImageMutations();
     await flushAllWorkspaceMutations();
     const local = await preflightBrowserSourceDelete(images);
-    if (!local.ready.length) throw codedError(local.failed[0]?.reason || "source_action_unavailable");
+    if (!local.ready.length) {
+      const details = local.failed.map((failure) => `${failure.imageId}: ${failure.reason}`).join("、");
+      console.warn("元画像を完全削除: 開始 対象=%d 成功=0 失敗=%d 詳細=%s", images.length, local.failed.length, details);
+      setStatus(`元画像を0件削除しました。失敗${local.failed.length}件: ${details}`, "warning");
+      showUserError(codedError(local.failed[0]?.reason || "source_action_unavailable"));
+      return;
+    }
     const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: local.ready.map((image) => image.id), deleteToken: token });
-    await rememberPendingSourceDelete({ deleteToken: token, imageIds: local.ready.map((image) => image.id), browserDeletedImageIds: [] });
     const preparedIds = new Set(prepared.preparedImageIds || []);
     const preparedImages = local.ready.filter((image) => preparedIds.has(image.id));
-    const browser = await deleteBrowserSources(preparedImages, async (_imageId, deleted) => {
-      await rememberPendingSourceDelete({ deleteToken: token, imageIds: preparedImages.map((image) => image.id), browserDeletedImageIds: deleted });
+    const pending = { deleteToken: token, imageIds: preparedImages.map((image) => image.id), browserDeletedImageIds: [],
+      browserEntries: preparedImages.filter((image) => image.sourceKind !== "filesystem").map(browserDeleteEntry).filter(Boolean) };
+    await rememberPendingSourceDelete(pending);
+    const browser = await deleteBrowserSources(preparedImages, pending.browserEntries, async () => {
+      pending.browserDeletedImageIds = pending.browserEntries.filter((entry) => entry.state === "deleted").map((entry) => entry.imageId);
+      await rememberPendingSourceDelete(pending);
     });
-    await rememberPendingSourceDelete({ deleteToken: token, imageIds: preparedImages.map((image) => image.id), browserDeletedImageIds: browser.deleted });
+    pending.browserDeletedImageIds = browser.deleted;
+    await rememberPendingSourceDelete(pending);
     const browserDeleted = new Set(browser.deleted);
     const commitImages = preparedImages.filter((image) => image.sourceKind === "filesystem" || browserDeleted.has(image.id));
     let data = { images: state.images, removedImageIds: [], failed: [] };
     if (commitImages.length) data = await commitSourceDeleteWithRetry({
       imageIds: commitImages.map((image) => image.id), deleteToken: token, browserDeletedImageIds: browser.deleted,
     });
+    else {
+      data = await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: token }), resyncOnStale: false });
+      data = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: token }), resyncOnStale: false });
+      await acknowledgeSourceDelete(token);
+    }
     const removed = new Set(data.removedImageIds || []);
     for (const image of images.filter((item) => removed.has(item.id))) {
       releaseImageCaches(image.id); state.sourceAccess.delete(image.id); state.drafts.delete(image.id); state.maskStatus.delete(image.id); clearReviewForRemovedImage(image);

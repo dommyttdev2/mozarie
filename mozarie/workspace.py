@@ -215,6 +215,21 @@ class WorkspaceStore:
                     image_id TEXT PRIMARY KEY REFERENCES images(image_id) ON DELETE CASCADE,
                     entry_id INTEGER REFERENCES history_entries(entry_id) ON DELETE SET NULL
                 );
+                -- This operational receipt is intentionally independent of the
+                -- workspace schema.  It lets an older workspace reopen while a
+                -- source deletion is still being recovered or acknowledged.
+                CREATE TABLE IF NOT EXISTS source_delete_operations (
+                    token TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    catalog_id TEXT,
+                    workspace_id TEXT,
+                    catalog_generation INTEGER NOT NULL,
+                    requested_image_ids TEXT NOT NULL,
+                    items_json TEXT NOT NULL,
+                    result_json TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 CREATE TRIGGER IF NOT EXISTS project_image_insert AFTER INSERT ON images BEGIN
                     UPDATE catalogs SET updated_at=CAST(strftime('%s','now') AS INTEGER) * 1000000000 + CAST(substr(strftime('%f','now'), 4, 3) AS INTEGER) * 1000000 WHERE catalog_id=NEW.catalog_id;
                 END;
@@ -238,6 +253,7 @@ class WorkspaceStore:
                       AND NOT EXISTS (SELECT 1 FROM history_entries WHERE group_id=OLD.group_id);
                 END;
             """)
+            self._migrate_source_delete_operations(db)
             if not existing:
                 db.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(self.VERSION),))
 
@@ -1214,80 +1230,109 @@ class WorkspaceStore:
                 raise
 
     @staticmethod
-    def _source_delete_operations_db(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    def _source_delete_operation_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        try:
+            requested = json.loads(str(row["requested_image_ids"]))
+            items = json.loads(str(row["items_json"]))
+            result = json.loads(str(row["result_json"])) if row["result_json"] is not None else None
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("source delete operation is invalid") from exc
+        if not isinstance(requested, list) or not isinstance(items, list) or (result is not None and not isinstance(result, dict)):
+            raise ValueError("source delete operation is invalid")
+        return {"state": str(row["state"]), "catalogId": row["catalog_id"], "workspaceId": row["workspace_id"],
+                "catalogGeneration": int(row["catalog_generation"]), "requestedImageIds": requested, "items": items,
+                "result": result, "createdAt": int(row["created_at"]), "updatedAt": int(row["updated_at"])}
+
+    @classmethod
+    def _migrate_source_delete_operations(cls, db: sqlite3.Connection) -> None:
+        """Move receipts written by the pre-table build once, without rewriting history."""
         row = db.execute("SELECT value FROM meta WHERE key='source_delete_operations'").fetchone()
         if row is None:
-            return {}
+            return
         try:
-            operations = json.loads(str(row["value"]))
-        except (TypeError, ValueError) as exc:
+            legacy = json.loads(str(row["value"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("source delete operations are invalid") from exc
-        if not isinstance(operations, dict):
+        if not isinstance(legacy, dict):
             raise ValueError("source delete operations are invalid")
-        return {str(token): value for token, value in operations.items() if isinstance(value, dict)}
-
-    @staticmethod
-    def _write_source_delete_operations_db(db: sqlite3.Connection, operations: dict[str, dict[str, Any]]) -> None:
-        db.execute("""INSERT INTO meta(key,value) VALUES('source_delete_operations',?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (json.dumps(operations, ensure_ascii=False, separators=(",", ":")),))
+        for token, operation in legacy.items():
+            if not isinstance(token, str) or not isinstance(operation, dict):
+                continue
+            db.execute("""INSERT OR IGNORE INTO source_delete_operations(
+                token,state,catalog_id,workspace_id,catalog_generation,requested_image_ids,items_json,result_json,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                token, str(operation.get("state", "prepared")), operation.get("catalogId"), operation.get("workspaceId"),
+                int(operation.get("catalogGeneration", 0)), json.dumps(operation.get("requestedImageIds", []), ensure_ascii=False),
+                json.dumps(operation.get("items", []), ensure_ascii=False),
+                None if operation.get("result") is None else json.dumps(operation["result"], ensure_ascii=False),
+                int(operation.get("createdAt", time.time_ns())), int(operation.get("updatedAt", time.time_ns())),
+            ))
+        db.execute("DELETE FROM meta WHERE key='source_delete_operations'")
 
     def prepare_source_delete(self, token: str, catalog_id: str | None, workspace_id: str | None,
-                              catalog_generation: int, requested_image_ids: list[str], items: list[dict[str, Any]]) -> dict[str, Any]:
+                              catalog_generation: int, requested_image_ids: list[str], items: list[dict[str, Any]],
+                              prepare_failures: list[dict[str, Any]]) -> dict[str, Any]:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                operations = self._source_delete_operations_db(db)
-                existing = operations.get(token)
+                existing = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
                 if existing is not None:
                     db.execute("COMMIT")
                     return existing
-                operation = {"state": "prepared", "catalogId": catalog_id, "workspaceId": workspace_id,
-                             "catalogGeneration": catalog_generation, "requestedImageIds": requested_image_ids, "items": items, "result": None,
-                             "createdAt": time.time_ns(), "updatedAt": time.time_ns()}
-                operations[token] = operation
-                self._write_source_delete_operations_db(db, operations)
+                now = time.time_ns()
+                db.execute("""INSERT INTO source_delete_operations(
+                    token,state,catalog_id,workspace_id,catalog_generation,requested_image_ids,items_json,result_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                    token, "prepared", catalog_id, workspace_id, catalog_generation,
+                    json.dumps(requested_image_ids, ensure_ascii=False), json.dumps(items, ensure_ascii=False),
+                    json.dumps({"failed": prepare_failures, "prepareFailures": prepare_failures}, ensure_ascii=False), now, now,
+                ))
                 db.execute("COMMIT")
-                return operation
+                return {"state": "prepared", "catalogId": catalog_id, "workspaceId": workspace_id,
+                        "catalogGeneration": catalog_generation, "requestedImageIds": requested_image_ids, "items": items,
+                        "result": {"failed": prepare_failures, "prepareFailures": prepare_failures},
+                        "createdAt": now, "updatedAt": now}
             except Exception:
                 db.execute("ROLLBACK")
                 raise
 
     def source_delete_operation(self, token: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as db:
-            operation = self._source_delete_operations_db(db).get(token)
-            return None if operation is None else dict(operation)
+            return self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
 
     def commit_source_delete(self, token: str, image_ids: list[str], result: dict[str, Any]) -> None:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                operations = self._source_delete_operations_db(db)
-                operation = operations.get(token)
+                operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
                 if operation is None:
                     raise ValueError("source delete operation is missing")
+                if operation["state"] not in {"prepared", "renaming"}:
+                    raise ValueError("source delete operation is not prepared")
                 for chunk in _chunks(image_ids):
                     db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
-                operation["state"] = str(result.get("state", "committed"))
-                operation["result"] = result
-                operation["updatedAt"] = time.time_ns()
-                self._write_source_delete_operations_db(db, operations)
+                db.execute("UPDATE source_delete_operations SET state=?,result_json=?,updated_at=? WHERE token=?", (
+                    str(result.get("state", "workspace_committed")), json.dumps(result, ensure_ascii=False), time.time_ns(), token,
+                ))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
 
-    def update_source_delete_operation(self, token: str, state: str, result: dict[str, Any]) -> None:
+    def update_source_delete_operation(self, token: str, state: str, result: dict[str, Any], *, expected_states: set[str] | None = None) -> None:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                operations = self._source_delete_operations_db(db)
-                operation = operations.get(token)
+                operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
                 if operation is None:
                     raise ValueError("source delete operation is missing")
-                operation["state"] = state
-                operation["result"] = result
-                operation["updatedAt"] = time.time_ns()
-                self._write_source_delete_operations_db(db, operations)
+                if expected_states is not None and operation["state"] not in expected_states:
+                    raise ValueError("source delete operation state changed")
+                db.execute("UPDATE source_delete_operations SET state=?,result_json=?,updated_at=? WHERE token=?", (
+                    state, json.dumps(result, ensure_ascii=False), time.time_ns(), token,
+                ))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
@@ -1298,15 +1343,13 @@ class WorkspaceStore:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                operations = self._source_delete_operations_db(db)
-                operation = operations.get(token)
+                operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
                 if operation is None:
                     db.execute("COMMIT")
                     return False
                 if operation.get("state") not in {"committed", "cancelled"}:
                     raise ValueError("source delete operation is not terminal")
-                operations.pop(token, None)
-                self._write_source_delete_operations_db(db, operations)
+                db.execute("DELETE FROM source_delete_operations WHERE token=?", (token,))
                 db.execute("COMMIT")
                 return True
             except Exception:
@@ -1315,9 +1358,28 @@ class WorkspaceStore:
 
     def pending_source_delete_cleanups(self) -> list[tuple[str, list[str]]]:
         with self._lock, self._connect() as db:
-            operations = self._source_delete_operations_db(db)
-            return [(token, [str(path) for path in (operation.get("result") or {}).get("quarantinePaths", [])])
-                    for token, operation in operations.items() if operation.get("state") == "cleanup_pending"]
+            rows = db.execute("SELECT token,result_json FROM source_delete_operations WHERE state IN ('workspace_committed','cleanup_pending')").fetchall()
+            result: list[tuple[str, list[str]]] = []
+            for row in rows:
+                try:
+                    details = json.loads(str(row["result_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                result.append((str(row["token"]), [str(path) for path in details.get("quarantinePaths", [])]))
+            return result
+
+    def pending_source_delete_renames(self) -> list[tuple[str, list[dict[str, Any]]]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT token,result_json FROM source_delete_operations WHERE state='renaming'").fetchall()
+            result: list[tuple[str, list[dict[str, Any]]]] = []
+            for row in rows:
+                try:
+                    details = json.loads(str(row["result_json"] or "{}"))
+                    plans = details.get("plannedQuarantines", [])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(plans, list): result.append((str(row["token"]), [plan for plan in plans if isinstance(plan, dict)]))
+            return result
 
     def clear_image_workspaces(self, revisions: dict[str, int], *, history_group: str | None = None) -> None:
         """Clear a selection in one durable transaction and one undo group."""
