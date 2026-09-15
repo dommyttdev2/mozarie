@@ -234,7 +234,6 @@ class CatalogMixin:
                 stack.enter_context(image_lock)
             if prehydrated is not None:
                 self._refresh_catalog_records(records)
-                prehydrated = self._stage_workspace_candidates(records)
             session: tuple[Path | None, Any | None]
             with self.lock:
                 if publish_catalog_id is None:
@@ -914,7 +913,7 @@ class CatalogMixin:
         transform = state.get("transform", {})
         if bool(transform.get("flipHorizontal", False)): value = np.fliplr(value)
         if bool(transform.get("flipVertical", False)): value = np.flipud(value)
-        output = io.BytesIO(); Image.fromarray(value, "L").save(output, format="PNG"); return output.getvalue()
+        output = io.BytesIO(); Image.fromarray(value).save(output, format="PNG"); return output.getvalue()
 
     def project_mask_images(self) -> list[dict[str, Any]]:
         if not self.catalog_id:
@@ -1003,7 +1002,7 @@ class CatalogMixin:
                 value[np.asarray(erase) > 0] = 0
         if bool(image.get("flipH", False)): value = np.fliplr(value)
         if bool(image.get("flipV", False)): value = np.flipud(value)
-        output = io.BytesIO(); Image.fromarray(value, "L").save(output, format="PNG")
+        output = io.BytesIO(); Image.fromarray(value).save(output, format="PNG")
         return output.getvalue()
 
     def resolve_source_mismatches(self, image_ids: list[str], clear_masks: bool) -> None:
@@ -2056,8 +2055,6 @@ class CatalogMixin:
                         self.catalog_generation += 1
                         self._clear_browser_save_tokens_unchecked()
                         self._cancel_manual_uploads_unchecked("ブラウザー画像を追加しました")
-                    if created_projectless_id:
-                        self.workspace_store.set_active_projectless_catalog(created_projectless_id)
                     images = self.list_images() if include_images else []
                     for path in set(replaced_session_paths):
                         try:

@@ -1,0 +1,298 @@
+"""Live HTTP coverage for the local-only request handler.
+
+These tests deliberately use a real loopback server and a real StudioState.
+They cover the browser-facing contract without substituting handler methods.
+"""
+
+from __future__ import annotations
+
+import http.client
+import io
+import json
+import sqlite3
+import shutil
+import tempfile
+import threading
+import time
+import unittest
+import warnings
+from unittest.mock import patch
+from pathlib import Path
+
+from PIL import Image
+
+import mozarie.http as http_module
+import mozarie.state as state_module
+from mozarie.http import MosaicHandler
+from mozarie.state import StudioState
+
+
+class LiveHttpEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        root = Path(self._temporary_directory.name)
+        self.app_dir = root / "app"
+        shutil.copytree(Path(__file__).resolve().parents[1] / "config", self.app_dir / "config")
+        self.source_dir = root / "images"
+        self.source_dir.mkdir()
+        Image.new("RGB", (12, 8), "white").save(self.source_dir / "source.png")
+
+        self._previous_app_dir = state_module.APP_DIR
+        self._previous_state = http_module.STATE
+        state_module.APP_DIR = self.app_dir
+        self.state = StudioState(root / "cache", root / "sessions")
+        http_module.STATE = self.state
+        self.server = http_module.ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.origin = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
+        http_module.STATE = self._previous_state
+        self.state.shutdown()
+        state_module.APP_DIR = self._previous_app_dir
+        self._temporary_directory.cleanup()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: object | None = None,
+        *,
+        authorized: bool = False,
+    ) -> tuple[int, dict[str, str], bytes]:
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers: dict[str, str] = {}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        if authorized:
+            headers.update({"Origin": self.origin, "X-Mozarie-Token": self.state.session_token})
+            if method != "GET":
+                headers.update({
+                    "X-Mozarie-Expected-Project-Id": self.state.catalog_id or "",
+                    "X-Mozarie-Expected-Catalog-Generation": str(self.state.catalog_generation),
+                })
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request(method, path, body, headers)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def raw_request(self, method: str, path: str, body: bytes, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+        if method != "GET" and "X-Mozarie-Expected-Catalog-Generation" not in headers:
+            headers = {
+                **headers,
+                "X-Mozarie-Expected-Project-Id": self.state.catalog_id or "",
+                "X-Mozarie-Expected-Catalog-Generation": str(self.state.catalog_generation),
+            }
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request(method, path, body, headers)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def test_live_get_routes_and_static_security_headers(self) -> None:
+        status, headers, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(self.state.session_token.encode("ascii"), body)
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+
+        status, _headers, body = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+
+        status, _headers, body = self.request("GET", "/api/settings?status=0")
+        self.assertEqual(status, 200)
+        self.assertNotIn("status", json.loads(body))
+
+        status, _headers, body = self.request("GET", "/api/images")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["images"], [])
+
+        status, _headers, body = self.request("GET", "/missing-file")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error_code": "api_not_found", "params": {}})
+
+    def test_get_body_is_rejected_and_cannot_frame_the_following_request(self) -> None:
+        """A failed mutation body before GET must never become the next method token."""
+        body = b'{"expectedProjectId":null,"expectedCatalogGeneration":0}'
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request("GET", "/api/health", body=body, headers={"Content-Length": str(len(body))})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertEqual(json.loads(response.read())["error_code"], "input_invalid")
+            self.assertEqual(response.getheader("Connection"), "close")
+        finally:
+            connection.close()
+        status, _headers, response_body = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(response_body)["ok"])
+
+    def test_live_mutations_enforce_session_then_change_catalog(self) -> None:
+        status, headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)})
+        self.assertEqual(status, 403)
+        self.assertEqual(headers.get("Connection"), "close")
+        self.assertEqual(json.loads(body)["error_code"], "session_expired")
+
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200)
+        images = json.loads(body)["images"]
+        self.assertEqual(len(images), 1)
+
+        status, _headers, body = self.request("DELETE", f"/api/catalog/image/{images[0]['id']}", authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["images"], [])
+
+        status, _headers, body = self.request("POST", "/api/unknown", {}, authorized=True)
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error_code"], "api_not_found")
+
+    def test_delete_json_body_is_fully_consumed_before_the_next_request(self) -> None:
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        payload = json.dumps({
+            "expectedProjectId": self.state.catalog_id,
+            "expectedCatalogGeneration": self.state.catalog_generation,
+        }).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request("DELETE", f"/api/catalog/image/{image_id}", body=payload, headers={
+                "Origin": self.origin,
+                "X-Mozarie-Token": self.state.session_token,
+                "Content-Type": "application/json",
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.request("GET", "/api/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(response.read())["ok"])
+        finally:
+            connection.close()
+
+    def test_live_binary_import_validates_then_stages_an_image(self) -> None:
+        headers = {
+            "Origin": self.origin,
+            "X-Mozarie-Token": self.state.session_token,
+            "X-Mozarie-Source-Kind": "browser-files",
+            "X-Mozarie-Import-Parallelism": "1",
+            "X-Mozarie-Import-Target-Count": "1",
+            "X-Mozarie-File-Mtime": "0",
+        }
+        status, _headers, body = self.raw_request(
+            "POST", "/api/import/file", b"not-an-image", {
+                **headers, "Content-Type": "text/plain", "X-Mozarie-File-Size": str(len(b"not-an-image")),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error_code"], "session_expired")
+
+        session_id = "cc1cfba8-f5d9-4cd5-a64c-5a3ce14ad014"
+        status, _headers, body = self.request(
+            "POST", "/api/import/start", {"sessionId": session_id}, authorized=True,
+        )
+        self.assertEqual(status, 200, body.decode("utf-8"))
+
+        encoded = io.BytesIO()
+        Image.new("RGB", (9, 7), "white").save(encoded, format="PNG")
+        status, _headers, body = self.raw_request(
+            "POST",
+            "/api/import/file",
+            encoded.getvalue(),
+            {
+                **headers,
+                "Content-Type": "application/octet-stream",
+                "X-Mozarie-Name": "source.png",
+                "X-Mozarie-Relative-Path": "source.png",
+                "X-Mozarie-Client-Key": "live-import",
+                "X-Mozarie-Import-Intent": "add",
+                "X-Mozarie-Import-Session": session_id,
+                "X-Mozarie-File-Size": str(len(encoded.getvalue())),
+            },
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        response = json.loads(body)
+        self.assertTrue(response["imported"])
+        self.assertEqual(response["catalogId"], self.state.catalog_id)
+        self.assertEqual(response["catalogGeneration"], self.state.catalog_generation)
+
+    def test_project_mask_export_succeeds_when_warnings_are_errors(self) -> None:
+        status, _headers, body = self.request("POST", "/api/projects", {"name": "Masks"}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8"))
+        image_id = json.loads(body)["images"][0]["id"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            status, headers, body = self.request("GET", f"/api/project/mask/{image_id}/mosaic")
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertEqual(headers["Content-Type"], "image/png")
+        with Image.open(io.BytesIO(body)) as mask:
+            self.assertEqual((mask.mode, mask.size), ("L", (12, 8)))
+
+    def test_live_browser_save_render_streams_a_stable_image_response(self) -> None:
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        status, headers, body = self.request("POST", "/api/save/render", {
+            "imageId": image_id,
+            "candidateRevision": self.state._candidate_revision(image_id),
+            "divisor": 100,
+            "draft": None,
+            "copyToBrowser": True,
+            "format": "original",
+            "keepMetadata": True,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertTrue(headers.get("X-Mozarie-Save-Token"))
+        with Image.open(io.BytesIO(body)) as rendered:
+            self.assertEqual((rendered.mode, rendered.size), ("RGB", (12, 8)))
+
+    def test_flag_write_keeps_catalogue_state_consistent_across_a_sqlite_wait(self) -> None:
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        entered = threading.Event(); release = threading.Event(); result: dict[str, object] = {}
+        original = self.state.workspace_store.set_image_flags
+        def delayed(*args, **kwargs):
+            entered.set(); self.assertTrue(release.wait(2)); return original(*args, **kwargs)
+        def flag_request() -> None:
+            result["response"] = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        with patch.object(self.state.workspace_store, "set_image_flags", side_effect=delayed):
+            worker = threading.Thread(target=flag_request); worker.start()
+            self.assertTrue(entered.wait(1))
+            # The write holds the catalogue transition until SQLite confirms it.
+            # Release it before reading state so the test verifies the durable
+            # transition rather than relying on an implementation-specific lock order.
+            release.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            status, _headers, body = self.request("GET", "/api/job")
+            self.assertEqual(status, 200)
+            self.assertIn("state", json.loads(body))
+        status, _headers, body = result["response"]  # type: ignore[misc]
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["hidden"])
+
+    def test_failed_flag_write_keeps_the_live_image_state_unchanged(self) -> None:
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        with patch.object(self.state.workspace_store, "set_image_flags", side_effect=sqlite3.DatabaseError("locked")):
+            status, _headers, body = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body)["error_code"], "workspace_database_error")
+        self.assertFalse(self.state.images[image_id].hidden)
+
+
+if __name__ == "__main__":
+    unittest.main()

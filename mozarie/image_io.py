@@ -11,7 +11,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError

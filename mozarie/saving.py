@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 from contextlib import ExitStack
@@ -127,7 +128,7 @@ class SavingMixin:
         try:
             try:
                 with record.path.open("rb") as source:
-                    before = source.stat()
+                    before = os.fstat(source.fileno())
                     if (before.st_mtime_ns, before.st_size) != fingerprint:
                         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
                     try:
@@ -150,7 +151,7 @@ class SavingMixin:
                             "保存用の一時ファイルへ書き込めませんでした。空き容量と書込権限を確認してください。",
                             "save_write_failed",
                         ) from exc
-                    after = source.stat()
+                    after = os.fstat(source.fileno())
                     if (after.st_mtime_ns, after.st_size) != fingerprint:
                         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
             except OSError as exc:
@@ -361,8 +362,17 @@ class SavingMixin:
                     # The token or the HTTP handler now owns the staged file.
                     rendered_path = None
             return BrowserSaveRender(
-                output, record, current_revision, save_token, output_path, no_effect, output_format, _output_mime, output_suffix,
-                response_path, response_path_is_temporary,
+                output=output,
+                record=record,
+                candidate_revision=current_revision,
+                save_token=save_token,
+                output_path=output_path,
+                no_effect=no_effect,
+                output_format=output_format,
+                mime_type=_output_mime,
+                extension=output_suffix,
+                response_path=response_path,
+                response_path_is_temporary=response_path_is_temporary,
             )
         finally:
             if rendered_path is not None:

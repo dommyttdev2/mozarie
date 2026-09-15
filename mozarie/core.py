@@ -221,7 +221,7 @@ class BrowserSaveToken:
 class BrowserSaveRender:
     """Rendered output and the opaque confirmation token for one browser save."""
 
-    output: bytes
+    output: bytes | None
     record: ImageRecord
     candidate_revision: int
     save_token: str
@@ -230,6 +230,8 @@ class BrowserSaveRender:
     output_format: str = "original"
     mime_type: str = "application/octet-stream"
     extension: str = ""
+    response_path: Path | None = None
+    response_path_is_temporary: bool = False
 
     def __iter__(self):
         yield self.output

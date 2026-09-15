@@ -673,10 +673,10 @@ class WorkspaceStore:
 
     def project_image(self, image_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
-            row = db.execute("""SELECT images.image_id,images.relative_path,images.width,images.height,images.source_id,project_sources.display_name
+            row = db.execute("""SELECT images.image_id,images.relative_path,images.width,images.height,images.hidden,images.source_id,project_sources.display_name
                 FROM images JOIN project_sources ON project_sources.source_id=images.source_id WHERE images.image_id=?""", (image_id,)).fetchone()
         return {"id": str(row["image_id"]), "relativePath": str(row["relative_path"]), "width": int(row["width"]), "height": int(row["height"]),
-                "sourceId": str(row["source_id"]), "sourceDisplay": str(row["display_name"])} if row else None
+                "hidden": bool(row["hidden"]), "sourceId": str(row["source_id"]), "sourceDisplay": str(row["display_name"])} if row else None
 
     def project_has_image(self, catalog_id: str, image_id: str) -> bool:
         with self._connect() as db:
