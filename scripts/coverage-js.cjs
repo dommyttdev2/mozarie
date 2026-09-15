@@ -16,35 +16,10 @@ const coverageRoot = requestedCoverageRoot ? path.resolve(requestedCoverageRoot)
 const nodeCoverageRoot = path.join(coverageRoot, "node");
 const nodeCoverageTemp = path.join(coverageRoot, "v8");
 const browserCoverageFile = path.join(coverageRoot, "browser-v8.json");
-const testFiles = [
-  "tests/test_app_core_detection_coverage.cjs",
-  "tests/test_browser_save_runtime.cjs",
-  "tests/test_coverage_js.cjs",
-  "tests/test_candidate_bundle.cjs",
-  "tests/test_detection_refresh_runtime.cjs",
-  "tests/test_editor_canvas_completion_runtime.cjs",
-  "tests/test_editor_canvas_geometry_runtime.cjs",
-  "tests/test_editor_masks_behavior.cjs",
-  "tests/test_editor_runtime.cjs",
-  "tests/test_gallery_save_coverage.cjs",
-  "tests/test_interaction_coverage.cjs",
-  "tests/test_import_picker_e2e.cjs",
-  "tests/test_padding_splitter_e2e.cjs",
-  "tests/test_flood_fill_worker.cjs",
-  "tests/test_masked_mosaic_worker.cjs",
-  "tests/test_mosaic_preview_runtime.cjs",
-  "tests/test_project_history_browser_e2e.cjs",
-  "tests/test_project_ui_runtime.cjs",
-  "tests/test_quiet_runner.cjs",
-  "tests/test_resources.cjs",
-  "tests/test_settings_runtime.cjs",
-  "tests/test_workspace_runtime.cjs",
-  "tests/test_workspace_flush_runtime.cjs",
-  "tests/test_workspace_flags_runtime.cjs",
-  "tests/test_workspace_idb_runtime.cjs",
-  "tests/test_ui_control_manifest.cjs",
-  "tests/test_workspace_recovery_e2e.cjs",
-];
+const testFiles = fs.readdirSync(path.join(root, "tests"), { withFileTypes: true })
+  .filter((entry) => entry.isFile() && /^test_.*\.cjs$/.test(entry.name))
+  .map((entry) => path.join("tests", entry.name))
+  .sort();
 
 function staticFiles(directory = staticRoot) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
