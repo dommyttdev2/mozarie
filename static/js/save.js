@@ -846,45 +846,51 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   }
 }
 
-const BROWSER_SAVE_ACK_STORAGE = "mozarie.browser-save-acks-v1";
+const BROWSER_SAVE_ACK_STORAGE = "mozarie-save-ack:";
 let browserSaveAckFlush = Promise.resolve();
+
+function browserSaveAckStorageKey(saveToken) { return `${BROWSER_SAVE_ACK_STORAGE}${encodeURIComponent(saveToken)}`; }
 
 function pendingBrowserSaveAcks() {
   try {
-    const saved = JSON.parse(localStorage.getItem(BROWSER_SAVE_ACK_STORAGE) || "[]");
-    return Array.isArray(saved) ? saved.filter((item) => item && typeof item.imageId === "string" && Number.isSafeInteger(item.candidateRevision)
-      && typeof item.saveToken === "string" && typeof item.sourceAction === "string") : [];
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(BROWSER_SAVE_ACK_STORAGE)) keys.push(key);
+    }
+    const pending = [];
+    for (const key of keys) {
+      try {
+        const item = JSON.parse(localStorage.getItem(key) || "null");
+        if (item && typeof item.imageId === "string" && Number.isSafeInteger(item.candidateRevision)
+          && typeof item.saveToken === "string" && typeof item.sourceAction === "string") pending.push(item);
+        else localStorage.removeItem(key);
+      } catch { localStorage.removeItem(key); }
+    }
+    return pending;
   } catch { return []; }
 }
 
-function storePendingBrowserSaveAcks(entries) {
-  try { localStorage.setItem(BROWSER_SAVE_ACK_STORAGE, JSON.stringify(entries)); } catch {}
+function queueBrowserSaveAck(payload) {
+  try { localStorage.setItem(browserSaveAckStorageKey(payload.saveToken), JSON.stringify({ imageId: payload.imageId, candidateRevision: payload.candidateRevision, saveToken: payload.saveToken, sourceAction: payload.sourceAction })); } catch {}
 }
 
-function queueBrowserSaveAck(payload) {
-  const pending = pendingBrowserSaveAcks().filter((item) => item.saveToken !== payload.saveToken);
-  pending.push({ imageId: payload.imageId, candidateRevision: payload.candidateRevision, saveToken: payload.saveToken, sourceAction: payload.sourceAction });
-  storePendingBrowserSaveAcks(pending);
+function clearBrowserSaveAck(payload) {
+  try { localStorage.removeItem(browserSaveAckStorageKey(payload.saveToken)); } catch {}
 }
 
 async function flushPendingBrowserSaveAcks() {
   const flush = async () => {
     const pending = pendingBrowserSaveAcks();
-    const retry = [];
     for (const payload of pending) {
       try {
         const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload), resyncOnStale: false });
-        if (status.state === "pending") {
-          retry.push(payload);
-          continue;
-        }
-        if (status.state !== "committed") continue;
+        if (status.state === "pending") continue;
+        if (status.state !== "committed") { clearBrowserSaveAck(payload); continue; }
         const result = await api("/api/save/ack", { method: "POST", body: JSON.stringify(payload), resyncOnStale: false });
-        if (result.state !== "acknowledged" && result.state !== "unknown") retry.push(payload);
-      } catch { retry.push(payload); }
+        if (result.state === "acknowledged" || result.state === "unknown") clearBrowserSaveAck(payload);
+      } catch {}
     }
-    const handled = new Set(pending.map((item) => item.saveToken));
-    storePendingBrowserSaveAcks([...retry, ...pendingBrowserSaveAcks().filter((item) => !handled.has(item.saveToken))]);
   };
   browserSaveAckFlush = browserSaveAckFlush.catch(() => {}).then(flush);
   return browserSaveAckFlush;
@@ -893,6 +899,10 @@ async function flushPendingBrowserSaveAcks() {
 async function acknowledgeBrowserSave(payload) {
   await flushPendingBrowserSaveAcks();
 }
+
+window.addEventListener("storage", (event) => {
+  if (event.storageArea === localStorage && event.key?.startsWith(BROWSER_SAVE_ACK_STORAGE)) void flushPendingBrowserSaveAcks();
+});
 
 async function commitBrowserSaveWithRetry(payload) {
   // Persist before the request so a closed tab can reconcile a committed
