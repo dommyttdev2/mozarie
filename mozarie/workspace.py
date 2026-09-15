@@ -455,8 +455,51 @@ class WorkspaceStore:
         with self._connect() as db:
             rows = db.execute(f"""SELECT catalogs.*,COUNT(images.image_id) AS image_count FROM catalogs
                 LEFT JOIN images ON images.catalog_id=catalogs.catalog_id
+                WHERE catalogs.name IS NOT NULL
                 GROUP BY catalogs.catalog_id ORDER BY {order}""").fetchall()
         return [self._project_row(row) for row in rows]
+
+    def active_projectless_catalog(self) -> str | None:
+        """Return the hidden durable workspace for the current unnamed screen."""
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='active_projectless_catalog_id'").fetchone()
+            if row is None:
+                return None
+            catalog_id = str(row["value"])
+            exists = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (catalog_id,)).fetchone()
+        return catalog_id if exists is not None else None
+
+    def create_projectless_catalog(self, source_root: str | None = None) -> str:
+        """Create and publish one internal unnamed workspace.
+
+        It deliberately uses the ordinary catalog tables so every edit follows
+        the same durable history path as a named project.  ``projects()``
+        hides these rows from the project UI.
+        """
+        catalog_id = uuid.uuid4().hex
+        now = time.time_ns()
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("INSERT INTO catalogs(catalog_id,name,status,source_root,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                           (catalog_id, None, "working", source_root, now, now))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return catalog_id
+
+    def set_active_projectless_catalog(self, catalog_id: str) -> None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (catalog_id,)).fetchone()
+            if row is None:
+                raise ValueError("projectless workspace is missing")
+            db.execute("INSERT INTO meta(key,value) VALUES('active_projectless_catalog_id',?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (catalog_id,))
+
+    def clear_active_projectless_catalog(self, catalog_id: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM meta WHERE key='active_projectless_catalog_id' AND value=?", (catalog_id,))
 
     def project(self, catalog_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -674,6 +717,7 @@ class WorkspaceStore:
                 raise ProjectNameAlreadyExistsError("project name already exists") from exc
             if not cursor.rowcount:
                 raise ValueError("project is missing")
+            db.execute("DELETE FROM meta WHERE key='active_projectless_catalog_id' AND value=?", (catalog_id,))
         return self.project(catalog_id) or {}
 
     def set_project_status(self, catalog_id: str, status: str) -> dict[str, Any]:
@@ -689,7 +733,8 @@ class WorkspaceStore:
         with self._connect() as db:
             sql = """SELECT catalogs.*,COUNT(images.image_id) AS image_count FROM catalogs
                 JOIN project_sources ON project_sources.catalog_id=catalogs.catalog_id
-                LEFT JOIN images ON images.catalog_id=catalogs.catalog_id WHERE project_sources.source_identity=? COLLATE NOCASE"""
+                LEFT JOIN images ON images.catalog_id=catalogs.catalog_id WHERE project_sources.source_identity=? COLLATE NOCASE
+                AND catalogs.name IS NOT NULL"""
             values: list[Any] = [source_root]
             if exclude_catalog:
                 sql += " AND catalogs.catalog_id<>?"; values.append(exclude_catalog)
@@ -1280,6 +1325,28 @@ class WorkspaceStore:
                     self._write_candidate_state_db(db, image_id, revision, candidates, effective,
                                                    replace=replace, history_group=history_group,
                                                    require_candidate_masks=True)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def commit_detection_states(self, states: list[tuple[str, int, int, list[Any], bool]], *, history_group: str | None) -> None:
+        """Publish one detection run only when every staged image is current.
+
+        Candidate PNGs are read while this single transaction is open.  A
+        changed source/revision or one invalid staged PNG rolls the complete
+        run back before any candidate or history row becomes visible.
+        """
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for image_id, expected_revision, revision, candidates, effective in states:
+                    self._write_candidate_state_db(
+                        db, image_id, revision, candidates, effective,
+                        replace=True, history_group=history_group,
+                        expected_revision=expected_revision, preserve_reviewed=True,
+                        require_candidate_masks=True,
+                    )
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")

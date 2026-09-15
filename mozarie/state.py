@@ -90,7 +90,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.settings_store = SettingsStore(APP_DIR)
         self.workspace_store = WorkspaceStore(APP_DIR / "data")
+        # ``catalog_id`` is the public named-project identity.  An unnamed
+        # screen uses ``workspace_id`` too, but that internal catalog never
+        # appears in the projects list or request expectations.
         self.catalog_id: str | None = None
+        self.workspace_id: str | None = self.workspace_store.active_projectless_catalog()
         self.project_read_only = False
         self.source_mismatches: dict[str, bool] = {}
         self.settings = self.settings_store.load()
@@ -123,8 +127,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.order: list[str] = []
         self.candidates: dict[str, list[Candidate]] = {}
         self.candidate_revisions: dict[str, int] = {}
-        # A projectless session is intentionally not in SQLite, but its live
-        # manual layers must become durable if the user later names a project.
+        # Kept only for opening databases written by older app processes.
+        # New unnamed workspaces use SQLite just like named projects.
         self.projectless_manual_drafts: dict[str, dict[str, Any]] = {}
         # These locks only serialize work for the same catalogue record.  State
         # mutation still uses ``lock``; never acquire an image lock while that

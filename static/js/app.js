@@ -157,7 +157,7 @@ async function toggleImageFlip(axis) {
     if (!updated || updated.id !== imageId) throw codedError("response_invalid");
     const index = state.images.findIndex((image) => image.id === imageId);
     if (index >= 0) Object.assign(state.images[index], updated);
-    if (state.project?.id) {
+    if (hasDurableHistory()) {
       state.projectHistory.set(imageId, { canUndo: result.canUndo === true, canRedo: result.canRedo === true });
     } else {
       recordHistoryOperation({ kind: "transform", flipH: axis === "horizontal", flipV: axis === "vertical" });

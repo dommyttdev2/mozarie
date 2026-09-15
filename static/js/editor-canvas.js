@@ -19,7 +19,7 @@ function canvasSizeForImage(image) {
 }
 
 function ensureHistoryCanvases() {
-  if (!state.currentImage || state.project?.id) { releaseHistoryCanvases(); return false; }
+  if (!state.currentImage || hasDurableHistory()) { releaseHistoryCanvases(); return false; }
   for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) {
     if (target.width !== state.currentImage.width || target.height !== state.currentImage.height) { target.width = state.currentImage.width; target.height = state.currentImage.height; }
   }
@@ -120,7 +120,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
       $("#currentFileName").textContent = record.relativePath;
       updateCandidateStatus();
       renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
-      if (state.project?.id) void refreshProjectHistory(imageId);
+      if (hasDurableHistory()) void refreshProjectHistory(imageId);
       prefetchNeighbors(record);
     } finally {
       releaseDraftImages(draftImages);
@@ -439,7 +439,7 @@ function releaseDraftImages(images) {
 
 async function decodeDraftImages(draft) {
   if (!draft) return [null, null, null, null, null, null];
-  const historyBase = state.project?.id ? {} : draft.historyBase || {};
+  const historyBase = hasDurableHistory() ? {} : draft.historyBase || {};
   const results = await Promise.allSettled([draft.add, draft.exclusion, draft.exclusionErase, historyBase.add, historyBase.exclusion, historyBase.exclusionErase]
     .map((source) => source ? loadImage(source) : null));
   const failure = results.find((result) => result.status === "rejected");
@@ -455,7 +455,7 @@ async function saveDraft() {
   const imageId = state.currentId;
   const dirtyLayers = new Set(state.draftLayerDirty);
   const dirtyRois = Object.fromEntries([...(state.draftDirtyRois || [])]);
-  const keepLocalHistory = !state.project?.id;
+  const keepLocalHistory = !hasDurableHistory();
   if (!keepLocalHistory) releaseHistoryCanvases();
   const historyBaseDirty = keepLocalHistory && state.historyBaseDirty;
   const snapshot = {
@@ -574,7 +574,7 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
     state.manualMaskPresent = draft.manualMaskPresent ?? Boolean(addImage);
     state.manualExclusionPresent = Boolean(exclusionImage);
     state.manualExclusionErasePresent = Boolean(exclusionEraseImage);
-    if (!state.project?.id && Array.isArray(draft.history) && draft.historyBase && ensureHistoryCanvases()) {
+    if (!hasDurableHistory() && Array.isArray(draft.history) && draft.historyBase && ensureHistoryCanvases()) {
       historyAddCanvas.getContext("2d").clearRect(0, 0, historyAddCanvas.width, historyAddCanvas.height);
       historyExclusionCanvas.getContext("2d").clearRect(0, 0, historyExclusionCanvas.width, historyExclusionCanvas.height);
       historyExclusionEraseCanvas.getContext("2d").clearRect(0, 0, historyExclusionEraseCanvas.width, historyExclusionEraseCanvas.height);

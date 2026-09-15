@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -244,6 +245,8 @@ class DetectionMixin:
             if not self._job_is_current(job_generation, catalog_generation):
                 return
             models = self._ensure_models()
+            staged: dict[str, tuple[int, ImageRecord, list[Candidate]]] = {}
+            stage_lock = threading.Lock()
 
             def claim_and_run(index: int, record: ImageRecord) -> None:
                 try:
@@ -252,65 +255,16 @@ class DetectionMixin:
                     if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                         self._discard_candidates(candidates)
                         return
-                    try:
-                        image_lock = self.image_io_lock(record.image_id)
-                    except ClientError:
-                        self._discard_candidates(candidates)
-                        raise
-                    with image_lock:
-                        with self.lock:
-                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                    or not self._job_is_current(job_generation, catalog_generation)
-                                    or self.images.get(record.image_id) is not record):
-                                self._discard_candidates(candidates)
-                                return
-                        try:
-                            self._assert_record_stat_matches(record)
-                        except ClientError:
-                            self._discard_candidates(candidates)
-                            raise
-                        with self.lock:
-                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                    or not self._job_is_current(job_generation, catalog_generation)
-                                    or self.images.get(record.image_id) is not record):
-                                self._discard_candidates(candidates)
-                                return
-                            boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
-                            stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
-                            expected_revision = self._candidate_revision(record.image_id)
-                        try:
-                            for candidate in candidates:
-                                final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                                if candidate.mask_path.name.startswith(".mozarie-pending-"):
-                                    os.replace(candidate.mask_path, final_path)
-                                    candidate.mask_path = final_path
-                        except Exception:
-                            self._discard_candidates(candidates)
-                            raise
-                        if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                    self._assert_record_stat_matches(record)
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or self.images.get(record.image_id) is not record):
                             self._discard_candidates(candidates)
                             return
-                        try:
-                            # PNG publication, effective-mask composition and
-                            # SQLite history are all deliberately outside the
-                            # global state lock.  The per-image lock above
-                            # keeps this epoch stable until the short publish.
-                            self._commit_candidate_snapshot_outside_state_lock(
-                                record.image_id, [*boundary_candidates, *candidates], replace=True,
-                                expected_revision=expected_revision, expected_catalog_generation=catalog_generation,
-                                history_group=getattr(self, "_detection_history_group", None),
-                            )
-                        except Exception:
-                            # The durable transaction did not publish this run:
-                            # remove every new final-path mask. The previous
-                            # candidate generation remains intact.
-                            self._discard_candidates(candidates)
-                            raise
-                        with self.lock:
-                            self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
-                        for path in stale_paths:
-                            path.unlink(missing_ok=True)
-                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                        expected_revision = self._candidate_revision(record.image_id)
+                    with stage_lock:
+                        staged[record.image_id] = (index, record, candidates)
                 finally:
                     self.invalidate_sam_image(record.image_id)
 
@@ -323,12 +277,68 @@ class DetectionMixin:
                 group_id = getattr(self, "_detection_history_group", None)
                 if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
                 return
             if control is not None and control.cancel_requested.is_set():
                 group_id = getattr(self, "_detection_history_group", None)
                 if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._cancel_job(job_generation, catalog_generation)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
                 return
+            if len(staged) != len(records):
+                raise ClientError("検出結果を公開できませんでした。", "catalog_changed")
+
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                            or not self._job_is_current(job_generation, catalog_generation)
+                            or any(self.images.get(record.image_id) is not record for record in records)):
+                        raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                    expected_revisions = {record.image_id: self._candidate_revision(record.image_id) for record in records}
+                    previous = {
+                        record.image_id: [candidate for candidate in self.candidates.get(record.image_id, [])]
+                        for record in records
+                    }
+                combined: dict[str, list[Candidate]] = {
+                    record.image_id: [
+                        *[candidate for candidate in previous[record.image_id] if candidate.origin == "boundary"],
+                        *staged[record.image_id][2],
+                    ]
+                    for record in records
+                }
+                for record in records:
+                    for candidate in staged[record.image_id][2]:
+                        if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                            final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                            os.replace(candidate.mask_path, final_path)
+                            candidate.mask_path = final_path
+                try:
+                    states = [
+                        (record.image_id, expected_revisions[record.image_id], expected_revisions[record.image_id] + 1,
+                         combined[record.image_id], self._effective_mask_for_candidates(record.image_id, combined[record.image_id]))
+                        for record in records
+                    ]
+                    self.workspace_store.commit_detection_states(states, history_group=getattr(self, "_detection_history_group", None))
+                except Exception:
+                    for _index, _record, candidates in staged.values():
+                        self._discard_candidates(candidates)
+                    raise
+                with self.lock:
+                    if self.catalog_generation != catalog_generation or any(self.images.get(record.image_id) is not record for record in records):
+                        raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                    for record in records:
+                        self.candidates[record.image_id] = combined[record.image_id]
+                        self.candidate_revisions[record.image_id] = expected_revisions[record.image_id] + 1
+                        self._record_job_success(staged[record.image_id][0], record.image_id, None, job_generation, catalog_generation)
+                for record in records:
+                    for candidate in previous[record.image_id]:
+                        if candidate.origin != "boundary":
+                            candidate.mask_path.unlink(missing_ok=True)
             group_id = getattr(self, "_detection_history_group", None)
             if group_id: self.workspace_store.finish_history_group(group_id)
             self._finish_job(job_generation, catalog_generation)

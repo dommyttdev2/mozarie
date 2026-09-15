@@ -537,7 +537,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
         try { await refreshCandidateRecord(imageId, true); } catch { /* Keep the optimistic aggregate until a later refresh. */ }
         renderCatalogViews();
       }
-      if (state.project?.id) void refreshProjectHistory(imageId);
+      if (hasDurableHistory()) void refreshProjectHistory(imageId);
       return true;
     } catch (error) {
       if (state.candidateUpdateVersions.get(mutationKey) !== version) return null;
@@ -657,7 +657,7 @@ async function batchCandidateOperation(spec) {
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
       setEditorUnreviewed();
       recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
-      if (state.project?.id) void refreshProjectHistory(imageId);
+      if (hasDurableHistory()) void refreshProjectHistory(imageId);
     } catch (error) {
       if (state.currentId === imageId && isCurrentGeneration(generation)) showUserError(error);
     } finally {
@@ -773,7 +773,7 @@ function copyCanvas(source, target) {
 
 function updateHistoryButtons() {
   const locked = !currentRecord() || currentImageActionPending() || isBusy() || state.importing;
-  if (state.project?.id) {
+  if (hasDurableHistory()) {
     const history = state.projectHistory.get(state.currentId) || {};
     $("#undoButton").disabled = locked || state.projectReadOnly || state.projectHistoryBusy || history.canUndo !== true;
     $("#redoButton").disabled = locked || state.projectReadOnly || state.projectHistoryBusy || history.canRedo !== true;
@@ -785,7 +785,7 @@ function updateHistoryButtons() {
 
 function resetHistoryToCurrentManualMask() {
   if (!state.currentImage) return;
-  if (state.project?.id) {
+  if (hasDurableHistory()) {
     releaseHistoryCanvases();
     state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set();
     state.historyBaseDirty = false;
@@ -1042,7 +1042,7 @@ function trimHistory() {
 }
 
 function recordHistoryOperation(operation) {
-  if (state.project?.id) { state.history = []; state.historyIndex = 0; updateHistoryButtons(); return; }
+  if (hasDurableHistory()) { state.history = []; state.historyIndex = 0; updateHistoryButtons(); return; }
   operation.editorState ||= historyEditorState();
   state.history.splice(state.historyIndex);
   state.history.push(operation); trimHistory(); state.historyIndex = state.history.length;
@@ -1050,7 +1050,7 @@ function recordHistoryOperation(operation) {
 }
 
 function rebuildManualMaskFromHistory() {
-  if (state.project?.id) return;
+  if (hasDurableHistory()) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
   exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
@@ -1081,7 +1081,7 @@ function completeManualStroke() {
 }
 
 async function refreshProjectHistory(imageId = state.currentId) {
-  if (!state.project?.id || !imageId) return;
+  if (!hasDurableHistory() || !imageId) return;
   try {
     const history = await api(`/api/project/history/${encodeURIComponent(imageId)}`);
     state.projectHistory.set(imageId, { canUndo: history.canUndo === true, canRedo: history.canRedo === true });
@@ -1093,7 +1093,7 @@ async function restoreProjectHistory(direction) {
   if (catalogStagingEditsActive()) return;
   const imageId = state.currentId;
   const generation = state.imageGeneration;
-  if (!state.project?.id || !currentRecord() || !imageId || state.projectReadOnly || state.projectHistoryBusy || isBusy() || state.importing || isGestureActive() || currentImageActionPending()) return;
+  if (!hasDurableHistory() || !currentRecord() || !imageId || state.projectReadOnly || state.projectHistoryBusy || isBusy() || state.importing || isGestureActive() || currentImageActionPending()) return;
   state.projectHistoryBusy = true; updateHistoryButtons();
   try {
     await queueImageMutation(imageId, async () => {
@@ -1163,7 +1163,7 @@ async function syncProjectlessCandidateHistory(imageId, previous, generation) {
 
 function restoreSnapshot(index) {
   if (catalogStagingEditsActive()) return;
-  if (state.project?.id) { void restoreProjectHistory(index < state.historyIndex ? "undo" : "redo"); return; }
+  if (hasDurableHistory()) { void restoreProjectHistory(index < state.historyIndex ? "undo" : "redo"); return; }
   if (!currentRecord() || isBusy() || state.importing || isGestureActive() || currentImageActionPending() || index < 0 || index > state.history.length) return;
   if (index === state.historyIndex) return;
   const imageId = state.currentId;

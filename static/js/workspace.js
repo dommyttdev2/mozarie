@@ -378,12 +378,12 @@ function queueWorkspaceDraft(imageId, immediate = false) {
         const image = state.images.find((entry) => entry.id === imageId);
         if (image) image.hasEffectiveMask = draft?.hasEffectiveMask === true;
       }
-      if (state.project?.id && state.currentId === imageId) void refreshProjectHistory(imageId);
+      if (hasDurableHistory() && state.currentId === imageId) void refreshProjectHistory(imageId);
       // A project has a durable copy and can reload an inactive draft on
       // demand.  Projectless sessions have no equivalent recovery path, so
       // they deliberately keep the in-memory bitmap.
       if (
-        state.project?.id && state.currentId !== imageId
+        hasDurableHistory() && state.currentId !== imageId
         && state.drafts.get(imageId) === draft
         && !state.workspaceDraftTimers.has(imageId)
         && !state.draftSaveChains.has(imageId)
