@@ -1087,7 +1087,7 @@ class CatalogMixin:
                     if (self.catalog_id, self.workspace_id, self.catalog_generation, tuple(self.images)) != (catalog_id, workspace_id, catalog_generation, image_ids):
                         raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "catalog_changed")
                     if prune_workspace and workspace_id:
-                        self.workspace_store.prune_catalog_images(workspace_id, set())
+                        self.workspace_store.delete_catalog_images(workspace_id)
                     # An unnamed workspace has no user-visible project entry.
                     # Closing or replacing it must remove both its hidden
                     # catalog and the active-workspace pointer before the live

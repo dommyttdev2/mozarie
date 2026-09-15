@@ -306,7 +306,7 @@ class WorkspaceStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection, tables: set[str]) -> None:
-        required = {"meta", "catalogs", "project_sources", "images", "candidates", "candidate_metadata", "manual_edits", "history_entries", "history_groups", "history_candidate_refs", "history_cursors"}
+        required = {"meta", "catalogs", "project_sources", "images", "image_transforms", "candidates", "candidate_metadata", "manual_edits", "history_entries", "history_groups", "history_candidate_refs", "history_cursors"}
         if not required.issubset(tables):
             raise WorkspaceOpenError(f"workspace database must be recreated for schema {WorkspaceStore.VERSION}")
         if tuple(row[0] for row in db.execute("PRAGMA quick_check(1)")) != ("ok",):
@@ -316,7 +316,7 @@ class WorkspaceStore:
         meta = {str(row["name"]): row for row in db.execute("PRAGMA table_info(meta)")}
         catalogs = {str(row["name"]): row for row in db.execute("PRAGMA table_info(catalogs)")}
         images = {str(row["name"]): row for row in db.execute("PRAGMA table_info(images)")}
-        transforms = {str(row["name"]): row for row in db.execute("PRAGMA table_info(image_transforms)")} if "image_transforms" in tables else {}
+        transforms = {str(row["name"]): row for row in db.execute("PRAGMA table_info(image_transforms)")}
         history = {str(row["name"]): row for row in db.execute("PRAGMA table_info(history_entries)")}
         foreign = list(db.execute("PRAGMA foreign_key_list(images)"))
         indexes = list(db.execute("PRAGMA index_list(catalogs)"))
@@ -337,7 +337,7 @@ class WorkspaceStore:
                 or str(meta["value"]["type"]).upper() != "TEXT" or not int(meta["value"]["notnull"])
                 or "catalog_id" not in catalogs or not int(catalogs["catalog_id"]["pk"])
                 or not {"catalog_id", "source_id", "relative_path", "image_id", "size_bytes", "mtime_ns", "width", "height", "source_blocked"}.issubset(images)
-                or (transforms and set(transforms) != {"image_id", "flip_horizontal", "flip_vertical", "source_flip_horizontal", "source_flip_vertical", "revision"})
+                or set(transforms) != {"image_id", "flip_horizontal", "flip_vertical", "source_flip_horizontal", "source_flip_vertical", "revision"}
                 or not {"entry_id", "catalog_id", "image_id", "before_json", "after_json", "delta_json", "created_at"}.issubset(history)
                 or not foreign
                 or not name_unique_nocase):
@@ -1474,19 +1474,12 @@ class WorkspaceStore:
             db.execute("UPDATE images SET candidate_revision=?,reviewed=0,updated_at=? WHERE image_id=?", (revision, time.time_ns(), image_id))
             self._record_history_db(db, image_id, before, self._history_state_db(db, image_id), group_id=group_id)
 
-    def prune_catalog_images(self, catalog_id: str, relative_paths: set[str]) -> None:
-        """Drop rows for files absent from a complete folder scan only."""
+    def delete_catalog_images(self, catalog_id: str) -> None:
+        """Drop every image in a catalog that is about to be discarded."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                if relative_paths:
-                    db.execute("CREATE TEMP TABLE IF NOT EXISTS workspace_paths(relative_path TEXT PRIMARY KEY)")
-                    db.execute("DELETE FROM workspace_paths")
-                    db.executemany("INSERT INTO workspace_paths(relative_path) VALUES(?)", ((path,) for path in relative_paths))
-                    db.execute("""DELETE FROM images WHERE catalog_id=? AND NOT EXISTS
-                        (SELECT 1 FROM workspace_paths WHERE workspace_paths.relative_path=images.relative_path)""", (catalog_id,))
-                else:
-                    db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
+                db.execute("DELETE FROM images WHERE catalog_id=?", (catalog_id,))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")

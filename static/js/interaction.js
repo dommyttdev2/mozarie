@@ -690,8 +690,6 @@ async function importSingleFile(entry, clientKey, catalogId = null, sourceId = n
       ...(sourceKind ? { "X-Mozarie-Source-Kind": sourceKind } : {}),
       "X-Mozarie-Import-Intent": importIntent,
       "X-Mozarie-Import-Session": session?.id || "",
-      "X-Mozarie-Import-Parallelism": String(session?.requestedParallelism || 1),
-      "X-Mozarie-Import-Target-Count": String(session?.total || 1),
       ...(catalogId ? { "X-Mozarie-Catalog-Id": encodeURIComponent(catalogId) } : {}),
       "X-Mozarie-Expected-Project-Id": encodeURIComponent(session?.expectedProjectId ?? state.project?.id ?? ""),
       ...(Number.isSafeInteger(session?.expectedCatalogGeneration) ? { "X-Mozarie-Expected-Catalog-Generation": String(session.expectedCatalogGeneration) } : {}),
