@@ -78,6 +78,7 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
             self.assertEqual(list(_chunks(db, [])), [])
             self.assertEqual([len(chunk) for chunk in _chunks(db, [str(n) for n in range(6)])], [5, 1])
             self.assertEqual([len(chunk) for chunk in _chunks(db, [str(n) for n in range(6)], reserved_binds=2)], [3, 3])
+        db.close()
         self.assertIsNone(WorkspaceStore._decode_png_mask(None))
         rgba = self.png(mode="RGBA", value=(1, 2, 3, 0))
         self.assertEqual(WorkspaceStore._decode_png_mask(rgba).getpixel((0, 0)), 0)
