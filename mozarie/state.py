@@ -430,6 +430,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         """Delete a non-writing manual transaction while retaining it if Windows refuses cleanup."""
         try:
             shutil.rmtree(session["directory"])
+        except FileNotFoundError:
+            pass
         except OSError as exc:
             LOGGER.error("手描きマスク転送を片付けられません: %s", exc)
             raise ClientError("手描きマスクの一時データを片付けられません。もう一度実行してください。", "workspace_write_failed") from exc

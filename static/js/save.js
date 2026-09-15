@@ -846,19 +846,19 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   }
 }
 
-const BROWSER_SAVE_ACK_STORAGE = "mozarie.browser-save-acks";
+const BROWSER_SAVE_ACK_STORAGE = "mozarie.browser-save-acks-v1";
 let browserSaveAckFlush = Promise.resolve();
 
 function pendingBrowserSaveAcks() {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(BROWSER_SAVE_ACK_STORAGE) || "[]");
+    const saved = JSON.parse(localStorage.getItem(BROWSER_SAVE_ACK_STORAGE) || "[]");
     return Array.isArray(saved) ? saved.filter((item) => item && typeof item.imageId === "string" && Number.isSafeInteger(item.candidateRevision)
       && typeof item.saveToken === "string" && typeof item.sourceAction === "string") : [];
   } catch { return []; }
 }
 
 function storePendingBrowserSaveAcks(entries) {
-  try { sessionStorage.setItem(BROWSER_SAVE_ACK_STORAGE, JSON.stringify(entries)); } catch {}
+  try { localStorage.setItem(BROWSER_SAVE_ACK_STORAGE, JSON.stringify(entries)); } catch {}
 }
 
 function queueBrowserSaveAck(payload) {
@@ -873,6 +873,12 @@ async function flushPendingBrowserSaveAcks() {
     const retry = [];
     for (const payload of pending) {
       try {
+        const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload), resyncOnStale: false });
+        if (status.state === "pending") {
+          retry.push(payload);
+          continue;
+        }
+        if (status.state !== "committed") continue;
         const result = await api("/api/save/ack", { method: "POST", body: JSON.stringify(payload), resyncOnStale: false });
         if (result.state !== "acknowledged" && result.state !== "unknown") retry.push(payload);
       } catch { retry.push(payload); }
@@ -885,11 +891,13 @@ async function flushPendingBrowserSaveAcks() {
 }
 
 async function acknowledgeBrowserSave(payload) {
-  queueBrowserSaveAck(payload);
   await flushPendingBrowserSaveAcks();
 }
 
 async function commitBrowserSaveWithRetry(payload) {
+  // Persist before the request so a closed tab can reconcile a committed
+  // deletion instead of leaving its terminal receipt in the server process.
+  queueBrowserSaveAck(payload);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt) await new Promise((resolve) => setTimeout(resolve, 150));
     try {
