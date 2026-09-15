@@ -180,7 +180,7 @@ function startFixtureServer() {
           response.end(JSON.stringify({ error_code: "internal_error" }));
           return;
         }
-        if (submittedSettings.models.target_segmentation === "no-gpu.onnx" && submittedSettings.models.provider === "gpu") {
+        if (path.win32.basename(String(submittedSettings.models.target_segmentation || "")) === "no-gpu.onnx" && submittedSettings.models.provider === "gpu") {
           response.writeHead(400, { "Content-Type": "application/json" });
           response.end(JSON.stringify({ error_code: "gpu_unsupported" }));
           return;
@@ -200,9 +200,10 @@ function startFixtureServer() {
       notifySettingsStatusWaiters();
       const reply = () => {
         const targetPath = submittedSettings.models.target_segmentation;
-        const gpus = targetPath === "no-gpu.onnx" ? [] : targetPath === "gpu-options.onnx"
+        const targetName = path.win32.basename(String(targetPath || ""));
+        const gpus = targetName === "no-gpu.onnx" ? [] : targetName === "gpu-options.onnx"
           ? [{ id: 3, name: "RTX Test", totalMemory: 16 * 1024 ** 3, supported: true }, { id: 4, name: "Legacy Test", totalMemory: 3 * 1024 ** 3, supported: false }]
-          : targetPath === "unknown-vram.onnx"
+          : targetName === "unknown-vram.onnx"
             ? [{ id: 5, name: "Unknown VRAM", supported: true }]
             : [{ id: settingsStatusRequests.length, name: targetPath || "default", totalMemory: 16 * 1024 ** 3 }];
         const paths = submittedSettings.models.sam_checkpoints || {};
@@ -212,7 +213,7 @@ function startFixtureServer() {
         // Match the real settings-status contract: CUDA devices inherit their
         // backend label from the enclosing runtime status rather than each GPU.
         const status = { models: {}, gpus, runtimeBackend: "cuda" };
-        if (targetPath !== "legacy-sam-status.onnx") status.samVariants = samVariants;
+        if (targetName !== "legacy-sam-status.onnx") status.samVariants = samVariants;
         response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ status }));
       };
       if (deferFullSettings) { await new Promise((resolve) => { pendingFullSettings.push(() => { reply(); resolve(); }); }); return; }
@@ -2803,7 +2804,7 @@ async function main() {
     assert.equal(await page.locator("#settingsGpuLoading").isVisible(), true, "an older status response does not clear a newer loading indicator");
     releaseFullSettings();
     await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
-    await page.locator("#settingsTargetModel").fill("gpu-options.onnx");
+    await page.locator("#settingsTargetModel").fill("G:\\models\\gpu-options.onnx");
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").textContent.includes("Legacy Test"));
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears after a successful response");
@@ -2814,7 +2815,7 @@ async function main() {
     await page.locator("#settingsSaveButton").click();
     await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
     assert.equal(await page.locator("#settingsGpuDevice").inputValue(), "3", "the supported GPU choice remains selected after saving");
-    await page.locator("#settingsTargetModel").fill("no-gpu.onnx");
+    await page.locator("#settingsTargetModel").fill("G:\\models\\no-gpu.onnx");
     await page.evaluate(() => refreshSettingsStatus());
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice").disabled);
     await page.locator("#settingsSaveButton").click();

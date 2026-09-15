@@ -23,6 +23,15 @@ async function main() {
     await page.goto(fixture.url, { waitUntil: "networkidle" });
     await page.locator(".gallery-item").first().click();
 
+    const initialHistoryIndex = await page.evaluate(() => state.historyIndex);
+    const waitForHistoryRestore = async (expectedIndex) => {
+      await page.waitForFunction((expected) => !state.historyRestoreBusy && state.historyIndex === expected, expectedIndex);
+    };
+    const restoreWithButton = async (selector, expectedIndex) => {
+      await page.locator(selector).click();
+      await waitForHistoryRestore(expectedIndex);
+    };
+
     const tolerancePanel = page.locator("#bucketToleranceControl");
     const toleranceInput = page.locator("#bucketTolerance");
     const openTolerance = async () => {
@@ -60,22 +69,22 @@ async function main() {
     await page.mouse.move(fillPoint.x, fillPoint.y); await page.mouse.down(); await page.mouse.move(fillPoint.x + 20, fillPoint.y + 10); await page.mouse.up();
     await page.waitForFunction((count) => state.history.length === count + 1 && canvasHasPixels(exclusionCtx, exclusionCanvas), maskBeforeExcludeFill.history);
     assert.deepEqual(await page.evaluate(() => ({ add: addCanvas.toDataURL(), manualMaskPresent: state.manualMaskPresent, tool: state.history.at(-1)?.tool })), { add: maskBeforeExcludeFill.add, manualMaskPresent: maskBeforeExcludeFill.manualMaskPresent, tool: "exclude_bucket" }, "exclude fill drag records once and leaves the mosaic layer and its presence flag byte-for-byte unchanged");
-    await page.locator("#undoButton").click();
+    await restoreWithButton("#undoButton", initialHistoryIndex);
     await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
     assert.equal(await page.evaluate((before) => addCanvas.toDataURL() === before, maskBeforeExcludeFill.add), true, "undoing exclude fill leaves the mosaic layer unchanged");
     assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, await page.locator("#errorDialog").innerText());
-    await page.locator("#redoButton").click();
+    await restoreWithButton("#redoButton", initialHistoryIndex + 1);
     await page.waitForFunction(() => canvasHasPixels(exclusionCtx, exclusionCanvas));
     assert.equal(await page.evaluate((before) => addCanvas.toDataURL() === before, maskBeforeExcludeFill.add), true, "redoing exclude fill restores only the exclusion layer");
-    await page.locator("#undoButton").click(); await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
+    await restoreWithButton("#undoButton", initialHistoryIndex); await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
 
     await page.locator("#compareViewButton").click();
     const compareCanvas = await page.locator("#editorCanvas").boundingBox();
     for (const fraction of [.25, .75]) {
       await page.mouse.click(compareCanvas.x + compareCanvas.width * fraction, compareCanvas.y + compareCanvas.height / 2);
-      await page.waitForFunction(() => canvasHasPixels(exclusionCtx, exclusionCanvas));
+      await page.waitForFunction((expected) => canvasHasPixels(exclusionCtx, exclusionCanvas) && !state.historyRestoreBusy && state.historyIndex === expected, initialHistoryIndex + 1);
       assert.equal(await page.evaluate((before) => addCanvas.toDataURL() === before && !state.manualMaskPresent, maskBeforeExcludeFill.add), true, `exclude fill from either compare pane changes only exclusion (${fraction})`);
-      await page.locator("#undoButton").click(); await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
+      await restoreWithButton("#undoButton", initialHistoryIndex); await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
     }
 
     const canvas = await page.locator("#editorCanvas").boundingBox();
