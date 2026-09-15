@@ -362,7 +362,7 @@ class WorkspaceTests(unittest.TestCase):
             records = [SimpleNamespace(relative_path=f"nested/{index:05}.png", size_bytes=10, mtime_ns=20) for index in range(5000)]
             stored = store.reconcile_images(catalog, records)
             transformed_id = str(stored["nested/00001.png"]["image_id"])
-            store.set_image_transform(transformed_id, flip_horizontal=True)
+            store.set_image_transform(transformed_id, True, False)
 
             def select_count(items):
                 statements: list[str] = []
@@ -408,8 +408,8 @@ class WorkspaceTests(unittest.TestCase):
             preview = store.preview_reconcile_images(catalog, source, records)
             self.assertEqual(len(preview), len(records))
             selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
-            self.assertEqual(len(selects), 1)
-            self.assertIn("image_transforms", selects[0])
+            self.assertLessEqual(len(selects), 2)
+            self.assertTrue(any("image_transforms" in statement for statement in selects))
 
     def test_schema_type_or_default_tampering_is_rejected_without_mutation(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

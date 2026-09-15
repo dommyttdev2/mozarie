@@ -157,7 +157,7 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
             provisional, _source, _images = store.create_projectless_native_workspace(native, [record])
             store.activate_projectless_catalog(provisional)
             self.assertEqual(store.active_projectless_catalog(), provisional)
-            store.detach_catalog(provisional)
+            store.delete_project(provisional)
             self.assertIsNone(store.active_projectless_catalog())
             with self.assertRaisesRegex(ValueError, "projectless"):
                 store.activate_projectless_catalog(named["id"])
@@ -434,25 +434,22 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
             try:
                 row = db.execute("SELECT ? AS expand_px", (4,)).fetchone()
                 self.assertEqual(WorkspaceStore._candidate_row(row)["expand_px"], 4)
-                for value in (True, -1, "abc"):
+                for value in (-1, "abc"):
                     bad = db.execute("SELECT ? AS expand_px", (value,)).fetchone()
                     with self.assertRaisesRegex(ValueError, "candidate"):
                         WorkspaceStore._candidate_row(bad)
+                with self.assertRaisesRegex(ValueError, "candidate"):
+                    WorkspaceStore._candidate_row({"expand_px": True})
             finally:
                 db.close()
-            with patch("mozarie.workspace.Image.open", side_effect=OSError("bad image")):
+            with patch("mozarie.workspace.open_image", side_effect=OSError("bad image")):
                 with self.assertRaisesRegex(ValueError, "mask"):
                     WorkspaceStore._decode_png_mask(self.png())
-            with patch("mozarie.workspace.Image.open") as opening:
-                fake = opening.return_value.__enter__.return_value
-                fake.format = "PNG"; fake.mode = "RGB"
-                with self.assertRaisesRegex(ValueError, "alpha"):
-                    WorkspaceStore._decode_png_mask(self.png())
-            with patch("mozarie.workspace.Image.open") as opening:
-                fake = opening.return_value.__enter__.return_value
-                fake.format = "GIF"
-                with self.assertRaisesRegex(ValueError, "mask"):
-                    WorkspaceStore._decode_png_mask(self.png())
+            with self.assertRaisesRegex(ValueError, "alpha"):
+                WorkspaceStore._decode_png_mask(self.png(mode="RGB"))
+            gif = io.BytesIO(); Image.new("L", (4, 4), 0).save(gif, format="GIF")
+            with self.assertRaisesRegex(ValueError, "PNG"):
+                WorkspaceStore._decode_png_mask(gif.getvalue())
             # A corrupt BLOB remains excluded from fast validity checks.
             db = sqlite3.connect(store.path)
             try:
