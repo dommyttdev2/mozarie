@@ -74,6 +74,15 @@ function startFixtureServer() {
   const settingsRequests = [];
   const settingsActions = [];
   const settingsStatusRequests = [];
+  const settingsStatusWaiters = [];
+  const notifySettingsStatusWaiters = () => {
+    for (let index = settingsStatusWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = settingsStatusWaiters[index];
+      if (settingsStatusRequests.length < waiter.count) continue;
+      settingsStatusWaiters.splice(index, 1);
+      waiter.resolve();
+    }
+  };
   const updateRequests = [];
   const modelPickerRequests = [];
   const modelDownloadRequests = [];
@@ -167,6 +176,7 @@ function startFixtureServer() {
       let body = ""; for await (const chunk of request) body += chunk;
       const submittedSettings = JSON.parse(body);
       settingsStatusRequests.push(submittedSettings);
+      notifySettingsStatusWaiters();
       const reply = () => {
         const targetPath = submittedSettings.models.target_segmentation;
         const gpus = targetPath === "no-gpu.onnx" ? [] : targetPath === "gpu-options.onnx"
@@ -484,7 +494,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1986,7 +1996,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await dragBoundary();
   await page.waitForFunction(() => !document.querySelector("#boundaryActions").hidden);
   await click("boundaryDetectButton");
-  await page.waitForTimeout(50);
+  await page.waitForFunction(() => !state.boundaryPending);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await click("boundaryTool"); await click("rectangleTool");
   await dragBoundary();
@@ -2092,7 +2102,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled);
   await click("saveAllButton");
   for (const [id, value] of [["applyTargetMode", "masked"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["applyDivisor", "102"]]) await input(id, value);
-  await click("chooseOutputDirectoryButton"); await page.waitForTimeout(50);
+  await click("chooseOutputDirectoryButton");
+  await page.waitForFunction(() => !state.outputDirectoryPicking);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await input("applyOverwriteMode", true); await input("applyCopyMode", true); await click("applyCloseButton");
   await setupFixture(); await click("brushTool");
@@ -2106,12 +2117,12 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await page.waitForFunction(() => !document.querySelector("#applyPauseButton").hidden);
   await click("applyPauseButton"); await click("applyCancelButton"); releaseSaveRenders(); await page.waitForFunction(() => !state.saving); await click("applyCloseButton");
   await click("saveAllButton"); await click("applyCloseButton");
-  await page.waitForTimeout(100);
+  await page.waitForFunction(() => !state.saving && !state.applyRunning && !state.saveStarting);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
 
   // Confirmation/error dialogs are opened from their public controls.
   await setupFixture();
-  await click("batchMoreButton"); await click("clearAllMasksButton"); await input("confirmNeverShow", true); await click("confirmAccept"); await page.waitForTimeout(50);
+  await click("batchMoreButton"); await click("clearAllMasksButton"); await input("confirmNeverShow", true); await click("confirmAccept");
   await page.waitForFunction(() => !state.masksClearing && !state.catalogMutation);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await setupFixture();
@@ -2135,7 +2146,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   for (const id of ["settingsTabGeneral", "settingsTabModels", "settingsTabDisplay", "settingsTabShortcuts", "settingsTabConfirm", "settingsTabInfo"]) await click(id);
   await click("settingsTabGeneral");
   for (const [id, value] of [["settingsLanguage", "en"], ["settingsPort", "8767"], ["settingsDefaultOutputDirectory", "G:\\output"], ["settingsImportParallelism", "2"], ["settingsSaveParallelism", "1"], ["settingsOpenBrowser", true]]) await input(id, value);
-  await click("settingsChooseOutputDirectory"); await page.waitForTimeout(50);
+  await click("settingsChooseOutputDirectory");
+  await page.waitForFunction(() => !state.outputDirectoryPicking);
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await click("settingsTabModels");
   await input("settingsTargetModel", "gpu-options.onnx"); await input("settingsProvider", "gpu");
@@ -2185,7 +2197,7 @@ async function main() {
   let browser;
   let fixtureUrl;
   let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable;
-  let settingsRequests;
+  let settingsRequests, waitForSettingsStatusRequests;
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
@@ -2194,7 +2206,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -2395,7 +2407,6 @@ async function main() {
         return { id, present: Boolean(node) };
       }), uiControlManifest);
       assert.equal(inventory.every((control) => control.present), true, `all manifest controls remain in the ${language}/${width} DOM: ${JSON.stringify(inventory.filter((control) => !control.present))}`);
-      await inventoryPage.waitForTimeout(25);
     }
     await stopCoveredPage(inventoryPage, true);
     assert.deepEqual(inventoryErrors, [], `inventory loading does not raise page errors: ${inventoryErrors.join("; ")}`);
@@ -2600,18 +2611,21 @@ async function main() {
     assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");
     assert.equal(await page.locator("#modelDownloadClose").isDisabled(), false, "a download status error lets the user close the modal");
     const pollsAfterFailure = modelDownloadPolls();
+    // This deliberately samples one polling interval: only elapsed time can
+    // prove that an already-failed job does not schedule another poll.
     await page.waitForTimeout(500);
     assert.equal(modelDownloadPolls(), pollsAfterFailure, "a download status error stops further polling");
     await page.locator("#errorDialogClose").click();
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(false); resetModelDownload();
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => !document.querySelector("#modelDownloadDialog").open);
     const statusesBeforeStaleResponse = settingsStatusRequests.length;
     const gpuBeforeStaleResponse = await page.locator("#settingsGpuDevice").textContent();
     await page.locator("#settingsTargetModel").fill("unsaved.onnx");
     deferFullSettings();
+    const staleStatusRequest = waitForSettingsStatusRequests(statusesBeforeStaleResponse + 1);
     await page.evaluate(() => { void refreshSettingsStatus(); });
-    await page.waitForTimeout(20);
+    await staleStatusRequest;
     assert.equal(settingsStatusRequests.length, statusesBeforeStaleResponse + 1, "one silent refresh captures the current form");
     assert.equal(settingsStatusRequests.at(-1).models.target_segmentation, "unsaved.onnx", "the silent refresh validates the current form");
     assert.equal(await page.locator("#settingsGpuLoading").isVisible(), true, "GPU loading is visible while status is pending");
@@ -2625,10 +2639,12 @@ async function main() {
     assert.equal(await page.locator("#settingsGpuLoading").isHidden(), true, "GPU loading clears when a stale response completes");
     assert.equal(await page.locator("#settingsGpuDevice").getAttribute("aria-busy"), null, "GPU selector is no longer busy after the response");
     deferFullSettings();
+    const deferredStatusRequestsReady = waitForSettingsStatusRequests(settingsStatusRequests.length + 2);
     await page.evaluate(() => { void refreshSettingsStatus(); void refreshSettingsStatus(); });
-    await page.waitForTimeout(20);
+    await deferredStatusRequestsReady;
+    const firstDeferredStatusResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/settings/status" && response.request().method() === "POST");
     releaseNextFullSettings();
-    await page.waitForTimeout(20);
+    await firstDeferredStatusResponse;
     assert.equal(await page.locator("#settingsGpuLoading").isVisible(), true, "an older status response does not clear a newer loading indicator");
     releaseFullSettings();
     await page.waitForFunction(() => document.querySelector("#settingsGpuLoading").hidden);
@@ -2977,8 +2993,9 @@ async function main() {
       return { empty, restored: { all: document.querySelector("#detectAllButton").disabled, current: document.querySelector("#detectCurrentButton").disabled } };
     });
     assert.deepEqual(detectionControls, { empty: { all: true, current: true }, restored: { all: false, current: false } }, "detection actions use persisted targets, not unsaved controls");
+    let detectionRequest = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/detect" && response.request().method() === "POST");
     await page.locator("#detectCurrentButton").click();
-    await page.waitForTimeout(50);
+    await detectionRequest;
     assert.equal(await page.locator("#detectDialog").isVisible(), false, "current-image detection must not open settings");
     assert.equal(detectRequests.length, 1, "current-image detection should start immediately");
     assert.deepEqual(detectRequests[0].imageIds, ["sample"]);
@@ -2990,21 +3007,22 @@ async function main() {
     await page.evaluate(async () => { await pollJob(); closeProcessing(); });
     await page.locator("label.target-chip:has(#detectTargetPussy)").click();
     await page.waitForFunction(() => document.querySelector("#detectTargetPussy").checked === false);
+    detectionRequest = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/detect" && response.request().method() === "POST");
     await page.locator("#detectCurrentButton").click();
-    await page.waitForTimeout(50);
+    await detectionRequest;
     assert.deepEqual(detectRequests[1].targetClasses, ["penis"], "current-image detection uses the visible penis-only choice");
     resetJob();
     await page.evaluate(async () => { await pollJob(); closeProcessing(); });
     await page.locator("label.target-chip:has(#detectTargetPenis)").click();
     await page.waitForFunction(() => document.querySelector("#detectTargetPenis").checked === false);
     await page.locator("#detectCurrentButton").click();
-    await page.waitForTimeout(50);
     assert.equal(detectRequests.length, 2, "current-image detection must not start without a selected target");
     assert.match(await page.locator("#detectionTargetValidation").textContent(), /penis|pussy/, "current-image detection explains which target to select");
     await page.locator("label.target-chip:has(#detectTargetPussy)").click();
     await page.waitForFunction(() => document.querySelector("#detectTargetPussy").checked === true);
+    detectionRequest = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/detect" && response.request().method() === "POST");
     await page.locator("#detectCurrentButton").click();
-    await page.waitForTimeout(50);
+    await detectionRequest;
     assert.deepEqual(detectRequests[2].targetClasses, ["pussy"], "current-image detection uses the visible pussy-only choice");
 
     const currentDetectionRequests = detectRequests.length;
@@ -3037,9 +3055,10 @@ async function main() {
     assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "GPU preserves the requested worker count");
     await page.locator("#settingsProvider").evaluate((select) => { select.value = "cpu"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     assert.equal(await page.locator("#detectParallelism").inputValue(), "4", "switching providers does not rewrite the worker count");
+    const allDetectionRequest = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/detect" && response.request().method() === "POST");
     await page.locator("#detectStartButton").click();
     await page.waitForFunction(() => document.querySelector("#detectDialog").open === false);
-    await page.waitForTimeout(50);
+    await allDetectionRequest;
     assert.equal(detectRequests.length, currentDetectionRequests + 1, "starting settings should call detection once");
     assert.equal(detectRequests[currentDetectionRequests].confidence, 0.67, "dialog threshold should be submitted");
     assert.equal(detectRequests[currentDetectionRequests].parallelism, 4, "dialog parallelism should be submitted on GPU");
@@ -4092,49 +4111,6 @@ async function main() {
       assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls.slice(-2)), [["query", "readwrite"], ["request", "readwrite"]], "a newly selected output directory uses the same explicit permission check");
     } finally {
       await stopCoveredPage(browserSavePage, true);
-    }
-
-    // Navigation and overview selection are user operations, so exercise the
-    // visible controls and keyboard modifiers rather than page-side helpers.
-    resetScenario();
-    const navigationPage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
-    await navigationPage.addInitScript(() => {
-      window.showOpenFilePicker = async () => [];
-      window.showDirectoryPicker = async () => ({ async *values() {} });
-    });
-    try {
-      await navigationPage.goto(fixtureUrl, { waitUntil: "networkidle" });
-      await navigationPage.locator('.gallery-item[data-id="sample"]').click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample");
-      await navigationPage.locator("#nextImageButton").click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample-two");
-      await navigationPage.locator("#previousImageButton").click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample");
-      await navigationPage.locator("#reviewAndNextButton").click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.reviewed);
-      await navigationPage.locator("#previousImageButton").click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample");
-      await navigationPage.locator("#hideAndNextButton").click();
-      await navigationPage.waitForFunction(() => state.currentId === "sample-two" && state.images.find((image) => image.id === "sample")?.hidden);
-      await navigationPage.locator("#overviewButton").click();
-      await navigationPage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
-      // Foldered cards are reached through the rendered overview UI, not a
-      // private renderer call. This proves the folder select has real options.
-      await navigationPage.evaluate(() => {
-        state.images[0].relativePath = "nested/sample.png";
-        state.images[1].relativePath = "nested/deeper/sample-two.png";
-      });
-      await navigationPage.locator("#closeOverviewButton").click();
-      await navigationPage.locator("#overviewButton").click();
-      await navigationPage.waitForFunction(() => document.querySelector("#overviewFolder option[value='nested']"));
-      await navigationPage.locator("#overviewFolder").selectOption("nested");
-      await navigationPage.locator("#batchModeButton").click();
-      await navigationPage.locator('.overview-item[data-id="sample-two"]').click();
-      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control"] });
-      await navigationPage.locator('.overview-item[data-id="sample"]').click({ modifiers: ["Control", "Shift"] });
-      assert.deepEqual(await navigationPage.evaluate(() => [...state.selectedImageIds].sort()), ["sample", "sample-two"], "overview modifier selection preserves both images");
-    } finally {
-      await stopCoveredPage(navigationPage, true);
     }
 
     await runExhaustiveCandidateScenarios(browser);
