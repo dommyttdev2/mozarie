@@ -244,12 +244,23 @@ class LiveHttpEndpointTests(unittest.TestCase):
         status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         image_id = json.loads(body)["images"][0]["id"]
+        client_save_token = "live-browser-save-stream-token"
+        status, _headers, body = self.request("POST", "/api/save/reserve", {
+            "imageId": image_id,
+            "candidateRevision": self.state._candidate_revision(image_id),
+            "clientSaveToken": client_save_token,
+            "copyToDefault": False,
+            "format": "original",
+            "keepMetadata": True,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         status, headers, body = self.request("POST", "/api/save/render", {
             "imageId": image_id,
             "candidateRevision": self.state._candidate_revision(image_id),
+            "clientSaveToken": client_save_token,
             "divisor": 100,
             "draft": None,
-            "copyToBrowser": True,
+            "copyToDefault": False,
             "format": "original",
             "keepMetadata": True,
         }, authorized=True)

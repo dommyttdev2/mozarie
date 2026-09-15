@@ -295,9 +295,15 @@ function beginBrowserDeletePermissionRequests(images) {
     });
   };
 }
-async function browserDeleteHandle(entry, image) {
+async function browserDeleteHandle(entry, image, requestPermission = false) {
   const options = { mode: "readwrite" };
-  const permission = await entry.parentHandle.queryPermission?.(options);
+  let permission = await entry.parentHandle.queryPermission?.(options);
+  if (permission && permission !== "granted" && requestPermission && entry.parentHandle.requestPermission) {
+    // Recovered IDB handles survive a restart but their write grant may not.
+    // When resume runs from a user action the browser can ask again; otherwise
+    // retain the durable operation for that explicit retry.
+    permission = await entry.parentHandle.requestPermission(options);
+  }
   if (permission && permission !== "granted") throw codedError("source_permission_denied");
   const resolved = await entry.parentHandle.getFileHandle(entry.name);
   if (resolved.isSameEntry && !await resolved.isSameEntry(entry.fileHandle)) throw codedError("stale_asset");
@@ -326,7 +332,7 @@ async function preflightBrowserSourceDelete(images, permissionFailures = []) {
   return { ready, failed };
 }
 
-async function deleteBrowserSources(images, entries, onChanged = null) {
+async function deleteBrowserSources(images, entries, onChanged = null, requestPermission = false) {
   const deleted = []; const failed = [];
   for (const image of images) {
     if (image.sourceKind === "filesystem") continue;
@@ -334,7 +340,7 @@ async function deleteBrowserSources(images, entries, onChanged = null) {
       const entry = entries.find((candidate) => candidate.imageId === image.id);
       if (!entry) throw codedError("source_action_unavailable");
       entry.state = "deleting"; await onChanged?.();
-      await browserDeleteHandle(entry, image); entry.state = "deleted"; deleted.push(image.id);
+      await browserDeleteHandle(entry, image, requestPermission); entry.state = "deleted"; deleted.push(image.id);
       await onChanged?.();
     }
     catch (error) { failed.push({ imageId: image.id, reason: error?.code || "source_delete_failed" }); }
@@ -343,19 +349,19 @@ async function deleteBrowserSources(images, entries, onChanged = null) {
 }
 
 async function commitSourceDeleteWithRetry(payload) {
-  try { return await catalogApi("/api/catalog/delete-source", payload); }
+  try { return await catalogApi("/api/catalog/delete-source", payload, { method: "POST" }); }
   catch (error) {
     if (error?.code !== "connection_lost") throw error;
     // The source may already be gone while only the response was lost.  The
     // server keeps this token's receipt, so repeating it is safe.
-    return catalogApi("/api/catalog/delete-source", payload);
+    return catalogApi("/api/catalog/delete-source", payload, { method: "POST" });
   }
 }
 async function claimSourceDelete(deleteToken) {
-  return catalogApi("/api/catalog/delete-source/claim", { deleteToken });
+  return catalogApi("/api/catalog/delete-source/claim", { deleteToken }, { method: "POST" });
 }
 async function releaseSourceDeleteClaim(deleteToken) {
-  return catalogApi("/api/catalog/delete-source/release", { deleteToken });
+  return catalogApi("/api/catalog/delete-source/release", { deleteToken }, { method: "POST" });
 }
 
 async function acknowledgeSourceDelete(deleteToken) {
@@ -381,12 +387,49 @@ async function recoverPendingBrowserDeletes(pending) {
   return { deleted: pending.browserDeletedImageIds, unresolved };
 }
 
-async function resumePendingSourceDeletes() {
+async function resumePendingSourceDeletes(requestPermission = false) {
   for (const pending of await pendingSourceDeletes()) {
     try {
-      let status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+      let status;
+      try {
+        status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+      } catch (error) {
+        if (error?.code !== "source_delete_not_prepared" || pending.state !== "preparing") throw error;
+        // The initial prepare request may never have reached the server. The
+        // local durable intent includes the handle, so prepare it now instead
+        // of throwing the user's copy+delete request away.
+        const images = pending.imageIds.map((imageId) => state.images.find((image) => image.id === imageId)).filter(Boolean);
+        const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: images.map((image) => image.id), deleteToken: pending.deleteToken }, { method: "POST" });
+        if (!pending.browserEntries?.length) pending.browserEntries = images.filter((image) => (prepared.preparedImageIds || []).includes(image.id)).map(browserDeleteEntry).filter(Boolean);
+        pending.imageIds = prepared.preparedImageIds || pending.imageIds;
+        pending.state = "prepared";
+        await rememberPendingSourceDelete(pending);
+        status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+      }
       const recovery = ["prepared", "claimed"].includes(status.state) ? await recoverPendingBrowserDeletes(pending) : { deleted: pending.browserDeletedImageIds || [], unresolved: false };
       if (["prepared", "claimed"].includes(status.state) && recovery.unresolved) continue;
+      // A copy's output has already committed before it requests source
+      // deletion.  Its durable intent explicitly retries the browser phase;
+      // do not silently cancel that request and strand the user's deletion.
+      if (pending.retryOnResume && ["prepared", "claimed"].includes(status.state) && !recovery.deleted.length) {
+        if (status.state === "prepared") status = await claimSourceDelete(pending.deleteToken);
+        const retryImages = pending.imageIds.map((imageId) => state.images.find((image) => image.id === imageId)).filter(Boolean);
+        const browser = await deleteBrowserSources(retryImages, pending.browserEntries || [], async () => {
+          pending.browserDeletedImageIds = pending.browserEntries.filter((entry) => entry.state === "deleted").map((entry) => entry.imageId);
+          await rememberPendingSourceDelete(pending);
+        }, requestPermission);
+        recovery.deleted = browser.deleted;
+        pending.browserDeletedImageIds = browser.deleted;
+        await rememberPendingSourceDelete(pending);
+        if (!recovery.deleted.length) {
+          setStatus(t("sourceDelete.copyPending"), "warning");
+          const known = new Map((state.pendingSourceDeleteEntries || []).map((entry) => [entry.imageId, entry]));
+          for (const entry of pending.browserEntries || []) known.set(entry.imageId, entry);
+          state.pendingSourceDeleteEntries = [...known.values()];
+          $("#sourceDeleteResume").hidden = false;
+          continue;
+        }
+      }
       if (status.state === "claimed" && !recovery.deleted.length) {
         await releaseSourceDeleteClaim(pending.deleteToken);
         status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
@@ -398,7 +441,7 @@ async function resumePendingSourceDeletes() {
         // Native files were never removed by the browser. Keep the durable
         // confirmation visible for an explicit retry instead of silently
         // cancelling it after a restart.
-        setStatus("元画像削除の確認が未完了です。対象を確認して、もう一度削除してください。", "warning");
+        setStatus(t("sourceDelete.confirmPending"), "warning");
         continue;
       } else if (status.state === "prepared") {
         await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
@@ -406,12 +449,27 @@ async function resumePendingSourceDeletes() {
       const settled = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
       if (["committed", "cancelled"].includes(settled.state)) await acknowledgeSourceDelete(pending.deleteToken);
     } catch (error) {
-      if (error?.code === "source_delete_not_prepared") await forgetPendingSourceDelete(pending.deleteToken);
+      if (pending.retryOnResume && isDefinitiveCommitRejection(error)
+        && await restoreCopiedBrowserSourcesAfterRejectedDelete(pending)) continue;
+      if (error?.code === "source_delete_not_prepared" && pending.state !== "preparing") await forgetPendingSourceDelete(pending.deleteToken);
       // Keep prepared and cleanup-pending operations until a terminal receipt is acknowledged.
     }
   }
   await resyncCatalog().catch(() => null);
 }
+
+async function resumePendingSourceDeletesFromUser() {
+  $("#sourceDeleteResume").hidden = true;
+  // Start the permission prompts synchronously inside the click turn. The
+  // durable IDB handles were cached while showing this explicit control.
+  const requests = (state.pendingSourceDeleteEntries || []).map((entry) => {
+    try { return Promise.resolve(entry.parentHandle.requestPermission?.({ mode: "readwrite" })); } catch { return Promise.resolve("denied"); }
+  });
+  await Promise.all(requests);
+  await resumePendingSourceDeletes(true);
+}
+
+window.addEventListener("online", () => { void resumePendingSourceDeletes(false).catch(() => {}); });
 
 async function permanentlyDeleteImages(images, visibleImages) {
   if (!images.length || isBusy() || state.importing) return;
@@ -441,7 +499,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
       showUserError(codedError(local.failed[0]?.reason || "source_action_unavailable"));
       return;
     }
-    const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: local.ready.map((image) => image.id), deleteToken: token });
+    const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: local.ready.map((image) => image.id), deleteToken: token }, { method: "POST" });
     const preparedIds = new Set(prepared.preparedImageIds || []);
     const preparedImages = local.ready.filter((image) => preparedIds.has(image.id));
     const pending = { deleteToken: token, imageIds: preparedImages.map((image) => image.id), browserDeletedImageIds: [],

@@ -745,5 +745,12 @@
   "project.deleteData": "このプロジェクトの操作履歴、モザイク範囲、除外範囲、候補、画像ごとの状態をすべて削除します。",
   "project.deleteSource": "元画像は削除しません。",
   "project.deleteIrreversible": "この操作は元に戻せません。",
-  "project.deleteConfirm": "プロジェクトを削除"
+  "project.deleteConfirm": "プロジェクトを削除",
+  "sourceDelete.resume": "元画像削除を再開",
+  "sourceDelete.copyPending": "コピー後の元画像削除は保留です。元画像を確認して再接続してください。",
+  "sourceDelete.confirmPending": "元画像削除の確認が未完了です。対象を確認して、もう一度削除してください。",
+  "sourceDelete.singlePending": "{complete} {output} 元画像の削除は保留です。再接続後に再試行します。",
+  "sourceDelete.batchPending": "{complete} 元画像の削除は保留です: {names}。再接続後に再試行します。",
+  "sourceDelete.notAvailable": "{complete} {output} コピーは保存しましたが、元画像を安全に削除できませんでした。",
+  "sourceDelete.batchNotAvailable": "{complete} コピーは保存しましたが、元画像を安全に削除できませんでした: {names}。"
 }

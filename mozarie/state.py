@@ -30,6 +30,7 @@ from .detection import DetectionMixin
 from .jobs import JobsMixin
 from .model_downloads import ModelDownloadManager
 from .workspace import WorkspaceOpenError, WorkspaceStore
+from .save_journal import SaveJournal
 
 
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
@@ -87,6 +88,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def __init__(self, cache_dir: Path | None = None, session_base_dir: Path | None = None) -> None:
         self.settings_store = SettingsStore(APP_DIR)
         self.workspace_store = WorkspaceStore(APP_DIR / "data")
+        self.save_journal = SaveJournal(APP_DIR / "data")
+        self.save_journal.recover(self.workspace_store.browser_save_receipt)
         # ``catalog_id`` is the public named-project identity.  An unnamed
         # screen uses ``workspace_id`` too, but that internal catalog never
         # appears in the projects list or request expectations.

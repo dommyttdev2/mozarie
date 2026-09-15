@@ -1401,7 +1401,6 @@ async function initialise() {
     return;
   }
   await loadTranslations(); restoreCompareSplit(); bindEvents();
-  state.outputDirectoryHandle = await rememberedOutputDirectoryHandle();
   renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
@@ -1410,12 +1409,14 @@ async function initialise() {
     if (document.visibilityState === "visible") void syncCatalogOnReturn();
   });
   window.addEventListener("pageshow", (event) => { if (event.persisted) void syncCatalogOnReturn(); });
+  $("#sourceDeleteResume").addEventListener("click", () => { void resumePendingSourceDeletesFromUser().catch(showUserError); });
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = catalogResponse(await api("/api/images"));
     $("#folderPath").value = data.root || "";
     resetCatalog(data.images || [], data.root || "");
     applyProjectSnapshot(data);
+    if (typeof reconcilePendingBrowserSaves === "function") await reconcilePendingBrowserSaves();
     state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
     if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
     if (typeof resumePendingSourceDeletes === "function") void resumePendingSourceDeletes().catch(() => {});

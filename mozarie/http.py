@@ -28,6 +28,7 @@ from . import state as state_module
 from .state import STATE, StudioState
 from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
 from .model_downloads import ModelDownloadError, ModelDownloadInProgress
+from .config import SettingsError, validate_output_directory_ready
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
@@ -87,12 +88,14 @@ _POST_OPERATION_LABELS = {
     "/api/settings/gpu-diagnostic": "GPU診断",
     "/api/settings/reset": "設定初期化",
     "/api/model-file/pick": "モデルファイル選択",
+    "/api/output-directory/pick": "保存先フォルダー選択",
     "/api/model-download/start": "モデルダウンロード開始",
     "/api/model-download/cancel": "モデルダウンロード取消",
     "/api/update/start": "更新開始",
     "/api/boundary": "境界候補追加",
     "/api/save/prepare": "ブラウザー保存準備",
     "/api/save/render": "ブラウザー保存レンダー",
+    "/api/save/reserve": "ブラウザー保存予約",
     "/api/save/commit": "ブラウザー保存確定",
     "/api/save/status": "ブラウザー保存状態確認",
     "/api/save/ack": "ブラウザー保存確定受領",
@@ -143,8 +146,8 @@ def _operation_log_details(path: str, payload: dict[str, Any]) -> str:
     image_ids = payload.get("imageIds")
     if isinstance(image_ids, list):
         details.append(f"対象={len(image_ids)}件")
-    if path in {"/api/folder", "/api/project/source-check", "/api/project/source/relink"}:
-        source_path = payload.get("path")
+    if path in {"/api/folder", "/api/project/source-check", "/api/project/source/relink", "/api/output-directory/pick"}:
+        source_path = payload.get("path") if path != "/api/output-directory/pick" else payload.get("currentPath")
         if isinstance(source_path, str) and source_path:
             details.append(f"パス={source_path}")
     return f" {' '.join(details)}" if details else ""
@@ -284,6 +287,41 @@ try {{
     if not path.is_absolute() or not path.is_file() or path.suffix.lower() not in suffixes:
         raise ClientError("選択したモデルファイルが正しくありません。", "model_picker_invalid")
     return str(path.resolve())
+
+
+def _pick_output_directory(state: StudioState = STATE, current_path: str = "") -> str | None:
+    """Pick and verify a writable directory; a browser handle has no full path."""
+    with state.lock:
+        if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            raise ClientError("処理中は保存先を変更できません。", "job_running")
+    script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$owner = New-Object System.Windows.Forms.Form
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+try {
+  $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Show(); $owner.Activate(); $owner.BringToFront()
+  $initial = $env:MOZARIE_OUTPUT_INITIAL_DIRECTORY
+  if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
+  if ($dialog.ShowDialog($owner) -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
+  [Console]::Out.Write([Convert]::ToBase64String($bytes))
+} finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }
+"""
+    environment = os.environ.copy()
+    candidate = _picker_hint_path(current_path) if isinstance(current_path, str) else None
+    if candidate is not None and candidate.is_dir():
+        environment["MOZARIE_OUTPUT_INITIAL_DIRECTORY"] = str(candidate.resolve())
+    selected = _run_native_picker(script, environment, failed_message="保存先フォルダーの選択を開けませんでした。", busy_message="保存先フォルダーを選択しています。", state=state)
+    if selected is None:
+        return None
+    try:
+        return str(validate_output_directory_ready(selected))
+    except (SettingsError, OSError) as exc:
+        raise ClientError("選択した保存先フォルダーを使用できません。", "output_folder_unavailable") from exc
 
 
 class MosaicHandler(BaseHTTPRequestHandler):
@@ -830,6 +868,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/model-file/pick":
                 selected = _pick_model_file(str(payload.get("modelKey", "")), current_path=str(payload.get("currentPath", "")))
                 self._json({"path": selected} if selected else {"cancelled": True})
+            elif path == "/api/output-directory/pick":
+                selected = _pick_output_directory(current_path=str(payload.get("currentPath", "")))
+                if selected is None:
+                    self._json({"cancelled": True})
+                else:
+                    settings = STATE.update_settings({"saving": {"default_output_directory": selected}})
+                    self._json({"settings": settings, "path": settings["saving"]["default_output_directory"]})
             elif path == "/api/model-download/start":
                 try:
                     self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
@@ -858,9 +903,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
                 ))
                 self._json({"entries": entries})
+            elif path == "/api/save/reserve":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.reserve_browser_save(
+                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
+                    _read_client_save_token(payload.get("clientSaveToken")),
+                    copy_to_default=_read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー"),
+                    suffix=_read_save_suffix(payload.get("suffix", "_censored")),
+                    output_format=str(payload.get("format", "original")),
+                    keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
+                )))
             elif path == "/api/save/render":
                 copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
                 copy_to_browser = _read_bool(payload.get("copyToBrowser", False), "ブラウザ保存")
+                if copy_to_browser:
+                    raise ClientError("コピー保存は選択済みの保存先へ実行してください。", "input_invalid")
                 rendered = self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
@@ -868,23 +924,28 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     payload.get("draft"),
                     copy_to_default=copy_to_default,
                     copy_to_browser=copy_to_browser,
+                    client_save_token=_read_client_save_token(payload.get("clientSaveToken")),
                     suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                     output_format=str(payload.get("format", "original")),
                     keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
                 ))
-                STATE.cleanup_browser_save_files()
+                revision, save_token = rendered.candidate_revision, rendered.save_token
                 if copy_to_default:
-                    self._json({
-                        "output": str(rendered.output_path),
-                        "candidateRevision": rendered.candidate_revision,
-                        "saveToken": rendered.save_token,
-                    })
+                    self._binary(
+                        b"", "application/octet-stream",
+                        headers={
+                            "X-Mozarie-Revision": str(revision),
+                            "X-Mozarie-Save-Token": save_token,
+                            "X-Mozarie-Output-Path-B64": base64.urlsafe_b64encode(str(rendered.output_path).encode("utf-8")).decode("ascii"),
+                            "X-Mozarie-No-Effect": "1" if rendered.no_effect else "0",
+                        },
+                    )
                 else:
                     assert rendered.response_path is not None
                     try:
                         self._stream_path(rendered.response_path, rendered.mime_type, {
-                            "X-Mozarie-Revision": str(rendered.candidate_revision),
-                            "X-Mozarie-Save-Token": rendered.save_token,
+                            "X-Mozarie-Revision": str(revision),
+                            "X-Mozarie-Save-Token": save_token,
                             "X-Mozarie-No-Effect": "1" if rendered.no_effect else "0",
                         })
                     finally:
@@ -911,10 +972,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
                 )))
             elif path == "/api/save/ack":
-                self._json(STATE.acknowledge_browser_save(
-                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
-                    str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
-                ))
+                self._json(STATE.acknowledge_browser_save(str(payload.get("saveToken", ""))))
             elif path == "/api/save/cancel":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.cancel_browser_save(
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
@@ -1332,6 +1390,12 @@ def _read_candidate_revision(value: Any) -> int:
 def _read_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ClientError(f"{field_name}はONまたはOFFで指定してください。", "input_invalid")
+    return value
+
+
+def _read_client_save_token(value: Any) -> str:
+    if not isinstance(value, str) or not 20 <= len(value) <= 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in value):
+        raise ClientError("保存確認トークンが正しくありません。", "input_invalid")
     return value
 
 

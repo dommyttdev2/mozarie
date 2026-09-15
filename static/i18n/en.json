@@ -745,5 +745,12 @@
   "project.deleteData": "Delete this project's operation history, mosaic ranges, exclusion ranges, candidates, and per-image state.",
   "project.deleteSource": "Original images are not deleted.",
   "project.deleteIrreversible": "This cannot be undone.",
-  "project.deleteConfirm": "Delete project"
+  "project.deleteConfirm": "Delete project",
+  "sourceDelete.resume": "Resume source deletion",
+  "sourceDelete.copyPending": "Deleting the original after copying is pending. Check the original and reconnect.",
+  "sourceDelete.confirmPending": "Original deletion confirmation is incomplete. Check the item and delete it again.",
+  "sourceDelete.singlePending": "{complete} {output} Original deletion is pending. It will retry after reconnecting.",
+  "sourceDelete.batchPending": "{complete} Original deletion is pending: {names}. It will retry after reconnecting.",
+  "sourceDelete.notAvailable": "{complete} {output} The copy was saved, but the original could not be deleted safely.",
+  "sourceDelete.batchNotAvailable": "{complete} Copies were saved, but these originals could not be deleted safely: {names}."
 }

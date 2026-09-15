@@ -1688,6 +1688,8 @@ class CatalogMixin:
                 self._pending_browser_save_cleanup.append((details.rendered_path, None))
             if details.output_path is not None:
                 self._pending_browser_save_cleanup.append((details.output_path, details.output_fingerprint))
+            if details.output_destination is not None:
+                self._release_output_destination(details.output_destination)
         return details
 
     def _release_browser_save_claim(self, token: str) -> None:
@@ -1695,25 +1697,28 @@ class CatalogMixin:
             self.browser_save_claims.discard(token)
 
     @staticmethod
-    def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None]]) -> list[tuple[Path, tuple[int, int] | None]]:
-        """Remove detached token files without touching a replacement at its path."""
-        retry: list[tuple[Path, tuple[int, int] | None]] = []
-        for path, fingerprint in paths:
+    def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None] | tuple[Path, tuple[int, int] | None, str | None]]) -> None:
+        """Remove only private staged token files; SaveJournal owns finals."""
+        for item in paths:
+            path, fingerprint = item[0], item[1]
+            if len(item) > 2:
+                continue
             if fingerprint is not None:
                 try:
                     stat = path.stat()
-                except FileNotFoundError:
-                    continue
                 except OSError:
-                    retry.append((path, fingerprint))
                     continue
                 if (stat.st_mtime_ns, stat.st_size) != fingerprint:
                     continue
             try:
                 path.unlink(missing_ok=True)
             except OSError:
-                retry.append((path, fingerprint))
-        return retry
+                continue
+            if path.parent.name == ".mozarie-staging":
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
 
     def _take_browser_save_cleanup_unchecked(self) -> list[tuple[Path, tuple[int, int] | None]]:
         paths = self._pending_browser_save_cleanup
@@ -1724,72 +1729,60 @@ class CatalogMixin:
         for token in tuple(self.browser_save_tokens):
             self._discard_browser_save_token_unchecked(token)
         self.browser_save_claims.clear()
-        self.browser_save_receipts.clear()
 
     def _discard_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
         for token, details in tuple(self.browser_save_tokens.items()):
             if details.image_id == image_id:
                 self._discard_browser_save_token_unchecked(token)
 
-    def _replace_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
-        pending = [token for token, details in self.browser_save_tokens.items() if details.image_id == image_id]
-        if any(token in self.browser_save_claims for token in pending):
-            raise ClientError("保存の確定中です。完了後にもう一度実行してください。", "operation_in_progress")
-        if not pending:
-            return
-        for token in pending:
-            self._discard_browser_save_token_unchecked(token)
-        LOGGER.info("ブラウザー保存を置換: 未確定=%d件", len(pending))
-
-    def _clear_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
-        """Discard every prior terminal receipt when this image commits again."""
-        for token, receipt in tuple(self.browser_save_receipts.items()):
-            if receipt.image_id == image_id:
-                self.browser_save_receipts.pop(token, None)
+    def _discard_expired_browser_save_tokens_unchecked(self) -> None:
+        # Tokens are durable until their terminal receipt is explicitly ACKed.
+        return
 
     def _has_active_browser_save_for_image_unchecked(self, image_id: str) -> bool:
-        return any(details.image_id == image_id for details in self.browser_save_tokens.values())
+        return any(details.image_id == image_id and (token in self.browser_save_claims or details.state in {"rendering", "pending", "publishing"})
+                   for token, details in self.browser_save_tokens.items())
 
+    def cleanup_expired_browser_save_tokens(self) -> None:
+        return
+
+    # Existing lifecycle callers invoke this after a response; only private
+    # stage files are eligible here, never an output final.
     def cleanup_browser_save_files(self) -> None:
-        """Remove files detached by an explicit cancel, commit, or catalogue change."""
         with self.lock:
-            cleanup_paths = self._take_browser_save_cleanup_unchecked()
-        retry = self._unlink_browser_save_cleanup(cleanup_paths)
-        if retry:
-            LOGGER.warning("ブラウザー保存の一時ファイル削除を保留: %d件", len(retry))
-            with self.lock:
-                self._pending_browser_save_cleanup.extend(retry)
+            paths = self._take_browser_save_cleanup_unchecked()
+        self._unlink_browser_save_cleanup(paths)
 
     def _issue_browser_save_token_unchecked(
-        self,
-        record: ImageRecord,
-        revision: int,
-        source_fingerprint: tuple[int, int],
-        catalog_generation: int,
-        rendered_path: Path | None,
-        output_path: Path | None = None,
-        output_fingerprint: tuple[int, int] | None = None,
-        allow_copy_action: bool = False,
-        no_effect: bool = False,
+        self, record: ImageRecord, revision: int, source_fingerprint: tuple[int, int],
+        catalog_generation: int, rendered_path: Path | None, output_path: Path | None = None,
+        output_fingerprint: tuple[int, int] | None = None, output_destination: Path | None = None,
+        client_token: str | None = None, allow_copy_action: bool = False, no_effect: bool = False,
         output_format: str = "original", keep_metadata: bool = True,
     ) -> str:
         self._assert_request_catalog_expectation()
-        self._replace_browser_save_tokens_for_image_unchecked(record.image_id)
-        token = secrets.token_urlsafe(32)
+        token = client_token or secrets.token_urlsafe(32)
+        existing = self.browser_save_tokens.get(token)
+        if existing is not None and existing.state == "rendering":
+            details = replace(existing, rendered_path=rendered_path, output_path=output_path,
+                              output_fingerprint=output_fingerprint, output_destination=output_destination,
+                              state="pending", allow_copy_action=allow_copy_action, no_effect=no_effect,
+                              output_format=output_format, keep_metadata=keep_metadata)
+            self.browser_save_tokens[token] = details
+            self.save_journal.update_stage(token, output_path or rendered_path, output_fingerprint)
+            return token
+        if existing is not None:
+            raise ClientError("保存確認トークンが重複しています。保存をやり直してください。", "save_state_changed")
         self.browser_save_tokens[token] = BrowserSaveToken(
-            image_id=record.image_id,
-            candidate_revision=revision,
-            source_fingerprint=source_fingerprint,
-            catalog_generation=catalog_generation,
-            rendered_path=rendered_path,
-            output_path=output_path,
-            output_fingerprint=output_fingerprint,
-            allow_copy_action=allow_copy_action,
-            no_effect=no_effect,
-            output_format=output_format, keep_metadata=keep_metadata, transform_revision=record.transform_revision,
+            image_id=record.image_id, candidate_revision=revision, source_fingerprint=source_fingerprint,
+            catalog_generation=catalog_generation, issued_at=time.monotonic(), rendered_path=rendered_path,
+            output_path=output_path, output_fingerprint=output_fingerprint, output_destination=output_destination,
+            allow_copy_action=allow_copy_action, no_effect=no_effect, output_format=output_format,
+            keep_metadata=keep_metadata, transform_revision=record.transform_revision,
             flip_horizontal=record.flip_horizontal, flip_vertical=record.flip_vertical,
             source_flip_horizontal=record.source_flip_horizontal, source_flip_vertical=record.source_flip_vertical,
         )
+        self.save_journal.update_stage(token, output_path or rendered_path, output_fingerprint)
         return token
 
     @staticmethod

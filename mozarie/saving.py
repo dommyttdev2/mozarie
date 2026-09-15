@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 
 from .core import (
-    IO_CHUNK_BYTES, BrowserSaveReceipt,
+    IO_CHUNK_BYTES, BrowserSaveReceipt, BrowserSaveToken,
     BrowserSaveRender, CandidateRole, ClientError,
     ImageRecord, JobControl, LOGGER, safe_import_relative_path, _read_mosaic_divisor,
     _read_save_suffix,
@@ -81,6 +81,108 @@ class SavingMixin:
     def _release_output_destination(self, destination: Path) -> None:
         with self.output_destination_lock:
             self.reserved_output_paths.discard(destination)
+
+    def _reassign_output_destination(self, destination: Path) -> Path:
+        with self.output_destination_lock:
+            self.reserved_output_paths.discard(destination)
+            replacement = unique_session_import_destination(destination, self.reserved_output_paths)
+            self.reserved_output_paths.add(replacement)
+            return replacement
+
+    def _file_identity(self, path: Path, stat: os.stat_result) -> str | None:
+        return self.save_journal.file_identity(path, stat)
+
+    def _publish_staged_copy(self, token: str, staged: Path, destination: Path) -> tuple[str | None, str] | None:
+        """Exclusively create the final name and retain its ownership receipt."""
+        if os.name == "nt":
+            # The stage already lives under destination/.mozarie-staging, so
+            # Windows RenameFile is an atomic same-volume publish and refuses
+            # an existing target.  No partially copied final name is visible.
+            try: os.rename(staged, destination)
+            except FileExistsError: return None
+            identity = self._file_identity(destination, destination.stat())
+            self.save_journal.placeholder(token, identity)
+            return identity, ""
+        try:
+            # O_EXCL maps to CREATE_NEW on Windows and works without hard-link
+            # support on UNC, SMB and FAT volumes.  Persist the file identity
+            # before copying so restart cleanup can only touch our own file.
+            with destination.open("xb") as target, staged.open("rb") as source:
+                identity = self._file_identity(destination, os.fstat(target.fileno()))
+                self.save_journal.placeholder(token, identity)
+                while chunk := source.read(1024 * 1024):
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            return identity, ""
+        except FileExistsError:
+            return None
+
+    def reserve_browser_save(self, image_id: str, revision: int, client_save_token: str, *, copy_to_default: bool, suffix: str, output_format: str, keep_metadata: bool) -> dict[str, Any]:
+        """Create the durable token before decoding masks or rendering pixels."""
+        suffix = _read_save_suffix(suffix)
+        if output_format not in {"original", "png", "jpg"} or not isinstance(keep_metadata, bool) or (output_format == "jpg" and keep_metadata):
+            raise ClientError("保存形式が正しくありません。", "input_invalid")
+        record = self.image_snapshot(image_id)
+        with self.lock:
+            self._assert_image_editable(image_id)
+            current_revision = self._candidate_revision(image_id)
+            if revision != current_revision:
+                raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed")
+            existing = self.browser_save_tokens.get(client_save_token)
+            if existing is not None:
+                if existing.image_id != image_id or existing.candidate_revision != revision:
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
+                return {"state": existing.state, "outputPath": str(existing.output_destination) if existing.output_destination else ""}
+            durable = self.save_journal.row(client_save_token)
+            receipt = self.workspace_store.browser_save_receipt(client_save_token)
+            if receipt is not None:
+                if receipt.get("imageId") != image_id or receipt.get("revision") != revision:
+                    raise ClientError("保存確認トークンと保存対象が一致しません。保存をやり直してください。", "save_state_changed")
+                return {"state": "committed", "outputPath": str(receipt.get("outputPath") or "")}
+            if durable is not None:
+                if durable["image_id"] != image_id or int(durable["revision"]) != revision:
+                    raise ClientError("保存確認トークンと保存対象が一致しません。保存をやり直してください。", "save_state_changed")
+                return {"state": str(durable["state"]), "outputPath": str(durable["destination"] or "")}
+            catalog_generation = self.catalog_generation
+            configured_output_directory = Path(self.settings["saving"]["default_output_directory"]).resolve() if copy_to_default else None
+        destination = None; staged = None; initial_fingerprint = None
+        if configured_output_directory is not None:
+            try:
+                configured_output_directory = validate_output_directory_ready(configured_output_directory)
+            except SettingsError as exc:
+                raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable") from exc
+            extension = record.path.suffix.lower() if output_format == "original" else f".{output_format}"
+            destination = self._reserve_output_destination(replace(record, path=record.path.with_suffix(extension)), suffix, configured_output_directory)
+            staged = destination.parent / ".mozarie-staging" / f"{client_save_token}.stage"
+            self.save_journal.reserve(client_save_token, image_id, revision, destination, staged)
+            try:
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                with staged.open("xb") as handle:
+                    handle.flush(); os.fsync(handle.fileno())
+                stat = staged.stat(); initial_fingerprint = (stat.st_mtime_ns, stat.st_size)
+            except OSError as exc:
+                self.save_journal.phase(client_save_token, "cancelled")
+                self._release_output_destination(destination)
+                raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable") from exc
+        else:
+            self.save_journal.reserve(client_save_token, image_id, revision, None, None)
+        with self.lock:
+            if self.catalog_generation != catalog_generation or self.images.get(image_id) is None:
+                self.save_journal.phase(client_save_token, "cancelled")
+                if staged is not None: self._unlink_browser_save_cleanup([(staged, initial_fingerprint)])
+                if destination is not None: self._release_output_destination(destination)
+                raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
+            self.browser_save_tokens[client_save_token] = BrowserSaveToken(
+                image_id=image_id, candidate_revision=revision, source_fingerprint=record.asset_fingerprint(),
+                catalog_generation=catalog_generation, issued_at=time.monotonic(), rendered_path=None,
+                output_path=staged, output_fingerprint=initial_fingerprint, output_destination=destination,
+                state="rendering", allow_copy_action=copy_to_default, output_format=output_format,
+                keep_metadata=keep_metadata, transform_revision=record.transform_revision,
+                flip_horizontal=record.flip_horizontal, flip_vertical=record.flip_vertical,
+                source_flip_horizontal=record.source_flip_horizontal, source_flip_vertical=record.source_flip_vertical,
+            )
+        return {"state": "rendering", "outputPath": str(destination) if destination else ""}
 
     def _browser_response_directory(self) -> Path:
         rendered_dir = self.cache_dir / "browser-save"
@@ -205,6 +307,7 @@ class SavingMixin:
         *,
         copy_to_default: bool = False,
         copy_to_browser: bool = False,
+        client_save_token: str | None = None,
         suffix: str = "_censored",
         output_format: str = "original",
         keep_metadata: bool = True,
@@ -256,8 +359,17 @@ class SavingMixin:
                         for candidate in self.candidates.get(image_id, [])
                         if candidate.enabled and candidate.candidate_id not in removed_candidate_ids
                     ]
+                    if client_save_token is None:
+                        raise ClientError("保存確認トークンがありません。保存をやり直してください。", "save_state_changed")
+                    reserved = self.browser_save_tokens.get(client_save_token)
+                    if reserved is None or reserved.image_id != image_id or reserved.candidate_revision != revision or reserved.state != "rendering":
+                        raise ClientError("保存確認トークンが無効または取消済みです。保存をやり直してください。", "save_state_changed")
                     if copy_to_default:
                         configured_output_directory = Path(self.settings["saving"]["default_output_directory"]).resolve()
+                        output_path = reserved.output_path
+                        output_destination = reserved.output_destination
+                        if output_path is None or output_destination is None:
+                            raise ClientError("保存先の準備が見つかりません。保存をやり直してください。", "save_state_changed")
                 # A candidate can disappear between the metadata snapshot and the
                 # disk read.  Do not compose a silently reduced mask.
                 shape = (record.height, record.width)
@@ -307,10 +419,8 @@ class SavingMixin:
                 except (MemoryError, OSError) as exc:
                     raise ClientError("保存用の画像またはマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
                 if copy_to_default:
-                    if not configured_output_directory.is_dir():
+                    if configured_output_directory is None or not configured_output_directory.is_dir() or output_path is None:
                         raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable")
-                    target_record = replace(record, path=record.path.with_suffix(output_suffix))
-                    output_path = self._reserve_output_destination(target_record, _read_save_suffix(suffix), configured_output_directory)
                     try:
                         assert output is not None
                         write_rendered_copy(output_path, output)
@@ -318,8 +428,6 @@ class SavingMixin:
                         output_fingerprint = (output_stat.st_mtime_ns, output_stat.st_size)
                     except OSError as exc:
                         raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。", "save_write_failed") from exc
-                    finally:
-                        self._release_output_destination(output_path)
                 elif not no_effect:
                     # Stream rendered data from a file instead of retaining a
                     # second response-sized browser buffer.  Overwrites keep
@@ -355,7 +463,8 @@ class SavingMixin:
                     save_token = self._issue_browser_save_token_unchecked(
                         record, current_revision, source_fingerprint, catalog_generation,
                         None if response_path_is_temporary else rendered_path, output_path, output_fingerprint,
-                        allow_copy_action=copy_to_browser or no_effect,
+                        output_destination=output_destination if copy_to_default else None, client_token=client_save_token,
+                        allow_copy_action=copy_to_browser or copy_to_default or no_effect,
                         no_effect=no_effect,
                         output_format=output_format, keep_metadata=keep_metadata,
                     )
@@ -366,7 +475,7 @@ class SavingMixin:
                 record=record,
                 candidate_revision=current_revision,
                 save_token=save_token,
-                output_path=output_path,
+                output_path=output_destination if copy_to_default else output_path,
                 no_effect=no_effect,
                 output_format=output_format,
                 mime_type=_output_mime,
@@ -380,7 +489,7 @@ class SavingMixin:
             if response_path_is_temporary and response_path is not None and 'save_token' not in locals():
                 response_path.unlink(missing_ok=True)
             if output_path is not None and 'save_token' not in locals():
-                output_path.unlink(missing_ok=True)
+                self.save_journal.cleanup(client_save_token or "")
 
     def commit_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str, *, source_mtime_ns: int | None = None, source_size_bytes: int | None = None) -> dict[str, Any]:
         if not isinstance(save_token, str) or not save_token:
@@ -390,11 +499,15 @@ class SavingMixin:
         if (source_mtime_ns is None) != (source_size_bytes is None) or (source_mtime_ns is not None and (source_mtime_ns < 0 or source_size_bytes < 0)):
             raise ClientError("保存後の元画像情報が正しくありません。", "input_invalid")
         rendered_path: Path | None = None
+        cleanup_paths: list[tuple[Path, tuple[int, int] | None]] = []
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
         source_stage = None
         quarantine_path: Path | None = None
+        published_output: tuple[Path, tuple[int, int], str | None] | None = None
+        expired_token = False
+        source_delete_pending = False
 
         def token_allows_action(details: BrowserSaveToken) -> bool:
             if details.no_effect:
@@ -405,18 +518,28 @@ class SavingMixin:
             return source_action in ({"keep", "deleted"} if details.rendered_path is None or details.allow_copy_action else {"overwrite"})
 
         with self.import_lock, ExitStack() as exit_stack:
+            durable_receipt = self.workspace_store.browser_save_receipt(save_token)
+            if durable_receipt is not None:
+                if (durable_receipt.get("imageId") != image_id or durable_receipt.get("revision") != revision):
+                    raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
+                return {"cleared": bool(durable_receipt.get("cleared")), "stale": bool(durable_receipt.get("stale")),
+                        "deleted": bool(durable_receipt.get("deleted")), "catalogGeneration": int(durable_receipt.get("catalogGeneration") or 0),
+                        "outputPath": str(durable_receipt.get("outputPath") or ""),
+                        "sourceDeletePending": bool(durable_receipt.get("sourceDeletePending")),
+                        "sourceAction": str(durable_receipt.get("sourceAction") or "keep")}
             with self.lock:
                 receipt = self.browser_save_receipts.get(save_token)
                 if receipt is not None:
-                    if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                    if receipt.image_id != image_id or receipt.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                     return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted,
-                            "catalogGeneration": receipt.catalog_generation}
+                            "catalogGeneration": receipt.catalog_generation, "sourceDeletePending": receipt.source_delete_pending,
+                            "sourceAction": receipt.source_action}
                 self._assert_request_catalog_expectation()
                 self._assert_image_editable(image_id)
                 token_details = self.browser_save_tokens.get(save_token)
                 if token_details is None:
-                    raise ClientError("保存確認トークンが無効または取消済みです。保存をやり直してください。", "save_state_changed")
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                 if not token_allows_action(token_details):
@@ -426,16 +549,17 @@ class SavingMixin:
                 with self.lock:
                     receipt = self.browser_save_receipts.get(save_token)
                     if receipt is not None:
-                        if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                        if receipt.image_id != image_id or receipt.candidate_revision != revision:
                             raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                         return {"cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted,
-                                "catalogGeneration": receipt.catalog_generation}
+                                "catalogGeneration": receipt.catalog_generation, "sourceDeletePending": receipt.source_delete_pending,
+                                "sourceAction": receipt.source_action}
                     self._assert_request_catalog_expectation()
                     self._assert_image_editable(image_id)
                     token_details = self.browser_save_tokens.get(save_token)
                     record = self.images.get(image_id)
                     if token_details is None:
-                        raise ClientError("保存確認トークンが無効または取消済みです。保存をやり直してください。", "save_state_changed")
+                        raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                     if (record is None or token_details.transform_revision != record.transform_revision
@@ -447,13 +571,17 @@ class SavingMixin:
                     if not token_allows_action(token_details):
                         raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
-                    if catalog_invalid:
+                    if expired_token:
+                        pass
+                    elif catalog_invalid:
                         self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
-                        # Claim first, then release in ExitStack's finally path
-                        # so a second prepare cannot replace this commit's copy.
+                        # The expiry poll runs without ``import_lock``. Claim
+                        # first, then release in ExitStack's finally path so it
+                        # cannot delete a copy during this commit.
                         self.browser_save_claims.add(save_token)
                         exit_stack.callback(self._release_browser_save_claim, save_token)
                         record_snapshot = replace(record)
@@ -462,11 +590,38 @@ class SavingMixin:
                         # source I/O; retain its token until the DB commit so a
                         # failed commit can be retried safely.
 
+                if expired_token:
+                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if catalog_invalid:
-                    self.cleanup_browser_save_files()
+                    self._unlink_browser_save_cleanup(cleanup_paths)
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
 
                 try:
+                    if token_details.output_path is not None and token_details.output_destination is not None:
+                        staged_stat = token_details.output_path.stat()
+                        if token_details.output_fingerprint is None or (staged_stat.st_mtime_ns, staged_stat.st_size) != token_details.output_fingerprint:
+                            raise ClientError("保存先の準備が変更されました。保存をやり直してください。", "save_state_changed")
+                        self.save_journal.phase(save_token, "publishing")
+                        publication = self._publish_staged_copy(save_token, token_details.output_path, token_details.output_destination)
+                        if publication is None:
+                            replacement = self._reassign_output_destination(token_details.output_destination)
+                            token_details = replace(token_details, output_destination=replacement)
+                            with self.lock:
+                                self.browser_save_tokens[save_token] = token_details
+                            self.save_journal.destination(save_token, replacement)
+                            publication = self._publish_staged_copy(save_token, token_details.output_path, replacement)
+                            if publication is None:
+                                raise ClientError("同名ファイルが追加されました。保存をやり直してください。", "save_state_changed")
+                        token_details.output_path.unlink(missing_ok=True)
+                        try:
+                            token_details.output_path.parent.rmdir()
+                        except OSError:
+                            pass
+                        destination_stat = token_details.output_destination.stat()
+                        identity, _digest = publication
+                        published_output = (token_details.output_destination, (destination_stat.st_mtime_ns, destination_stat.st_size), identity)
+                        self.save_journal.published(save_token, published_output[1], identity)
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
                         source_stage = _stage_record_replacement(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)
@@ -478,15 +633,37 @@ class SavingMixin:
                         # owns deletion for filesystem catalogue records.
                         if record_snapshot.source_kind != "session" or record_snapshot.path.exists():
                             quarantine_path = record_snapshot.path.with_name(f".{record_snapshot.path.name}.mozarie-delete-{save_token}")
-                            record_snapshot.path.replace(quarantine_path)
+                            self.save_journal.phase(save_token, "source_quarantined", quarantine_path)
+                            if not self.save_journal.quarantine_source(save_token, record_snapshot.path, quarantine_path):
+                                # The copy has already published.  Keep it and
+                                # retain the original when this filesystem
+                                # cannot prove an atomic recoverable deletion.
+                                quarantine_path = None
+                                source_action = "keep"
+                                source_delete_pending = True
+                                self.save_journal.clear_quarantine(save_token)
                 except ClientError:
+                    self.save_journal.phase(save_token, "cleanup_pending")
                     with self.lock:
                         self._discard_browser_save_token_unchecked(save_token)
-                    self.cleanup_browser_save_files()
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
+                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    if published_output is not None:
+                        self._unlink_browser_save_cleanup([published_output])
+                    self.save_journal.cleanup(save_token)
                     raise
                 except OSError as exc:
+                    self.save_journal.phase(save_token, "cleanup_pending")
+                    with self.lock:
+                        self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
+                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    if published_output is not None:
+                        self._unlink_browser_save_cleanup([published_output])
+                    self.save_journal.cleanup(save_token)
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
 
+                workspace_committed = False
                 try:
                     with self.lock:
                         record = self.images.get(image_id)
@@ -502,6 +679,13 @@ class SavingMixin:
                         if source_action == "overwrite" and record_snapshot.source_kind == "session":
                             persisted_mtime = source_mtime_ns
                             persisted_size = source_size_bytes
+                        if source_action == "deleted": self.save_journal.phase(save_token, "workspace_committing")
+                        receipt_generation = catalog_generation + (1 if deleted else 0)
+                        durable_save_receipt = {"token": save_token, "imageId": image_id, "revision": revision,
+                                                "sourceAction": source_action, "cleared": cleared, "stale": not cleared,
+                                                "deleted": deleted, "catalogGeneration": receipt_generation,
+                                                "sourceDeletePending": source_delete_pending,
+                                                "outputPath": str(token_details.output_destination) if token_details.output_destination is not None else ""}
                         self.workspace_store.commit_save(
                             image_id,
                             mtime_ns=persisted_mtime if source_action == "overwrite" else None,
@@ -510,12 +694,29 @@ class SavingMixin:
                             delete_image=deleted,
                             source_flip_horizontal=record_snapshot.flip_horizontal if source_action == "overwrite" else None,
                             source_flip_vertical=record_snapshot.flip_vertical if source_action == "overwrite" else None,
+                            save_receipt=durable_save_receipt,
                         )
+                        workspace_committed = True
+                        # The receipt was inserted in the Workspace transaction.
+                        # A journal write after this point is best effort only.
+                        try: self.save_journal.decide_commit(save_token)
+                        except OSError: pass
                 except Exception:
+                    if workspace_committed:
+                        # The workspace receipt is the irreversible boundary.
+                        # A journal outage must not restore the source or
+                        # cancel an output that the workspace already recorded.
+                        raise
                     if source_stage is not None:
                         source_stage.rollback()
-                    if quarantine_path is not None and quarantine_path.exists():
-                        quarantine_path.replace(record_snapshot.path)
+                    self.save_journal.phase(save_token, "cleanup_pending")
+                    with self.lock:
+                        self._discard_browser_save_token_unchecked(save_token)
+                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
+                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    if published_output is not None:
+                        self._unlink_browser_save_cleanup([published_output])
+                    self.save_journal.cleanup(save_token)
                     raise
 
                 with self.lock:
@@ -544,9 +745,10 @@ class SavingMixin:
                         self._image_io_locks.pop(image_id, None)
                         self.catalog_generation += 1
                     self.browser_save_tokens.pop(save_token, None)
+                    if token_details.output_destination is not None:
+                        self._release_output_destination(token_details.output_destination)
                     response_generation = self.catalog_generation
-                    self._clear_browser_save_receipts_for_image_unchecked(image_id)
-                    self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation)
+                    self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation, source_delete_pending, time.monotonic())
                     rendered_path = token_details.rendered_path
                     if deleted:
                         self._discard_browser_save_tokens_for_image_unchecked(image_id)
@@ -554,59 +756,100 @@ class SavingMixin:
                     thumbnail_paths = list((self.cache_dir / "thumbnails").glob(f"{image_id}-*.jpg"))
                 if mask_paths:
                     self._delete_mask_files(mask_paths, candidate_dirs)
+                if deleted:
+                    self.cleanup_expired_browser_save_tokens()
                 for thumbnail_path in thumbnail_paths:
                     thumbnail_path.unlink(missing_ok=True)
                 if rendered_path is not None:
                     rendered_path.unlink(missing_ok=True)
                 if source_stage is not None:
                     source_stage.finalize()
-                if quarantine_path is not None:
-                    quarantine_path.unlink(missing_ok=True)
+                try: self.save_journal.finish(save_token, cleared, not cleared, deleted, response_generation)
+                except OSError: pass
+                # Keep the receipt authoritative while journal-owned cleanup
+                # removes only this token's quarantine and private stage.
+                self.save_journal.recover_token(save_token, lambda _token: durable_save_receipt)
                 if source_action != "keep":
                     self.invalidate_sam_image(image_id)
                 return {"cleared": cleared, "stale": not cleared, "deleted": deleted,
-                        "catalogGeneration": response_generation}
+                        "catalogGeneration": response_generation,
+                        "sourceAction": source_action,
+                        "sourceDeletePending": source_delete_pending,
+                        "outputPath": str(token_details.output_destination) if token_details.output_destination is not None else ""}
 
     def browser_save_status(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, Any]:
         """Report only the finite state of one opaque save token."""
         with self.lock:
             receipt = self.browser_save_receipts.get(save_token)
             if receipt is not None:
-                if receipt.image_id == image_id and receipt.candidate_revision == revision and receipt.source_action == source_action:
+                if receipt.image_id == image_id and receipt.candidate_revision == revision:
                     return {"state": "committed", "cleared": receipt.cleared, "stale": receipt.stale, "deleted": receipt.deleted,
-                            "catalogGeneration": receipt.catalog_generation}
+                            "catalogGeneration": receipt.catalog_generation, "sourceDeletePending": receipt.source_delete_pending,
+                            "sourceAction": receipt.source_action}
                 return {"state": "unknown"}
             self._assert_request_catalog_expectation()
             details = self.browser_save_tokens.get(save_token)
             if details is not None and details.image_id == image_id and details.candidate_revision == revision:
-                return {"state": "pending"}
+                return {"state": details.state, "outputPath": str(details.output_destination) if details.output_destination is not None else "", "noEffect": details.no_effect}
+        durable_receipt = self.workspace_store.browser_save_receipt(save_token)
+        if (durable_receipt is not None and durable_receipt.get("imageId") == image_id
+                and durable_receipt.get("revision") == revision):
+            return {"state": "committed", "cleared": bool(durable_receipt.get("cleared")),
+                    "stale": bool(durable_receipt.get("stale")), "deleted": bool(durable_receipt.get("deleted")),
+                    "catalogGeneration": int(durable_receipt.get("catalogGeneration") or 0),
+                    "outputPath": str(durable_receipt.get("outputPath") or ""),
+                    "sourceDeletePending": bool(durable_receipt.get("sourceDeletePending")),
+                    "sourceAction": str(durable_receipt.get("sourceAction") or "keep")}
+        journal = self.save_journal.row(save_token)
+        if journal is not None and journal["image_id"] == image_id and int(journal["revision"]) == revision:
+            if journal["state"] == "committed":
+                return {"state": "committed", "cleared": bool(journal["cleared"]), "stale": bool(journal["stale"]),
+                        "deleted": bool(journal["deleted"]), "catalogGeneration": int(journal["catalog_generation"] or 0)}
+            return {"state": str(journal["state"]), "outputPath": str(journal["destination"] or "")}
         return {"state": "unknown"}
 
-    def acknowledge_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, str]:
-        """Release a committed retry receipt after the browser received its result."""
-        with self.lock:
-            receipt = self.browser_save_receipts.get(save_token)
-            if receipt is None:
-                return {"state": "unknown"}
-            if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
-                return {"state": "unknown"}
-            self.browser_save_receipts.pop(save_token, None)
-        LOGGER.info("ブラウザー保存の確定受領を確認")
-        return {"state": "acknowledged"}
+    def acknowledge_browser_save(self, save_token: str) -> dict[str, Any]:
+        receipt = self.workspace_store.browser_save_receipt(save_token)
+        if receipt is not None:
+            if not self.save_journal.recover_token(save_token, lambda _token: receipt):
+                return {"acknowledged": False}
+            if not self.save_journal.acknowledge(save_token):
+                return {"acknowledged": False}
+            # A second acknowledgement after the journal deletion is safe:
+            # the Workspace receipt remains the authority until this succeeds.
+            deleted = self.workspace_store.acknowledge_browser_save_receipt(save_token)
+            acknowledged = deleted or self.workspace_store.browser_save_receipt(save_token) is None
+        else:
+            # Both durable records absent is an idempotent successful ACK.  A
+            # non-terminal journal row is not silently discarded.
+            journal = self.save_journal.row(save_token)
+            acknowledged = journal is None
+        if acknowledged:
+            with self.lock: self.browser_save_receipts.pop(save_token, None)
+        return {"acknowledged": acknowledged}
 
     def cancel_browser_save(self, image_id: str, revision: int, save_token: str) -> dict[str, Any]:
         """Cancel a still-pending token and remove only its own new copy."""
         # Serialise claiming and cancellation with commit; once commit has
         # detached a token, cancellation must never remove its successful copy.
         with self.import_lock:
+            receipt = self.workspace_store.browser_save_receipt(save_token)
+            if receipt is not None:
+                self.save_journal.recover_token(save_token, lambda _token: receipt)
+                return {"state": "committed"}
             with self.lock:
                 self._assert_request_catalog_expectation()
                 details = self.browser_save_tokens.get(save_token)
                 if details is None or details.image_id != image_id or details.candidate_revision != revision:
-                    return {"state": "unknown"}
+                    journal = self.save_journal.row(save_token)
+                    if journal is not None and journal.get("recovery_decision") == "commit":
+                        return {"state": "committed"}
+                    return {"state": str(journal["state"])} if journal is not None else {"state": "unknown"}
                 self._discard_browser_save_token_unchecked(save_token)
-        self.cleanup_browser_save_files()
-        return {"state": "pending"}
+                cleanup_paths = self._take_browser_save_cleanup_unchecked()
+        self._unlink_browser_save_cleanup(cleanup_paths)
+        cleaned = self.save_journal.cleanup(save_token)
+        return {"state": "cancelled" if cleaned else "cleanup_pending"}
 
 
     def _apply_worker(

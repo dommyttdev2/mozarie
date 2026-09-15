@@ -230,6 +230,9 @@ class WorkspaceStore:
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS browser_save_receipts (
+                    token TEXT PRIMARY KEY, receipt_json TEXT NOT NULL, created_at INTEGER NOT NULL
+                );
                 CREATE TRIGGER IF NOT EXISTS project_image_insert AFTER INSERT ON images BEGIN
                     UPDATE catalogs SET updated_at=CAST(strftime('%s','now') AS INTEGER) * 1000000000 + CAST(substr(strftime('%f','now'), 4, 3) AS INTEGER) * 1000000 WHERE catalog_id=NEW.catalog_id;
                 END;
@@ -1549,9 +1552,10 @@ class WorkspaceStore:
     def commit_save(self, image_id: str, *, mtime_ns: int | None = None, size_bytes: int | None = None,
                     candidate_revision: int | None = None,
                     clear_workspace: bool, delete_image: bool = False,
-                    source_flip_horizontal: bool | None = None, source_flip_vertical: bool | None = None) -> None:
+                    source_flip_horizontal: bool | None = None, source_flip_vertical: bool | None = None,
+                    save_receipt: dict[str, Any] | None = None) -> None:
         """Commit one completed save before its in-memory review state is published."""
-        if not delete_image and mtime_ns is None and size_bytes is None and candidate_revision is None and not clear_workspace:
+        if not delete_image and mtime_ns is None and size_bytes is None and candidate_revision is None and not clear_workspace and save_receipt is None:
             return
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -1570,10 +1574,32 @@ class WorkspaceStore:
                 if clear_workspace and not delete_image:
                     db.execute("DELETE FROM candidates WHERE image_id=?", (image_id,))
                     db.execute("DELETE FROM manual_edits WHERE image_id=?", (image_id,))
+                if save_receipt is not None:
+                    token = save_receipt.get("token")
+                    if not isinstance(token, str) or not token:
+                        raise ValueError("save receipt token is invalid")
+                    db.execute("INSERT INTO browser_save_receipts(token,receipt_json,created_at) VALUES(?,?,?) ON CONFLICT(token) DO NOTHING",
+                        (token, json.dumps(save_receipt, ensure_ascii=False, separators=(',', ':')), time.time_ns()))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
+
+    def browser_save_receipt(self, token: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT receipt_json FROM browser_save_receipts WHERE token=?", (token,)).fetchone()
+        if row is None:
+            return None
+        try:
+            receipt = json.loads(str(row["receipt_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return dict(receipt) if isinstance(receipt, dict) else None
+
+    def acknowledge_browser_save_receipt(self, token: str) -> bool:
+        with self._lock, self._connect() as db:
+            result = db.execute("DELETE FROM browser_save_receipts WHERE token=?", (token,))
+            return result.rowcount > 0
 
     def image_transform(self, image_id: str) -> dict[str, Any]:
         with self._connect() as db:

@@ -14,7 +14,7 @@ const state = {
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreToken: 0, workspaceId: null, historyDurable: false, translations: {},
   applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicPreviewFull: false, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
-  outputDirectoryPicking: false, outputDirectoryHandle: null, singleSave: null,
+  outputDirectoryPicking: false, singleSave: null,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(), imageMutationChains: new Map(), candidateControlLocks: new Map(),
@@ -788,7 +788,7 @@ function updateActionButtons() {
   const currentSaveDisabled = busyLocked || mutationLocked || catalogStaging || switchingImages || mutatingCandidates || !currentProcessable;
   $("#saveButton").disabled = currentSaveDisabled;
   $("#applyStartButton").disabled = busyLocked || mutationLocked || catalogStaging || mutatingCandidates || state.applyTargetIds.length === 0
-    || Boolean(applyRestrictionMessage()) || (selectedSaveMode() === "copy" && !state.outputDirectoryHandle);
+    || Boolean(applyRestrictionMessage()) || (selectedSaveMode() === "copy" && !state.settings?.saving?.default_output_directory);
   $("#overviewButton").disabled = busyLocked || state.images.length === 0;
   const visibleImages = galleryFilteredImages();
   const visibleIndex = visibleImages.findIndex((image) => image.id === state.currentId);

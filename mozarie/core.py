@@ -201,11 +201,14 @@ class BrowserSaveToken:
     candidate_revision: int
     source_fingerprint: tuple[int, int]
     catalog_generation: int
+    issued_at: float
     rendered_path: Path | None
     # Only a newly-created Mozarie copy is cancellable.  Existing source files
     # are never represented here.
     output_path: Path | None = None
     output_fingerprint: tuple[int, int] | None = None
+    output_destination: Path | None = None
+    state: str = "pending"
     allow_copy_action: bool = False
     no_effect: bool = False
     output_format: str = "original"
@@ -251,6 +254,8 @@ class BrowserSaveReceipt:
     stale: bool
     deleted: bool
     catalog_generation: int
+    source_delete_pending: bool = False
+    completed_at: float = 0.0
 
 
 @dataclass
