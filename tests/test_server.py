@@ -4018,12 +4018,12 @@ class MozarieTests(unittest.TestCase):
         hand = np.zeros_like(target); hand[100:120, 310:330] = 1; hand[250:270, 350:360] = 1
         face = np.zeros_like(target); face[20:40, 130:170] = 1
         with patch.object(detection_module, "white_fluid_mask", side_effect=lambda _rgb, search: np.asarray(search, dtype=np.uint8) * 255) as fluid:
-            ass = self.new_state()._metadata_fluid_mask(rgb, [np.zeros_like(target), target], np.zeros_like(hand), [], frozenset({"cum on ass"}))
-            fingers = self.new_state()._metadata_fluid_mask(rgb, [target], hand, [], frozenset({"cum on fingers"}))
-            chest = self.new_state()._metadata_fluid_mask(
+            ass = self.new_state()._metadata_fluid_search(rgb, [np.zeros_like(target), target], np.zeros_like(hand), [], frozenset({"cum on ass"}))
+            fingers = self.new_state()._metadata_fluid_search(rgb, [target], hand, [], frozenset({"cum on fingers"}))
+            chest = self.new_state()._metadata_fluid_search(
                 rgb, [], np.zeros_like(target), [{"mask": np.zeros_like(face)}, {"mask": face}], frozenset({"cum_on_breasts"}),
             )
-            absent = self.new_state()._metadata_fluid_mask(rgb, [], np.zeros_like(hand), [], frozenset({"cum on fingers"}))
+            absent = self.new_state()._metadata_fluid_search(rgb, [], np.zeros_like(hand), [], frozenset({"cum on fingers"}))
         self.assertEqual(fluid.call_count, 3)
         self.assertEqual(ass[150, 100], 255)
         self.assertEqual(ass[314, 259], 255)
@@ -4042,8 +4042,8 @@ class MozarieTests(unittest.TestCase):
         target = np.zeros((400, 400), dtype=np.uint8); target[160:210, 160:200] = 1
         rgb[120:140, 130:230] = 255  # White clothing above the ass ROI is not a candidate.
         rgb[250:255, 170:190] = 255  # A small bright lower deposit remains a candidate.
-        detected = self.new_state()._metadata_fluid_mask(rgb, [target], np.zeros_like(target), [], frozenset({"cum on ass"}))
-        untagged = self.new_state()._metadata_fluid_mask(rgb, [target], np.zeros_like(target), [], frozenset({"not_cum_on_ass"}))
+        detected = self.new_state()._metadata_fluid_search(rgb, [target], np.zeros_like(target), [], frozenset({"cum on ass"}))
+        untagged = self.new_state()._metadata_fluid_search(rgb, [target], np.zeros_like(target), [], frozenset({"not_cum_on_ass"}))
         self.assertFalse(np.any(detected[120:140, 130:230]))
         self.assertTrue(np.any(detected[250:255, 170:190]))
         self.assertFalse(np.any(untagged))
@@ -4052,14 +4052,14 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         rgb = np.zeros((40, 40, 3), dtype=np.uint8)
         target = np.zeros((40, 40), dtype=np.uint8); target[10:20, 10:20] = 255
-        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+        with patch.object(detection_module, "white_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
             finalized = state._finalize_exclusions(rgb, [{"class_name": "penis", "mask": target, "confidence": .8, "source": "target"}], frozenset({"cum on ass"}))
         self.assertIn("metadata_exclusions", finalized[0])
         self.assertNotIn("fluid", finalized[0]["exclusions"])
-        with patch.object(state, "_metadata_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
+        with patch.object(detection_module, "white_fluid_mask", return_value=np.ones((40, 40), dtype=np.uint8) * 255):
             synthetic = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
         self.assertEqual(synthetic[-1]["class_name"], "__fluid_exclusion__")
-        with patch.object(state, "_metadata_fluid_mask", return_value=np.zeros((40, 40), dtype=np.uint8)):
+        with patch.object(detection_module, "white_fluid_mask", return_value=np.zeros((40, 40), dtype=np.uint8)):
             unchanged = state._finalize_exclusions(rgb, [{"class_name": "female_face", "mask": target}], frozenset({"cum_on_breasts"}))
         self.assertEqual(len(unchanged), 1)
 
@@ -4718,36 +4718,15 @@ class MozarieTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
-    def test_provisional_browser_catalog_detaches_without_durable_clear(self):
-        from http.server import ThreadingHTTPServer
-
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-        original_catalog_id = http_module.STATE.catalog_id
-        original_provisional = http_module.STATE.browser_catalog_provisional
-        try:
-            with patch.object(http_module.STATE, "detach_catalog") as detach_catalog, \
-                    patch.object(http_module.STATE, "clear_catalog") as clear_catalog, \
-                    patch.object(http_module.STATE.workspace_store, "ensure_provisional_catalog", return_value="a" * 32):
-                connection.request("POST", "/api/workspace/catalog", json.dumps({"provisional": True}).encode("utf-8"), {
-                    "Content-Type": "application/json",
-                    "X-Mozarie-Token": http_module.STATE.session_token,
-                    "Origin": f"http://127.0.0.1:{httpd.server_port}",
-                })
-                response = connection.getresponse()
-                payload = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(response.status, 200)
-            self.assertEqual(payload, {"catalogId": "a" * 32, "provisional": True})
-            detach_catalog.assert_called_once_with()
-            clear_catalog.assert_not_called()
-        finally:
-            http_module.STATE.catalog_id = original_catalog_id
-            http_module.STATE.browser_catalog_provisional = original_provisional
-            connection.close()
-            httpd.shutdown()
-            httpd.server_close()
+    def test_projectless_browser_workspace_detaches_without_leaving_an_active_record(self):
+        state = self.new_state()
+        raw = io.BytesIO(); Image.new("RGB", (8, 8), "white").save(raw, format="PNG")
+        import_images_for_test(state, [{"name": "source.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")}])
+        workspace_id = state.workspace_id
+        self.assertIsNotNone(workspace_id)
+        state.clear_catalog()
+        self.assertIsNone(state.workspace_id)
+        self.assertFalse(state.workspace_store.catalog_exists(workspace_id))
 
     def test_mutation_api_rejects_invalid_request_context(self):
         from http.server import ThreadingHTTPServer
@@ -6518,8 +6497,6 @@ class MozarieTests(unittest.TestCase):
         metadata.add_text("prompt", '{"seed": 9}')
         Image.new("RGB", (16, 16), "white").save(raw, format="PNG", pnginfo=metadata)
         state = self.new_state()
-        state.catalog_id = state.workspace_store.ensure_provisional_catalog()
-        state.browser_catalog_provisional = True
         images, _imported = import_images_for_test(state, [
             {"clientKey": "session", "name": "source.png", "data": base64.b64encode(raw.getvalue()).decode("ascii")},
         ])
@@ -6607,7 +6584,7 @@ class MozarieTests(unittest.TestCase):
 
         state, image_id, revision, expired = pending_copy()
         details = state.browser_save_tokens[expired.save_token]
-        state.browser_save_tokens[expired.save_token] = replace(details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1)
+        state.browser_save_tokens[expired.save_token] = replace(details, issued_at=time.monotonic() - 10_000_000)
         state.cleanup_expired_browser_save_tokens()
         self.assertFalse(expired.output_path.exists(), "expiry removes the token-owned copy")
 
@@ -6677,7 +6654,7 @@ class MozarieTests(unittest.TestCase):
             details = state.browser_save_tokens[token]
             state.browser_save_tokens[token] = type(details)(
                 details.image_id, details.candidate_revision, details.source_fingerprint,
-                details.catalog_generation, time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                details.catalog_generation, time.monotonic() - 10_000_000,
                 details.rendered_path,
             )
 
@@ -6936,7 +6913,7 @@ class MozarieTests(unittest.TestCase):
                 details.candidate_revision,
                 details.source_fingerprint,
                 details.catalog_generation,
-                time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                time.monotonic() - 10_000_000,
                 details.rendered_path,
             )
             with self.assertRaisesRegex(ClientError, "無効または期限切れ"):
@@ -6963,7 +6940,7 @@ class MozarieTests(unittest.TestCase):
             def block_after_claim(record, rendered_path, fingerprint):
                 details = state.browser_save_tokens[token]
                 state.browser_save_tokens[token] = replace(
-                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                    details, issued_at=time.monotonic() - 10_000_000,
                 )
                 claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
 
@@ -7001,7 +6978,7 @@ class MozarieTests(unittest.TestCase):
             def block_assert(*args, **kwargs):
                 details = state.browser_save_tokens[rendered.save_token]
                 state.browser_save_tokens[rendered.save_token] = replace(
-                    details, issued_at=time.monotonic() - core_module.SAVE_TOKEN_TTL_SECONDS - 1,
+                    details, issued_at=time.monotonic() - 10_000_000,
                 )
                 claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
 
@@ -7907,7 +7884,6 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             ]
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
                     patch.object(state, "_hand_refinement_context", return_value=([segments[1]], np.zeros((6, 6), dtype=np.uint8), [])), \
-                    patch.object(state, "_fallback_hand_boxes_mask", return_value=np.zeros((6, 6), dtype=np.uint8)), \
                     patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
                     patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items: items):
                 candidates = state._detect_image(DetectionModels(target=Mock(), auxiliaries=[]), record, .5)
@@ -8013,8 +7989,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
                 patch.object(state, "_boundary_hand_boxes", return_value=[(1, 1, 4, 4)]), \
                 patch.object(state, "_hand_boxes_over_apply", return_value=[(1, 1, 4, 4)]), \
                 patch.object(state, "_hand_segmentation_predictor_for", return_value=specialist), \
-                patch.object(detection_module, "accepted_specialist_hand_mask", return_value=None), \
-                patch.object(state, "_fallback_hand_boxes_mask", return_value=np.ones((6, 6), dtype=np.uint8)):
+                patch.object(detection_module, "accepted_specialist_hand_mask", return_value=None):
             self.assertEqual(state.add_boundary_candidate(image_id, payload)["candidates"][0]["source"], "boundary")
 
         state, image_id, predictor = make_state()
@@ -8022,7 +7997,6 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
                 patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
                 patch.object(state, "_boundary_hand_boxes", return_value=[(1, 1, 4, 4)]), \
                 patch.object(state, "_hand_boxes_over_apply", return_value=[(1, 1, 4, 4)]), \
-                patch.object(state, "_fallback_hand_boxes_mask", return_value=np.zeros((6, 6), dtype=np.uint8)), \
                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: (segments[0].update({"image_exclusions": {"hand": np.zeros((6, 6), dtype=np.uint8)}}), segments)[1]):
             state.add_boundary_candidate(image_id, payload)
 
