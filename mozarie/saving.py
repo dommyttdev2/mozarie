@@ -81,6 +81,36 @@ class SavingMixin:
         with self.output_destination_lock:
             self.reserved_output_paths.discard(destination)
 
+    def _stage_browser_response_source(
+        self,
+        record: ImageRecord,
+        fingerprint: tuple[int, int],
+        suffix: str,
+    ) -> Path:
+        """Copy one unchanged source to a response file without a bytes buffer."""
+        rendered_dir = self.cache_dir / "browser-save"
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+        staged_path: Path | None = None
+        try:
+            with record.path.open("rb") as source:
+                before = source.stat()
+                if (before.st_mtime_ns, before.st_size) != fingerprint:
+                    raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+                with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=suffix, delete=False) as destination:
+                    staged_path = Path(destination.name)
+                    while chunk := source.read(IO_CHUNK_BYTES):
+                        destination.write(chunk)
+                    destination.flush()
+                after = source.stat()
+                if (after.st_mtime_ns, after.st_size) != fingerprint:
+                    raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+            result = staged_path
+            staged_path = None
+            return result
+        finally:
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
+
     def prepare_browser_save(
         self,
         image_ids: list[str],
@@ -245,9 +275,14 @@ class SavingMixin:
                     response_path_is_temporary = copy_to_browser
                     output = None
                 elif not copy_to_default:
-                    # A no-effect save is the original file.  It can go
-                    # straight to the HTTP stream without materialising it.
-                    response_path = record.path
+                    # A no-effect response must still be a stable snapshot:
+                    # the image lock ends before the HTTP handler streams it.
+                    # Copy it in chunks, never through a response-sized bytes
+                    # object, then let the handler own cleanup.
+                    rendered_path = self._stage_browser_response_source(record, source_fingerprint, output_suffix)
+                    response_path = rendered_path
+                    response_path_is_temporary = True
+                    output = None
 
                 with self.lock:
                     self._assert_image_editable(image_id)
