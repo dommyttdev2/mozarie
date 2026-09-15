@@ -66,6 +66,11 @@ class ProjectHttpCoverageTests(unittest.TestCase):
             headers["Content-Type"] = "application/json"
         if authorized:
             headers.update({"Origin": self.origin, "X-Mozarie-Token": self.state.session_token})
+            if method != "GET":
+                headers.update({
+                    "X-Mozarie-Expected-Project-Id": self.state.catalog_id or "",
+                    "X-Mozarie-Expected-Catalog-Generation": str(self.state.catalog_generation),
+                })
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         try:
             connection.request(method, path, body, headers)

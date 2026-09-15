@@ -128,7 +128,7 @@ def import_images_for_test(state, files):
                 name=file_data.get("name", ""),
                 relative_path=file_data.get("relativePath", file_data.get("name", "")),
                 client_key=file_data.get("clientKey", str(index)),
-                include_images=False,
+                include_images=False, intent=file_data.get("intent", "add"),
             )
             imported.extend(item_imported)
     return state.list_images(), imported
@@ -717,6 +717,7 @@ class MozarieTests(unittest.TestCase):
                 staged.write_bytes(upload.getvalue())
                 _images, imported = state.import_image_file_for_api(
                     staged, name="001.png", relative_path="001.png", client_key="collision", include_images=False,
+                    intent="add",
                 )
             added_id = imported[0]["imageId"]
             self.assertNotEqual(added_id, native_id)
@@ -757,6 +758,7 @@ class MozarieTests(unittest.TestCase):
                 _images, items = state.import_image_file_for_api(
                     upload, name=Path(relative_path).name, relative_path=relative_path,
                     client_key=f"manifest-{index}", include_images=False, mtime_ns=20, size_bytes=len(raw),
+                    intent="add",
                 )
                 imported[relative_path] = items[0]["imageId"]
         return imported
@@ -5095,6 +5097,7 @@ class MozarieTests(unittest.TestCase):
                 name="active.png",
                 relative_path="active.png",
                 client_key="active",
+                intent="add",
             )
             active = first.session_dir
 
@@ -5972,6 +5975,7 @@ class MozarieTests(unittest.TestCase):
                     relative_path="nested/first.png",
                     client_key="first",
                     include_images=False,
+                    intent="add",
                 )
 
             self.assertEqual(images, [])
