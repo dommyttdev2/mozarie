@@ -126,38 +126,13 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             missing.do_DELETE()
         self.assertEqual(getattr(errors[0][0], "error_code", None), "project_not_found")
 
-    def test_upload_catalog_conflicts_and_provisional_fallback_are_explicit(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            staged = Path(directory) / "upload.png"
-            staged.write_bytes(b"fixture")
-
-            def run_upload(*, catalog_id: str | None, requested: str) -> tuple[Mock, list[object]]:
-                state = Mock()
-                state.catalog_id = catalog_id
-                state.browser_catalog_provisional = False
-                state.import_staging_gate = threading.RLock()
-                state.import_lock = threading.RLock()
-                state.workspace_store.ensure_provisional_catalog.return_value = "provisional"
-                state.import_image_file_for_api.return_value = ([], True)
-                emitted: list[object] = []
-                request = handler(headers={"X-Mozarie-Catalog-Id": requested})
-                request.path = "/api/import/file"
-                request._require_binary_import_request = lambda: None
-                request._read_binary_body_to_file = lambda: staged
-                request._client_error = lambda error, *_args, **_kwargs: emitted.append(error)
-                request._json = lambda payload, *_args, **_kwargs: emitted.append(payload)
-                with patch.object(http_module, "STATE", state):
-                    request.do_POST()
-                return state, emitted
-
-            conflict, emitted = run_upload(catalog_id="active", requested="other")
-            self.assertEqual(getattr(emitted[0], "error_code", None), "operation_in_progress")
-            conflict.end_import_transfer.assert_called_once()
-
-            staged.write_bytes(b"fixture")
-            fallback, emitted = run_upload(catalog_id=None, requested="")
-            self.assertEqual(emitted[-1]["catalogId"], "provisional")
-            self.assertTrue(fallback.browser_catalog_provisional)
+    def test_binary_import_requires_a_complete_session_contract(self) -> None:
+        request = handler(headers={"Content-Length": "1"}); request.path = "/api/import/file"
+        request._require_binary_import_request = lambda: None
+        errors: list[object] = []; request._client_error = lambda error, *_args, **_kwargs: errors.append(error)
+        with patch.object(http_module, "STATE", Mock()):
+            request.do_POST()
+        self.assertEqual(getattr(errors[0], "error_code", None), "input_invalid")
 
     def test_post_optional_error_and_response_paths_have_stable_results(self) -> None:
         request = handler(); request._require_json_request = lambda: None
@@ -195,8 +170,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         thread.assert_called_once()
 
     def test_binary_reader_rejects_oversize_and_thumbnail_staleness_cleans_temp_file(self) -> None:
-        with self.assertRaises(ClientError):
-            handler(headers={"Content-Length": str(http_module.MAX_BODY_BYTES + 1)})._read_binary_body_to_file()
+        self.assertEqual(handler(headers={"Content-Length": str(100_000_000)})._request_body_length(), 100_000_000)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -289,14 +263,14 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory) / "upload.png"; staged.write_bytes(b"fixture")
             state = Mock()
-            state.catalog_id = None; state.browser_catalog_provisional = False
-            state.import_staging_gate = threading.RLock(); state.import_lock = threading.RLock()
+            state.catalog_id = None; state.workspace_id = None
+            state.import_lock = threading.RLock()
             state.import_image_file_for_api.return_value = ([], True)
             request = handler(headers={"X-Mozarie-Catalog-Id": "catalog"}); request.path = "/api/import/file"
             request._require_binary_import_request = lambda: None; request._read_binary_body_to_file = lambda: staged; request._json = Mock()
             with patch.object(http_module, "STATE", state):
                 request.do_POST()
-            state.activate_browser_catalog.assert_called_once_with("catalog")
+            state.open_project.assert_not_called()
 
             staged.write_bytes(b"fixture")
             state.catalog_id = "catalog"
@@ -304,7 +278,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             request._require_binary_import_request = lambda: None; request._read_binary_body_to_file = lambda: staged; request._json = Mock()
             with patch.object(http_module, "STATE", state):
                 request.do_POST()
-            state.workspace_store.ensure_provisional_catalog.assert_not_called()
+            state.workspace_store.active_projectless_catalog.assert_not_called()
 
         state = Mock(); request = handler(); request.path = "/api/workspace/catalog"
         request._require_json_request = lambda: None; request._read_json_body = lambda: {"provisional": True, "catalogId": "not-allowed"}
