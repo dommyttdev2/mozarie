@@ -520,7 +520,6 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
   const generation = state.imageGeneration;
   if (!imageId || currentImageActionPending()) return null;
   const targetCandidates = [...state.candidates];
-  clearRoleCandidateDisplayMode(candidate.role);
   const mutationKey = candidateMutationKey(imageId, candidate.id);
   const version = nextCandidateMutationVersion(mutationKey);
   const desired = candidate.enabled;
@@ -916,7 +915,7 @@ function paintStrokePath(points, tool, size, startIndex = 0) {
   else if (tool === "exclude_eraser") strokePath(exclusionEraseCtx, points, size, "source-over", startIndex);
   else if (tool === "eraser") { strokePath(exclusionCtx, points, size, "source-over", startIndex); strokePath(exclusionEraseCtx, points, size, "destination-out", startIndex); }
   else { strokePath(addCtx, points, size, "source-over", startIndex); if (!state.manualExclusionForced) strokePath(exclusionCtx, points, size, "destination-out", startIndex); }
-  markStrokeDirty(tool, [points[startIndex], points.at(-1)], size);
+  markStrokeDirty(tool, points.slice(startIndex), size);
 }
 
 function fillAt(point, tool = state.tool) {
