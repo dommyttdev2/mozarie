@@ -1119,7 +1119,7 @@ class WorkspaceStore:
             raise ValueError("workspace mask dimensions do not match source image")
         value = np.asarray(image.resize(new_size, Image.Resampling.NEAREST), dtype=np.uint8) > 0
         output = io.BytesIO()
-        Image.fromarray(value.astype(np.uint8) * 255, "L").save(output, format="PNG")
+        Image.fromarray(value.astype(np.uint8) * 255).save(output, format="PNG")
         return output.getvalue(), value.astype(np.uint8) * 255
 
     @staticmethod

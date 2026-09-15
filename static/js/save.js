@@ -269,13 +269,13 @@ async function startSingleSave(event) {
     if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
     if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
     state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
-    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let cleanupIntent = null;
+    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let cleanupIntent = null; let access = null;
     const cleanupProjectId = state.project?.id || null;
     try {
     await flushWorkspaceDraft(save.imageId);
     const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false, format, keepMetadata }) });
     entry = prepared.entries?.[0]; if (!entry) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
-    const access = sourceAccessFor(save.imageId);
+    access = sourceAccessFor(save.imageId);
     if (!copying) await ensureSaveSources([save.imageId], "overwrite", false);
     const response = await renderSingleSave({ imageId: save.imageId, candidateRevision: entry.candidateRevision, divisor: save.divisor, draft: save.draft, copyToBrowser: copying, suffix, format, keepMetadata });
     saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
@@ -309,7 +309,7 @@ async function startSingleSave(event) {
       if (reconcile) {
         await cancelBrowserSave(entry, saveToken);
         if (sourceSnapshot !== null) await restoreSourceHandle(access, sourceSnapshot, deleteOriginal);
-        if (output) await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
+        if (output && !(deleteOriginal && access?.fileHandle && sourceSnapshot === null)) await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
       }
       throw error;
     } finally {
@@ -569,8 +569,11 @@ function sourceCommitMetadata(access) {
 }
 
 async function snapshotSourceHandle(access) {
-  const file = await access.fileHandle.getFile();
-  return typeof file.arrayBuffer === "function" ? new Uint8Array(await file.arrayBuffer()) : null;
+  try {
+    const file = await access.fileHandle.getFile();
+    if (typeof file.arrayBuffer === "function") return new Uint8Array(await file.arrayBuffer());
+  } catch {}
+  throw codedError("source_restore_failed");
 }
 
 async function restoreSourceHandle(access, snapshot, deleted) {
@@ -690,7 +693,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
               } catch { throw codedError("source_restore_failed"); }
               if (reconcile) {
                 await cancelBrowserSave(entry, saveToken);
-                await inputs.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
+                if (!(inputs.deleteOriginal && access?.fileHandle && sourceSnapshot === null)) await inputs.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
               }
               if (cleanupIntent && isDefinitiveCommitRejection(error)) {
                 await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
