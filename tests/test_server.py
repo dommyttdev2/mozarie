@@ -745,10 +745,8 @@ class MozarieTests(unittest.TestCase):
     def _import_browser_manifest(self, state, files, catalog_id=None):
         if catalog_id is None:
             state.clear_catalog()
-            state.catalog_id = state.workspace_store.ensure_provisional_catalog()
-            state.browser_catalog_provisional = True
         else:
-            state.activate_browser_catalog(catalog_id)
+            state.open_project(catalog_id)
         imported = {}
         with tempfile.TemporaryDirectory() as directory:
             staging = Path(directory)
@@ -758,7 +756,7 @@ class MozarieTests(unittest.TestCase):
                 _images, items = state.import_image_file_for_api(
                     upload, name=Path(relative_path).name, relative_path=relative_path,
                     client_key=f"manifest-{index}", include_images=False, mtime_ns=20, size_bytes=len(raw),
-                    intent="add",
+                    intent="add", source_identity="browser-manifest", source_kind="browser-directory",
                 )
                 imported[relative_path] = items[0]["imageId"]
         return imported
@@ -770,12 +768,11 @@ class MozarieTests(unittest.TestCase):
         initial = [("a.png", png("red")), ("b.png", png("green")), ("nested/c.png", png("blue"))]
         first = self.new_state()
         self._import_browser_manifest(first, initial)
-        first_catalog, _ = first.finalize_browser_catalog()
+        first_catalog = first.create_project()["id"]
         second = self.new_state()
         self._import_browser_manifest(second, [("a.png", png("yellow")), *initial[1:]])
-        second_catalog, remapped = second.finalize_browser_catalog()
+        second_catalog = second.create_project()["id"]
         self.assertNotEqual(second_catalog, first_catalog)
-        self.assertEqual(remapped, {})
 
     def test_browser_manifest_add_delete_and_same_name_content_are_isolated(self):
         def png(color):
@@ -784,17 +781,17 @@ class MozarieTests(unittest.TestCase):
         first = self.new_state()
         files = [("folder/001.png", png("red")), ("folder/002.png", png("green")), ("folder/003.png", png("blue"))]
         self._import_browser_manifest(first, files)
-        first_catalog, _ = first.finalize_browser_catalog()
+        first_catalog = first.create_project()["id"]
 
         second = self.new_state()
         self._import_browser_manifest(second, [files[0], files[1], ("folder/new.png", png("white"))])
-        second_catalog, _ = second.finalize_browser_catalog()
+        second_catalog = second.create_project()["id"]
         self.assertNotEqual(second_catalog, first_catalog)
 
         # Same paths/folder names but different bytes cannot cross-contaminate.
         isolated = self.new_state()
         self._import_browser_manifest(isolated, [("folder/001.png", png("black")), ("folder/002.png", png("gray"))])
-        isolated_catalog, _ = isolated.finalize_browser_catalog()
+        isolated_catalog = isolated.create_project()["id"]
         self.assertNotEqual(isolated_catalog, first_catalog)
 
     def test_explicit_browser_catalog_never_reassigns_and_restores_state(self):
@@ -802,7 +799,7 @@ class MozarieTests(unittest.TestCase):
         files = [("same/001.png", buffer.getvalue()), ("same/002.png", buffer.getvalue())]
         first = self.new_state()
         ids = self._import_browser_manifest(first, files)
-        catalog_id, _ = first.finalize_browser_catalog()
+        catalog_id = first.create_project()["id"]
         assert catalog_id is not None
         first.set_image_flags(ids["same/001.png"], {"hidden": True, "reviewed": True})
 
@@ -816,9 +813,7 @@ class MozarieTests(unittest.TestCase):
 
         reopened = self.new_state()
         reopened_ids = self._import_browser_manifest(reopened, files, catalog_id)
-        finalized, remapped = reopened.finalize_browser_catalog()
-        self.assertEqual(finalized, catalog_id)
-        self.assertEqual(remapped, {})
+        self.assertEqual(reopened.catalog_id, catalog_id)
         restored = {item["id"]: item for item in reopened.list_images()}
         self.assertTrue(restored[reopened_ids["same/001.png"]]["hidden"])
         self.assertTrue(restored[reopened_ids["same/001.png"]]["reviewed"])
@@ -842,7 +837,7 @@ class MozarieTests(unittest.TestCase):
 
             browser = self.new_state()
             self._import_browser_manifest(browser, files)
-            browser_catalog, _ = browser.finalize_browser_catalog()
+            browser_catalog = browser.create_project()["id"]
             self.assertNotEqual(browser_catalog, native_catalog)
 
     def test_browser_manifest_is_never_content_matched(self):
@@ -851,19 +846,19 @@ class MozarieTests(unittest.TestCase):
         many = [(f"root/{index:03}.png", raw) for index in range(100)]
         target = self.new_state()
         self._import_browser_manifest(target, many)
-        target_catalog, _ = target.finalize_browser_catalog()
+        target_catalog = target.create_project()["id"]
         self.assertIsNone(target.workspace_store.best_catalog_for_manifest([], "f" * 32))
 
         one = [("only.png", raw)]
         single = self.new_state(); self._import_browser_manifest(single, one)
-        single_catalog, _ = single.finalize_browser_catalog()
+        single_catalog = single.create_project()["id"]
         self.assertIsNone(single.workspace_store.best_catalog_for_manifest([], "e" * 32))
 
         clone = self.new_state()
-        clone_id = clone.workspace_store.ensure_catalog()
-        self._import_browser_manifest(clone, one, clone_id)  # A separate finalized but equal folder.
+        self._import_browser_manifest(clone, one)
+        clone_id = clone.create_project("clone")["id"]  # A separate finalized but equal folder.
         third = self.new_state(); self._import_browser_manifest(third, one)
-        third_catalog, _ = third.finalize_browser_catalog()
+        third_catalog = third.create_project()["id"]
         self.assertNotIn(third_catalog, {single_catalog, clone.catalog_id, target_catalog})
 
     def test_builtin_output_directory_is_created_for_default_copy(self):
@@ -946,15 +941,16 @@ class MozarieTests(unittest.TestCase):
             finally:
                 state.native_picker_lock.release()
 
-    def test_import_staging_gate_allows_ten_concurrent_uploads(self):
+    def test_import_session_records_requested_and_effective_parallelism_without_a_fixed_cap(self):
         state = self.new_state()
-        acquired = [state.import_staging_gate.acquire(blocking=False) for _ in range(10)]
+        session_id = "a5cbcf80-5fc6-4c86-a2f8-0c582b7f1150"
+        state.begin_import_transfer(session_id, None, state.catalog_generation, 11, 11)
         try:
-            self.assertEqual(acquired, [True] * 10)
-            self.assertFalse(state.import_staging_gate.acquire(blocking=False))
+            session = state._import_sessions[session_id]
+            self.assertEqual(session["requested_parallelism"], 11)
+            self.assertEqual(session["effective_parallelism"], 11)
         finally:
-            for acquired_one in acquired:
-                if acquired_one: state.import_staging_gate.release()
+            state.end_import_transfer(session_id, succeeded=False)
 
     def test_model_file_picker_releases_its_lock_after_cancel_and_bad_results(self):
         state = self.new_state()
