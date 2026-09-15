@@ -100,6 +100,8 @@ class DetectionMixin:
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
         target_classes: set[str] | None = None,
+        *,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> None:
         # The gate makes initial job setup mutually exclusive with boundary
         # inference and model-cache replacement.
@@ -120,7 +122,7 @@ class DetectionMixin:
             detection_options = {
                 "mode": str(detection["mode"]),
                 "fluid_exclusion_enabled": bool(detection["fluid_exclusion_enabled"]),
-                "fluid_color_fill": (
+                "fluid_color_fill": fluid_color_fill if fluid_color_fill is not None else (
                     bool(detection["fluid_color_fill_enabled"]),
                     int(detection["fluid_color_fill_tolerance"]),
                 ),

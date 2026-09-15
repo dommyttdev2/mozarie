@@ -142,6 +142,24 @@ def _log_operation_failed(operation: tuple[str, str] | None, started_at: float |
     LOGGER.warning("操作失敗: %s [%s] status=%d error_code=%s 所要=%.2f秒", label, route, int(status), error_code, time.monotonic() - started_at)
 
 
+def _read_fluid_color_fill_options(payload: dict[str, Any], settings: dict[str, Any]) -> tuple[bool, int]:
+    """Read the per-run fluid expansion snapshot without accepting coercions."""
+
+    enabled_key = "fluidColorFillEnabled"
+    tolerance_key = "fluidColorFillTolerance"
+    provided = {key for key in (enabled_key, tolerance_key) if key in payload}
+    if provided and provided != {enabled_key, tolerance_key}:
+        raise ClientError("精液候補の色拡張設定が正しくありません。", "input_invalid")
+    if not provided:
+        detection = settings["detection"]
+        return bool(detection["fluid_color_fill_enabled"]), int(detection["fluid_color_fill_tolerance"])
+    enabled = payload[enabled_key]
+    tolerance = payload[tolerance_key]
+    if not isinstance(enabled, bool) or isinstance(tolerance, bool) or not isinstance(tolerance, int) or not 0 <= tolerance <= 255:
+        raise ClientError("精液候補の色拡張設定が正しくありません。", "input_invalid")
+    return enabled, tolerance
+
+
 def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
     """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
@@ -667,12 +685,17 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
+                fluid_color_fill = _read_fluid_color_fill_options(payload, STATE.settings)
                 if "targetClasses" in payload:
                     self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                           lambda: STATE.start_detection(*detect_args, _read_target_classes(payload["targetClasses"])))
+                                           lambda: STATE.start_detection(
+                                               *detect_args,
+                                               _read_target_classes(payload["targetClasses"]),
+                                               fluid_color_fill=fluid_color_fill,
+                                           ))
                 else:
                     self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                           lambda: STATE.start_detection(*detect_args))
+                                           lambda: STATE.start_detection(*detect_args, fluid_color_fill=fluid_color_fill))
                 self._json({"ok": True})
             elif path == "/api/candidates/batch":
                 image_id = str(payload.get("imageId", ""))

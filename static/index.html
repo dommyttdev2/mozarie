@@ -280,6 +280,7 @@
           <input id="detectConfidenceNumber" type="number" min="0.10" max="1.00" step="0.01" value="0.50" data-i18n-aria-label="detectDialog.confidenceNumber" aria-label="判定しきい値の数値">
         </span>
        </label>
+       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
        <label class="form-row">
         <span data-i18n="detectDialog.applyCandidatePadding">モザイク候補の枠</span>
         <span class="inline-field"><input id="detectCandidatePadding" type="number" min="0" step="1" value="0" inputmode="numeric" data-i18n-aria-label="detectDialog.applyCandidatePadding" aria-label="モザイク候補の枠"><span>px</span></span>
@@ -296,7 +297,6 @@
         <span data-i18n="detectDialog.fluidColorFillTolerance">精液候補の色の許容範囲</span>
         <span class="inline-field"><input id="detectFluidColorFillTolerance" type="number" min="0" max="255" step="1" value="26" inputmode="numeric" data-i18n-aria-label="detectDialog.fluidColorFillTolerance" aria-label="精液候補の色の許容範囲"><span data-i18n="detectDialog.toleranceUnit">/ 255</span></span>
        </label>
-       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
        <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
        <p id="detectPaddingValidation" class="dialog-result error" role="alert" hidden></p>
        <p id="detectFluidColorFillValidation" class="dialog-result error" role="alert" hidden></p>

@@ -31,7 +31,8 @@ function detectionFluidColorFillTolerance() {
   return /^\d+$/.test(text) && Number.isSafeInteger(value) && value <= 255 ? value : null;
 }
 function validateDetectionFluidColorFill() {
-  const valid = detectionFluidColorFillTolerance() !== null;
+  const active = state.settings?.detection?.fluid_exclusion_enabled !== false && $("#detectFluidColorFillEnabled").checked;
+  const valid = !active || detectionFluidColorFillTolerance() !== null;
   const input = $("#detectFluidColorFillTolerance");
   const message = $("#detectFluidColorFillValidation");
   input.setAttribute("aria-invalid", String(!valid));
@@ -40,8 +41,10 @@ function validateDetectionFluidColorFill() {
   return valid;
 }
 function syncDetectionFluidColorFill() {
-  const enabled = $("#detectFluidColorFillEnabled").checked;
-  $("#detectFluidColorFillTolerance").disabled = !enabled;
+  const enabled = state.settings?.detection?.fluid_exclusion_enabled !== false;
+  const checkbox = $("#detectFluidColorFillEnabled");
+  checkbox.disabled = !enabled;
+  $("#detectFluidColorFillTolerance").disabled = !enabled || !checkbox.checked;
   validateDetectionFluidColorFill();
 }
 function syncDetectionActions() {
@@ -93,7 +96,7 @@ function openDetectionDialog(imageIds) {
   showModalFromInvoker($("#detectDialog"));
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets(), fluidColorFill = null) {
   const ids = new Set(processableImages().map((image) => image.id));
   imageIds = [...new Set(imageIds)].filter((imageId) => ids.has(imageId));
   if (!imageIds.length || catalogStagingEditsActive() || (!state.detectionStarting && (isBusy() || state.importing))) return;
@@ -104,7 +107,9 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     await flushAllImageMutations();
     await saveDraft();
     await flushAllWorkspaceMutations();
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.max(1, Math.round(parallelism)), targetClasses }) });
+    const payload = { imageIds, confidence, parallelism: Math.max(1, Math.round(parallelism)), targetClasses };
+    if (fluidColorFill) Object.assign(payload, fluidColorFill);
+    await api("/api/detect", { method: "POST", body: JSON.stringify(payload) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
@@ -142,8 +147,13 @@ async function startDetectionFromDialog(event) {
   if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding() || !validateDetectionFluidColorFill()) return;
   const defaultCandidatePadding = detectionCandidatePadding();
   const defaultExcludeCandidatePadding = detectionCandidatePadding("#detectExcludeCandidatePadding");
-  const fluidColorFillEnabled = $("#detectFluidColorFillEnabled").checked;
-  const fluidColorFillTolerance = detectionFluidColorFillTolerance();
+  const fluidExclusionEnabled = state.settings?.detection?.fluid_exclusion_enabled !== false;
+  const fluidColorFillEnabled = fluidExclusionEnabled
+    ? $("#detectFluidColorFillEnabled").checked
+    : state.settings?.detection?.fluid_color_fill_enabled !== false;
+  const fluidColorFillTolerance = detectionFluidColorFillTolerance()
+    ?? state.settings?.detection?.fluid_color_fill_tolerance
+    ?? 26;
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   beginDetectionStart(imageIds);
@@ -166,7 +176,10 @@ async function startDetectionFromDialog(event) {
     }
     catch (error) { setSettingsForm(state.settings, state.settingsStatus); failDetectionStart(error); state.detectionStarting = false; updateActionButtons(); return; }
   }
-  await runDetection(imageIds, confidence, parallelism, targetClasses);
+  await runDetection(imageIds, confidence, parallelism, targetClasses, {
+    fluidColorFillEnabled,
+    fluidColorFillTolerance,
+  });
 }
 
 async function cancelDetection() {

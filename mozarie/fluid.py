@@ -50,19 +50,23 @@ def expand_white_fluid_mask(
 
     # ``floodFill`` uses a mask two pixels larger than the source image.  A
     # non-zero entry blocks traversal, so pre-fill every pixel outside the
-    # permitted region and preserve that boundary for every seed component.
-    flood_mask = np.pad(np.asarray(~allowed, dtype=np.uint8), 1, constant_values=1)
+    # permitted region.  Every component gets a fresh work mask: one accepted
+    # deposit must not prevent another from reaching its own colour region.
     source = np.ascontiguousarray(pixels)
     expanded = np.zeros_like(seeds, dtype=bool)
     component_count, labels = cv2.connectedComponents(np.asarray(seeds, dtype=np.uint8), connectivity=4)
     flags = 4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (2 << 8)
     difference = (tolerance, tolerance, tolerance)
     for label in range(1, component_count):
-        row, column = np.argwhere(labels == label)[0]
+        coordinates = np.argwhere(labels == label)
+        colors = source[coordinates[:, 0], coordinates[:, 1]].astype(np.int32)
+        median = np.median(colors, axis=0)
+        row, column = coordinates[np.argmin(np.sum((colors - median) ** 2, axis=1))]
+        flood_mask = np.pad(np.asarray(~allowed, dtype=np.uint8), 1, constant_values=1)
         cv2.floodFill(source, flood_mask, (int(column), int(row)), 0, difference, difference, flags)
         expanded |= flood_mask[1:-1, 1:-1] == 2
-    # A fixed-range fill may not cover every accepted seed if another component
-    # has already marked it in the shared mask.  Preserve every accepted seed.
+    # Preserve every accepted seed even if its representative colour is an
+    # outlier for the remainder of that component.
     return np.asarray(expanded | seeds, dtype=np.uint8) * 255
 
 
