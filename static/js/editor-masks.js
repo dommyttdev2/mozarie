@@ -811,13 +811,13 @@ function strokeLine(context, from, to, size, operation = "source-over") {
   context.restore();
 }
 
-function strokePath(context, points, size, operation = "source-over") {
-  const first = points[0];
+function strokePath(context, points, size, operation = "source-over", startIndex = 0) {
+  const first = points[startIndex];
   if (!first) return;
-  if (points.length === 1) { strokeLine(context, first, first, size, operation); return; }
+  if (startIndex >= points.length - 1) { strokeLine(context, first, first, size, operation); return; }
   context.save(); context.globalCompositeOperation = operation; context.strokeStyle = "#ffffff"; context.lineWidth = size; context.lineCap = "round"; context.lineJoin = "round";
   context.beginPath(); context.moveTo(first.x, first.y);
-  for (let index = 1; index < points.length; index += 1) context.lineTo(points[index].x, points[index].y);
+  for (let index = startIndex + 1; index < points.length; index += 1) context.lineTo(points[index].x, points[index].y);
   context.stroke(); context.restore();
 }
 
@@ -868,11 +868,11 @@ function markStrokeDirty(tool, points = null, size = Number($("#brushSize").valu
   if (state.activeStroke) refreshManualStrokeRoi(roi);
 }
 
-function paintStrokePath(points, tool, size) {
-  if (tool === "mosaic_eraser") strokePath(addCtx, points, size, "destination-out");
-  else if (tool === "exclude_eraser") strokePath(exclusionEraseCtx, points, size);
-  else if (tool === "eraser") { strokePath(exclusionCtx, points, size); strokePath(exclusionEraseCtx, points, size, "destination-out"); }
-  else { strokePath(addCtx, points, size); if (!state.manualExclusionForced) strokePath(exclusionCtx, points, size, "destination-out"); }
+function paintStrokePath(points, tool, size, startIndex = 0) {
+  if (tool === "mosaic_eraser") strokePath(addCtx, points, size, "destination-out", startIndex);
+  else if (tool === "exclude_eraser") strokePath(exclusionEraseCtx, points, size, "source-over", startIndex);
+  else if (tool === "eraser") { strokePath(exclusionCtx, points, size, "source-over", startIndex); strokePath(exclusionEraseCtx, points, size, "destination-out", startIndex); }
+  else { strokePath(addCtx, points, size, "source-over", startIndex); if (!state.manualExclusionForced) strokePath(exclusionCtx, points, size, "destination-out", startIndex); }
   markStrokeDirty(tool, points, size);
 }
 
@@ -967,7 +967,7 @@ function appendManualStrokePoint(point) {
 function paintPendingManualStroke() {
   const stroke = state.activeStroke;
   if (!stroke || stroke.paintedPointCount >= stroke.points.length) return;
-  paintStrokePath(stroke.points.slice(stroke.paintedPointCount - 1), stroke.tool, stroke.size);
+  paintStrokePath(stroke.points, stroke.tool, stroke.size, Math.max(0, stroke.paintedPointCount - 1));
   stroke.paintedPointCount = stroke.points.length;
   requestMosaicPreview();
 }

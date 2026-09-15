@@ -884,18 +884,24 @@ function withMaskRoi(context, roi, draw) {
   try { draw(); } finally { context.restore(); }
 }
 
+function drawMaskRoi(target, source, roi) {
+  if (!roi) { target.drawImage(source, 0, 0); return; }
+  const width = roi.right - roi.left; const height = roi.bottom - roi.top;
+  target.drawImage(source, roi.left, roi.top, width, height, roi.left, roi.top, width, height);
+}
+
 function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = "", roi = null) {
   withMaskRoi(effectiveExclusionCtx, roi, () => {
     const target = roi || { left: 0, top: 0, right: effectiveExclusionCanvas.width, bottom: effectiveExclusionCanvas.height };
     effectiveExclusionCtx.clearRect(target.left, target.top, target.right - target.left, target.bottom - target.top);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
-    if (candidate.id !== omittedCandidateId && candidate.enabled && candidate.role === "exclude" && (!forcedOnly || candidate.forced)) effectiveExclusionCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+    if (candidate.id !== omittedCandidateId && candidate.enabled && candidate.role === "exclude" && (!forcedOnly || candidate.forced)) drawMaskRoi(effectiveExclusionCtx, state.candidateImages.get(candidate.id), roi);
   }
-  if (state.manualExclusionEnabled && (!forcedOnly || state.manualExclusionForced)) effectiveExclusionCtx.drawImage(exclusionCanvas, 0, 0);
+  if (state.manualExclusionEnabled && (!forcedOnly || state.manualExclusionForced)) drawMaskRoi(effectiveExclusionCtx, exclusionCanvas, roi);
   if (state.manualExclusionEraseEnabled) {
     effectiveExclusionCtx.save(); effectiveExclusionCtx.globalCompositeOperation = "destination-out";
-    effectiveExclusionCtx.drawImage(exclusionEraseCanvas, 0, 0); effectiveExclusionCtx.restore();
+    drawMaskRoi(effectiveExclusionCtx, exclusionEraseCanvas, roi); effectiveExclusionCtx.restore();
   }
   });
   return effectiveExclusionCanvas;
@@ -914,15 +920,15 @@ function composeCurrentMask(roi = null) {
   combinedCtx.clearRect(target.left, target.top, target.right - target.left, target.bottom - target.top);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
-    if (candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+    if (candidate.enabled && candidate.role !== "exclude") drawMaskRoi(combinedCtx, state.candidateImages.get(candidate.id), roi);
   }
   combinedCtx.globalCompositeOperation = "destination-out";
-  combinedCtx.drawImage(effectiveExclusionCanvas, 0, 0);
+  drawMaskRoi(combinedCtx, effectiveExclusionCanvas, roi);
   combinedCtx.globalCompositeOperation = "source-over";
-  if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
+  if (state.manualEnabled) drawMaskRoi(combinedCtx, addCanvas, roi);
   combinedCtx.globalCompositeOperation = "destination-out";
   if (hasNonForcedExclusion) composeEnabledExclusionMask(true, "", roi);
-  combinedCtx.drawImage(effectiveExclusionCanvas, 0, 0);
+  drawMaskRoi(combinedCtx, effectiveExclusionCanvas, roi);
   combinedCtx.globalCompositeOperation = "source-over";
   });
   // Restore the regular union for display when a temporary forced union was

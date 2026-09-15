@@ -31,7 +31,12 @@ class SettingsStore:
 
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        settings = defaults if not self.local_path.is_file() else _merge(defaults, _migrate_legacy_shortcuts(json.loads(self.local_path.read_text(encoding="utf-8"))))
+        if self.local_path.is_file():
+            override = _migrate_legacy_shortcuts(json.loads(self.local_path.read_text(encoding="utf-8")))
+            _migrate_candidate_padding(override)
+            settings = _merge(defaults, override)
+        else:
+            settings = defaults
         _migrate_candidate_padding(settings)
         return validate_settings(self._set_builtin_output_directory(settings))
 
