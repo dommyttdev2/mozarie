@@ -45,6 +45,10 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._has_active_worker = lambda: False
         state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
         state._assert_catalog_mutable = lambda *_args, **_kwargs: None
+        state._assert_image_editable = lambda *_args, **_kwargs: None
+        state._assert_image_processable = lambda *_args, **_kwargs: None
+        state._publish_job_snapshot_unchecked = lambda: state.job
+        state._copy_job_snapshot = lambda job: job
         state._job_is_current = lambda generation, catalog: generation in (None, 1) and catalog in (None, 1)
         state._candidate_revision = lambda _image_id: 1
         state._allowed_root_for_record = lambda record, root, session: root
@@ -72,6 +76,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._has_active_worker = lambda: False
         state._assert_catalog_mutable = lambda *_args, **_kwargs: None
         state._assert_image_editable = lambda *_args, **_kwargs: None
+        state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
         state._candidate_revision = lambda image_id: state.candidate_revisions.get(image_id, 1)
         state.image_snapshot = lambda image_id: __import__("dataclasses").replace(state.images[image_id])
         state._records_for_ids_with_catalog = lambda ids: ([state.images[item] for item in ids], state.catalog_generation)
