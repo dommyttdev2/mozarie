@@ -172,6 +172,8 @@ class DetectionMixin:
         if not raw_path:
             raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            raise ClientError(f"{label}モデルには絶対パスを指定してください。", "model_file_invalid")
         if not path.is_file():
             raise ClientError(f"{label}モデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() != ".onnx":
@@ -187,6 +189,8 @@ class DetectionMixin:
                 "sam_checkpoint_missing",
             )
         path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            raise ClientError("SAMモデルには絶対パスを指定してください。", "sam_checkpoint_invalid")
         if not path.is_file():
             raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:

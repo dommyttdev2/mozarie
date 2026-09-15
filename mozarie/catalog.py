@@ -344,7 +344,10 @@ class CatalogMixin:
                     self._assert_catalog_expectation(expected_project_id, expected_catalog_generation)
             if not raw_path or not isinstance(raw_path, str):
                 return self._set_root(raw_path)
-            root = Path(raw_path).expanduser().resolve()
+            candidate = Path(raw_path).expanduser()
+            if not candidate.is_absolute():
+                return self._set_root(raw_path)
+            root = candidate.resolve()
             if not root.is_dir():
                 return self._set_root(raw_path)
             with self.lock:
@@ -379,7 +382,10 @@ class CatalogMixin:
                    staged_source_id: str | None = None) -> list[Any]:
         if not raw_path or not isinstance(raw_path, str):
             raise ClientError("Windowsフォルダを入力してください。", "input_invalid")
-        root = Path(raw_path).expanduser().resolve()
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            raise ClientError("絶対パスのWindowsフォルダを入力してください。", "input_invalid")
+        root = candidate.resolve()
         if not root.is_dir():
             raise ClientError("指定フォルダが見つかりません。", "folder_not_found")
         with self.lock:
@@ -2219,6 +2225,8 @@ class CatalogMixin:
                 if not raw_path:
                     raise ClientError("HandSegNetモデルが未設定です。設定のモデルタブで .safetensors を指定してください。", "model_not_configured")
                 path = Path(raw_path).expanduser()
+                if not path.is_absolute():
+                    raise ClientError("HandSegNetモデルには絶対パスを指定してください。", "model_file_invalid")
                 if not path.is_file():
                     raise ClientError("HandSegNetモデルが見つかりません。設定のモデルタブで選び直してください。", "model_file_missing")
                 if path.suffix.lower() != ".safetensors":
