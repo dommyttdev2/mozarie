@@ -20,7 +20,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 import mozarie.state as state_module
-from mozarie.core import BrowserSaveReceipt, Candidate, CandidateRole, ClientError, ImageRecord, SAVE_TOKEN_TTL_SECONDS
+from mozarie.core import BrowserSaveReceipt, Candidate, CandidateRole, ClientError, ImageRecord
 from mozarie.state import StudioState, cuda_device_statuses, gpu_device_statuses
 from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
@@ -34,7 +34,7 @@ def png(mode: str = "L") -> bytes:
 class WorkspaceExtraCoverageTests(unittest.TestCase):
     def make_store(self, root: Path) -> tuple[WorkspaceStore, str, str]:
         store = WorkspaceStore(root)
-        catalog_id = store.ensure_catalog()
+        catalog_id = str(store.create_project("fixture")["id"])
         item = SimpleNamespace(relative_path="one.png", size_bytes=10, mtime_ns=20)
         return store, catalog_id, str(store.reconcile_images(catalog_id, [item])["one.png"]["image_id"])
 
@@ -417,14 +417,13 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         self.assertEqual(status["models"]["target_segmentation"]["reasonCode"], "invalid_format")
         self.assertEqual(status["models"]["sam_checkpoint"]["reasonCode"], "invalid_format")
         self.assertEqual(status["samVariants"]["vit_b"]["reasonCode"], "type_mismatch")
-        self.state.end_import_transfer()
 
     def test_catalogue_guards_and_candidate_bulk_state(self) -> None:
         image_id = self.add_image()
         with self.assertRaises(ClientError):
             self.state.remove_images_from_catalog("not-a-list")  # type: ignore[arg-type]
         with self.assertRaises(ClientError):
-            self.state._import_images(["invalid"], include_images=False)  # type: ignore[list-item]
+            self.state._import_images(["invalid"], include_images=False, intent="add")  # type: ignore[list-item]
         mask = self.root / "mask.png"
         mask.write_bytes(png())
         apply = Candidate("apply", "penis", .9, mask, role=CandidateRole.APPLY)
@@ -441,8 +440,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         image_id = self.add_image()
         item = self.state.images[image_id]
         token = self.state._issue_browser_save_token_unchecked(item, 0, (item.mtime_ns, item.size_bytes), self.state.catalog_generation, None)
-        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state.cleanup_expired_browser_save_tokens()
+        self.state._discard_browser_save_tokens_for_image_unchecked(image_id)
         self.assertNotIn(token, self.state.browser_save_tokens)
         item.path = self.root / "missing.png"
         with self.assertRaises(ClientError):
@@ -497,27 +495,27 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
 
     def test_expired_receipt_and_nested_session_removal(self) -> None:
         staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
-        _images, imported = self.state.import_image_file_for_api(staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="key")
+        _images, imported = self.state.import_image_file_for_api(staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="key", intent="add")
         image_id = imported[0]["imageId"]
         nested = self.state.images[image_id].path.parent
         (nested / "keep.txt").write_text("keep")
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state.cleanup_expired_browser_save_tokens()
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, self.state.catalog_generation)
+        self.state._clear_browser_save_receipts_for_image_unchecked(image_id)
         self.assertNotIn("old", self.state.browser_save_receipts)
         self.state.remove_image_from_catalog(image_id)
         self.assertTrue(nested.exists())
 
     def test_import_validation_and_catalog_change(self) -> None:
         staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
-        self.assertEqual(self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": staged}], include_images=False), ([], []))
+        self.assertEqual(self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": staged}], include_images=False, intent="add"), ([], []))
         with self.assertRaises(ClientError):
-            self.state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": "not-a-path"}], include_images=False)
+            self.state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": "not-a-path"}], include_images=False, intent="add")
         def mutate_generation(path, suffix):
             self.state.catalog_generation += 1
             return (4, 4)
         with patch("mozarie.catalog.inspect_import_image", side_effect=mutate_generation):
             with self.assertRaises(ClientError) as context:
-                self.state.import_image_file_for_api(staged, name="changed.png", relative_path="changed.png", client_key="changed")
+                self.state.import_image_file_for_api(staged, name="changed.png", relative_path="changed.png", client_key="changed", intent="add")
         self.assertEqual(context.exception.error_code, "catalog_changed")
 
     def test_catalogue_file_cleanup_and_snapshot_errors(self) -> None:
@@ -536,7 +534,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
         with patch("mozarie.catalog.os.replace", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                self.state.import_image_file_for_api(staged, name="failed.png", relative_path="failed.png", client_key="failed")
+                self.state.import_image_file_for_api(staged, name="failed.png", relative_path="failed.png", client_key="failed", intent="add")
 
     def test_model_provider_and_import_failures(self) -> None:
         image_id = self.add_image(); item = self.state.images[image_id]
@@ -579,15 +577,14 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         created = owned.cache_dir
         owned.shutdown()
         self.assertFalse(created.exists())
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, self.state.catalog_generation)
+        self.state._clear_browser_save_receipts_for_image_unchecked("image")
         self.assertNotIn("old", self.state.browser_save_receipts)
 
     def test_catalogue_remaining_file_and_durable_state_edges(self) -> None:
         image_id = self.add_image(); item = self.state.images[image_id]
         token = self.state._issue_browser_save_token_unchecked(item, 0, (item.mtime_ns, item.size_bytes), self.state.catalog_generation, None)
-        self.state.browser_save_tokens[token] = replace(self.state.browser_save_tokens[token], issued_at=time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.state._discard_browser_save_tokens_for_image_unchecked(image_id)
         cache_dir = self.root / "candidate-dir"; cache_dir.mkdir(); (cache_dir / "old.png").write_bytes(png())
         with patch.object(Path, "unlink", side_effect=OSError("busy")):
             self.state._delete_mask_files([], [cache_dir])
@@ -627,24 +624,12 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
             else: sys.modules["safetensors.torch"] = old_safe
 
     def test_catalogue_finalization_and_import_failure_paths(self) -> None:
-        image_id = self.add_image(); item = self.state.images[image_id]
-        source = self.state.workspace_store.ensure_provisional_catalog()
-        target = self.state.workspace_store.ensure_catalog()
-        self.state.catalog_id = source
-        self.state.browser_catalog_provisional = True
-        self.state.browser_import_hashes = {item.relative_path: "hash"}
-        with patch.object(self.state.workspace_store, "best_catalog_for_manifest", return_value=target), patch.object(self.state.workspace_store, "reconcile_images", return_value={}):
-            self.state.finalize_browser_catalog()
-        source = self.state.workspace_store.ensure_provisional_catalog()
-        self.state.images = {item.image_id: item}
-        self.state.order = [item.image_id]
-        self.state.catalog_id = source
-        self.state.browser_catalog_provisional = True
-        self.state.browser_import_hashes = {item.relative_path: "hash"}
-        candidate = Candidate("restored", "penis", .5, self.root / "restored.png")
-        stored = {item.relative_path: {"image_id": item.image_id, "hidden": False, "reviewed": False}}
-        with patch.object(self.state.workspace_store, "best_catalog_for_manifest", return_value=target), patch.object(self.state.workspace_store, "reconcile_images", return_value=stored), patch.object(self.state.workspace_store, "hydrate_candidates", return_value=(1, [candidate])):
-            self.state.finalize_browser_catalog()
+        staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
+        _images, imported = self.state.import_image_file_for_api(
+            staged, name="initial.png", relative_path="initial.png", client_key="initial", intent="add",
+        )
+        self.assertTrue(imported)
+        self.assertIsNotNone(self.state.workspace_id)
         scan = self.root / "scan"; scan.mkdir(); image = scan / "race.png"; Image.new("RGB", (4, 4), "white").save(image)
         def modify_after_read(path, suffix):
             path.write_bytes(path.read_bytes() + b"x")
@@ -665,14 +650,13 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
                 self.state._import_images([
                     {"name": "one.png", "relativePath": "one.png", "stagedPath": first},
                     {"name": "two.png", "relativePath": "two.png", "stagedPath": second},
-                ], include_images=False)
+                ], include_images=False, intent="add")
 
     def test_import_hydrates_durable_candidates(self) -> None:
         staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
-        self.state.activate_browser_catalog()
         candidate = Candidate("restored", "penis", .5, self.root / "restored.png")
         with patch.object(self.state.workspace_store, "hydrate_candidates", return_value=(1, [candidate])):
-            _images, imported = self.state.import_image_file_for_api(staged, name="restored.png", relative_path="restored.png", client_key="restored")
+            _images, imported = self.state.import_image_file_for_api(staged, name="restored.png", relative_path="restored.png", client_key="restored", intent="add")
         image_id = imported[0]["imageId"]
         self.assertEqual(self.state.candidate_revisions[image_id], 1)
 
@@ -683,10 +667,9 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         token = self.state._issue_browser_save_token_unchecked(self.state.images[image_id], 0, (1, 1), 0, None)
         self.state._discard_browser_save_tokens_for_image_unchecked("different")
         self.assertIn(token, self.state.browser_save_tokens)
-        self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, __import__("time").monotonic())
-        self.state._discard_expired_browser_save_tokens_unchecked()
+        self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, self.state.catalog_generation)
         self.assertIn("fresh", self.state.browser_save_receipts)
-        self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": self.root / "source.png"}], include_images=False, transfer_active=True)
+        self.state._import_images([{"name": "skip.txt", "relativePath": "skip.txt", "stagedPath": self.root / "source.png"}], include_images=False, transfer_active=True, intent="add")
         self.state.sam_image_id = image_id; self.state.sam_predictor = None
         self.state.hand_segmentation_image_id = image_id; self.state.hand_segmentation_predictor = None
         self.state.invalidate_sam_image(image_id)
@@ -703,7 +686,7 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
 
     def test_session_record_removal_without_import_root(self) -> None:
         staged = self.root / "staged.png"; Image.new("RGB", (4, 4), "white").save(staged)
-        _images, imported = self.state.import_image_file_for_api(staged, name="session.png", relative_path="session.png", client_key="session")
+        _images, imported = self.state.import_image_file_for_api(staged, name="session.png", relative_path="session.png", client_key="session", intent="add")
         self.state.session_imports_dir = None
         self.state.remove_image_from_catalog(imported[0]["imageId"])
 
@@ -740,25 +723,24 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
     def test_browser_import_and_detach_lifecycle(self) -> None:
         staged = self.root / "staged.png"
         Image.new("RGB", (4, 4), "white").save(staged)
-        catalog_id = self.state.activate_browser_catalog()
         images, imported = self.state.import_image_file_for_api(
-            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="client-1",
+            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="client-1", intent="add",
         )
         self.assertEqual(len(images), 1)
         self.assertEqual(imported[0]["clientKey"], "client-1")
-        self.assertEqual(self.state.detach_catalog(), catalog_id)
+        self.assertIsNotNone(self.state.workspace_id)
+        self.assertIsNone(self.state.detach_catalog())
         self.assertFalse(self.state.images)
 
     def test_provisional_detach_and_catalog_identifier_failure(self) -> None:
-        provisional = self.state.workspace_store.ensure_provisional_catalog()
-        self.state.catalog_id = provisional
-        self.state.browser_catalog_provisional = True
-        self.assertIsNone(self.state.detach_catalog())
-        self.assertFalse(self.state.workspace_store.catalog_exists(provisional))
-        with patch.object(self.state.workspace_store, "catalog_exists", return_value=True), patch.object(self.state.workspace_store, "ensure_catalog", side_effect=ValueError("bad")):
-            with self.assertRaises(ClientError) as context:
-                self.state.activate_browser_catalog("a" * 32)
-            self.assertEqual(context.exception.error_code, "input_invalid")
+        record = SimpleNamespace(relative_path="one.png", size_bytes=1, mtime_ns=1, width=4, height=4)
+        provisional, _source, _images = self.state.workspace_store.create_projectless_native_workspace(self.root, [record])
+        self.state.workspace_store.activate_projectless_catalog(provisional)
+        self.state.workspace_store.delete_project(provisional)
+        self.assertIsNone(self.state.workspace_store.active_projectless_catalog())
+        named = self.state.workspace_store.create_project("named")
+        with self.assertRaises(ValueError):
+            self.state.workspace_store.activate_projectless_catalog(named["id"])
 
     def test_sam_and_handseg_provider_initialisation_paths(self) -> None:
         class Model:
@@ -893,12 +875,12 @@ class FinalCatalogCoverageTests(unittest.TestCase):
     def test_catalogue_error_cleanup_and_mask_boundaries(self) -> None:
         image_id = self.add_image()
         record = self.state.images[image_id]
-        with self.assertRaises(ClientError):
-            self.state.activate_browser_catalog("a" * 32)
+        with self.assertRaises(ValueError):
+            self.state.workspace_store.activate_projectless_catalog("a" * 32)
         with self.assertRaises(ClientError):
             self.state.remove_images_from_catalog([])
         with self.assertRaises(ClientError):
-            self.state._import_images([], include_images=False)
+            self.state._import_images([], include_images=False, intent="add")
         with self.assertRaises(ClientError):
             self.state._assert_record_stat_matches(replace(record, path=self.root / "gone.png"))
         self.state.images[image_id] = replace(record, source_kind="other")
@@ -929,16 +911,13 @@ class FinalCatalogCoverageTests(unittest.TestCase):
         self.state.workspace_store.delete_images([image_id])
         self.state.save_manual_workspace(image_id, payload)
 
-    def test_token_expiry_predictor_and_session_directory_cleanup(self) -> None:
+    def test_token_lifecycle_predictor_and_session_directory_cleanup(self) -> None:
         image_id = self.add_image()
-        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state._discard_expired_browser_save_tokens_unchecked()
-        self.state.browser_save_receipts["fresh"] = BrowserSaveReceipt(
-            image_id, 0, "copy", False, False, False, time.monotonic()
+        self.state.browser_save_receipts["prior"] = BrowserSaveReceipt(
+            image_id, 0, "copy", False, False, False, self.state.catalog_generation,
         )
-        self.state._discard_expired_browser_save_tokens_unchecked()
-        self.state.browser_save_receipts["expired"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1)
-        self.state.cleanup_expired_browser_save_tokens()
+        self.state._clear_browser_save_receipts_for_image_unchecked(image_id)
+        self.assertNotIn("prior", self.state.browser_save_receipts)
         self.state.sam_predictor = Mock()
         self.state.hand_segmentation_predictor = Mock()
         self.state._invalidate_sam_cache()
@@ -953,7 +932,7 @@ class FinalCatalogCoverageTests(unittest.TestCase):
         staged = self.root / "staged.png"
         Image.new("RGB", (4, 4), "white").save(staged)
         _images, imported = self.state.import_image_file_for_api(
-            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="nested"
+            staged, name="nested/photo.png", relative_path="nested/photo.png", client_key="nested", intent="add"
         )
         nested = self.state.images[imported[0]["imageId"]].path.parent
         (nested / "keep.txt").write_text("keep")
@@ -1042,6 +1021,6 @@ class FinalCatalogCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkspaceStore(Path(directory))
             with self.assertRaises(ValueError):
-                store.ensure_catalog("not-a-valid-catalog-id")
+                store.activate_projectless_catalog("not-a-valid-catalog-id")
             with self.assertRaises(ValueError):
                 store._decode_png_mask(b"\x89PNG\r\n\x1a\ntruncated")
