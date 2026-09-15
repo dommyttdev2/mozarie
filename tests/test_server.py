@@ -219,7 +219,7 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state()
             image_id = state.set_root(str(root))[0]["id"]
-            record = state.image_for_id(image_id)
+            record = replace(state.image_for_id(image_id))
             mask_path = state.cache_dir / image_id / "candidate.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
@@ -257,7 +257,7 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
-            record = state.image_for_id(image_id)
+            record = replace(state.image_for_id(image_id))
             mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             candidate = Candidate("candidate", "penis", .9, mask_path)
@@ -7853,7 +7853,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             self.assertEqual(state.job.state, "error")
             self.assertIn("復元を保留", state.job.error)
             stat = source.stat()
-            self.assertEqual(record.asset_fingerprint(), (stat.st_mtime_ns, stat.st_size))
+            self.assertEqual(state.image_for_id(image_id).asset_fingerprint(), (stat.st_mtime_ns, stat.st_size))
             self.assertIn(image_id, state.source_mismatches)
             db = sqlite3.connect(state.save_journal.path)
             try:
@@ -7865,7 +7865,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
             state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
-            record = state.image_for_id(image_id)
+            record = replace(state.image_for_id(image_id))
             mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(mask_path)
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
@@ -7887,6 +7887,27 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             self.assertFalse(Path(str(row["quarantine"])).exists())
             self.assertIsNone(recovered.save_journal.row(token))
             self.assertEqual(recovered.workspace_store.apply_save_receipts(), [])
+
+    def test_background_overwrite_commit_decision_failure_keeps_the_live_record_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = replace(state.image_for_id(image_id))
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            with patch.object(state.save_journal, "decide_commit", side_effect=OSError("journal locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
+
+            self.assertEqual(state.job.state, "error")
+            stat = source.stat()
+            live_record = state.image_for_id(image_id)
+            self.assertEqual(live_record.asset_fingerprint(), (stat.st_mtime_ns, stat.st_size))
+            self.assertEqual((live_record.mtime_ns, live_record.size_bytes), (stat.st_mtime_ns, stat.st_size))
+            self.assertEqual(state.source_mismatches, {})
 
     def test_detection_configuration_and_model_loading_error_paths(self):
         state = self.new_state()

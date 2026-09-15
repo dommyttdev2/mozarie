@@ -911,14 +911,20 @@ class SavingMixin:
                         try:
                             stat = record.path.stat()
                         except OSError:
-                            pass
-                        else:
+                            stat = None
+                        if stat is not None:
                             record.set_asset_fingerprint(stat.st_mtime_ns, stat.st_size)
                             if record.source_kind == "filesystem":
                                 record.mtime_ns = stat.st_mtime_ns
                                 record.size_bytes = stat.st_size
                         with self.lock:
-                            if self.images.get(record.image_id) is record:
+                            live_record = self.images.get(record.image_id)
+                            if stat is not None and live_record is not None and live_record is not record:
+                                live_record.set_asset_fingerprint(stat.st_mtime_ns, stat.st_size)
+                                if live_record.source_kind == "filesystem":
+                                    live_record.mtime_ns = stat.st_mtime_ns
+                                    live_record.size_bytes = stat.st_size
+                            if live_record is not None:
                                 self.source_mismatches[record.image_id] = False
                         raise ClientError(
                             "元画像の復元を保留しました。外部の変更を確認してMozarieを再起動してください。",
@@ -990,8 +996,6 @@ class SavingMixin:
                                 save_receipt=durable_apply_receipt,
                             )
                             workspace_committed = True
-                            if save_token is not None:
-                                self.save_journal.decide_commit(save_token)
                             if not copy_to_default and not no_effect:
                                 live_record = self.images[record.image_id]
                                 live_record.mtime_ns = output_stat.st_mtime_ns
@@ -1001,6 +1005,8 @@ class SavingMixin:
                                 live_record.source_flip_horizontal = live_record.flip_horizontal
                                 live_record.source_flip_vertical = live_record.flip_vertical
                                 live_record.transform_revision += 1
+                            if save_token is not None:
+                                self.save_journal.decide_commit(save_token)
                             self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
                     except Exception:
                         if save_token is not None and not workspace_committed:
