@@ -1481,9 +1481,6 @@ class CatalogMixin:
             remaining: list[str] = []
             operation = self.workspace_store.source_delete_operation(token)
             durable_result = dict((operation or {}).get("result") or {})
-            if durable_result.get("recoveryConflicts"):
-                LOGGER.warning("元画像削除の後処理を保留: 衝突=%d", len(durable_result["recoveryConflicts"]))
-                continue
             plans = {str(plan.get("quarantinePath", "")): plan for plan in durable_result.get("quarantinePlans", []) if isinstance(plan, dict)}
             names = dict(durable_result.get("quarantineRelativePaths", {}))
             conflicts: list[dict[str, str]] = []
