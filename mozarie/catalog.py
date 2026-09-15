@@ -227,39 +227,70 @@ class CatalogMixin:
             if prehydrated is not None:
                 self._refresh_catalog_records(records)
                 prehydrated = self._stage_workspace_candidates(records)
+            session: tuple[Path | None, Any | None]
             with self.lock:
                 if publish_catalog_id is None:
                     self._assert_catalog_mutable()
-                if detach_project:
-                    self.catalog_id = None
-                    self.workspace_id = None
-                    self.project_read_only = False
-                    self.source_mismatches = {}
-                self.images = {record.image_id: record for record in records}
-                self.order = [record.image_id for record in records]
-                self.candidates = {} if prehydrated is None else {image_id: candidates for image_id, (_revision, candidates) in prehydrated.items()}
-                self.candidate_revisions = ({record.image_id: 0 for record in records} if prehydrated is None
-                                            else {record.image_id: prehydrated.get(record.image_id, (0, []))[0] for record in records})
-                self.projectless_manual_drafts.clear()
-                self._clear_browser_save_tokens_unchecked()
-                self.root = root
-                self.source_roots = {str(record.source_id): record.source_root for record in records if record.source_id and record.source_root}
-                self.catalog_sources = [dict(source) for source in publish_sources] if publish_sources is not None else ([] if detach_project else self.catalog_sources)
-                if publish_catalog_id is not None:
-                    self.catalog_id = publish_catalog_id
-                    self.workspace_id = publish_catalog_id
-                    self.project_read_only = publish_read_only
-                elif publish_workspace_id is not None:
-                    self.catalog_id = None
-                    self.workspace_id = publish_workspace_id
-                    self.project_read_only = False
-                if publish_active_workspace_id is not None:
-                    self.workspace_store.publish_active_projectless_catalog(
-                        publish_active_workspace_id, discard_workspace_id,
-                    )
-                if publish_source_mismatches is not None:
-                    self.source_mismatches = dict(publish_source_mismatches)
                 self._invalidate_sam_cache()
+                live_state = {
+                    "catalog_id": self.catalog_id,
+                    "workspace_id": self.workspace_id,
+                    "project_read_only": self.project_read_only,
+                    "source_mismatches": self.source_mismatches,
+                    "images": self.images,
+                    "order": self.order,
+                    "candidates": self.candidates,
+                    "candidate_revisions": self.candidate_revisions,
+                    "projectless_manual_drafts": self.projectless_manual_drafts,
+                    "root": self.root,
+                    "source_roots": self.source_roots,
+                    "catalog_sources": self.catalog_sources,
+                }
+                activated_workspace = False
+                try:
+                    # The active pointer becomes durable before the live screen
+                    # changes.  If the live swap cannot finish, the except block
+                    # restores it before the new workspace is discarded.
+                    if publish_active_workspace_id is not None:
+                        self.workspace_store.activate_projectless_catalog(publish_active_workspace_id)
+                        activated_workspace = True
+                    if detach_project:
+                        self.catalog_id = None
+                        self.workspace_id = None
+                        self.project_read_only = False
+                        self.source_mismatches = {}
+                    self.images = {record.image_id: record for record in records}
+                    self.order = [record.image_id for record in records]
+                    self.candidates = {} if prehydrated is None else {image_id: candidates for image_id, (_revision, candidates) in prehydrated.items()}
+                    self.candidate_revisions = ({record.image_id: 0 for record in records} if prehydrated is None
+                                                else {record.image_id: prehydrated.get(record.image_id, (0, []))[0] for record in records})
+                    self.projectless_manual_drafts = {}
+                    self.root = root
+                    self.source_roots = {str(record.source_id): record.source_root for record in records if record.source_id and record.source_root}
+                    self.catalog_sources = [dict(source) for source in publish_sources] if publish_sources is not None else ([] if detach_project else self.catalog_sources)
+                    if publish_catalog_id is not None:
+                        self.catalog_id = publish_catalog_id
+                        self.workspace_id = publish_catalog_id
+                        self.project_read_only = publish_read_only
+                    elif publish_workspace_id is not None:
+                        self.catalog_id = None
+                        self.workspace_id = publish_workspace_id
+                        self.project_read_only = False
+                    if publish_source_mismatches is not None:
+                        self.source_mismatches = dict(publish_source_mismatches)
+                    # Old unnamed data is removed only after the active pointer
+                    # and every live catalog field describe the new workspace.
+                    if discard_workspace_id and discard_workspace_id != publish_active_workspace_id:
+                        self.workspace_store.delete_project(discard_workspace_id)
+                except Exception:
+                    for field, value in live_state.items():
+                        setattr(self, field, value)
+                    if activated_workspace:
+                        self.workspace_store.restore_active_projectless_catalog(
+                            discard_workspace_id, expected_catalog_id=publish_active_workspace_id,
+                        )
+                    raise
+                self._clear_browser_save_tokens_unchecked()
                 self.job = Job()
                 self.catalog_generation += 1
                 session = self._detach_session_unchecked()
@@ -1498,6 +1529,7 @@ class CatalogMixin:
                         created_projectless_id, durable_source_id, stored_images = self.workspace_store.create_projectless_browser_workspace(
                             added, kind=source_kind, display_name=source_kind, source_identity=browser_identity,
                         )
+                        self.workspace_store.activate_projectless_catalog(created_projectless_id)
                         self.workspace_id = created_projectless_id
                         durable_source_created = True
                         durable_created_ids = [str(stored["image_id"]) for stored in stored_images.values()]
@@ -1568,8 +1600,6 @@ class CatalogMixin:
                         # Publishing their generation lets another tab reject a
                         # request captured before this visible catalogue change.
                         self.catalog_generation += 1
-                    if created_projectless_id:
-                        self.workspace_store.publish_active_projectless_catalog(created_projectless_id)
                     images = self.list_images() if include_images else []
                     for path in set(replaced_session_paths):
                         try:

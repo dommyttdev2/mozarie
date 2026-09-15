@@ -526,8 +526,8 @@ class WorkspaceStore:
                 raise
         return catalog_id, source_id, stored
 
-    def publish_active_projectless_catalog(self, catalog_id: str, discard_catalog_id: str | None = None) -> None:
-        """Make one unnamed workspace restart-visible and discard its predecessor."""
+    def activate_projectless_catalog(self, catalog_id: str) -> None:
+        """Make one unnamed workspace the restart-visible workspace."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -536,8 +536,27 @@ class WorkspaceStore:
                     raise ValueError("projectless workspace is missing")
                 db.execute("INSERT INTO meta(key,value) VALUES('active_projectless_catalog_id',?) "
                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (catalog_id,))
-                if discard_catalog_id and discard_catalog_id != catalog_id:
-                    db.execute("DELETE FROM catalogs WHERE catalog_id=? AND name IS NULL", (discard_catalog_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def restore_active_projectless_catalog(self, previous_catalog_id: str | None, *, expected_catalog_id: str) -> None:
+        """Restore the active pointer if a later live publication did not complete."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                current = db.execute("SELECT value FROM meta WHERE key='active_projectless_catalog_id'").fetchone()
+                if current is None or str(current["value"]) != expected_catalog_id:
+                    db.execute("COMMIT")
+                    return
+                if previous_catalog_id is None:
+                    db.execute("DELETE FROM meta WHERE key='active_projectless_catalog_id'")
+                else:
+                    row = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (previous_catalog_id,)).fetchone()
+                    if row is None:
+                        raise ValueError("previous projectless workspace is missing")
+                    db.execute("UPDATE meta SET value=? WHERE key='active_projectless_catalog_id'", (previous_catalog_id,))
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
