@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const runner = require("../scripts/test-quiet.cjs");
+const policy = require("../scripts/test-result-policy.cjs");
 
 async function runCommandCases() {
   const success = await runner.runCommand(process.execPath, ["-e", "console.log('ok')"]);
@@ -82,6 +83,11 @@ function diagnosticCases() {
   assert.ok(huge.length <= 32 * 1024, "diagnostics have a bounded maximum size");
 }
 
+function deferredTestPolicyCases() {
+  assert.equal(policy.unittestSkippedCount("Ran 3 tests in 0.001s\n\nOK\n"), 0, "a complete unittest suite has no skipped cases");
+  assert.throws(() => policy.assertNoSkippedUnittestTests("Ran 3 tests in 0.001s\n\nOK (skipped=1)\n"), /skipped=1/, "a successful unittest suite with a skipped case fails CI");
+}
+
 async function runTemporaryDirectoryCases() {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-quiet-runner-test-"));
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-quiet-workspace-"));
@@ -125,6 +131,7 @@ assert.deepEqual(runner.coverageRates('<coverage line-rate="1" branch-rate="1"/>
 assert.doesNotThrow(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="0" branch-rate="0"/><class filename="updater.py" line-rate="0" branch-rate="0"/><class filename="setup_gpu_check.py" line-rate="0" branch-rate="0"/></coverage>'), "required files are reported without a numeric coverage gate");
 assert.throws(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="1" branch-rate="1"/></coverage>'), /missing required files: updater.py/, "missing required coverage is rejected");
 diagnosticCases();
+deferredTestPolicyCases();
 const backendEnvironment = runner.backendEnvironment(path.join(os.tmpdir(), "mozarie-quiet-env"), "coverage-data");
 assert.equal(backendEnvironment.PYTHONPYCACHEPREFIX, path.join(os.tmpdir(), "mozarie-quiet-env", "pycache"), "backend bytecode is directed to the temporary directory");
 assert.equal(backendEnvironment.MOZARIE_RUNTIME, undefined, "ambient runtime selection cannot change test behavior");

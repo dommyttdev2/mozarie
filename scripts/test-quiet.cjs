@@ -2,6 +2,7 @@ const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { assertNoSkippedUnittestTests } = require("./test-result-policy.cjs");
 
 const root = path.resolve(__dirname, "..");
 
@@ -209,6 +210,7 @@ async function runBackend(temporaryRoot, artifacts) {
   const env = backendEnvironment(temporaryRoot, coverageFile);
   const python = pythonExecutable();
   const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env });
+  assertNoSkippedUnittestTests(tests);
   await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env });
   await requiredCommand("backend coverage XML", python, ["-m", "coverage", "xml", "-o", coverageXml], { env });
   const xml = fs.readFileSync(coverageXml, "utf8");

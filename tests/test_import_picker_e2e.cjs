@@ -2976,19 +2976,20 @@ async function main() {
       return { nonForced, forced, forcedErased };
     });
     assert.deepEqual(manualExclusionVisibility, { nonForced: true, forced: false, forcedErased: true }, "manual exclusion erase restores forced exclusions without creating a new mosaic");
-    const restoredHistory = await page.evaluate(async () => {
+    await page.evaluate(async () => {
       resetCurrentDraft(); state.drafts.delete("sample");
       beginManualStroke({ x: 12, y: 12 }); completeManualStroke(); await saveDraft();
-      const saved = state.drafts.get("sample");
       addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); state.history = []; state.historyIndex = 0;
-      restoreDraft("sample", state.imageGeneration);
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await restoreDraft("sample", state.imageGeneration);
+    });
+    await page.waitForFunction(() => state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas));
+    const restoredHistory = await page.evaluate(() => {
       const restored = state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas);
       restoreSnapshot(0);
       const undoWorked = !canvasHasPixels(addCtx, addCanvas) && !$("#redoButton").disabled;
       restoreSnapshot(1);
       const redoWorked = canvasHasPixels(addCtx, addCanvas);
-      state.drafts.set("sample", saved); resetCurrentDraft(); state.drafts.delete("sample");
+      resetCurrentDraft(); state.drafts.delete("sample");
       return { restored, undoWorked, redoWorked };
     });
     assert.deepEqual(restoredHistory, { restored: true, undoWorked: true, redoWorked: true }, "manual history survives changing away and back to an image");
@@ -3621,9 +3622,11 @@ async function main() {
     });
     assert.equal(selectionMenu.right, selectionMenu.buttonRight, "selection menu right edge anchors to its button");
     assert.ok(selectionMenu.top >= selectionMenu.buttonBottom && selectionMenu.right <= selectionMenu.viewportWidth && selectionMenu.bottom <= selectionMenu.viewportHeight, `selection menu is visibly anchored below its button: ${JSON.stringify(selectionMenu)}`);
+    const batchDetectRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/detect" && request.method() === "POST");
     await page.locator('[data-selection-action="detect"]').click();
     await page.locator("#detectStartButton").click();
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    const postedDetectRequest = await batchDetectRequest;
+    assert.deepEqual(postedDetectRequest.postDataJSON().imageIds.sort(), ["sample", "sample-two"], "batch auto detect posts exactly the selected gallery ids");
     assert.equal(detectRequests.length, batchDetectBefore + 1, "batch auto detect sends exactly one request");
     assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");
     await page.evaluate(() => pollJob());
@@ -3804,11 +3807,8 @@ async function main() {
       });
       state.drafts.set("sample", draft("A")); state.drafts.set("sample-two", draft("B"));
       await selectImage("sample", true, { saveCurrentDraft: false });
-      await new Promise((resolve) => setTimeout(resolve, 25));
       await selectImage("sample-two", true, { saveCurrentDraft: false });
-      await new Promise((resolve) => setTimeout(resolve, 25));
       await selectImage("sample", true, { saveCurrentDraft: false });
-      await new Promise((resolve) => setTimeout(resolve, 25));
       const restoredHistory = state.history.length === 1 && state.historyIndex === 1;
       restoreSnapshot(0); const undo = state.historyIndex === 0;
       restoreSnapshot(1); const redo = state.historyIndex === 1;

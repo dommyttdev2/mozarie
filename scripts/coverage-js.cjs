@@ -8,6 +8,7 @@ const v8ToIstanbul = require("v8-to-istanbul");
 const { createCoverageMap } = require("istanbul-lib-coverage");
 const libReport = require("istanbul-lib-report");
 const reports = require("istanbul-reports");
+const { frontendTestArguments, frontendTestFiles } = require("./test-discovery.cjs");
 
 const root = path.resolve(__dirname, "..");
 const staticRoot = path.join(root, "static", "js");
@@ -16,10 +17,7 @@ const coverageRoot = requestedCoverageRoot ? path.resolve(requestedCoverageRoot)
 const nodeCoverageRoot = path.join(coverageRoot, "node");
 const nodeCoverageTemp = path.join(coverageRoot, "v8");
 const browserCoverageFile = path.join(coverageRoot, "browser-v8.json");
-const testFiles = fs.readdirSync(path.join(root, "tests"), { withFileTypes: true })
-  .filter((entry) => entry.isFile() && /^test_.*\.cjs$/.test(entry.name))
-  .map((entry) => path.join("tests", entry.name))
-  .sort();
+const testFiles = frontendTestFiles();
 
 function staticFiles(directory = staticRoot) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -40,10 +38,7 @@ function runNodeCoverage() {
     "--temp-directory", nodeCoverageTemp,
     "--clean",
     process.execPath,
-    "--test",
-    "--test-reporter=tap",
-    "--test-concurrency=4",
-    ...testFiles,
+    ...frontendTestArguments(testFiles),
   ], {
     cwd: root,
     env: {
@@ -51,9 +46,11 @@ function runNodeCoverage() {
       MOZARIE_JS_COVERAGE: "1",
       MOZARIE_BROWSER_COVERAGE_FILE: browserCoverageFile,
     },
-    stdio: "inherit",
+    encoding: "utf8",
   });
   if (result.error) throw result.error;
+  process.stdout.write(result.stdout || "");
+  process.stderr.write(result.stderr || "");
   assert.equal(result.status, 0, "the existing frontend and browser tests must pass before coverage is evaluated");
 }
 
@@ -131,4 +128,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { browserCoverageMap };
+module.exports = { browserCoverageMap, testFiles };

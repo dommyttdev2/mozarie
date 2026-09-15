@@ -20,6 +20,14 @@
 - モックはOS、GPU、ネットワーク、時計など外部境界に限る。製品内部を写経するモックではなく、公開された入力と出力を確認する。Nodeの`node:test`では各試験の`context.mock`を使い、試験終了時に自動復元される範囲で置換する。
 - 実GPU、実モデル、Windowsダイアログ、OS権限、実UNCはCI fixtureに置き換えない。該当する実機確認を残す。
 
+## AIにテストを依頼するときの指示
+
+AIには対象の利用者観測を一つずつ示し、初期状態、操作、成功時の不変条件、失敗時に保持する不変条件を指定する。実在のパス、画像形式、並列要求など、障害を再現する最小限で現実的なデータを使う。規則を確認できる最小の層を選び、OS、GPU、ネットワーク、時計などの外部境界だけをモックする。
+
+固定時間の待機、`skip`、`TODO`、文字列が含まれるだけの確認は作らない。ブラウザーでは locator、応答、状態遷移を待ち、fixtureは専用の一時状態で閉じる。追加したテストは、対象の変更を意図的に壊したときに失敗することを確認し、人が差分を読んでから採用する。coverageの数字を上げる目的でテストを増やさない。
+
+`tests/` 配下の `test_*.cjs` は再帰的に同じ順序で通常実行とcoverageへ渡す。Nodeの構造化テスト結果でSKIP/TODOが一件でも報告された実行は失敗にする。Windows専用のPython試験はWindows CIで実行するため、backendもskip 0件を要求する。
+
 ## 回帰境界
 
 次の境界が変わるときは、成功だけでなく失敗後の状態も検証する。
@@ -45,5 +53,7 @@ CIは隔離fixtureで実行できるテストを常に実行する。Playwright�
 - [Playwright best practices](https://playwright.dev/docs/best-practices)
 - [Playwright web-first assertions](https://playwright.dev/docs/test-assertions)
 - [GitHub ActionsでのPythonテスト](https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python)
+- [GitHub Copilotでテストを書く](https://docs.github.com/en/copilot/tutorials/write-tests)
+- [GitHub Copilot coding agentのテスト指示](https://docs.github.com/en/copilot/using-github-copilot/using-github-copilot-coding-agent-to-work-on-tasks/best-practices-for-using-copilot-coding-agent-to-work-on-tasks)
 - [Google Testing Blog: Code Coverage Best Practices](https://testing.googleblog.com/2020/08/code-coverage-best-practices.html)
 - [FileSystemFileHandle.getFile()](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/getFile)
