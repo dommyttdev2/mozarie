@@ -1394,7 +1394,7 @@ def _read_bool(value: Any, field_name: str) -> bool:
 
 
 def _read_client_save_token(value: Any) -> str:
-    if not isinstance(value, str) or not 20 <= len(value) <= 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in value):
+    if not isinstance(value, str) or not _is_canonical_uuid(value):
         raise ClientError("保存確認トークンが正しくありません。", "input_invalid")
     return value
 

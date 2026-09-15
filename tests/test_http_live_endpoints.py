@@ -240,11 +240,26 @@ class LiveHttpEndpointTests(unittest.TestCase):
         with Image.open(io.BytesIO(body)) as mask:
             self.assertEqual((mask.mode, mask.size), ("L", (12, 8)))
 
+    def test_save_reserve_requires_a_canonical_uuid_token(self) -> None:
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        status, _headers, body = self.request("POST", "/api/save/reserve", {
+            "imageId": image_id,
+            "candidateRevision": self.state._candidate_revision(image_id),
+            "clientSaveToken": "not-a-canonical-uuid",
+            "copyToDefault": False,
+            "format": "original",
+            "keepMetadata": True,
+        }, authorized=True)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error_code"], "input_invalid")
+
     def test_live_browser_save_render_streams_a_stable_image_response(self) -> None:
         status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         image_id = json.loads(body)["images"][0]["id"]
-        client_save_token = "live-browser-save-stream-token"
+        client_save_token = "00000000-0000-4000-8000-000000000001"
         status, _headers, body = self.request("POST", "/api/save/reserve", {
             "imageId": image_id,
             "candidateRevision": self.state._candidate_revision(image_id),

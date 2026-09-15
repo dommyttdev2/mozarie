@@ -31,6 +31,8 @@ const snapshotSourceHandle = new Function("codedError", `${functionSource("snaps
     "const sourceDelete = await deleteCopiedBrowserSource(sourceImage, saveToken);",
     "await restoreCopiedBrowserSourcesAfterRejectedDelete(pending)",
   ]) assert.ok(source.includes(marker), `${marker} must keep a browser copy/delete reversible until its separate receipt commits`);
+  assert.ok(source.includes("const parallelism = Math.min(save.entries.length, inputs.parallelism);"), "batch saves must use the user's configured parallelism up to the target count");
+  assert.ok(!source.includes("memoryWorkers"), "batch saves must not impose a hidden memory-worker cap");
   for (const endpoint of [
     "/api/catalog/delete-source",
     "/api/catalog/delete-source/prepare",
