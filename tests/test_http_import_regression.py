@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
+from http import HTTPStatus
 
 from PIL import Image
 
@@ -161,3 +162,17 @@ class FolderLoadLoggingContractTests(unittest.TestCase):
         for secret in (secret_id, secret_body, secret_header):
             self.assertNotIn(secret, success_log)
             self.assertNotIn(secret, failure_log)
+
+    def test_per_image_success_logs_are_suppressed_but_failures_are_safe_warnings(self) -> None:
+        secret = "save-token-and-body-secret"
+        for path in ("/api/import/file", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"):
+            operation = http_module._operation_log_spec("POST", path)
+            self.assertIsNotNone(operation)
+            with self.assertNoLogs("mozarie.core", "INFO"):
+                started = http_module._log_operation_started(operation, path, {"token": secret, "body": secret})
+                http_module._log_operation_finished(operation, started)
+            with self.assertLogs("mozarie.core", "WARNING") as warning_logs:
+                http_module._log_operation_failed(operation, started, HTTPStatus.BAD_REQUEST, ClientError(secret, "input_invalid"))
+            warning = "\n".join(warning_logs.output)
+            self.assertIn("status=400 error_code=input_invalid", warning)
+            self.assertNotIn(secret, warning)

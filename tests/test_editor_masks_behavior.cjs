@@ -124,7 +124,7 @@ const context = {
   releaseCandidateBitmap() {}, releaseCandidateBundles() {}, invalidateCandidateBundles: () => events.push("invalidate"), markImagesUnreviewed: () => events.push("unreview"),
   clearBoundaryInteraction: () => events.push("boundary-clear"), updateBoundaryActions() {}, setStatusKey: () => events.push("status"), showUserError: (error) => events.push(`error:${error}`),
   canDetectBoundary: () => true, compareEventSide: () => "right", compareSideOffset: () => 100, inverseTransformImagePoint: (point) => point,
-  flushWorkspaceDraft: async () => {}, applyProjectSnapshot() {}, selectImage: async () => {},
+  flushWorkspaceDraft: async () => {}, applyProjectSnapshot() {}, loadReviewedPaths() {}, invalidateMaskComposition() {}, codedError: (code) => ({ code }), selectImage: async () => {},
   boundaryRequests: () => [{ draft: state.boundaryDrafts[0], draftIds: ["draft"] }], pointForRoi: (roi) => ({ x: roi.left + 1, y: roi.top + 1 }),
   api: async () => ({ candidates: [{ id: "boundary", enabled: true }], candidateRevision: 8 }),
 };
@@ -260,9 +260,9 @@ assert.equal(state.manualMaskPresent, true);
 state.removedCandidateIds.add("apply");
 test.recordHistoryOperation({ kind: "removeCandidates", ids: ["apply"] });
 assert.equal(state.historyIndex, 2);
-test.restoreSnapshot(1);
+test.rebuildManualMaskFromHistory(1);
 assert.equal(state.removedCandidateIds.has("apply"), false, "undo rebuilds the candidate deletion state");
-test.restoreSnapshot(2);
+test.rebuildManualMaskFromHistory(2);
 assert.equal(state.removedCandidateIds.has("apply"), true, "redo replays the candidate deletion");
 assert.equal(test.buildCombinedMask(), "data:image/png;base64,mask");
 
@@ -293,13 +293,87 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
     state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkRoleModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
-    state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+    state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = false;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
     state.images = [{ id: "image", width: 100, height: 80, assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
     state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(["apply", "exclude"]);
     context.confirmationRequired = () => false; context.confirmAction = async () => true;
     context.isBusy = () => false; context.reconcileCurrentCandidates = async () => false;
   };
+
+  // Projectless undo keeps its cursor on the old snapshot while every server
+  // write is pending.  A failure after a partial write must reload the server
+  // state through a forced selection, even while restoration is marked busy.
+  const originalHistoryHooks = {
+    api: context.api, queueImageMutation: context.queueImageMutation, saveWorkspaceFlagNow: context.saveWorkspaceFlagNow,
+    saveDraft: context.saveDraft, flushWorkspaceDraft: context.flushWorkspaceDraft, selectImage: context.selectImage,
+    fetchBitmap: context.fetchBitmap, reconcileCatalogSnapshot: context.reconcileCatalogSnapshot,
+  };
+  const historyTarget = () => ({
+    manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: true,
+    reviewed: true, hidden: true, removedCandidateIds: [], candidates: [{ id: "apply", enabled: false, forced: true, expandPx: 4, color: "#abc" }],
+  });
+  const prepareProjectlessRestore = () => {
+    state.currentId = "image"; state.currentImage = { width: 100, height: 80 }; state.imageGeneration = 2; state.importing = false;
+    state.historyRestoreBusy = false; state.pendingImageId = null; state.project = null; state.drafts = new Map(); state.maskStatus = new Map();
+    state.images = [{ id: "image", width: 100, height: 80, assetVersion: "a", candidateRevision: 4, reviewed: false, hidden: false, flipH: true, flipV: false }];
+    state.candidates = [{ id: "apply", role: "apply", enabled: true, forced: false, expandPx: 8, color: "#fff" }];
+    state.candidateImages = new Map(); state.candidateUpdateVersions = new Map(); state.removedCandidateIds = new Set();
+    state.historyEditorState = historyTarget(); state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(["apply"]);
+    state.history = [{ kind: "transform", flipH: true, flipV: false }]; state.historyIndex = 1;
+  };
+  const runProjectlessRestore = async (failAt = null, holdQueue = false) => {
+    prepareProjectlessRestore();
+    const order = []; const serverRecord = { ...state.images[0] }; const serverCandidate = { ...state.candidates[0] };
+    let releaseQueue; const queueGate = holdQueue ? new Promise((resolve) => { releaseQueue = resolve; }) : Promise.resolve();
+    context.queueImageMutation = async (_imageId, action) => { order.push("queued"); await queueGate; return action(); };
+    context.saveWorkspaceFlagNow = async (_record, field, value) => {
+      order.push(`flag:${field}`); if (failAt === field) return false;
+      serverRecord[field] = value; return true;
+    };
+    context.api = async (path) => {
+      order.push(path);
+      if (path === "/api/images") return { images: [{ ...serverRecord }] };
+      if (path.endsWith("/transform")) {
+        if (failAt === "transform") throw new Error("transform failed");
+        serverRecord.flipH = false; return { image: { ...serverRecord } };
+      }
+      if (path.includes("/api/candidate/")) {
+        if (failAt === "candidate") throw new Error("candidate failed");
+        Object.assign(serverCandidate, { enabled: false, forced: true, expandPx: 4, color: "#abc" }); return { candidateRevision: 5 };
+      }
+      throw new Error(`unexpected ${path}`);
+    };
+    context.fetchBitmap = async () => ({ close() {} });
+    context.saveDraft = async (historyIndex) => { order.push(`draft:${historyIndex}`); if (failAt === "draft") throw new Error("draft failed"); };
+    context.flushWorkspaceDraft = async () => { order.push("flush"); };
+    context.reconcileCatalogSnapshot = () => false;
+    context.selectImage = async (imageId, force, options) => {
+      order.push("select"); assert.equal(imageId, "image"); assert.equal(force, true, "history resync bypasses the busy select guard"); assert.equal(options.saveCurrentDraft, false);
+      state.candidates = [{ ...serverCandidate }];
+    };
+    const pending = test.restoreSnapshot(0);
+    assert.equal(state.historyIndex, 1, "history position remains on the prior snapshot while queued persistence waits");
+    if (holdQueue) {
+      assert.equal(state.historyRestoreBusy, true, "the queued restore marks itself busy until the mutation begins");
+      assert.deepEqual(order, ["queued"], "no write begins before the image mutation queue releases");
+      releaseQueue();
+    }
+    await pending;
+    return { order, serverRecord, serverCandidate };
+  };
+  let restoreResult = await runProjectlessRestore(null, true);
+  assert.equal(state.historyIndex, 0, "history position commits only after all persistence has completed");
+  assert.deepEqual(restoreResult.order, ["queued", "flag:reviewed", "flag:hidden", "/api/images/image/transform", "/api/candidate/image/apply", "draft:0", "flush"], "projectless restore persists flags, transform, padding, draft, and flush in order");
+  for (const failedStep of ["reviewed", "hidden", "transform", "candidate", "draft"]) {
+    restoreResult = await runProjectlessRestore(failedStep);
+    assert.equal(state.historyIndex, 1, `${failedStep} failure leaves the previous history position selected`);
+    assert.ok(restoreResult.order.includes("/api/images"), `${failedStep} failure reloads the server snapshot`);
+    assert.ok(restoreResult.order.includes("select"), `${failedStep} failure force-selects the resynchronized image`);
+    assert.equal(JSON.stringify(state.images[0]), JSON.stringify(restoreResult.serverRecord), `${failedStep} failure leaves catalog state equal to the server`);
+    assert.equal(JSON.stringify(state.candidates[0]), JSON.stringify(restoreResult.serverCandidate), `${failedStep} failure leaves candidate state equal to the server`);
+  }
+  Object.assign(context, originalHistoryHooks);
 
   resetCandidateState();
   readCounts.clear(); batchPresences.length = 0;
@@ -540,7 +614,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.equal(state.history.length, 15, "durable project history keeps every operation");
   assert.equal(state.historyBaseDirty, true, "the initial base remains available for durable history");
   state.importing = true; test.restoreSnapshot(0); assert.equal(state.historyIndex, 15, "history restoration is blocked while importing");
-  state.importing = false; test.restoreSnapshot(0); assert.equal(state.historyIndex, 0, "history restoration rebuilds the active image state");
+  state.importing = false; test.rebuildManualMaskFromHistory(0); state.historyIndex = 0; assert.equal(state.historyIndex, 0, "history restoration rebuilds the active image state");
 
   // Exercise the actual controls rendered for manual and detected masks.  The
   // controls are deliberately tested through their click listeners because the

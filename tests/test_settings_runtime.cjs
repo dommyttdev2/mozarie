@@ -14,7 +14,7 @@ function element(id) {
       dataset: {}, options: [], parentElement: null,
       classList: { values: new Set(), add(value) { this.values.add(value); }, remove(value) { this.values.delete(value); }, toggle(value, enabled) { if (enabled) this.values.add(value); else this.values.delete(value); }, contains(value) { return this.values.has(value); } },
       append(option) { this.options.push(option); }, setAttribute(name, value) { attributes.set(name, value); }, removeAttribute(name) { attributes.delete(name); }, getAttribute(name) { return attributes.get(name) || null; },
-      closest() { return null; }, matches() { return false; }, contains() { return false; }, addEventListener() {}, focus() {},
+      closest() { return null; }, matches() { return false; }, contains() { return false; }, addEventListener() {}, focus() { this.focused = true; },
     });
   }
   return elements.get(id);
@@ -58,7 +58,7 @@ const context = {
     createElement() { return element(`generated-${elements.size}`); },
   },
   $: element,
-  t: (key) => key,
+  t: (key, params = {}) => params.field ? `${key}:${params.field}` : key,
   busy: false, modelsTabQuery: false,
   isBusy: () => context.busy,
   showModalFromInvoker(dialog, invoker) { context.modal = [dialog, invoker]; },
@@ -76,7 +76,7 @@ const context = {
   confirmAction: async () => true,
 };
 vm.runInNewContext(source, context, { filename: settingsPath });
-vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectedSamType,selectSamVariant,selectSettingsTab,moveSettingsTab,setToolRailTabStop,renderSettingsStatus,setSettingsForm,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,showUnsupportedModelDownload,modelDownloadConfirmation,startModelDownload,beginModelDownload,cancelModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent,gpuMemoryLabel,modelCardEnabled,setHandSegmentationAvailable,setPrecisionDetectionEnabled,setFluidExclusionEnabled,setFillColorTolerance,saveFillColorTolerance};", context, { filename: "test-settings-exports.js" });
+vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectedSamType,selectSamVariant,selectSettingsTab,moveSettingsTab,setToolRailTabStop,renderSettingsStatus,setSettingsForm,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,showUnsupportedModelDownload,modelDownloadConfirmation,startModelDownload,beginModelDownload,cancelModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent,gpuMemoryLabel,modelCardEnabled,setHandSegmentationAvailable,setPrecisionDetectionEnabled,setFluidExclusionEnabled,setFillColorTolerance,saveFillColorTolerance,validateAbsoluteSettingsPaths};", context, { filename: "test-settings-exports.js" });
 
 (async () => {
   assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: true, metaKey: false, shiftKey: true, altKey: true, key: "a" }), "Ctrl+Shift+Alt+A", "shortcut capture normalizes modifiers and single letters");
@@ -134,6 +134,7 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
 
   state.settings = { general: {}, models: { gpu_device: 0 }, display: {} };
   context.validateDetectionTargets = () => true;
+  element("#settingsSamModel").value = "";
   shortcutBindings.push(
     { dataset: { shortcutAction: "previous" }, value: "Ctrl+P" },
     { dataset: { shortcutAction: "next" }, value: "Ctrl+P" },
@@ -141,6 +142,25 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
   await context.settingsTest.saveSettings({ preventDefault() {} });
   assert.equal(errors.at(-1)[0].code, "input_invalid", "saving rejects duplicate shortcut bindings before sending settings");
 
+  shortcutBindings.length = 0;
+  element("#settingsDefaultOutputDirectory").value = "G:\\output";
+  for (const id of ["#settingsNtd11Model", "#settingsSensitiveModel", "#settingsSamModel", "#settingsHandModel", "#settingsHandSegmentationModel"]) element(id).value = "";
+  element("#settingsTargetModel").value = "models\\target.onnx";
+  let settingsPosts = 0;
+  context.api = async () => { settingsPosts += 1; return { settings: { general: { language: "ja", shortcuts_enabled: true }, display: { mosaic_preview: true } }, version: "v1" }; };
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(settingsPosts, 0, "a relative model path is rejected before settings are posted");
+  assert.equal(element("#settingsTargetModel").getAttribute("aria-invalid"), "true", "the relative model field is marked invalid");
+  assert.equal(element("#settingsTargetModel").focused, true, "the relative model field receives focus");
+  assert.equal(tabs[1].classList.contains("active"), true, "a model path error opens the Models settings tab");
+  assert.equal(element("#settingsResult").textContent, "settings.absolutePathRequired:settings.targetModel", "the inline error tells the user that the named field needs an absolute path");
+  element("#settingsTargetModel").value = "G:\\models\\target.onnx";
+  element("#settingsDefaultOutputDirectory").value = "relative-output";
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(element("#settingsDefaultOutputDirectory").getAttribute("aria-invalid"), "true", "the relative output folder field is marked invalid");
+  assert.equal(tabs[0].classList.contains("active"), true, "an output path error opens the General settings tab");
+
+  element("#settingsDefaultOutputDirectory").value = "";
   context.pickOutputDirectory = async () => { state.outputDirectoryHandle = { name: "output" }; return state.outputDirectoryHandle; };
   await context.settingsTest.chooseSettingsOutputDirectory();
   assert.equal(element("#settingsDefaultOutputDirectory").value, "", "choosing an output directory keeps the configured path separate from its browser-only handle");

@@ -1285,7 +1285,7 @@ function bindEvents() {
         }
       } else if (state.tool === "boundary_brush") {
         appendBoundaryBrushPoint(point);
-      } else { appendManualStrokePoint(state.hover); state.pointer = state.hover; }
+      } else { appendManualStrokePoint(point); state.pointer = point; }
     }
   };
   canvas.addEventListener("pointermove", (event) => {

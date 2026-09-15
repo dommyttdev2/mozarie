@@ -176,6 +176,23 @@ async function testBoundApplicationEvents() {
   state.processing = { kind: "import", state: "running" }; state.importSession = {}; await fire("#processingPauseButton", "click"); await fire("#processingPauseButton", "click");
   state.contextMenuImageId = "one"; await fire("#toggleReviewMenuItem", "click"); await fire("#removeImageMenuItem", "click"); state.contextMenuImageId = "missing"; await fire("#toggleReviewMenuItem", "click"); await fire("#removeImageMenuItem", "click"); await fire("#gallery", "dragenter", { dataTransfer: { types: [] } }); await fire("#gallery", "dragover", { dataTransfer: { types: [] } }); await canvas.listeners.get("pointerdown")(event({ button: 2 })); context.busy = true; await canvas.listeners.get("pointermove")(event()); context.busy = false; state.gestureDisplaySide = null; state.drawing = false; await canvas.listeners.get("pointermove")(event()); state.currentImage = null; await canvas.listeners.get("wheel")(event({ deltaY: 1 })); state.currentImage = { id: "one" }; await canvas.listeners.get("wheel")(event({ shiftKey: true, deltaY: 1 })); await canvas.listeners.get("wheel")(event({ shiftKey: false, deltaY: -1 }));
   state.tool = "brush"; await canvas.listeners.get("pointerdown")(event()); canvas.releasePointerCapture = () => { throw new Error("released"); }; await canvas.listeners.get("pointerup")(event()); canvas.releasePointerCapture = Element.prototype.releasePointerCapture;
+  state.currentImage = { id: "one", width: 10, height: 10 }; state.currentId = "one"; state.drawing = false; state.panning = false; state.activeStroke = null;
+  const editingTools = ["brush", "mosaic_eraser", "eraser", "exclude_eraser", "bucket", "exclude_bucket", "boundary", "polygon", "boundary_brush"];
+  for (const tool of editingTools) {
+    state.tool = tool; state.drawing = false; state.activeStroke = null; state.boundaryStart = null; state.polygonPoints = []; canvas.pointerId = null;
+    await canvas.listeners.get("pointerdown")(event({ clientX: -1, clientY: 5 }));
+    assert.equal(canvas.pointerId, null, `${tool} rejects a gesture that starts outside the image`);
+    assert.equal(state.drawing, false, `${tool} does not begin an outside-image gesture`);
+    assert.equal(state.polygonPoints.length, 0, `${tool} does not add an outside-image polygon point`);
+  }
+  const clampedPoints = [];
+  context.clampPoint = (point) => ({ x: Math.max(0, Math.min(10, point.x)), y: Math.max(0, Math.min(10, point.y)) });
+  context.appendManualStrokePoint = (point) => { clampedPoints.push(point); };
+  state.tool = "brush"; canvas.pointerId = null;
+  await canvas.listeners.get("pointerdown")(event({ clientX: 5, clientY: 5 }));
+  await canvas.listeners.get("pointermove")(event({ clientX: 20, clientY: 20, buttons: 1 }));
+  assert.deepEqual(clampedPoints.at(-1), { x: 10, y: 10 }, "a brush drag clamps an image-external move after an in-image start");
+  assert.deepEqual(state.pointer, { x: 10, y: 10 }, "the active brush pointer keeps the clamped image coordinate");
   element("#catalogContextMenu").open = true; document.activeElement = menuItems[0]; await keydown(event({ key: "Escape" }));
   assert.ok(calls.length > 40, "the listener matrix drives the page actions through DOM events");
 }
