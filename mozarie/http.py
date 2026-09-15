@@ -57,9 +57,9 @@ def _is_api_path(path: str) -> bool:
 
 
 _POST_OPERATION_LABELS = {
+    "/api/import/file": "ブラウザー画像の読み込み",
     "/api/import/start": "ブラウザー画像の読み込み開始",
     "/api/import/finish": "ブラウザー画像の読み込み確定",
-    "/api/import/cancel": "ブラウザー画像の読み込み取消",
     "/api/folder": "フォルダー読み込み",
     "/api/projects": "プロジェクト作成",
     "/api/project/name": "プロジェクト名変更",
@@ -92,6 +92,10 @@ _POST_OPERATION_LABELS = {
     "/api/update/start": "更新開始",
     "/api/boundary": "境界候補追加",
     "/api/save/prepare": "ブラウザー保存準備",
+    "/api/save/render": "ブラウザー保存レンダー",
+    "/api/save/commit": "ブラウザー保存確定",
+    "/api/save/status": "ブラウザー保存状態確認",
+    "/api/save/cancel": "ブラウザー保存取消",
     "/api/apply": "ファイル保存",
     "/api/job/pause": "バックグラウンド処理一時停止",
     "/api/job/resume": "バックグラウンド処理再開",
@@ -110,6 +114,15 @@ def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
         label = _POST_OPERATION_LABELS.get(path)
         if label is not None:
             return label, path
+        if path.startswith("/api/workspace/manual/"):
+            if "/layer/" in path:
+                return "手描きマスク転送", "/api/workspace/manual/layer"
+            if path.endswith("/begin"):
+                return "手描きマスク転送開始", "/api/workspace/manual/begin"
+            if path.endswith("/commit"):
+                return "手描きマスク転送確定", "/api/workspace/manual/commit"
+            if path.endswith("/cancel"):
+                return "手描きマスク転送取消", "/api/workspace/manual/cancel"
         if path.startswith("/api/project/history/"):
             return "プロジェクト履歴", "/api/project/history"
         if path.startswith("/api/workspace/image/"):
@@ -599,6 +612,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 finally:
                     STATE.end_import_transfer(import_session_id, succeeded=succeeded)
                 self._json(response)
+                _log_operation_finished(operation, operation_started_at)
                 return
             manual_parts = path.split("/")
             if len(manual_parts) == 8 and manual_parts[1:4] == ["api", "workspace", "manual"] and manual_parts[5] == "layer":
@@ -615,6 +629,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                        lambda: STATE.finish_manual_upload_layer(image_id, session_id, layer, content_length))
                 self._json({"ok": True})
+                _log_operation_finished(operation, operation_started_at)
                 return
             self._require_json_request()
             payload = self._read_json_body()
@@ -636,9 +651,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                                             "failed": bool(payload.get("failed", False)),
                                                             "cancelled": bool(payload.get("cancelled", False)),
                                                         }))
-            elif path == "/api/import/cancel":
-                self._json(STATE.cancel_import_session(str(payload.get("sessionId", "")), expected_project_id,
-                                                        expected_catalog_generation))
             elif path == "/api/folder":
                 _result, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,

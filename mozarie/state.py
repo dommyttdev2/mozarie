@@ -136,7 +136,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
         self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
-        # A claimed token is being committed outside ``lock``.  Expiry polling
+        # A claimed token is being committed outside ``lock``. A later prepare
         # must leave its already-written copy alone until the commit finishes.
         self.browser_save_claims: set[str] = set()
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
@@ -421,12 +421,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 del self._import_sessions[session_id]
                 return {"ok": True, "catalogGeneration": self.catalog_generation}
 
-    def cancel_import_session(self, session_id: str, owner_project_id: str | None,
-                              owner_catalog_generation: int) -> dict[str, int | bool]:
-        return self.finish_import_session(session_id, owner_project_id, owner_catalog_generation, {
-            "completed": 0, "failed": False, "cancelled": True,
-        })
-
     @staticmethod
     def _valid_manual_layer(value: Any) -> bool:
         return value in {"add", "exclusion", "exclusionErase"}
@@ -444,14 +438,21 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             self._assert_image_editable(image_id)
             if image_id not in self.images:
                 raise ClientError("画像が見つかりません。", "image_not_found")
-            existing = self._manual_uploads.pop(session_id, None)
-            if existing is not None:
-                shutil.rmtree(existing["directory"], ignore_errors=True)
+            stale_sessions = [
+                (stale_id, stale) for stale_id, stale in self._manual_uploads.items()
+                if stale["image_id"] == image_id and stale["catalog_id"] == self.catalog_id
+                and stale["catalog_generation"] == self.catalog_generation
+            ]
+            for stale_id, stale in stale_sessions:
+                self._manual_uploads.pop(stale_id, None)
+                shutil.rmtree(stale["directory"], ignore_errors=True)
+            if stale_sessions:
+                LOGGER.info("手描きマスク転送を放棄: 次の保存で置換 件数=%d", len(stale_sessions))
             directory = self.cache_dir / "manual-staging" / session_id
             directory.mkdir(parents=True, exist_ok=False)
             self._manual_uploads[session_id] = {
                 "image_id": image_id, "catalog_id": self.catalog_id, "catalog_generation": self.catalog_generation,
-                "layers": requested, "uploaded": set(), "directory": directory, "started_at": time.monotonic(),
+                "layers": requested, "uploaded": set(), "directory": directory, "started_at": time.monotonic(), "writing": None,
             }
         LOGGER.info("手描きマスク転送を開始: レイヤー=%d件", len(requested))
         return {"sessionId": session_id}
@@ -464,14 +465,18 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if (session is None or session["image_id"] != image_id or layer not in session["layers"]
                     or session["catalog_id"] != self.catalog_id or session["catalog_generation"] != self.catalog_generation):
                 raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
+            if session["writing"] is not None:
+                raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
+            session["writing"] = layer
             return session["directory"] / f"{layer}.png"
 
     def finish_manual_upload_layer(self, image_id: str, session_id: str, layer: str, byte_count: int) -> None:
         with self.lock:
             session = self._manual_uploads.get(session_id)
-            if session is None or session["image_id"] != image_id or layer not in session["layers"]:
+            if session is None or session["image_id"] != image_id or layer not in session["layers"] or session["writing"] != layer:
                 raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
             session["uploaded"].add(layer)
+            session["writing"] = None
         LOGGER.info("手描きマスク転送: レイヤー=%s bytes=%d", layer, byte_count)
 
     def commit_manual_upload(self, image_id: str, session_id: str, payload: dict[str, Any]) -> None:

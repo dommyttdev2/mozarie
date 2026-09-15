@@ -1717,10 +1717,16 @@ class CatalogMixin:
             if details.image_id == image_id:
                 self._discard_browser_save_token_unchecked(token)
 
-    def _discard_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
-        for token, receipt in tuple(self.browser_save_receipts.items()):
-            if receipt.image_id == image_id:
-                self.browser_save_receipts.pop(token, None)
+    def _replace_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
+        pending = [token for token, details in self.browser_save_tokens.items() if details.image_id == image_id]
+        if any(token in self.browser_save_claims for token in pending):
+            raise ClientError("保存の確定中です。完了後にもう一度実行してください。", "operation_in_progress")
+        if not pending:
+            return
+        for token in pending:
+            self._discard_browser_save_token_unchecked(token)
+        LOGGER.info("ブラウザー保存を置換: 未確定=%d件", len(pending))
+        self._unlink_browser_save_cleanup(self._take_browser_save_cleanup_unchecked())
 
     def _has_active_browser_save_for_image_unchecked(self, image_id: str) -> bool:
         return any(details.image_id == image_id for details in self.browser_save_tokens.values())
@@ -1745,7 +1751,7 @@ class CatalogMixin:
         output_format: str = "original", keep_metadata: bool = True,
     ) -> str:
         self._assert_request_catalog_expectation()
-        self._discard_browser_save_receipts_for_image_unchecked(record.image_id)
+        self._replace_browser_save_tokens_for_image_unchecked(record.image_id)
         token = secrets.token_urlsafe(32)
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,

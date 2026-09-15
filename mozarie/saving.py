@@ -407,7 +407,7 @@ class SavingMixin:
                 self._assert_image_editable(image_id)
                 token_details = self.browser_save_tokens.get(save_token)
                 if token_details is None:
-                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
+                    raise ClientError("保存確認トークンが無効または取消済みです。保存をやり直してください。", "save_state_changed")
                 if token_details.image_id != image_id or token_details.candidate_revision != revision:
                     raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                 if not token_allows_action(token_details):
@@ -426,7 +426,7 @@ class SavingMixin:
                     token_details = self.browser_save_tokens.get(save_token)
                     record = self.images.get(image_id)
                     if token_details is None:
-                        raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
+                        raise ClientError("保存確認トークンが無効または取消済みです。保存をやり直してください。", "save_state_changed")
                     if token_details.image_id != image_id or token_details.candidate_revision != revision:
                         raise ClientError("保存確認トークンが保存対象と一致しません。保存をやり直してください。", "save_state_changed")
                     if (record is None or token_details.transform_revision != record.transform_revision
@@ -444,9 +444,8 @@ class SavingMixin:
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
-                        # The expiry poll runs without ``import_lock``. Claim
-                        # first, then release in ExitStack's finally path so it
-                        # cannot delete a copy during this commit.
+                        # Claim first, then release in ExitStack's finally path
+                        # so a second prepare cannot replace this commit's copy.
                         self.browser_save_claims.add(save_token)
                         exit_stack.callback(self._release_browser_save_claim, save_token)
                         record_snapshot = replace(record)
