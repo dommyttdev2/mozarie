@@ -212,7 +212,10 @@ class SavingMixin:
         record = self.image_snapshot(image_id)
         if draft is None:
             draft = self.workspace_store.manual(image_id, self._encode_workspace_mask)
-        draft_masks = decode_draft_masks(draft, record.width, record.height)
+        try:
+            draft_masks = decode_draft_masks(draft, record.width, record.height)
+        except (MemoryError, OSError) as exc:
+            raise ClientError("保存用の手描きマスクを読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         manual_exclude_forced = draft_manual_exclusion_forced(draft, self.settings["detection"].get("exclude_forced_default", True))
         removed_candidate_ids = {str(value) for value in draft.get("removedCandidateIds", [])} if isinstance(draft, dict) else set()
         divisor = _read_mosaic_divisor(divisor)
@@ -275,6 +278,8 @@ class SavingMixin:
                                     replace=True,
                                 )
                         raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
+                    except (MemoryError, OSError) as exc:
+                        raise ClientError("保存用の検出マスクを読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
                     if candidate_mask.shape != shape:
                         raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
                     if candidate.role == CandidateRole.APPLY:

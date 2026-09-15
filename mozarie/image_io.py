@@ -25,22 +25,39 @@ from .runtime import directml_devices, runtime_backend
 
 
 _IMAGE_OPEN_LOCK = threading.RLock()
+_IMAGE_OPEN_DEPTH = 0
+_IMAGE_OPEN_PREVIOUS_LIMIT: int | None = None
 
 
 @contextmanager
 def open_image(source: Any):
     """Open one supported image with Pillow's process-wide pixel guard disabled."""
+    global _IMAGE_OPEN_DEPTH, _IMAGE_OPEN_PREVIOUS_LIMIT
     with _IMAGE_OPEN_LOCK:
-        previous_limit = Image.MAX_IMAGE_PIXELS
-        try:
-            Image.MAX_IMAGE_PIXELS = None
-            image = Image.open(source)
-        finally:
-            Image.MAX_IMAGE_PIXELS = previous_limit
+        if _IMAGE_OPEN_DEPTH == 0:
+            _IMAGE_OPEN_PREVIOUS_LIMIT = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = None
+        _IMAGE_OPEN_DEPTH += 1
+    try:
+        image = Image.open(source)
+    except BaseException:
+        with _IMAGE_OPEN_LOCK:
+            _IMAGE_OPEN_DEPTH -= 1
+            if _IMAGE_OPEN_DEPTH == 0:
+                Image.MAX_IMAGE_PIXELS = _IMAGE_OPEN_PREVIOUS_LIMIT
+                _IMAGE_OPEN_PREVIOUS_LIMIT = None
+        raise
     try:
         yield image
     finally:
-        image.close()
+        try:
+            image.close()
+        finally:
+            with _IMAGE_OPEN_LOCK:
+                _IMAGE_OPEN_DEPTH -= 1
+                if _IMAGE_OPEN_DEPTH == 0:
+                    Image.MAX_IMAGE_PIXELS = _IMAGE_OPEN_PREVIOUS_LIMIT
+                    _IMAGE_OPEN_PREVIOUS_LIMIT = None
 
 
 def _valid_color(value: str) -> bool:
@@ -481,6 +498,8 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
             if image.mode in {"L", "1"}:
                 return np.asarray(image.convert("L"), dtype=np.uint8)
             raise ClientError("The mask must include an alpha channel or be grayscale.", "input_invalid")
+    except MemoryError as exc:
+        raise ClientError("編集マスクを読み込めません。使用可能なメモリを確認してください。", "input_invalid") from exc
     except (OSError, UnidentifiedImageError) as exc:
         raise ClientError("編集マスクは有効なPNGではありません。", "input_invalid") from exc
 

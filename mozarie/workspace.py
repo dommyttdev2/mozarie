@@ -356,7 +356,7 @@ class WorkspaceStore:
                     return image.getchannel("A").point(lambda value: 255 if value else 0)
                 if image.mode in {"L", "1"}:
                     return image.convert("L").point(lambda value: 255 if value else 0)
-        except (OSError, UnidentifiedImageError) as exc:
+        except (MemoryError, OSError, UnidentifiedImageError) as exc:
             raise ValueError("workspace mask is not a PNG") from exc
         raise ValueError("workspace mask has no alpha or grayscale channel")
 
@@ -1772,29 +1772,32 @@ class WorkspaceStore:
         """Encode only the changed rectangle of a binary manual layer."""
         if before is None and after is None: return None
         if before == after: return None
-        source = before if before is not None else after
-        assert source is not None
-        with open_image(io.BytesIO(source)) as image: width, height = image.size
-        if roi is None:
-            left, top, right, bottom = 0, 0, width, height
-        else:
-            left, top, right, bottom = roi
-            if right > width or bottom > height:
-                raise ValueError("workspace manual dirty region is invalid")
-        def pixels(raw: bytes | None) -> np.ndarray:
-            if raw is None: return np.zeros((bottom - top, right - left), dtype=np.uint8)
-            with open_image(io.BytesIO(raw)) as image:
-                if image.size != (width, height):
-                    raise ValueError("workspace manual mask dimensions are invalid")
-                return np.asarray(image.crop((left, top, right, bottom)).convert("L"), dtype=np.uint8) > 0
-        changed = np.logical_xor(pixels(before), pixels(after))
-        ys, xs = np.where(changed)
-        if not len(xs): return {"existsBefore": before is not None, "existsAfter": after is not None, "box": None}
-        changed_left, changed_right = left + int(xs.min()), left + int(xs.max()) + 1
-        changed_top, changed_bottom = top + int(ys.min()), top + int(ys.max()) + 1
-        output = io.BytesIO(); Image.fromarray(changed[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.uint8) * 255).save(output, format="PNG")
-        return {"existsBefore": before is not None, "existsAfter": after is not None,
-                "box": [changed_left, changed_top, changed_right - changed_left, changed_bottom - changed_top], "png": base64.b64encode(output.getvalue()).decode("ascii"), "size": [width, height]}
+        try:
+            source = before if before is not None else after
+            assert source is not None
+            with open_image(io.BytesIO(source)) as image: width, height = image.size
+            if roi is None:
+                left, top, right, bottom = 0, 0, width, height
+            else:
+                left, top, right, bottom = roi
+                if right > width or bottom > height:
+                    raise ValueError("workspace manual dirty region is invalid")
+            def pixels(raw: bytes | None) -> np.ndarray:
+                if raw is None: return np.zeros((bottom - top, right - left), dtype=np.uint8)
+                with open_image(io.BytesIO(raw)) as image:
+                    if image.size != (width, height):
+                        raise ValueError("workspace manual mask dimensions are invalid")
+                    return np.asarray(image.crop((left, top, right, bottom)).convert("L"), dtype=np.uint8) > 0
+            changed = np.logical_xor(pixels(before), pixels(after))
+            ys, xs = np.where(changed)
+            if not len(xs): return {"existsBefore": before is not None, "existsAfter": after is not None, "box": None}
+            changed_left, changed_right = left + int(xs.min()), left + int(xs.max()) + 1
+            changed_top, changed_bottom = top + int(ys.min()), top + int(ys.max()) + 1
+            output = io.BytesIO(); Image.fromarray(changed[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.uint8) * 255).save(output, format="PNG")
+            return {"existsBefore": before is not None, "existsAfter": after is not None,
+                    "box": [changed_left, changed_top, changed_right - changed_left, changed_bottom - changed_top], "png": base64.b64encode(output.getvalue()).decode("ascii"), "size": [width, height]}
+        except (MemoryError, OSError, UnidentifiedImageError) as exc:
+            raise ValueError("workspace manual mask cannot be decoded") from exc
 
     @classmethod
     def _manual_delta(cls, before: dict[str, Any], after: dict[str, Any], rois: dict[str, tuple[int, int, int, int]] | None = None) -> dict[str, Any]:
@@ -1814,21 +1817,24 @@ class WorkspaceStore:
         width, height = size; left, top, box_width, box_height = box
         if left + box_width > width or top + box_height > height:
             raise ValueError("workspace history is invalid")
-        if raw is None: canvas = np.zeros((height, width), dtype=np.uint8)
-        else:
-            with open_image(io.BytesIO(raw)) as image:
-                if image.size != (width, height):
-                    raise ValueError("workspace history is invalid")
-                canvas = (np.asarray(image.convert("L"), dtype=np.uint8) > 0).astype(np.uint8) * 255
-        delta = WorkspaceStore._unpack_blob(encoded)
-        WorkspaceStore._require_png_mask(delta)
-        assert delta is not None
-        with open_image(io.BytesIO(delta)) as image: region = (np.asarray(image.convert("L"), dtype=np.uint8) > 0)
-        if region.shape != (box_height, box_width):
-            raise ValueError("workspace history is invalid")
-        canvas[top:top + box_height, left:left + box_width] ^= region.astype(np.uint8) * 255
-        if not target_exists: return None
-        output = io.BytesIO(); Image.fromarray(canvas).save(output, format="PNG"); return output.getvalue()
+        try:
+            if raw is None: canvas = np.zeros((height, width), dtype=np.uint8)
+            else:
+                with open_image(io.BytesIO(raw)) as image:
+                    if image.size != (width, height):
+                        raise ValueError("workspace history is invalid")
+                    canvas = (np.asarray(image.convert("L"), dtype=np.uint8) > 0).astype(np.uint8) * 255
+            delta = WorkspaceStore._unpack_blob(encoded)
+            WorkspaceStore._require_png_mask(delta)
+            assert delta is not None
+            with open_image(io.BytesIO(delta)) as image: region = (np.asarray(image.convert("L"), dtype=np.uint8) > 0)
+            if region.shape != (box_height, box_width):
+                raise ValueError("workspace history is invalid")
+            canvas[top:top + box_height, left:left + box_width] ^= region.astype(np.uint8) * 255
+            if not target_exists: return None
+            output = io.BytesIO(); Image.fromarray(canvas).save(output, format="PNG"); return output.getvalue()
+        except (MemoryError, OSError, UnidentifiedImageError) as exc:
+            raise ValueError("workspace history mask cannot be decoded") from exc
 
     @staticmethod
     def _history_candidate_ids(state: dict[str, Any]) -> set[str]:
