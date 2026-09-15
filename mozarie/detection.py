@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
