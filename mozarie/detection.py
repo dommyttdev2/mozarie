@@ -1033,8 +1033,8 @@ class DetectionMixin:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     try:
                         path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                    except OSError as cleanup_exc:
+                        LOGGER.warning("Could not remove failed boundary mask %s: %s", path, cleanup_exc)
 
             try:
                 for item, candidate_mask in zip(created, masks):
