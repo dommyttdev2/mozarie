@@ -359,10 +359,19 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     LOGGER.info("ブラウザー画像読込を開始: 対象=%d件 要求並列=%d 実効並列=%d", target_count, requested_parallelism, effective_parallelism)
                 elif session["project_id"] != expected_project_id or session["generation"] != expected_catalog_generation:
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
+                elif (session["requested_parallelism"] != requested_parallelism
+                      or session["target_count"] != target_count):
+                    raise ClientError("画像追加セッションの並列数が一致しません。", "input_invalid")
                 elif session["finish_requested"]:
                     raise ClientError("画像追加セッションは完了しています。", "operation_in_progress")
                 elif self.catalog_id != expected_project_id or (session["active"] == 0 and self.catalog_generation != session["last_generation"]):
                     raise ClientError("プロジェクト一覧が更新されました。もう一度操作してください。", "stale_catalog")
+                elif session["active"] >= session["effective_parallelism"]:
+                    # The browser starts no more than its advertised worker
+                    # count. A mismatched or stale client must not turn the
+                    # informational value in CMD into an unbounded server
+                    # transfer count.
+                    raise ClientError("画像追加の同時処理数を超えています。", "operation_in_progress")
                 session["active"] += 1
                 session["touched"] = time.monotonic()
                 self.active_import_count += 1
