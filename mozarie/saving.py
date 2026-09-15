@@ -92,21 +92,16 @@ class SavingMixin:
     def _file_identity(self, path: Path, stat: os.stat_result) -> str | None:
         return self.save_journal.file_identity(path, stat)
 
-    def _publish_staged_copy(self, token: str, staged: Path, destination: Path) -> tuple[str | None, str] | None:
-        """Exclusively create the final name and retain its ownership receipt."""
+    def _publish_staged_copy(self, token: str, staged: Path, destination: Path,
+                             staged_fingerprint: tuple[int, int]) -> tuple[str | None, tuple[int, int]] | None:
+        """Publish one exclusive final and retain the identity of that exact file."""
         if os.name == "nt":
-            # The stage already lives under destination/.mozarie-staging, so
-            # Windows RenameFile is an atomic same-volume publish and refuses
-            # an existing target.  No partially copied final name is visible.
-            try: os.rename(staged, destination)
-            except FileExistsError: return None
-            identity = self._file_identity(destination, destination.stat())
-            self.save_journal.placeholder(token, identity)
-            return identity, ""
+            identity = self.save_journal.publish_staged_windows(token, staged, destination)
+            return (identity, staged_fingerprint) if identity is not None else None
         try:
-            # O_EXCL maps to CREATE_NEW on Windows and works without hard-link
-            # support on UNC, SMB and FAT volumes.  Persist the file identity
-            # before copying so restart cleanup can only touch our own file.
+            # O_EXCL maps to CREATE_NEW on filesystems without a link-based
+            # no-clobber primitive.  Keep the descriptor's identity and final
+            # fingerprint; the path is checked once after close below.
             with destination.open("xb") as target, staged.open("rb") as source:
                 identity = self._file_identity(destination, os.fstat(target.fileno()))
                 self.save_journal.placeholder(token, identity)
@@ -114,7 +109,8 @@ class SavingMixin:
                     target.write(chunk)
                 target.flush()
                 os.fsync(target.fileno())
-            return identity, ""
+                stat = os.fstat(target.fileno())
+            return identity, (stat.st_mtime_ns, stat.st_size)
         except FileExistsError:
             return None
 
@@ -506,7 +502,6 @@ class SavingMixin:
         source_stage = None
         quarantine_path: Path | None = None
         published_output: tuple[Path, tuple[int, int], str | None] | None = None
-        expired_token = False
         source_delete_pending = False
 
         def token_allows_action(details: BrowserSaveToken) -> bool:
@@ -571,9 +566,7 @@ class SavingMixin:
                     if not token_allows_action(token_details):
                         raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
-                    if expired_token:
-                        pass
-                    elif catalog_invalid:
+                    if catalog_invalid:
                         self._discard_browser_save_token_unchecked(save_token)
                         cleanup_paths = self._take_browser_save_cleanup_unchecked()
                     elif self._has_active_worker():
@@ -590,9 +583,6 @@ class SavingMixin:
                         # source I/O; retain its token until the DB commit so a
                         # failed commit can be retried safely.
 
-                if expired_token:
-                    self._unlink_browser_save_cleanup(cleanup_paths)
-                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if catalog_invalid:
                     self._unlink_browser_save_cleanup(cleanup_paths)
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
@@ -603,25 +593,26 @@ class SavingMixin:
                         if token_details.output_fingerprint is None or (staged_stat.st_mtime_ns, staged_stat.st_size) != token_details.output_fingerprint:
                             raise ClientError("保存先の準備が変更されました。保存をやり直してください。", "save_state_changed")
                         self.save_journal.phase(save_token, "publishing")
-                        publication = self._publish_staged_copy(save_token, token_details.output_path, token_details.output_destination)
+                        staged_fingerprint = (staged_stat.st_mtime_ns, staged_stat.st_size)
+                        publication = self._publish_staged_copy(save_token, token_details.output_path, token_details.output_destination, staged_fingerprint)
                         if publication is None:
                             replacement = self._reassign_output_destination(token_details.output_destination)
                             token_details = replace(token_details, output_destination=replacement)
                             with self.lock:
                                 self.browser_save_tokens[save_token] = token_details
                             self.save_journal.destination(save_token, replacement)
-                            publication = self._publish_staged_copy(save_token, token_details.output_path, replacement)
+                            publication = self._publish_staged_copy(save_token, token_details.output_path, replacement, staged_fingerprint)
                             if publication is None:
                                 raise ClientError("同名ファイルが追加されました。保存をやり直してください。", "save_state_changed")
-                        token_details.output_path.unlink(missing_ok=True)
+                        identity, destination_fingerprint = publication
                         try:
-                            token_details.output_path.parent.rmdir()
-                        except OSError:
-                            pass
-                        destination_stat = token_details.output_destination.stat()
-                        identity, _digest = publication
-                        published_output = (token_details.output_destination, (destination_stat.st_mtime_ns, destination_stat.st_size), identity)
-                        self.save_journal.published(save_token, published_output[1], identity)
+                            current_identity = self._file_identity(token_details.output_destination, token_details.output_destination.stat())
+                        except OSError as exc:
+                            raise ClientError("保存先の出力が変更されました。保存をやり直してください。", "save_state_changed") from exc
+                        if identity is None or current_identity != identity:
+                            raise ClientError("保存先の出力が変更されました。保存をやり直してください。", "save_state_changed")
+                        published_output = (token_details.output_destination, destination_fingerprint, identity)
+                        self.save_journal.published(save_token, destination_fingerprint, identity)
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
                         source_stage = _stage_record_replacement(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)

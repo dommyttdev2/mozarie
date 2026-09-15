@@ -30,6 +30,7 @@ from .domain import Candidate, CandidateRole
 from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, open_image, oriented_image_size, unique_session_import_destination
 from .masks import compose_masks, expand_mask, union_mask
 from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
+from .save_journal import SaveJournal
 from .workspace import ProjectNameAlreadyExistsError, ProjectSourceNoMatchError, ProjectSourcePathConflictError, ProjectSourceUnavailableError, WorkspaceStore, native_source_identity
 
 class CatalogMixin:
@@ -1159,21 +1160,26 @@ class CatalogMixin:
                         raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "stale_catalog")
                     if any(self.images.get(image_id) is not record for image_id, record in records.items()):
                         raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "stale_catalog")
-                    prepared: list[str] = []; failures: list[dict[str, str]] = []
+                    prepared: list[str] = []; failures: list[dict[str, str]] = []; items: list[dict[str, Any]] = []
                     for image_id, record in records.items():
                         if record is None:
                             failures.append({"imageId": image_id, "reason": "image_not_found"}); continue
+                        identity = None
                         if record.source_kind == "filesystem":
                             try: stat = record.path.stat()
                             except OSError:
                                 failures.append({"imageId": image_id, "reason": "source_unavailable"}); continue
                             if (stat.st_mtime_ns, stat.st_size) != (record.mtime_ns, record.size_bytes):
                                 failures.append({"imageId": image_id, "reason": "source_changed"}); continue
+                            identity = SaveJournal.file_identity(record.path, stat)
+                            if identity is None:
+                                failures.append({"imageId": image_id, "reason": "source_unavailable"}); continue
                         prepared.append(image_id)
-                    items = [{"imageId": image_id, "sourceKind": records[image_id].source_kind,
-                              "relativePath": records[image_id].relative_path, "sourcePath": str(records[image_id].path),
-                              "mtimeNs": records[image_id].mtime_ns, "sizeBytes": records[image_id].size_bytes}
-                             for image_id in prepared]
+                        item = {"imageId": image_id, "sourceKind": record.source_kind,
+                                "relativePath": record.relative_path, "sourcePath": str(record.path),
+                                "mtimeNs": record.mtime_ns, "sizeBytes": record.size_bytes}
+                        if identity is not None: item["fileIdentity"] = identity
+                        items.append(item)
                     try:
                         self.workspace_store.prepare_source_delete(delete_token, catalog_id, workspace_id, generation, requested_ids, items, failures)
                     except ValueError as exc:
@@ -1252,7 +1258,10 @@ class CatalogMixin:
         except OSError as exc: return source, quarantine, f"quarantine_unavailable:{type(exc).__name__}"
         try: fingerprint = (int(plan.get("mtimeNs", -1)), int(plan.get("sizeBytes", -1)))
         except (TypeError, ValueError): return source, quarantine, "quarantine_fingerprint_invalid"
-        if (stat.st_mtime_ns, stat.st_size) != fingerprint:
+        identity = plan.get("fileIdentity")
+        if not isinstance(identity, str) or not identity:
+            return source, quarantine, "quarantine_identity_invalid"
+        if (stat.st_mtime_ns, stat.st_size) != fingerprint or SaveJournal.file_identity(quarantine, stat) != identity:
             return source, quarantine, "quarantine_changed"
         return source, quarantine, None
 
@@ -1267,7 +1276,8 @@ class CatalogMixin:
                 if (str(item.get("imageId", "")) == str(plan.get("imageId", ""))
                         and str(item.get("sourceKind", "")) == "filesystem"
                         and str(item.get("sourcePath", "")) == str(plan.get("sourcePath", ""))
-                        and int(item.get("mtimeNs", -1)) == plan_mtime and int(item.get("sizeBytes", -1)) == plan_size):
+                        and int(item.get("mtimeNs", -1)) == plan_mtime and int(item.get("sizeBytes", -1)) == plan_size
+                        and str(item.get("fileIdentity", "")) == str(plan.get("fileIdentity", ""))):
                     return True
             except (TypeError, ValueError):
                 continue
@@ -1296,7 +1306,8 @@ class CatalogMixin:
                 try: stat = record.path.stat()
                 except OSError:
                     failures.append({"imageId": image_id, "reason": "source_unavailable"}); continue
-                if (stat.st_mtime_ns, stat.st_size) != (int(item["mtimeNs"]), int(item["sizeBytes"])):
+                if ((stat.st_mtime_ns, stat.st_size) != (int(item["mtimeNs"]), int(item["sizeBytes"]))
+                        or SaveJournal.file_identity(record.path, stat) != item.get("fileIdentity")):
                     failures.append({"imageId": image_id, "reason": "source_changed"}); continue
             elif image_id not in browser_deleted:
                 failures.append({"imageId": image_id, "reason": "browser_source_not_deleted"}); continue
@@ -1305,8 +1316,10 @@ class CatalogMixin:
         native_records = [record for record in removable if record.source_kind == "filesystem"]
         plans = [{"imageId": record.image_id, "relativePath": record.relative_path, "sourcePath": str(record.path),
                   "mtimeNs": record.mtime_ns, "sizeBytes": record.size_bytes,
+                  "fileIdentity": str(items[record.image_id].get("fileIdentity", "")),
                   "quarantinePath": str(record.path.with_name(f".{record.path.name}.mozarie-delete-{uuid.uuid4().hex}"))}
                  for record in native_records]
+        plan_by_image = {str(plan["imageId"]): plan for plan in plans}
         if plans:
             renaming = {"plannedQuarantines": plans, "renamedImageIds": [], "failed": failures,
                         "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
@@ -1315,8 +1328,7 @@ class CatalogMixin:
         for record in removable:
             if record.source_kind != "filesystem": confirmed.append(record); continue
             quarantine = plan_paths[record.image_id]
-            try: os.replace(record.path, quarantine)
-            except OSError:
+            if not SaveJournal.rename_windows_verified(record.path, quarantine, str(plan_by_image[record.image_id]["fileIdentity"]), (int(plan_by_image[record.image_id]["mtimeNs"]), int(plan_by_image[record.image_id]["sizeBytes"]))):
                 failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); continue
             renamed.append((record, quarantine)); confirmed.append(record)
             progress = {"plannedQuarantines": plans, "renamedImageIds": [current.image_id for current, _path in renamed], "failed": failures,
@@ -1334,7 +1346,7 @@ class CatalogMixin:
             try:
                 durable_result = {"removedImageIds": [record.image_id for record in confirmed] + durable_only_ids, "failed": failures,
                                   "state": "workspace_committed", "quarantinePaths": [str(path) for _record, path in renamed],
-                                  "quarantinePlans": [planned[record.image_id] for record, _path in renamed],
+                                  "quarantinePlans": [plan_by_image[record.image_id] for record, _path in renamed],
                                   "quarantineRelativePaths": {str(path): record.relative_path for record, path in renamed}}
                 removed = self.remove_images_from_catalog([record.image_id for record in confirmed], source_delete_token=delete_token,
                                                           source_delete_result=durable_result, source_delete_extra_ids=durable_only_ids)
@@ -1349,20 +1361,18 @@ class CatalogMixin:
                                    "catalogGeneration": self.catalog_generation}
                 else:
                     restore_conflicts: list[dict[str, str]] = []
-                    planned = {str(plan["imageId"]): plan for plan in plans}
                     for record, _quarantine in reversed(renamed):
-                        source, quarantine, reason = self._valid_source_delete_quarantine(planned[record.image_id])
+                        source, quarantine, reason = self._valid_source_delete_quarantine(plan_by_image[record.image_id])
                         if reason is not None or source is None or quarantine is None:
                             restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
                                                       "reason": reason or "quarantine_path_invalid"}); continue
                         if source.exists():
                             restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
                                                       "reason": "source_restore_conflict"}); continue
-                        try: os.replace(quarantine, source)
-                        except OSError as restore_error:
+                        if not SaveJournal.rename_windows_verified(quarantine, source, str(plan_by_image[record.image_id]["fileIdentity"]), (int(plan_by_image[record.image_id]["mtimeNs"]), int(plan_by_image[record.image_id]["sizeBytes"]))):
                             restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
                                                       "reason": "source_restore_failed"})
-                            LOGGER.warning("元画像の削除復元に失敗: 対象=%s 理由=%s", record.relative_path, restore_error)
+                            LOGGER.warning("元画像の削除復元に失敗: 対象=%s", record.relative_path)
                     if restore_conflicts:
                         collision = {"removedImageIds": [], "failed": restore_conflicts, "state": "restore_conflict",
                                      "recoveryConflicts": restore_conflicts, "plannedQuarantines": plans, "quarantinePaths": [], "cleanupPendingCount": len(restore_conflicts)}
@@ -1377,19 +1387,17 @@ class CatalogMixin:
             removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
         removed_ids = set(removed["removedImageIds"]); cleanup_paths: list[str] = []
         cleanup_conflicts: list[dict[str, str]] = []
-        planned = {str(plan["imageId"]): plan for plan in plans}
         for record, quarantine in renamed:
             if record.image_id not in removed_ids: continue
-            _source, verified_quarantine, reason = self._valid_source_delete_quarantine(planned[record.image_id])
+            _source, verified_quarantine, reason = self._valid_source_delete_quarantine(plan_by_image[record.image_id])
             if reason is not None or verified_quarantine is None:
                 cleanup_paths.append(str(quarantine))
                 cleanup_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
                                           "reason": reason or "quarantine_path_invalid"})
                 LOGGER.warning("元画像削除の後処理を保留: 対象=%s 理由=%s", record.relative_path, reason)
                 continue
-            try: quarantine.unlink()
-            except OSError as exc:
-                LOGGER.warning("元画像削除の後処理を保留: 対象=%s 理由=%s", record.relative_path, exc)
+            if not SaveJournal.delete_windows_verified(quarantine, str(plan_by_image[record.image_id]["fileIdentity"])):
+                LOGGER.warning("元画像削除の後処理を保留: 対象=%s", record.relative_path)
                 cleanup_paths.append(str(quarantine))
         result = {**removed, "failed": failures, "prepareFailures": (operation.get("result") or {}).get("prepareFailures", []),
                   "state": "cleanup_pending" if cleanup_paths else "committed",
@@ -1482,11 +1490,10 @@ class CatalogMixin:
                 if source.exists():
                     conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
                                       "reason": "source_restore_conflict"}); continue
-                try: os.replace(quarantine, source)
-                except OSError as exc:
+                if not SaveJournal.rename_windows_verified(quarantine, source, str(plan.get("fileIdentity", "")), (int(plan.get("mtimeNs", -1)), int(plan.get("sizeBytes", -1)))):
                     conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
                                       "reason": "source_restore_failed"})
-                    LOGGER.warning("元画像削除の名前変更を復元できません: 対象=%s 理由=%s", relative_path, exc)
+                    LOGGER.warning("元画像削除の名前変更を復元できません: 対象=%s", relative_path)
             if conflicts:
                 result = {"removedImageIds": [], "failed": conflicts, "state": "restore_conflict", "recoveryConflicts": conflicts,
                           "plannedQuarantines": plans, "quarantinePaths": [], "cleanupPendingCount": len(conflicts)}
@@ -1521,11 +1528,9 @@ class CatalogMixin:
                     conflicts.append({"relativePath": names.get(raw_path, Path(raw_path).name), "reason": conflict_reason})
                     LOGGER.warning("元画像削除の後処理を再試行しません: 対象=%s 理由=%s", names.get(raw_path, Path(raw_path).name), conflict_reason)
                     continue
-                try:
-                    quarantine.unlink(missing_ok=True)
-                except OSError as exc:
+                if not SaveJournal.delete_windows_verified(quarantine, str(plan.get("fileIdentity", ""))):
                     remaining.append(raw_path)
-                    LOGGER.warning("元画像削除の後処理を再試行できません: 対象=%s 理由=%s", names.get(raw_path, Path(raw_path).name), exc)
+                    LOGGER.warning("元画像削除の後処理を再試行できません: 対象=%s", names.get(raw_path, Path(raw_path).name))
             if operation is None:
                 continue
             result = dict(operation.get("result") or {})

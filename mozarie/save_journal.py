@@ -258,6 +258,31 @@ class SaveJournal:
         ctypes.memmove(ctypes.addressof(buffer) + FileRenameInfo.name.offset, encoded + b"\0\0", info.name_length + 2)
         return bool(set_info(wintypes.HANDLE(handle), 3, ctypes.byref(buffer), size))
 
+    def publish_staged_windows(self, token: str, staged: Path, destination: Path) -> str | None:
+        """Publish a stage through the same verified handle that names it."""
+        if os.name != "nt":
+            return None
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        create.restype = wintypes.HANDLE
+        close = kernel32.CloseHandle; close.argtypes = [wintypes.HANDLE]; close.restype = wintypes.BOOL
+        # Keep DELETE unshared until both rename and journal ownership record
+        # finish, so a replacement cannot slip into that interval.
+        handle = create(str(staged), 0x10080, 0x3, None, 3, 0x80, None)
+        if handle == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            identity = self._windows_handle_identity(handle)
+            if identity is None or not self._rename_windows_handle(handle, destination, identity):
+                return None
+            self.placeholder(token, identity)
+            return identity
+        finally:
+            close(handle)
+
     @classmethod
     def _rename_windows_owned(cls, quarantine: Path, source: Path, identity: str) -> bool:
         import ctypes
@@ -272,6 +297,56 @@ class SaveJournal:
             return ctypes.get_last_error() == 2
         try: return cls._rename_windows_handle(handle, source, identity)
         finally: close(handle)
+
+    @staticmethod
+    def _windows_handle_fingerprint(handle: int) -> tuple[int, int] | None:
+        if os.name != "nt":
+            return None
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [("attributes", wintypes.DWORD), ("created", wintypes.FILETIME),
+                        ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
+                        ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                        ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                        ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+        get_info = kernel32.GetFileInformationByHandle
+        get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+        get_info.restype = wintypes.BOOL
+        info = ByHandleFileInformation()
+        if not get_info(wintypes.HANDLE(handle), ctypes.byref(info)):
+            return None
+        ticks = (int(info.written.dwHighDateTime) << 32) | int(info.written.dwLowDateTime)
+        return ((ticks - 116444736000000000) * 100, (int(info.size_high) << 32) | int(info.size_low))
+
+    @classmethod
+    def rename_windows_verified(cls, source: Path, destination: Path, identity: str,
+                                fingerprint: tuple[int, int]) -> bool:
+        """Rename only the source held by a handle matching its prepared metadata."""
+        if os.name != "nt":
+            return False
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        create.restype = wintypes.HANDLE
+        close = kernel32.CloseHandle; close.argtypes = [wintypes.HANDLE]; close.restype = wintypes.BOOL
+        handle = create(str(source), 0x10080, 0x3, None, 3, 0x80, None)
+        if handle == wintypes.HANDLE(-1).value:
+            return False
+        try:
+            return (cls._windows_handle_identity(handle) == identity
+                    and cls._windows_handle_fingerprint(handle) == fingerprint
+                    and cls._rename_windows_handle(handle, destination, identity))
+        finally:
+            close(handle)
+
+    @classmethod
+    def delete_windows_verified(cls, target: Path, identity: str) -> bool:
+        """Delete only the file currently held by its verified Windows handle."""
+        return os.name == "nt" and cls._delete_windows_owned(target, identity)
 
     def quarantine_source(self, token: str, source: Path, quarantine: Path) -> bool:
         """Atomically move a verified Windows source into its journaled quarantine."""

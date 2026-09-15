@@ -182,6 +182,23 @@ class SaveRecoveryTests(unittest.TestCase):
             del journal
             gc.collect()
 
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows source delete identity contract")
+    def test_verified_source_rename_rejects_same_fingerprint_replacement(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); source = root / "source.png"; quarantine = root / ".source.png.mozarie-delete-token"
+            source.write_bytes(b"owned!")
+            expected_stat = source.stat(); expected_identity = SaveJournal.file_identity(source, expected_stat)
+            self.assertTrue(SaveJournal.rename_windows_verified(source, quarantine, str(expected_identity), (expected_stat.st_mtime_ns, expected_stat.st_size)))
+            self.assertTrue(SaveJournal.rename_windows_verified(quarantine, source, str(expected_identity), (expected_stat.st_mtime_ns, expected_stat.st_size)))
+            foreign = root / "foreign.png"; foreign.write_bytes(b"alien!")
+            __import__("os").utime(foreign, ns=(expected_stat.st_atime_ns, expected_stat.st_mtime_ns))
+            foreign.replace(source)
+            replaced_stat = source.stat()
+            self.assertEqual((replaced_stat.st_mtime_ns, replaced_stat.st_size), (expected_stat.st_mtime_ns, expected_stat.st_size))
+            self.assertFalse(SaveJournal.rename_windows_verified(source, quarantine, str(expected_identity), (expected_stat.st_mtime_ns, expected_stat.st_size)))
+            self.assertEqual(source.read_bytes(), b"alien!")
+            self.assertFalse(quarantine.exists())
+
     @unittest.skipUnless(__import__("os").name == "nt", "Windows handle rename contract")
     def test_quarantine_source_uses_verified_handle_and_rejects_missing_identity(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -195,6 +212,32 @@ class SaveRecoveryTests(unittest.TestCase):
             self.assertTrue(journal.quarantine_source("token", source, quarantine))
             self.assertFalse(source.exists())
             self.assertEqual(quarantine.read_bytes(), b"owned")
+            del journal
+            gc.collect()
+
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows handle publish contract")
+    def test_publish_stage_records_its_handle_identity_before_replacement_can_win(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); stage = root / "private.stage"; destination = root / "result.png"
+            stage.write_bytes(b"owned")
+            journal = SaveJournal(root)
+            journal.reserve("token", "image", 1, destination, stage)
+            original_placeholder = journal.placeholder
+            blocked_replacement = False
+            def record(token, identity):
+                nonlocal blocked_replacement
+                with self.assertRaises(PermissionError):
+                    destination.unlink()
+                blocked_replacement = True
+                original_placeholder(token, identity)
+            with mock.patch.object(journal, "placeholder", side_effect=record):
+                identity = journal.publish_staged_windows("token", stage, destination)
+            self.assertTrue(blocked_replacement)
+            self.assertIsNotNone(identity)
+            self.assertEqual(journal.row("token")["destination_identity"], identity)
+            destination.unlink(); destination.write_bytes(b"foreign")
+            self.assertFalse(journal.cleanup("token"))
+            self.assertEqual(destination.read_bytes(), b"foreign")
             del journal
             gc.collect()
 

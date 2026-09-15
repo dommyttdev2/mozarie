@@ -240,6 +240,36 @@ class LiveHttpEndpointTests(unittest.TestCase):
         with Image.open(io.BytesIO(body)) as mask:
             self.assertEqual((mask.mode, mask.size), ("L", (12, 8)))
 
+    def test_source_delete_rejects_a_same_fingerprint_foreign_replacement(self) -> None:
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        delete_token = "00000000-0000-4000-8000-000000000002"
+        status, _headers, body = self.request("POST", "/api/catalog/delete-source/prepare", {
+            "imageIds": [image_id], "deleteToken": delete_token,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.request("POST", "/api/catalog/delete-source/claim", {
+            "deleteToken": delete_token,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        source = self.source_dir / "source.png"; original = source.read_bytes(); stat = source.stat()
+        foreign = self.source_dir / "foreign.png"
+        foreign_bytes = bytearray(original); foreign_bytes[-1] ^= 1
+        foreign.write_bytes(foreign_bytes)
+        __import__("os").utime(foreign, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        foreign.replace(source)
+        self.assertEqual((source.stat().st_mtime_ns, source.stat().st_size), (stat.st_mtime_ns, stat.st_size))
+        status, _headers, body = self.request("POST", "/api/catalog/delete-source", {
+            "imageIds": [image_id], "deleteToken": delete_token,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        result = json.loads(body)
+        self.assertEqual(result["removedImageIds"], [])
+        self.assertEqual(result["failed"][0]["reason"], "source_changed")
+        self.assertEqual(source.read_bytes(), bytes(foreign_bytes))
+        self.assertFalse(any(self.source_dir.glob(".source.png.mozarie-delete-*")))
+
     def test_save_reserve_requires_a_canonical_uuid_token(self) -> None:
         status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
