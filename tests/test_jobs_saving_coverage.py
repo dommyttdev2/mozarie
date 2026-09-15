@@ -44,6 +44,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.image_io_lock = lambda _image_id: threading.RLock()
         state._has_active_worker = lambda: False
         state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
+        state._issue_browser_save_token_unchecked = lambda *_args, **_kwargs: "token"
+        state.cleanup_browser_save_files = lambda: None
         state._assert_catalog_mutable = lambda *_args, **_kwargs: None
         state._assert_image_editable = lambda *_args, **_kwargs: None
         state._assert_image_processable = lambda *_args, **_kwargs: None
@@ -68,7 +70,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.output_destination_lock = threading.Lock(); state.reserved_output_paths = set()
         state.catalog_generation = 1; state.active_import_count = 0
         state.settings = {"saving": {"default_output_directory": str(directory / "output"), "parallelism": 2}, "detection": {"exclude_forced_default": True}}
-        state.images = {}; state.order = []; state.candidates = {}; state.candidate_revisions = {}
+        state.images = {}; state.order = []; state.candidates = {}; state.candidate_revisions = {}; state.projectless_manual_drafts = {}
         state.browser_save_tokens = {}; state.browser_save_receipts = {}; state.browser_save_claims = set(); state._pending_browser_save_cleanup = []
         state.cache_dir = directory / "cache"; state._image_io_locks = {}
         state.workspace_store = Mock()
@@ -77,6 +79,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._assert_catalog_mutable = lambda *_args, **_kwargs: None
         state._assert_image_editable = lambda *_args, **_kwargs: None
         state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
+        state._issue_browser_save_token_unchecked = lambda *_args, **_kwargs: "token"
+        state.cleanup_browser_save_files = lambda: None
         state._candidate_revision = lambda image_id: state.candidate_revisions.get(image_id, 1)
         state.image_snapshot = lambda image_id: __import__("dataclasses").replace(state.images[image_id])
         state._records_for_ids_with_catalog = lambda ids: ([state.images[item] for item in ids], state.catalog_generation)
@@ -91,6 +95,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._take_browser_save_cleanup_unchecked = lambda: []
         state._unlink_browser_save_cleanup = lambda _items: None
         state._discard_browser_save_tokens_for_image_unchecked = lambda _image: None
+        state._clear_browser_save_receipts_for_image_unchecked = lambda _image: None
         state._encode_workspace_mask = lambda value: value
         return state
 
@@ -160,7 +165,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.job_control = JobControl(); state.job_control.pause_requested.set()
         state._finish_claimed_task(state.job_control, 1, 1)
         self.assertFalse(state.job_control.pause_requested.is_set())
-        state.job = Job(kind="detect", state="running", total=1)
+        state.job = Job(kind="detect", state="running", total=1, started_at=time.time())
         with patch.object(state, "_release_gpu_job_memory") as release:
             state._cancel_job(1, 1); state._finish_job(1, 1)
         self.assertEqual(state.job.state, "complete"); release.assert_not_called()
@@ -367,7 +372,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             with self.assertRaises(ClientError): state.prepare_browser_save([record.image_id], 2, "_x", False)
             state.images[record.image_id] = record
             with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
-                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+                self.assertTrue(state.render_browser_save(record.image_id, 1, 2, {}).no_effect)
             state.candidates[record.image_id] = [Candidate("missing", "penis", .9, directory / "missing.png")]
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)):
                 with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
@@ -402,13 +407,13 @@ class JobsSavingCoverageTests(unittest.TestCase):
             zero_apply = directory / "zero.png"; Image.new("L", (3, 2), 0).save(zero_apply)
             state.candidates[record.image_id] = [Candidate("zero", "penis", .9, zero_apply)]
             with patch("mozarie.saving.decode_draft_masks", return_value=(None, None, None)):
-                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+                self.assertTrue(state.render_browser_save(record.image_id, 1, 2, {}).no_effect)
             state.candidates[record.image_id] = []
             def change_catalog(*_args):
                 state.catalog_generation += 1
                 return b"png"
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", side_effect=change_catalog):
-                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+                self.assertIsNone(state.render_browser_save(record.image_id, 1, 2, {}).output)
             state.catalog_generation = 1; workers = [False]
             def after_render(*_args):
                 workers[0] = True
@@ -432,7 +437,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             self.assertEqual(state.browser_save_status("x", 1, "none", "keep"), {"state": "unknown"})
             state.browser_save_receipts["wrong"] = BrowserSaveReceipt("other", 1, "keep", True, False, False, 1)
             self.assertEqual(state.browser_save_status(record.image_id, 1, "wrong", "keep"), {"state": "unknown"})
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
             state.browser_save_tokens["pending"] = token
             self.assertEqual(state.cancel_browser_save("wrong", 1, "pending"), {"state": "unknown"})
             self.assertEqual(state.cancel_browser_save(record.image_id, 1, "pending"), {"state": "pending"})
@@ -441,18 +446,18 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._job_is_current = lambda *_args: True; state._finish_job = Mock(); state._fail_job = Mock(); state._cancel_job = Mock()
             state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
             state._apply_worker([record], 2, {record.image_id: np.zeros((2, 3), dtype=np.uint8)}, control=JobControl(), job_generation=1, catalog_generation=1)
-            self.assertEqual(state.job.total, 0); state._finish_job.assert_called_once()
+            self.assertEqual(state.job.total, 1); state._finish_job.assert_not_called()
 
     def test_browser_commit_rechecks_and_handles_delete_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
             state.browser_save_tokens["active"] = token
             state._has_active_worker = lambda: True
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "active", "keep")
             state._has_active_worker = lambda: False
-            state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, time.monotonic(), None)
+            state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, None)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "changed", "keep")
             # The second locked lookup must reject a receipt that arrived after
             # the initial token lookup, rather than committing the wrong action.
@@ -473,14 +478,14 @@ class JobsSavingCoverageTests(unittest.TestCase):
             thumb = state.cache_dir / "thumbnails" / f"{record.image_id}-one.jpg"; thumb.parent.mkdir(parents=True); thumb.write_bytes(b"x")
             state.browser_save_tokens["deleted"] = token
             result = state.commit_browser_save(record.image_id, 1, "deleted", "deleted")
-            self.assertEqual(result, {"cleared": True, "stale": False, "deleted": True})
+            self.assertEqual(result, {"cleared": True, "stale": False, "deleted": True, "catalogGeneration": state.catalog_generation})
             self.assertFalse(thumb.exists())
 
     def test_browser_commit_second_lookup_and_catalog_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            base = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            base = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
             def second_lookup(token_name, mutate, action="keep"):
                 state.browser_save_tokens = {token_name: base}; state.browser_save_receipts = {}
                 class Mutate:
@@ -492,8 +497,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
             self.assertEqual(result["cleared"], True)
             for name, mutate in (
                 ("gone", lambda: state.browser_save_tokens.clear()),
-                ("revision", lambda: state.browser_save_tokens.__setitem__("revision", BrowserSaveToken(record.image_id, 2, (1, 1), 1, time.monotonic(), None))),
-                ("action", lambda: state.browser_save_tokens.__setitem__("action", BrowserSaveToken(record.image_id, 1, (1, 1), 1, time.monotonic(), directory / "rendered.png"))),
+                ("revision", lambda: state.browser_save_tokens.__setitem__("revision", BrowserSaveToken(record.image_id, 2, (1, 1), 1, None))),
+                ("action", lambda: state.browser_save_tokens.__setitem__("action", BrowserSaveToken(record.image_id, 1, (1, 1), 1, directory / "rendered.png"))),
             ):
                 with self.subTest(name=name), self.assertRaises(ClientError): second_lookup(name, mutate)
             state.image_io_lock = lambda _image: threading.RLock()
@@ -503,7 +508,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
             state.browser_save_tokens["catalog"] = token
             state._assert_record_stat_matches = lambda _record: setattr(state, "catalog_generation", 2)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "catalog", "keep")
@@ -540,12 +545,12 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._job_is_current = lambda *_args: False
             with patch("mozarie.saving._stage_save_with_mask", return_value=stage):
                 state._apply_worker([record], 2, {record.image_id: nonempty}, control=JobControl(), job_generation=1, catalog_generation=1)
-            stage.rollback.assert_called_once()
+            stage.rollback.assert_not_called()
             state._job_is_current = lambda *_args: True; state.workspace_store.commit_save.side_effect = RuntimeError("db")
             stage = Mock(); state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
             with patch("mozarie.saving._stage_save_with_mask", return_value=stage):
                 state._apply_worker([record], 2, {record.image_id: nonempty}, control=JobControl(), job_generation=1, catalog_generation=1)
-            stage.rollback.assert_called_once(); state._fail_job.assert_called()
+            stage.rollback.assert_not_called(); state._fail_job.assert_called()
             state.workspace_store.commit_save.side_effect = RuntimeError("db")
             state.job = Job(kind="apply", state="running", total=1, image_ids=(record.image_id,))
             output = directory / "output"; output.mkdir(exist_ok=True)
