@@ -8,6 +8,7 @@ import io
 from email.message import Message
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -295,6 +296,10 @@ class JobsCoverageTests(unittest.TestCase):
         jobs.candidates = {}
         jobs.catalog_generation = 1
         jobs.image_io_lock = lambda _image_id: threading.RLock()
+        jobs._assert_request_catalog_expectation = lambda: None
+        jobs._assert_catalog_mutable = lambda: None
+        jobs._copy_job_snapshot = lambda snapshot: snapshot
+        jobs._publish_job_snapshot_unchecked = lambda: jobs.job.as_dict()
         return jobs
 
     def test_jobs_reject_invalid_controls_and_selected_records(self) -> None:
@@ -349,6 +354,7 @@ class HttpCoverageTests(unittest.TestCase):
         handler.rfile = io.BytesIO(payload)
         handler.wfile = io.BytesIO()
         handler.close_connection = False
+        handler._catalog_expectation = lambda _payload=None: (None, 0)
         return handler
 
     def test_http_body_and_route_validators_cover_invalid_and_valid_forms(self) -> None:
@@ -385,13 +391,15 @@ class HttpCoverageTests(unittest.TestCase):
                 _run_native_picker("", {}, failed_message="failed", busy_message="busy", state=state)
         state.native_picker_lock.release.assert_called_once()
         state = MagicMock(); state.native_picker_lock.acquire.return_value = True
-        completed = type("Result", (), {"returncode": 0, "stdout": b"not-base64"})()
-        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=completed):
+        state.shutdown_requested.is_set.return_value = False
+        completed = type("Result", (), {"returncode": 0, "communicate": lambda _self, timeout: (b"not-base64", b"")})()
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.Popen", return_value=completed):
             with self.assertRaises(ClientError):
                 _run_native_picker("$x=1", {}, failed_message="failed", busy_message="busy", state=state)
         state = MagicMock(); state.native_picker_lock.acquire.return_value = True
-        completed = type("Result", (), {"returncode": 0, "stdout": b""})()
-        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=completed):
+        state.shutdown_requested.is_set.return_value = False
+        completed = type("Result", (), {"returncode": 0, "communicate": lambda _self, timeout: (b"", b"")})()
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.Popen", return_value=completed):
             self.assertIsNone(_run_native_picker("$x=1", {}, failed_message="failed", busy_message="busy", state=state))
         with self.assertRaises(ClientError):
             _pick_model_file("unknown", state=MagicMock())
@@ -422,6 +430,10 @@ class HttpCoverageTests(unittest.TestCase):
         state.set_root.return_value = [{"id": "x"}]
         state.start_apply.return_value = True
         state.request_pause.return_value.as_dict.return_value = {"state": "paused"}
+        state.catalog_request.return_value = nullcontext()
+        state.import_lock = nullcontext()
+        state.catalog_snapshot.return_value = {"catalogGeneration": 0}
+        state.settings["detection"].update(fluid_color_fill_enabled=False, fluid_color_fill_tolerance=26)
         handler = self.handler()
         handler._require_json_request = Mock()
         handler._client_error = Mock()
@@ -439,17 +451,18 @@ class HttpCoverageTests(unittest.TestCase):
                     handler.path = path
                     handler._read_json_body = Mock(return_value=payload)
                     handler.do_POST()
-        state.set_root.assert_called_once_with("C:/images")
+        state.set_root.assert_called_once_with("C:/images", expected_project_id=None, expected_catalog_generation=0)
         state.clear_catalog.assert_called_once()
-        state.start_detection.assert_called_once_with([], .5, 1)
+        state.start_detection.assert_called_once_with([], .5, 1, fluid_color_fill=(False, 26))
         state.clear_masks.assert_called_once_with([])
         state.start_apply.assert_called_once()
         state.request_pause.assert_called_once()
 
     def test_http_delete_routes_dispatch_and_unknown_route_is_not_found(self) -> None:
-        state = Mock()
+        state = MagicMock()
         state.delete_candidate.return_value = True
         state._candidate_revision.return_value = 3
+        state.catalog_request.return_value = nullcontext()
         handler = self.handler()
         handler._require_mutation_request = Mock()
         handler._json = Mock(); handler._client_error = Mock()
@@ -478,7 +491,6 @@ class HttpCoverageTests(unittest.TestCase):
                 with self.subTest(path=path):
                     handler.path = path
                     handler.do_GET()
-        state.cleanup_expired_browser_save_tokens.assert_called_once()
         handler._send_image.assert_any_call("x", thumbnail=False, version="one")
         handler._send_image.assert_any_call("x", thumbnail=True, version="two")
         handler._send_candidate_mask.assert_called_once_with("x", "y", "3")
@@ -486,9 +498,11 @@ class HttpCoverageTests(unittest.TestCase):
     def test_http_post_routes_cover_settings_models_saves_and_jobs(self) -> None:
         state = MagicMock()
         state.settings = {"detection": {"threshold": .5, "parallelism": 1}}
+        state.settings["detection"].update(fluid_color_fill_enabled=False, fluid_color_fill_tolerance=26)
         state.model_downloads.cancel.return_value = {"state": "cancelled"}
         state.resume_job.return_value.as_dict.return_value = {"state": "running"}
         state.request_cancel.return_value.as_dict.return_value = {"state": "running"}
+        state.catalog_request.return_value = nullcontext()
         handler = self.handler()
         handler._require_json_request = Mock(); handler._json = Mock(); handler._client_error = Mock()
         routes = (
@@ -527,6 +541,9 @@ class SavingCoverageTests(unittest.TestCase):
         record = image_io.ImageRecord("x", Path("C:/session.png"), "session.png", 2, 2, 1, 1, source_kind="session")
         saving.images = {"x": record}
         saving._records_for_ids_with_catalog = lambda _ids: ([record], 1)
+        saving._assert_catalog_mutable = lambda: None
+        saving._assert_image_editable = lambda _image_id: None
+        saving._assert_request_catalog_expectation = lambda: None
         saving._start_job = Mock()
         self.assertFalse(saving.start_apply([], 2, {}))
         with self.assertRaises(ClientError):
@@ -552,6 +569,8 @@ class SavingCoverageTests(unittest.TestCase):
             record = image_io.ImageRecord("x", output / "source.png", "folder/source.png", 2, 2, 1, 1)
             saving.images = {"x": record}
             saving._records_for_ids_with_catalog = lambda _ids: ([record], 4)
+            saving._assert_catalog_mutable = lambda: None
+            saving._assert_image_editable = lambda _image_id: None
             saving._candidate_revision = lambda _image_id: 7
             saving._start_job = Mock()
             prepared = saving.prepare_browser_save(["x"], 2, "_censored", True)
