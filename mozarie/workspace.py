@@ -1326,14 +1326,10 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
-    def commit_detection_states(self, states: list[tuple[str, int, int, list[Any], bool]], *, history_group: str | None) -> None:
-        """Publish one detection run only when every staged image is current.
-
-        Candidate PNGs are read while this single transaction is open.  A
-        changed source/revision or one invalid staged PNG rolls the complete
-        run back before any candidate or history row becomes visible.
-        """
-        with self._lock, self._connect() as db:
+    def prepare_detection_states(self, states: list[tuple[str, int, int, list[Any], bool]], *, history_group: str | None) -> _PendingWorkspaceCommit:
+        """Stage one detection run for a state publisher to commit or roll back."""
+        with self._lock:
+            db = self._connect()
             db.execute("BEGIN IMMEDIATE")
             try:
                 for image_id, expected_revision, revision, candidates, effective in states:
@@ -1343,9 +1339,10 @@ class WorkspaceStore:
                         expected_revision=expected_revision, preserve_reviewed=True,
                         require_candidate_masks=True,
                     )
-                db.execute("COMMIT")
+                return _PendingWorkspaceCommit(db)
             except Exception:
                 db.execute("ROLLBACK")
+                db.close()
                 raise
 
     def prepare_candidate_state(self, image_id: str, revision: int, candidates: list[Any], effective: bool, *, replace: bool,
@@ -1904,9 +1901,31 @@ class WorkspaceStore:
                 return True
             can_undo = group_ready(undo_entry, "undo")
             can_redo = group_ready(redo_entry, "redo")
-        return {"canUndo": can_undo, "canRedo": can_redo}
+            return {"canUndo": can_undo, "canRedo": can_redo}
 
-    def restore_history(self, image_id: str, direction: str, member_guard: Callable[[list[str]], None] | None = None) -> list[str]:
+    def history_members(self, image_id: str, direction: str) -> list[str]:
+        """Read the next undo/redo group before callers acquire image locks."""
+        if direction not in {"undo", "redo"}:
+            raise ValueError("invalid history direction")
+        with self._connect() as db:
+            cursor = db.execute("SELECT entry_id FROM history_cursors WHERE image_id=?", (image_id,)).fetchone()
+            current = int(cursor["entry_id"]) if cursor and cursor["entry_id"] is not None else 0
+            if direction == "undo":
+                entry = db.execute("SELECT * FROM history_entries WHERE entry_id=? AND image_id=?", (current, image_id)).fetchone() if current else None
+            else:
+                entry = db.execute("SELECT * FROM history_entries WHERE image_id=? AND entry_id>? ORDER BY entry_id LIMIT 1", (image_id, current)).fetchone()
+            if entry is None:
+                return []
+            if entry["group_id"]:
+                return [str(row["image_id"]) for row in db.execute(
+                    "SELECT image_id FROM history_entries WHERE group_id=? ORDER BY image_id", (entry["group_id"],)
+                )]
+            return [image_id]
+
+    def restore_history(
+        self, image_id: str, direction: str, member_guard: Callable[[list[str]], None] | None = None,
+        expected_members: list[str] | None = None,
+    ) -> list[str]:
         if direction not in {"undo", "redo"}:
             raise ValueError("invalid history direction")
         with self._lock, self._connect() as db:
@@ -1921,6 +1940,9 @@ class WorkspaceStore:
                 if entry is None:
                     db.execute("COMMIT"); return []
                 entries = db.execute("SELECT * FROM history_entries WHERE group_id=? ORDER BY entry_id", (entry["group_id"],)).fetchall() if entry["group_id"] else [entry]
+                record_ids = [str(member["image_id"]) for member in entries]
+                if expected_members is not None and set(record_ids) != set(expected_members):
+                    db.execute("COMMIT"); return []
                 if entry["group_id"]:
                     group = db.execute("SELECT status FROM history_groups WHERE group_id=?", (entry["group_id"],)).fetchone()
                     if group is None or str(group["status"]) == "building":
@@ -1936,7 +1958,7 @@ class WorkspaceStore:
                         if cursor_id != expected:
                             db.execute("COMMIT"); return []
                 if member_guard is not None:
-                    member_guard([str(member["image_id"]) for member in entries])
+                    member_guard(record_ids)
                 changed: list[str] = []
                 for member in entries:
                     state = json.loads(str(member["before_json"] if direction == "undo" else member["after_json"]))

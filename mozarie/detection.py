@@ -109,8 +109,8 @@ class DetectionMixin:
                 self._assert_image_editable(record.image_id)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
             # Every successfully published result belongs to one undo group.
-            # The worker still commits each image as it finishes, so detection
-            # progress and cancellation remain responsive.
+            # Candidates remain staged until every target is ready, then the
+            # group is published as one SQLite transaction.
             self._detection_history_group = self.workspace_store.begin_history_group()
             # Capture the default here. Settings may be changed after the job
             # starts, but one detection run must use one coherent value.
@@ -224,6 +224,8 @@ class DetectionMixin:
         catalog_generation: int | None = None,
     ) -> None:
         models: DetectionModels | None = None
+        staged: dict[str, tuple[int, ImageRecord, list[Candidate]]] = {}
+        durable_published = False
         try:
             # Direct workers without a launch epoch snapshot it once before
             # any work; publication must
@@ -240,12 +242,15 @@ class DetectionMixin:
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                group_id = getattr(self, "_detection_history_group", None)
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._cancel_job(job_generation, catalog_generation)
                 return
             if not self._job_is_current(job_generation, catalog_generation):
+                group_id = getattr(self, "_detection_history_group", None)
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 return
             models = self._ensure_models()
-            staged: dict[str, tuple[int, ImageRecord, list[Candidate]]] = {}
             stage_lock = threading.Lock()
 
             def claim_and_run(index: int, record: ImageRecord) -> None:
@@ -311,26 +316,48 @@ class DetectionMixin:
                     ]
                     for record in records
                 }
-                for record in records:
-                    for candidate in staged[record.image_id][2]:
-                        if candidate.mask_path.name.startswith(".mozarie-pending-"):
-                            final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                            os.replace(candidate.mask_path, final_path)
-                            candidate.mask_path = final_path
                 try:
+                    # Move each staged PNG before SQLite reads it.  Every
+                    # candidate remains in ``staged`` while moving, so one
+                    # failed move cleans both already-final files and pending
+                    # files from the same run.
+                    for record in records:
+                        for candidate in staged[record.image_id][2]:
+                            if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                                final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                                os.replace(candidate.mask_path, final_path)
+                                candidate.mask_path = final_path
+                    # The source can change while model workers run.  Check it
+                    # again with every image lock held directly before the
+                    # durable state is prepared.
+                    for record in records:
+                        self._assert_record_stat_matches(record)
                     states = [
                         (record.image_id, expected_revisions[record.image_id], expected_revisions[record.image_id] + 1,
                          combined[record.image_id], self._effective_mask_for_candidates(record.image_id, combined[record.image_id]))
                         for record in records
                     ]
-                    self.workspace_store.commit_detection_states(states, history_group=getattr(self, "_detection_history_group", None))
+                    pending = self.workspace_store.prepare_detection_states(
+                        states, history_group=getattr(self, "_detection_history_group", None),
+                    )
                 except Exception:
                     for _index, _record, candidates in staged.values():
                         self._discard_candidates(candidates)
                     raise
                 with self.lock:
-                    if self.catalog_generation != catalog_generation or any(self.images.get(record.image_id) is not record for record in records):
+                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                            or not self._job_is_current(job_generation, catalog_generation)
+                            or any(self.images.get(record.image_id) is not record for record in records)
+                            or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
+                        pending.rollback()
+                        for _index, _record, candidates in staged.values():
+                            self._discard_candidates(candidates)
                         raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                    # SQLite and the process cache become visible under the
+                    # same catalogue lock.  Do not re-check global state after
+                    # this commit: a catalog transition cannot interleave it.
+                    pending.commit()
+                    durable_published = True
                     for record in records:
                         self.candidates[record.image_id] = combined[record.image_id]
                         self.candidate_revisions[record.image_id] = expected_revisions[record.image_id] + 1
@@ -338,14 +365,23 @@ class DetectionMixin:
                 for record in records:
                     for candidate in previous[record.image_id]:
                         if candidate.origin != "boundary":
-                            candidate.mask_path.unlink(missing_ok=True)
+                            try:
+                                candidate.mask_path.unlink(missing_ok=True)
+                            except OSError:
+                                # Old cache files are disposable.  Their
+                                # cleanup must not turn a published history
+                                # group into a failed operation.
+                                pass
             group_id = getattr(self, "_detection_history_group", None)
             if group_id: self.workspace_store.finish_history_group(group_id)
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             models = None
             group_id = getattr(self, "_detection_history_group", None)
-            if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
+            if not durable_published:
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
             self._fail_job(exc, job_generation, catalog_generation)
         finally:
             # ``claim_and_run`` closes over this value. Drop it before the

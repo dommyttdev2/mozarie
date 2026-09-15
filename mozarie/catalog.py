@@ -1900,10 +1900,9 @@ class CatalogMixin:
         return self.workspace_store.history_status(image_id)
 
     def restore_project_history(self, image_id: str, direction: str) -> dict[str, Any]:
-        # ``restore_history`` discovers every member of a grouped operation in
-        # its durable transaction. Keep project transitions out until those
-        # members have been hydrated and published; their per-image locks can
-        # then follow the normal image-lock-before-state-lock order.
+        # Lock every member before the durable cursor is restored.  A grouped
+        # undo must never race a candidate/manual mutation on one of its other
+        # images.
         with self.import_lock:
             self.image_for_id(image_id)
             self._assert_image_editable(image_id)
@@ -1913,15 +1912,24 @@ class CatalogMixin:
                 catalog_id = self.catalog_id
                 workspace_id = self.workspace_id
                 catalog_generation = self.catalog_generation
-                changed_ids = self.workspace_store.restore_history(
-                    image_id, direction,
-                    member_guard=self._assert_images_processable,
-                )
-            with self.lock:
-                record_ids = [changed_id for changed_id in changed_ids if changed_id in self.images]
+            record_ids = self.workspace_store.history_members(image_id, direction)
+            if not record_ids:
+                return {"changedImageIds": [], "current": {}, **self.workspace_store.history_status(image_id)}
             locks = [(changed_id, self.image_io_lock(changed_id)) for changed_id in record_ids]
             with ExitStack() as stack:
                 for _changed_id, image_lock in sorted(locks): stack.enter_context(image_lock)
+                with self.lock:
+                    if (self.catalog_id != catalog_id or self.workspace_id != workspace_id
+                            or self.catalog_generation != catalog_generation
+                            or any(changed_id not in self.images for changed_id in record_ids)):
+                        raise ClientError("プロジェクト一覧が更新されました。もう一度操作してください。", "stale_catalog")
+                    changed_ids = self.workspace_store.restore_history(
+                        image_id, direction,
+                        member_guard=self._assert_images_processable,
+                        expected_members=record_ids,
+                    )
+                    if not changed_ids:
+                        return {"changedImageIds": [], "current": {}, **self.workspace_store.history_status(image_id)}
                 hydrated: dict[str, tuple[int, list[Candidate], bool, bool, dict[str, Any]]] = {}
                 for changed_id in record_ids:
                     shutil.rmtree(self.cache_dir / changed_id, ignore_errors=True)
