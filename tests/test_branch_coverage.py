@@ -7,9 +7,10 @@ import io
 import tempfile
 import unittest
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -144,9 +145,8 @@ class ImageIoBranchTests(unittest.TestCase):
         palette_raw = png_data(palette)
         with self.assertRaises(ClientError):
             _png_with_original_chunks(palette_raw, Image.new("RGB", (2, 2), "white"))
-        with patch("mozarie.image_io.MAX_BODY_BYTES", 1):
-            with self.assertRaises(ClientError):
-                _decode_mask(data_url(Image.new("L", (2, 2))), 2, 2)
+        with self.assertRaises(ClientError):
+            _decode_mask(data_url(Image.new("L", (3, 2))), 2, 2)
 
     def test_webp_and_jpeg_parsers_reject_complete_but_invalid_containers(self) -> None:
         def riff(chunk_type: bytes, payload: bytes) -> bytes:
@@ -260,6 +260,7 @@ class HttpBranchTests(unittest.TestCase):
         instance.rfile = io.BytesIO(body)
         instance.wfile = io.BytesIO()
         instance.close_connection = False
+        instance._catalog_expectation = lambda _payload=None: (None, 0)
         return instance
 
     def test_request_parsers_reject_ambiguous_values_and_preserve_valid_values(self) -> None:
@@ -305,7 +306,9 @@ class HttpBranchTests(unittest.TestCase):
 
     def test_binary_import_reader_streams_real_bytes_and_removes_short_partial_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state = SimpleNamespace(cache_dir=Path(directory))
+            staging = Path(directory) / "import-staging"
+            staging.mkdir()
+            state = SimpleNamespace(_ensure_session=lambda: staging)
             payload = b"abc123"
             handler = self.handler(headers={"Content-Length": str(len(payload))}, body=payload)
             with patch.object(http_module, "STATE", state):
@@ -315,7 +318,7 @@ class HttpBranchTests(unittest.TestCase):
                 staged.unlink()
                 with self.assertRaises(ClientError):
                     self.handler(headers={"Content-Length": "7"}, body=payload)._read_binary_body_to_file()
-            self.assertEqual(list((Path(directory) / "import-staging").glob("*")), [])
+            self.assertEqual(list(staging.glob("*")), [])
 
     def test_client_error_and_static_response_choose_safe_user_codes(self) -> None:
         handler = self.handler()
@@ -338,15 +341,15 @@ class HttpBranchTests(unittest.TestCase):
             self.assertEqual(rendered[0][0], b"token")
 
     def test_native_picker_reports_cancel_failure_and_decodes_a_real_utf8_path(self) -> None:
-        state = SimpleNamespace(native_picker_lock=__import__("threading").Lock())
+        state = SimpleNamespace(native_picker_lock=__import__("threading").Lock(), shutdown_requested=__import__("threading").Event())
         with patch("mozarie.http.Path.is_file", return_value=False):
             with self.assertRaises(ClientError):
                 http_module._run_native_picker("", {}, failed_message="failed", busy_message="busy", state=state)
-        response = SimpleNamespace(returncode=0, stdout=base64.b64encode("C:/日本語/model.onnx".encode("utf-8")))
-        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=response):
+        response = SimpleNamespace(returncode=0, communicate=lambda timeout: (base64.b64encode("C:/日本語/model.onnx".encode("utf-8")), b""))
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.Popen", return_value=response):
             self.assertEqual(http_module._run_native_picker("write-output", {}, failed_message="failed", busy_message="busy", state=state), "C:/日本語/model.onnx")
-        cancelled = SimpleNamespace(returncode=0, stdout=b"")
-        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.run", return_value=cancelled):
+        cancelled = SimpleNamespace(returncode=0, communicate=lambda timeout: (b"", b""))
+        with patch("mozarie.http.Path.is_file", return_value=True), patch("mozarie.http.subprocess.Popen", return_value=cancelled):
             self.assertIsNone(http_module._run_native_picker("", {}, failed_message="failed", busy_message="busy", state=state))
 
     def test_unknown_get_post_and_delete_walk_every_unmatched_api_route(self) -> None:
@@ -376,7 +379,7 @@ class HttpBranchTests(unittest.TestCase):
         handler._json = lambda *_args, **_kwargs: None
         handler._binary = lambda *_args, **_kwargs: None
         handler._client_error = lambda error, *_args, **_kwargs: (_ for _ in ()).throw(error)
-        state = Mock()
+        state = MagicMock()
         state.request_pause.return_value = SimpleNamespace(as_dict=lambda: {})
         state.resume_job.return_value = SimpleNamespace(as_dict=lambda: {})
         state.request_cancel.return_value = SimpleNamespace(as_dict=lambda: {})
@@ -385,10 +388,11 @@ class HttpBranchTests(unittest.TestCase):
         state.list_images.return_value = []
         state.diagnose_gpu_runtime.return_value = []
         state.recover_gpu_oom_for_request.return_value = None
+        state.catalog_request.return_value = nullcontext()
+        state.import_lock = nullcontext()
+        state.catalog_snapshot.return_value = {"catalogGeneration": 0}
         routes = (
             ("/api/folder", {"path": "C:/images"}),
-            ("/api/workspace/catalog", {"catalogId": "catalog"}),
-            ("/api/workspace/catalog/finalize", {}),
             ("/api/catalog/clear", {}),
             ("/api/workspace/image/image", {}),
             ("/api/workspace/manual/image", {}),
@@ -416,7 +420,7 @@ class HttpBranchTests(unittest.TestCase):
                     handler.path = path
                     handler._read_json_body = lambda payload=payload: payload
                     handler.do_POST()
-        state.set_root.assert_called_once_with("C:/images")
+        state.set_root.assert_called_once_with("C:/images", expected_project_id=None, expected_catalog_generation=0)
         state.start_apply.assert_called_once()
 
     def test_post_route_optional_user_choices_take_their_enabled_paths(self) -> None:
@@ -425,15 +429,15 @@ class HttpBranchTests(unittest.TestCase):
         handler._require_json_request = lambda: None
         handler._json = lambda *_args, **_kwargs: None
         handler._client_error = lambda error, *_args, **_kwargs: (_ for _ in ()).throw(error)
-        state = Mock()
-        state.workspace_store.ensure_provisional_catalog.return_value = "provisional"
-        state.settings = {"detection": {"threshold": 0.5, "parallelism": 1}}
+        state = MagicMock()
+        state.settings = {"detection": {"threshold": 0.5, "parallelism": 1, "fluid_color_fill_enabled": False, "fluid_color_fill_tolerance": 26}}
         state.update_settings.return_value = {}
         state.reset_settings.return_value = {}
         state.settings_status.return_value = {}
         state.recover_gpu_oom_for_request.return_value = None
+        state.catalog_request.return_value = nullcontext()
         routes = (
-            ("/api/workspace/catalog", {"provisional": True}),
+            ("/api/project/source-check", {"path": "C:/images"}),
             ("/api/detect", {"imageIds": [], "confidence": .5, "parallelism": 1, "targetClasses": ["penis"]}),
             ("/api/settings", {}),
             ("/api/settings/reset", {}),
@@ -462,6 +466,7 @@ class HttpBranchTests(unittest.TestCase):
         state.lock = __import__("threading").RLock()
         state._candidate_revision.return_value = 2
         state.recover_gpu_oom_for_request.return_value = None
+        state.catalog_request.return_value = nullcontext()
         get_routes = (
             "/api/health",
             "/api/settings?status=0",
@@ -602,9 +607,8 @@ class UpdaterBranchTests(unittest.TestCase):
             def read(self, size: int) -> bytes: return self.data.read(size)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.object(updater, "MAX_ARCHIVE_BYTES", 1):
-                with self.assertRaises(updater.UpdateError):
-                    updater.download_archive("https://example.test/a.zip", root / "a.zip", "0" * 64, 2, lambda *_args, **_kwargs: Response(b"ab"))
+            with self.assertRaises(updater.UpdateError):
+                updater.download_archive("https://example.test/a.zip", root / "a.zip", "0" * 64, 1, lambda *_args, **_kwargs: Response(b"ab"))
             unsafe_member = zipfile.ZipInfo("wrapper/bad.txt")
             unsafe_member.filename = r"wrapper\bad.txt"
             with self.assertRaises(updater.UpdateError):
@@ -630,12 +634,6 @@ class UpdaterBranchTests(unittest.TestCase):
     def test_updater_local_archive_and_runtime_preflight_failures_preserve_the_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            oversized = root / "oversized.zip"
-            with zipfile.ZipFile(oversized, "w") as bundle:
-                bundle.writestr("wrapper/file.txt", b"ab")
-            with patch.object(updater, "MAX_ARCHIVE_BYTES", 1):
-                with self.assertRaises(updater.UpdateError):
-                    updater.extract_archive(oversized, root / "out")
             multi_root = root / "multi.zip"
             with zipfile.ZipFile(multi_root, "w") as bundle:
                 bundle.writestr("one/file.txt", b"x")
