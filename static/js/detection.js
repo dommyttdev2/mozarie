@@ -1,6 +1,6 @@
 function detectionParallelism() {
   const value = Number($("#detectParallelism").value);
-  return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
+  return Number.isFinite(value) ? Math.max(1, Math.round(value)) : 2;
 }
 function detectionTargets(prefix = "detectTarget") {
   return ["penis", "pussy"].filter((name) => $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked === true);
@@ -13,13 +13,13 @@ function setDetectionTargets(targets, prefix = "detectTarget") {
 }
 
 function persistedDetectionTargets() { return state.settings?.detection?.targets || []; }
-function detectionCandidatePadding() {
-  const text = String($("#detectCandidatePadding").value).trim();
+function detectionCandidatePadding(selector = "#detectCandidatePadding") {
+  const text = String($(selector).value).trim();
   const value = Number(text);
-  return /^\d+$/.test(text) && Number.isSafeInteger(value) && value <= 16384 ? value : null;
+  return /^\d+$/.test(text) && Number.isSafeInteger(value) ? value : null;
 }
 function validateDetectionCandidatePadding() {
-  const valid = detectionCandidatePadding() !== null;
+  const valid = detectionCandidatePadding() !== null && detectionCandidatePadding("#detectExcludeCandidatePadding") !== null;
   const message = $("#detectPaddingValidation");
   message.textContent = valid ? "" : t("detectDialog.candidatePaddingInvalid"); message.hidden = valid;
   $("#detectCandidatePadding").setAttribute("aria-invalid", String(!valid));
@@ -47,7 +47,7 @@ function validateDetectionTargets(targetClasses, target = null) {
 function normaliseImportParallelism(value) {
   if (String(value ?? "").trim() === "") return 3;
   const number = Number(value);
-  return Number.isFinite(number) ? Math.min(10, Math.max(1, Math.round(number))) : 3;
+  return Number.isFinite(number) ? Math.max(1, Math.round(number)) : 3;
 }
 
 function importParallelism() {
@@ -62,6 +62,7 @@ function openDetectionDialog(imageIds) {
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
   $("#detectCandidatePadding").value = String(state.settings?.detection?.default_candidate_padding_px || 0);
+  $("#detectExcludeCandidatePadding").value = String(state.settings?.detection?.default_exclude_candidate_padding_px || 0);
   $("#detectCandidatePadding").setAttribute("aria-invalid", "false"); $("#detectPaddingValidation").hidden = true;
   $("#detectParallelism").disabled = false;
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
@@ -81,7 +82,7 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     await flushAllImageMutations();
     await saveDraft();
     await flushAllWorkspaceMutations();
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
+    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.max(1, Math.round(parallelism)), targetClasses }) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
@@ -118,12 +119,13 @@ async function startDetectionFromDialog(event) {
   const targetClasses = detectionTargets("dialogTarget");
   if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding()) return;
   const defaultCandidatePadding = detectionCandidatePadding();
+  const defaultExcludeCandidatePadding = detectionCandidatePadding("#detectExcludeCandidatePadding");
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   beginDetectionStart(imageIds);
   if (state.settings) {
     const settings = structuredClone(state.settings);
-    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses, default_candidate_padding_px: defaultCandidatePadding };
+    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses, default_candidate_padding_px: defaultCandidatePadding, default_exclude_candidate_padding_px: defaultExcludeCandidatePadding };
     try {
       const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settings) });
       state.settings = saved.settings;

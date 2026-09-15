@@ -114,6 +114,7 @@ class DetectionMixin:
             # Capture the default here. Settings may be changed after the job
             # starts, but one detection run must use one coherent value.
             self._active_detection_default_padding = int(self.settings["detection"]["default_candidate_padding_px"])
+            self._active_detection_default_exclude_padding = int(self.settings["detection"]["default_exclude_candidate_padding_px"])
             args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
             if targets != TARGET_CLASSES:
                 args = (*args, targets)
@@ -668,6 +669,10 @@ class DetectionMixin:
                 int(self._active_detection_default_padding),
                 int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
             )
+        default_exclude_padding = min(
+            int(self._active_detection_default_exclude_padding),
+            int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
+        )
         with self.image_io_lock(record.image_id):
             self._assert_record_stat_matches(record)
             image, _source, info = canonical_image(record)
@@ -707,7 +712,7 @@ class DetectionMixin:
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
             for exclusion_kind, exclusion_mask in dict(segment.get("metadata_exclusions", {})).items():
                 exclusion_id = uuid.uuid4().hex
@@ -717,7 +722,7 @@ class DetectionMixin:
                     candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
                     mask_path=exclusion_path, color="#4ac3df", source=f"{exclusion_kind}_exclusion",
                     origin="auto", role=CandidateRole.EXCLUDE, enabled=True, forced=False,
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
             if segment["class_name"] not in DETECTED_TARGET_CLASSES:
                 continue
@@ -758,7 +763,7 @@ class DetectionMixin:
                     role=CandidateRole.EXCLUDE,
                     enabled=True,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
         return candidates
 
@@ -846,6 +851,7 @@ class DetectionMixin:
             boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
             candidate_id = uuid.uuid4().hex
             default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
+            default_exclude_padding = min(int(self.settings["detection"]["default_exclude_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
             created = [Candidate(
                 candidate_id=candidate_id,
                 label_token="boundary_polygon" if polygon_mask is not None else "boundary",
@@ -869,7 +875,7 @@ class DetectionMixin:
                     source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
                     enabled=True,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
                 masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
             temporary_paths: list[Path] = []

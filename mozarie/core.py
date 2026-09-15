@@ -851,14 +851,14 @@ def _read_mosaic_divisor(value: Any) -> int:
         divisor = int(value)
     except (TypeError, ValueError) as exc:
         raise ClientError("モザイク粗さが正しくありません。", "input_invalid") from exc
-    if not 1 <= divisor <= 10000:
-        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。", "input_invalid")
+    if divisor < 1:
+        raise ClientError("モザイク粗さの分母は1以上で指定してください。", "input_invalid")
     return divisor
 
 
 def _read_detection_parallelism(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ClientError("並列数は1から4で指定してください。", "input_invalid")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ClientError("並列数は1以上で指定してください。", "input_invalid")
     return value
 
 

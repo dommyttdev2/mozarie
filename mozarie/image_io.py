@@ -488,11 +488,12 @@ def unique_session_import_destination(path: Path, reserved: set[Path] | None = N
     reserved = reserved if reserved is not None else set()
     if not path.exists() and path not in reserved:
         return path
-    for number in range(2, 10000):
+    number = 2
+    while True:
         candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
         if not candidate.exists() and candidate not in reserved:
             return candidate
-    raise ClientError("同名ファイルが多すぎるため保存先を決められません。", "save_write_failed")
+        number += 1
 
 
 def _default_output_destination(record: ImageRecord, suffix: str = "_censored", reserved: set[Path] | None = None) -> Path:

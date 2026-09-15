@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 import math
 
 import cv2
@@ -12,8 +11,6 @@ import numpy as np
 __all__ = ["white_fluid_mask"]
 
 
-_MAX_STRICT_COMPONENTS = 8
-_MAX_BROAD_COMPONENTS = 4
 _MAX_COMPONENT_RATIO = 0.15
 _MAX_TOTAL_RATIO = 0.20
 
@@ -50,7 +47,7 @@ def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
         for label in range(1, count)
         if minimum <= areas[label] <= maximum and seed_counts[label] >= 2 and seed_counts[label] / areas[label] >= 0.10
     ]
-    candidates = heapq.nlargest(_MAX_STRICT_COMPONENTS, eligible, key=lambda label: (areas[label], -label))
+    candidates = eligible
     selected_labels: list[int] = []
     selected_area = 0
     for label in candidates:
@@ -100,9 +97,7 @@ def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
         and contrast_counts[label] >= max(2, math.ceil(loose_areas[label] * 0.05))
         and residual_sums[label] / loose_areas[label] >= 10
     ]
-    broad_candidates = heapq.nlargest(
-        _MAX_BROAD_COMPONENTS, broad_eligible, key=lambda label: (contrast_counts[label], new_areas[label], -label)
-    )
+    broad_candidates = broad_eligible
     broad_selected_labels: list[int] = []
     for label in broad_candidates:
         area = int(new_areas[label])

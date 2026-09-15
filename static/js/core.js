@@ -9,7 +9,7 @@ const state = {
   tool: "brush", panning: false, drawing: false, gestureDisplaySide: null, hoverDisplaySide: "left", boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplaySide: "left",
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
-  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
+  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkRoleModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
   catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreToken: 0, translations: {},
@@ -378,7 +378,7 @@ function setDetectionConfidence(value) {
   $("#detectConfidenceNumber").value = confidence.toFixed(2);
 }
 function activeDetection() { return state.job?.kind === "detect" && ["running", "pausing", "paused"].includes(state.job?.state); }
-function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
+function normaliseDivisor(value) { return Math.max(1, Math.round(Number(value) || 100)); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
   return image ? Math.max(4, Math.ceil(Math.max(image.width, image.height) / divisor)) : 0;
@@ -701,6 +701,11 @@ function imageIndex(imageId = state.currentId) { return state.images.findIndex((
 function hasOpenDialog() { return [...document.querySelectorAll("dialog")].some((dialog) => dialog.open); }
 function isEditableTarget(target) {
   return Boolean(target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target?.tagName));
+}
+function isTextEditableTarget(target) {
+  if (target?.isContentEditable || target?.tagName === "TEXTAREA") return true;
+  if (target?.tagName !== "INPUT") return false;
+  return !["button", "checkbox", "color", "radio", "range", "submit"].includes(String(target.type || "text").toLowerCase());
 }
 function focusElement(element) { element?.focus({ preventScroll: true }); }
 function focusCanvas() { focusElement(canvas); }

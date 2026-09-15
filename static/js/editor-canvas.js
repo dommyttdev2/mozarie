@@ -343,6 +343,10 @@ async function reconcileCurrentCandidates(imageId, generation) {
     if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
     state.candidates = bundle.candidates;
     state.candidateImages = bundle.candidateImages;
+    for (const role of ["apply", "exclude"]) {
+      const ids = bundle.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
+      inheritRoleCandidateDisplayMode(role, ids);
+    }
     const record = state.images.find((image) => image.id === imageId);
     if (record) {
       const visible = bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));

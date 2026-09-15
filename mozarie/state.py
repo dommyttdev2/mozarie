@@ -95,6 +95,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.source_mismatches: dict[str, bool] = {}
         self.settings = self.settings_store.load()
         self._active_detection_default_padding = int(self.settings["detection"]["default_candidate_padding_px"])
+        self._active_detection_default_exclude_padding = int(self.settings["detection"]["default_exclude_candidate_padding_px"])
         self.lock = threading.RLock()
         self.import_lock = threading.RLock()
         self._request_catalog_expectation = threading.local()

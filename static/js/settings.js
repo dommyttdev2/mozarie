@@ -265,7 +265,12 @@ function setFillColorTolerance(value) {
   const tolerance = Math.max(0, Math.min(255, Math.round(Number(value))));
   $("#bucketTolerance").value = String(tolerance);
   $("#bucketToleranceValue").textContent = String(tolerance);
+  $("#bucketToleranceDecrease").disabled = tolerance <= 0;
+  $("#bucketToleranceIncrease").disabled = tolerance >= 255;
 }
+
+let fillToleranceMutation = Promise.resolve();
+let fillToleranceVersion = 0;
 
 async function saveFillColorTolerance() {
   const input = $("#bucketTolerance");
@@ -274,14 +279,18 @@ async function saveFillColorTolerance() {
   setFillColorTolerance(tolerance);
   if (tolerance === previous) return;
   state.settings.editing.fill_color_tolerance = tolerance;
+  const version = ++fillToleranceVersion;
+  const save = fillToleranceMutation.then(async () => api("/api/settings?status=0", { method: "POST", body: JSON.stringify({ editing: { fill_color_tolerance: tolerance } }) }));
+  fillToleranceMutation = save.catch(() => {});
   try {
-    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify({ editing: { fill_color_tolerance: tolerance } }) });
-    state.settings = data.settings;
-    setFillColorTolerance(data.settings.editing.fill_color_tolerance);
+    const data = await save;
+    if (version === fillToleranceVersion) { state.settings = data.settings; setFillColorTolerance(data.settings.editing.fill_color_tolerance); }
   } catch (error) {
-    state.settings.editing.fill_color_tolerance = previous;
-    setFillColorTolerance(previous);
-    showUserError(error, input);
+    if (version === fillToleranceVersion) {
+      state.settings.editing.fill_color_tolerance = previous;
+      setFillColorTolerance(previous);
+      showUserError(error, input);
+    }
   }
 }
 
@@ -312,7 +321,7 @@ function settingsPayload() {
       exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),
     },
     saving: {
-      parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),
+      parallelism: Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2)),
       default_output_directory: $("#settingsDefaultOutputDirectory").value.trim(),
     },
     shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload(), actions: shortcutActionsPayload() },

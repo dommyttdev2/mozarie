@@ -42,6 +42,7 @@
     "fluid_exclusion_enabled": true,
     "exclude_forced_default": true,
     "default_candidate_padding_px": 0,
+    "default_exclude_candidate_padding_px": 0,
     "threshold": 0.5,
     "parallelism": 2,
     "targets": ["penis", "pussy"]

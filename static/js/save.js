@@ -603,7 +603,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
     mode,
     outputDirectoryHandle: state.outputDirectoryHandle,
     projectId: state.project?.id || null,
-    parallelism: Math.min(8, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2))),
+    parallelism: Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2)),
     drafts: new Map(Object.entries(draftPayload(imageIds))),
     sources: new Map(imageIds.map((imageId) => [imageId, {
       image: state.images.find((image) => image.id === imageId),

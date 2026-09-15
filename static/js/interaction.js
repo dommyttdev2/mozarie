@@ -76,7 +76,7 @@ function closeBoundaryModeMenu({ restoreFocus = false } = {}) {
 }
 function updateBrushSize(value) {
   if (isBusy() || state.importing) return;
-  const input = $("#brushSize"); input.value = Math.min(500, Math.max(1, Math.round(value)));
+  const input = $("#brushSize"); input.value = Math.max(1, Math.round(value));
   $("#brushSizeValue").textContent = t("editor.pixels", { value: input.value }); render(); updateBrushCursor();
 }
 function updateBlockSizeDisplay() {
@@ -739,7 +739,7 @@ function setGalleryDropOverlay(visible) {
 }
 
 function handleEditorKeydown(event) {
-  if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || isEditableTarget(document.activeElement) || hasOpenDialog()) return false;
+  if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || isTextEditableTarget(document.activeElement) || hasOpenDialog()) return false;
   if (state.viewMode !== "edit") return false;
   const binding = shortcutFromEvent(event);
   const shortcuts = state.settings?.shortcuts?.bindings || { undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
@@ -747,7 +747,8 @@ function handleEditorKeydown(event) {
   if (!currentImageActionPending() && !state.projectReadOnly && isProcessableImage(currentRecord()) && !currentRecord()?.sourceDimensionsChanged
     && ((binding === shortcuts.undo && enabled.undo !== false) || (binding === shortcuts.redo && enabled.redo !== false))) {
     event.preventDefault();
-    void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
+    if (state.project?.id) void restoreProjectHistory(binding === shortcuts.redo ? "redo" : "undo");
+    else void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
     return true;
   }
   return false;
@@ -784,8 +785,8 @@ function handleNavigationKeydown(event) {
   else if (action === "last" && galleryFilteredImages().at(-1)) void selectImage(galleryFilteredImages().at(-1).id);
   else if (action === "reviewAndNext") void reviewAndMoveNext();
   else if (action === "removeImage") void removeImageFromCatalog(state.currentId);
-  else if (action === "undo") void restoreSnapshot(state.historyIndex - 1);
-  else if (action === "redo") void restoreSnapshot(state.historyIndex + 1);
+  else if (action === "undo") { if (state.project?.id) void restoreProjectHistory("undo"); else void restoreSnapshot(state.historyIndex - 1); }
+  else if (action === "redo") { if (state.project?.id) void restoreProjectHistory("redo"); else void restoreSnapshot(state.historyIndex + 1); }
   return true;
 }
 

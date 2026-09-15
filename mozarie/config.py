@@ -32,6 +32,7 @@ class SettingsStore:
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
         settings = defaults if not self.local_path.is_file() else _merge(defaults, _migrate_legacy_shortcuts(json.loads(self.local_path.read_text(encoding="utf-8"))))
+        _migrate_candidate_padding(settings)
         return validate_settings(self._set_builtin_output_directory(settings))
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
@@ -42,6 +43,7 @@ class SettingsStore:
 
     def default_settings(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
+        _migrate_candidate_padding(defaults)
         return validate_settings(self._set_builtin_output_directory(defaults))
 
     def _set_builtin_output_directory(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -110,6 +112,16 @@ def _expect_color(value: Any, name: str) -> str:
     return value.lower()
 
 
+def _migrate_candidate_padding(settings: dict[str, Any]) -> None:
+    """Split the former shared candidate padding without losing local settings."""
+    detection = settings.get("detection")
+    if not isinstance(detection, dict):
+        return
+    legacy = detection.get("default_candidate_padding_px", 0)
+    detection.setdefault("default_candidate_padding_px", legacy)
+    detection.setdefault("default_exclude_candidate_padding_px", legacy)
+
+
 def validate_settings(value: Any) -> dict[str, Any]:
     """Validate the small portable settings surface before persisting it."""
     settings = _expect_dict(value, "settings")
@@ -140,9 +152,10 @@ def validate_settings(value: Any) -> dict[str, Any]:
     )
     exclude_forced_default = _expect_bool(detection.get("exclude_forced_default"), "detection.exclude_forced_default")
     default_candidate_padding_px = detection.get("default_candidate_padding_px", 0)
-    if (isinstance(default_candidate_padding_px, bool) or not isinstance(default_candidate_padding_px, int)
-            or not 0 <= default_candidate_padding_px <= 16384):
-        raise SettingsError("detection.default_candidate_padding_px must be an integer between 0 and 16384")
+    default_exclude_candidate_padding_px = detection.get("default_exclude_candidate_padding_px", default_candidate_padding_px)
+    for key, candidate_padding in (("default_candidate_padding_px", default_candidate_padding_px), ("default_exclude_candidate_padding_px", default_exclude_candidate_padding_px)):
+        if isinstance(candidate_padding, bool) or not isinstance(candidate_padding, int) or candidate_padding < 0:
+            raise SettingsError(f"detection.{key} must be a non-negative integer")
     fill_color_tolerance = editing.get("fill_color_tolerance")
     if isinstance(fill_color_tolerance, bool) or not isinstance(fill_color_tolerance, int) or not 0 <= fill_color_tolerance <= 255:
         raise SettingsError("editing.fill_color_tolerance must be an integer between 0 and 255")
@@ -181,7 +194,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "sam_checkpoints": sam_checkpoints,
             "sam_model_type": sam_model_type,
             "provider": provider,
-            "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, 64)),
+            "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, float("inf"))),
         },
         "display": {
             "apply_color": _expect_color(display.get("apply_color"), "display.apply_color"),
@@ -191,7 +204,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "tool_position": tool_position,
         },
         "importing": {
-            "parallelism": int(_expect_number(importing.get("parallelism"), "importing.parallelism", 1, 10)),
+            "parallelism": int(_expect_number(importing.get("parallelism"), "importing.parallelism", 1, float("inf"))),
         },
         "editing": {
             "fill_color_tolerance": fill_color_tolerance,
@@ -201,12 +214,13 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
             "exclude_forced_default": exclude_forced_default,
             "default_candidate_padding_px": default_candidate_padding_px,
+            "default_exclude_candidate_padding_px": default_exclude_candidate_padding_px,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
-            "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
+            "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, float("inf"))),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
         },
         "saving": {
-            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8)),
+            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, float("inf"))),
             "default_output_directory": _validate_output_directory(
                 saving.get("default_output_directory") or str((Path(__file__).resolve().parent.parent / "output").resolve())
             ),

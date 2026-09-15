@@ -858,6 +858,8 @@ function bindEvents() {
   $("#downloadCurrentExcludeMask").addEventListener("click", () => { const image = currentRecord(); if (!currentImageActionPending() && isProcessableImage(image)) void downloadProjectArtifact(`/api/project/mask/${encodeURIComponent(image.id)}/exclude`, "exclude-mask.png", image.id, state.imageGeneration); });
   $("#bucketTolerance").addEventListener("input", (event) => setFillColorTolerance(event.currentTarget.value));
   $("#bucketTolerance").addEventListener("change", () => { void saveFillColorTolerance(); });
+  $("#bucketToleranceDecrease").addEventListener("click", () => { setFillColorTolerance(Number($("#bucketTolerance").value) - 1); void saveFillColorTolerance(); });
+  $("#bucketToleranceIncrease").addEventListener("click", () => { setFillColorTolerance(Number($("#bucketTolerance").value) + 1); void saveFillColorTolerance(); });
   $("#bucketToleranceClose").addEventListener("click", () => closeFillToleranceControl({ focus: true }));
   $("#bucketToleranceControl").addEventListener("toggle", (event) => {
     if (event.newState === "open") return;
@@ -1253,12 +1255,12 @@ function bindEvents() {
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
     beginManualStroke(rawPoint); render();
   });
-  const processPointerMove = (event) => {
+  const processPointerMove = (event, rect) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
-    state.hover = pointFromEvent(event);
+    state.hover = pointFromEvent(event, rect);
     state.hoverDisplaySide = state.gestureDisplaySide ?? compareEventSide(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
@@ -1281,7 +1283,8 @@ function bindEvents() {
   };
   canvas.addEventListener("pointermove", (event) => {
     const events = event.getCoalescedEvents?.() || [event];
-    for (const pointEvent of events) processPointerMove(pointEvent);
+    const rect = canvas.getBoundingClientRect();
+    for (const pointEvent of events) processPointerMove(pointEvent, rect);
     updateBrushCursor();
     if (state.panning || state.drawing) render();
   });
@@ -1337,7 +1340,7 @@ function bindEvents() {
     }
     const rect = canvas.getBoundingClientRect(); const offset = compareEventOffset(event, rect); const mouseX = event.clientX - rect.left - offset; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
-    state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
+    state.view.scale = Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render(); updateBrushCursor();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {

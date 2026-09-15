@@ -2215,8 +2215,9 @@ class CatalogMixin:
                 if "expandPx" in payload:
                     expand_px = payload["expandPx"]
                     max_expand_px = int(np.ceil(np.hypot(record.width - 1, record.height - 1)))
-                    if isinstance(expand_px, bool) or not isinstance(expand_px, int) or not 0 <= expand_px <= max_expand_px:
-                        raise ClientError(f"候補の枠pxは0から{max_expand_px}までの整数で指定してください。", "input_invalid")
+                    if isinstance(expand_px, bool) or not isinstance(expand_px, int) or expand_px < 0:
+                        raise ClientError("候補の枠pxは0以上の整数で指定してください。", "input_invalid")
+                    expand_px = min(expand_px, max_expand_px)
                     if candidate.expand_px != expand_px:
                         candidate.expand_px = expand_px
                         # Padding is metadata.  Do not rewrite or duplicate
@@ -2235,9 +2236,9 @@ class CatalogMixin:
         record = self.image_for_id(image_id)
         if operation == "set_padding":
             max_expand_px = int(np.ceil(np.hypot(record.width - 1, record.height - 1)))
-            if (isinstance(expand_px, bool) or not isinstance(expand_px, int)
-                    or not 0 <= expand_px <= max_expand_px):
-                raise ClientError(f"候補の枠pxは0から{max_expand_px}までの整数で指定してください。", "input_invalid")
+            if isinstance(expand_px, bool) or not isinstance(expand_px, int) or expand_px < 0:
+                raise ClientError("候補の枠pxは0以上の整数で指定してください。", "input_invalid")
+            expand_px = min(expand_px, max_expand_px)
         with self.image_io_lock(image_id):
             with self.lock:
                 self._assert_request_catalog_expectation()
@@ -2310,9 +2311,8 @@ class CatalogMixin:
                             raise ClientError("更新する候補がありません。", "candidate_not_found")
                         if operation == "set_padding":
                             max_expand_px = int(np.ceil(np.hypot(record.width - 1, record.height - 1)))
-                            if (isinstance(expand_px, bool) or not isinstance(expand_px, int)
-                                    or not 0 <= expand_px <= max_expand_px):
-                                raise ClientError(f"候補の枠pxは0から{max_expand_px}までの整数で指定してください。", "input_invalid")
+                            if isinstance(expand_px, bool) or not isinstance(expand_px, int) or expand_px < 0:
+                                raise ClientError("候補の枠pxは0以上の整数で指定してください。", "input_invalid")
                         current = self.candidates.get(image_id, [])
                         if operation == "delete":
                             updates[image_id] = [replace(item) for item in current if item not in selected]
