@@ -25,6 +25,7 @@ class _Response:
 
     def __enter__(self): return self
     def __exit__(self, *args): return False
+    def close(self) -> None: return None
     def geturl(self) -> str: return self.url
     def read(self, size: int) -> bytes:
         part = self.payload[self.offset:self.offset + size]; self.offset += len(part); return part
@@ -247,10 +248,10 @@ class ModelDownloadTests(unittest.TestCase):
             manager.start("hand_detection", "vit_b")
             self.assertTrue(entered.wait(1))
             release.set()
-            self.assertTrue(manager.shutdown(timeout=1))
+            self.assertTrue(manager.shutdown())
         self.assertEqual(manager.snapshot()["state"], "cancelled")
 
-    def test_shutdown_returns_false_when_a_worker_does_not_stop_by_the_deadline(self) -> None:
+    def test_shutdown_waits_for_the_cancelled_worker_to_finish(self) -> None:
         manager = ModelDownloadManager(Path(tempfile.mkdtemp()))
         entered = threading.Event(); release = threading.Event()
         def blocked_download(_entry: ModelDownload) -> Path:
@@ -258,10 +259,9 @@ class ModelDownloadTests(unittest.TestCase):
         with patch.object(manager, "_download", side_effect=blocked_download):
             manager.start("hand_detection", "vit_b")
             self.assertTrue(entered.wait(1))
-            self.assertFalse(manager.shutdown(timeout=.001))
-            self.assertEqual(manager.snapshot()["state"], "cancelling")
             release.set()
-            self.assertTrue(manager.shutdown(timeout=1))
+            self.assertTrue(manager.shutdown())
+        self.assertEqual(manager.snapshot()["state"], "cancelled")
 
 
 if __name__ == "__main__":

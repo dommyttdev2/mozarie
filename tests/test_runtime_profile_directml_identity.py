@@ -13,7 +13,7 @@ class RuntimeProfileDirectMlIdentityTests(unittest.TestCase):
     def _onnx_dependencies(captured: dict[str, object]):
         session = SimpleNamespace(
             disable_fallback=lambda: None,
-            get_providers=lambda: ["DmlExecutionProvider"],
+            get_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"],
             run=lambda *_args: [[[1.0]]],
         )
         options = SimpleNamespace()

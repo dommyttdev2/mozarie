@@ -31,6 +31,12 @@ def png(mode: str = "L") -> bytes:
     return stream.getvalue()
 
 
+def jpeg() -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (4, 4), "white").save(stream, format="JPEG")
+    return stream.getvalue()
+
+
 class WorkspaceExtraCoverageTests(unittest.TestCase):
     def make_store(self, root: Path) -> tuple[WorkspaceStore, str, str]:
         store = WorkspaceStore(root)
@@ -135,7 +141,7 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             finally:
                 db.close()
             with self.assertRaises(sqlite3.DatabaseError):
-                store.prune_catalog_images(catalog_id, set())
+                store.delete_catalog_images(catalog_id)
             db = sqlite3.connect(store.path)
             try:
                 db.execute("DROP TRIGGER reject_prune")
@@ -147,18 +153,6 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
             self.assertIsNone(store.candidate_png(image_id, "not-stored"))
 
     def test_schema_metadata_and_manual_payload_rejections(self) -> None:
-        class InvalidPng:
-            format = "JPEG"
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def load(self) -> None:
-                return None
-
         class SchemaView:
             def __init__(self, db: sqlite3.Connection, *, bad_primary: bool = False, bad_unique: bool = False, bad_foreign: bool = False) -> None:
                 self.db = db
@@ -194,9 +188,8 @@ class WorkspaceExtraCoverageTests(unittest.TestCase):
                     WorkspaceStore._validate_schema(SchemaView(db, bad_foreign=True), tables)
             finally:
                 db.close()
-            with patch("mozarie.workspace.Image.open", return_value=InvalidPng()):
-                with self.assertRaises(ValueError):
-                    WorkspaceStore._decode_png_mask(png())
+            with self.assertRaises(ValueError):
+                WorkspaceStore._decode_png_mask(jpeg())
             for payload in (
                 {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": "bad", "hasEffectiveMask": False},
                 {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": [], "hasEffectiveMask": "bad"},
@@ -807,15 +800,10 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError) as context:
             self.state._hand_segmentation_predictor_for(item, object())
         self.assertEqual(context.exception.error_code, "model_file_missing")
-        class InvalidPng:
-            format = "JPEG"
-            def __enter__(self): return self
-            def __exit__(self, *_args): return False
-            def load(self): return None
         encoded = "data:image/png;base64," + base64.b64encode(png()).decode("ascii")
-        with patch("mozarie.catalog.Image.open", return_value=InvalidPng()):
-            with self.assertRaises(ClientError):
-                self.state._decode_workspace_mask(encoded)
+        invalid = "data:image/png;base64," + base64.b64encode(jpeg()).decode("ascii")
+        with self.assertRaises(ClientError):
+            self.state._decode_workspace_mask(invalid)
         self.state.workspace_store.delete_images([image_id])
         self.state.save_manual_workspace(image_id, {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": []})
 
@@ -892,16 +880,9 @@ class FinalCatalogCoverageTests(unittest.TestCase):
             encoded = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
             with self.assertRaises(ClientError):
                 self.state._decode_workspace_mask(encoded)
-        class WrongFormat:
-            format = "JPEG"
-            mode = "L"
-            def __enter__(self): return self
-            def __exit__(self, *_args): return False
-            def load(self): return None
-        encoded = "data:image/png;base64," + base64.b64encode(png()).decode("ascii")
-        with patch("mozarie.catalog.Image.open", return_value=WrongFormat()):
-            with self.assertRaises(ClientError):
-                self.state._decode_workspace_mask(encoded)
+        encoded = "data:image/png;base64," + base64.b64encode(jpeg()).decode("ascii")
+        with self.assertRaises(ClientError):
+            self.state._decode_workspace_mask(encoded)
 
         payload = {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": []}
         with patch.object(self.state.workspace_store, "save_manual", side_effect=ValueError("disk failure")):

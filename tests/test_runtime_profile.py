@@ -104,9 +104,12 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile._probe_onnx(ort, onnx, np, "cuda", 0)
 
     def test_onnx_probe_supports_cuda_and_cpu_and_rejects_bad_results(self) -> None:
-        for profile, provider in (("cuda", "CUDAExecutionProvider"), ("cpu", "CPUExecutionProvider")):
+        for profile, provider, active in (
+            ("cuda", "CUDAExecutionProvider", ["CUDAExecutionProvider", "CPUExecutionProvider"]),
+            ("cpu", "CPUExecutionProvider", ["CPUExecutionProvider"]),
+        ):
             with self.subTest(profile=profile):
-                ort, onnx, np = self._probe_dependencies([provider])
+                ort, onnx, np = self._probe_dependencies(active)
                 self.assertEqual(runtime_profile._probe_onnx(ort, onnx, np, profile, 2), provider)
         ort, onnx, np = self._probe_dependencies([], output=[])
         with self.assertRaisesRegex(runtime_profile.ProfileError, "probe failed"):

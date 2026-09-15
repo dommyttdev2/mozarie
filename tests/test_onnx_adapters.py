@@ -23,41 +23,14 @@ from mozarie.inference.yolo_segment import TargetSegmenter
 
 
 class OnnxAdapterTests(unittest.TestCase):
-    def test_dll_registration_handles_missing_torch_and_cuda_runtime_loading(self) -> None:
-        with patch.object(onnx_module.os, "name", "posix"):
-            self.assertIsNone(onnx_module._register_torch_dll_directory())
-        with patch.object(onnx_module.os, "name", "nt"), patch("mozarie.inference.onnx.importlib.util.find_spec", return_value=None):
-            self.assertIsNone(onnx_module._register_torch_dll_directory())
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            lib = root / "lib"; lib.mkdir()
-            nvrtc = lib / "nvrtc64_130_0.dll"; nvrtc.write_bytes(b"x")
-            spec = type("Spec", (), {"origin": str(root / "__init__.py")})
-            with patch.object(onnx_module.os, "name", "nt"), \
-                    patch("mozarie.inference.onnx.importlib.util.find_spec", return_value=spec), \
-                    patch.object(onnx_module.os, "add_dll_directory", return_value="handle"), \
-                    patch.object(onnx_module.ctypes, "WinDLL", side_effect=OSError("missing")):
-                onnx_module._register_torch_dll_directory()
-        self.assertIn("handle", onnx_module._dll_directory_handles)
-        missing_spec = type("Spec", (), {"origin": str(Path(tempfile.gettempdir()) / "torch" / "__init__.py")})
-        with patch.object(onnx_module.os, "name", "nt"), patch("mozarie.inference.onnx.importlib.util.find_spec", return_value=missing_spec):
-            onnx_module._register_torch_dll_directory()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); lib = root / "lib"; lib.mkdir()
-            empty_spec = type("Spec", (), {"origin": str(root / "__init__.py")})
-            with patch.object(onnx_module.os, "name", "nt"), \
-                    patch("mozarie.inference.onnx.importlib.util.find_spec", return_value=empty_spec), \
-                    patch.object(onnx_module.os, "add_dll_directory", return_value="empty"):
-                onnx_module._register_torch_dll_directory()
+    def test_cpu_provider_contract_does_not_depend_on_gpu_runtime(self) -> None:
+        self.assertEqual(available_providers("cpu"), ["CPUExecutionProvider"])
 
-    def test_onnx_preload_helper_respects_torch_and_runtime_availability(self) -> None:
-        preload = Mock()
-        runtime = SimpleNamespace(preload_dlls=preload)
-        onnx_module._preload_onnxruntime_dlls(runtime, {})
-        preload.assert_called_once_with()
-        onnx_module._preload_onnxruntime_dlls(runtime, {"torch": object()})
-        self.assertEqual(preload.call_count, 1)
-        onnx_module._preload_onnxruntime_dlls(SimpleNamespace(), {})
+    def test_gpu_provider_contract_rejects_an_unavailable_runtime(self) -> None:
+        with patch("mozarie.inference.onnx.runtime_backend", return_value="cuda"), \
+                patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CPUExecutionProvider"]):
+            with self.assertRaisesRegex(Exception, "GPU"):
+                available_providers("gpu")
 
     def test_detection_model_constructors_load_only_when_called(self) -> None:
         import mozarie.detection as detection
@@ -78,12 +51,14 @@ class OnnxAdapterTests(unittest.TestCase):
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
             cuda_session = Mock()
-            cuda_session.get_providers.return_value = ["CUDAExecutionProvider"]
+            cuda_session.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             cpu_session = Mock()
             cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers",
                 return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
-            ), patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[cuda_session, cpu_session]) as create:
+            ), patch("mozarie.inference.onnx.runtime_backend", return_value="cuda"), \
+                    patch("mozarie.inference.onnx.torch_module", return_value=object()), \
+                    patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[cuda_session, cpu_session]) as create:
                 self.assertIs(create_session(path, "gpu", 2), cuda_session)
                 self.assertIs(create_session(path, "cpu"), cpu_session)
             self.assertEqual(create.call_args_list[0].kwargs["providers"], [(
@@ -101,7 +76,8 @@ class OnnxAdapterTests(unittest.TestCase):
             cpu_session.disable_fallback.assert_called_once_with()
 
     def test_default_gpu_does_not_pass_a_redundant_device_id(self) -> None:
-        with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]):
+        with patch("mozarie.inference.onnx.runtime_backend", return_value="cuda"), \
+                patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]):
             self.assertEqual(available_providers("gpu", 0), [("CUDAExecutionProvider", {
                 "arena_extend_strategy": "kSameAsRequested",
                 "cudnn_conv_algo_search": "HEURISTIC",
@@ -122,7 +98,7 @@ class OnnxAdapterTests(unittest.TestCase):
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"model")
             session = Mock()
-            session.get_providers.return_value = ["DmlExecutionProvider"]
+            session.get_providers.return_value = ["DmlExecutionProvider", "CPUExecutionProvider"]
             directml = SimpleNamespace(
                 device_count=lambda: 2,
                 device_name=lambda index: ["AMD Radeon(TM) Graphics", "AMD Radeon RX 6600M"][index],
@@ -146,8 +122,10 @@ class OnnxAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"invalid")
-            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.runtime_backend", return_value="cuda"), \
+                 patch("mozarie.inference.onnx.torch_module", return_value=object()), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("invalid model"), diagnostic]):
                 with self.assertRaisesRegex(Exception, "検出モデル"):
                     create_session(path, "gpu", 0)
@@ -156,8 +134,10 @@ class OnnxAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.onnx"
             path.write_bytes(b"invalid")
-            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider"]
+            diagnostic = Mock(); diagnostic.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             with patch("mozarie.inference.onnx.ort.get_available_providers", return_value=["CUDAExecutionProvider"]), \
+                 patch("mozarie.inference.onnx.runtime_backend", return_value="cuda"), \
+                 patch("mozarie.inference.onnx.torch_module", return_value=object()), \
                  patch("mozarie.inference.onnx.ort.InferenceSession", side_effect=[RuntimeError("CUDA model input shape is invalid"), diagnostic]):
                 with self.assertRaises(Exception) as raised:
                     create_session(path, "gpu", 0)
