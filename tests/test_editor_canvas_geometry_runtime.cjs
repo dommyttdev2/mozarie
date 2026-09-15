@@ -68,7 +68,7 @@ const context = {
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
   combinedCanvas: canvas(), addCanvas: canvas(), exclusionCanvas: canvas(), exclusionEraseCanvas: canvas(),
-  $: (id) => element(id), t: (key) => key, isBusy: () => false, isGestureActive: () => false, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
+  $: (id) => element(id), t: (key) => key, isBusy: () => false, isGestureActive: () => false, isProcessableImage: () => true, catalogStagingEditsActive: () => false, manualCanvasInputLocked: () => false, hasDurableHistory: () => state.project != null, focusCanvas: () => { focused += 1; }, updateActionButtons() {}, renderCatalogViews() {},
   currentRecord: () => state.images[0] || { enabledCandidateCount: 0 },
   imageUrl: (record) => `/image/${record.id}`, maskUrl: (imageId, candidateId) => `/mask/${imageId}/${candidateId}`,
   decodedImageWeight: () => 1, closeBitmap(image) { image?.close?.(); }, forgetThumbnail() {}, abortCatalogLoads() {}, releaseCandidateBitmapBundle() {}, catalogRecordMatches: () => true, isCurrentGeneration: () => true,

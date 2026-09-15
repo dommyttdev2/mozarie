@@ -12,7 +12,7 @@ async function testDetectionWaitsForDraft() {
   const context = {
     state, Math, Promise,
     $: () => validation,
-    isBusy: () => false,
+    isBusy: () => false, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = [{ id: "image" }]) => images,
     saveDraft: async () => { events.push("draft"); },
     api: async () => { events.push("detect"); return { ok: true }; },
     updateActionButtons() {}, showProcessing() {}, closeProcessing() {}, updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() {},
@@ -35,7 +35,7 @@ async function testDetectionShowsProcessingBeforeDelayedRequests() {
   const events = [];
   const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, pendingDetectionTargetIds: ["one", "two"], settings: { detection: { targets: ["penis"] } }, settingsStatus: null };
   const context = {
-    state, Math, Promise, structuredClone, normaliseDetectionConfidence: (value) => Number(value), $: control, isBusy: () => state.job?.state === "running",
+    state, Math, Promise, structuredClone, normaliseDetectionConfidence: (value) => Number(value), normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.pendingDetectionTargetIds.map((id) => ({ id }))) => images, $: control, isBusy: () => state.job?.state === "running",
     saveDraft: () => { events.push("draft"); return draft.promise; },
     api: (path) => { events.push(path); return path.startsWith("/api/settings") ? settings.promise : detect.promise; },
     setSettingsForm() {}, updateActionButtons() {}, showProcessing: (job) => events.push(`modal:${job.completed}/${job.total}:${job.current}`), closeProcessing: () => events.push("close"), updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() {}, t: (key) => key,
@@ -45,9 +45,9 @@ async function testDetectionShowsProcessingBeforeDelayedRequests() {
   const pending = context.startDetectionForTest({ preventDefault() {} });
   assert.equal(events[0], "modal:0/2:", "the modal opens synchronously before settings, draft, and detect requests");
   assert.deepEqual({ imageIds: [...state.job.imageIds], completedImageIds: [...state.job.completedImageIds], completed: state.job.completed, total: state.job.total }, { imageIds: ["one", "two"], completedImageIds: [], completed: 0, total: 2 });
-  settings.resolve({ settings: state.settings }); await new Promise((resolve) => setImmediate(resolve));
+  settings.resolve({ settings: state.settings }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft", "a delayed draft keeps the same optimistic processing state");
-  draft.resolve(); await new Promise((resolve) => setImmediate(resolve));
+  draft.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft|/api/detect", "a delayed detect request does not recreate the modal");
   detect.resolve({ ok: true }); await pending;
   assert.equal(events.filter((event) => event.startsWith("modal:")).length, 1, "the modal is shown once while the start request is pending");
@@ -57,7 +57,7 @@ async function testDetectionStartFailureClosesProcessing() {
   const events = []; const validation = { id: "#detectionTargetValidation", textContent: "", hidden: true };
   const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null };
   const context = {
-    state, Math, Promise, $: () => validation, isBusy: () => false,
+    state, Math, Promise, $: () => validation, isBusy: () => false, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = [{ id: "image" }]) => images,
     saveDraft: async () => { throw new Error("draft failed"); }, api: async () => ({ ok: true }),
     updateActionButtons() {}, showProcessing() { events.push("show"); }, closeProcessing() { events.push("close"); }, updateProgress(job) { events.push(job.state); }, setStatusKey() {}, setStatus() {}, showUserError() { events.push("error"); }, t: (key) => key,
   };
@@ -77,7 +77,7 @@ async function testDetectionSettingsFailureDoesNotStartDetect() {
   };
   const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, pendingDetectionTargetIds: ["one"], settings: { detection: { targets: ["penis"], default_candidate_padding_px: 0 } }, settingsStatus: null };
   const context = {
-    state, Math, Promise, structuredClone, normaliseDetectionConfidence: Number, $: control, isBusy: () => false,
+    state, Math, Promise, structuredClone, normaliseDetectionConfidence: Number, normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.pendingDetectionTargetIds.map((id) => ({ id }))) => images, $: control, isBusy: () => false,
     saveDraft: async () => { events.push("draft"); }, api: async (path) => { events.push(path); throw new Error("settings failed"); },
     setSettingsForm() {}, updateActionButtons() {}, showProcessing() { events.push("modal"); }, closeProcessing() { events.push("close"); }, updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() { events.push("error"); }, t: (key) => key,
   };

@@ -16,7 +16,7 @@ const state = {
 const context = {
   state, Map, Set, Promise, Object, Number, encodeURIComponent, window: {}, indexedDB: undefined,
   clearTimeout, setTimeout,
-  api(url, options) { writes.push({ url, options }); return Promise.resolve({}); },
+  api(url, options) { writes.push({ url, options }); return Promise.resolve({}); }, hasDurableHistory: () => false,
   saveDraft() {}, showUserError() {},
 };
 vm.runInNewContext(source, context, { filename: workspacePath });

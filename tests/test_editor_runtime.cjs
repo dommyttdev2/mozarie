@@ -41,7 +41,7 @@ const state = {
   boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryBrushStroke: null,
   boundaryPromptPoint: null, pendingImageId: null, boundaryPending: false, importing: false,
   manualExclusionForced: false, manualEnabled: false, manualExclusionEnabled: false, manualExclusionEraseEnabled: false,
-  images: [{ id: "image", sourcePath: "C:/images/sample.png" }, { id: "other" }], sourceAccess: new Map([['gone', {}]]), drafts: new Map([['gone', {}]]),
+  images: [{ id: "image", sourcePath: "C:/images/sample.png" }, { id: "other" }], sourceAccess: new Map([['gone', {}]]), projectlessDirectorySources: new Map(), drafts: new Map([['gone', {}]]),
   maskStatus: new Map([['gone', true]]), selectedImageIds: new Set(['gone']), candidates: [], removedCandidateIds: new Set(),
   history: [], historyIndex: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   settings: { shortcuts: { bindings: { previous: "ArrowLeft", next: "ArrowRight", toggleOverview: "G" }, actions: {} }, confirmations: {} },
@@ -57,7 +57,7 @@ const context = {
   $: (selector) => element(selector), document: { activeElement: null, documentElement: { clientWidth: 320, clientHeight: 240 } },
   window: { innerWidth: 320, innerHeight: 240 }, crypto: { randomUUID: () => "key-1" },
   navigator: { clipboard: { writeText: async () => {} } },
-  isBusy: () => false, clearBoundaryInteraction() {}, clearBoundaryConstruction() {}, closeBoundaryModeMenu: () => false,
+  isBusy: () => false, catalogStagingEditsActive: () => false, manualCanvasInputLocked: () => false, isProcessableImage: () => true, hasDurableHistory: () => false, clearBoundaryInteraction() {}, clearBoundaryConstruction() {}, closeBoundaryModeMenu: () => false,
   updateBoundaryActions() {}, render() {}, focusCanvas() {}, focusElement() {}, t: (key, values = {}) => `${key}:${values.value || ""}`,
   calculatedBlockSize: () => 4, currentRecord: () => state.images[0], mosaicDivisor: () => 2, normaliseDivisor: (value) => Number(value),
   markMaskDirty() {}, markDraftDirty() {}, flushMaskComposition() {}, requestMosaicPreview() {}, scheduleManualWorkspaceSave() {},
@@ -149,7 +149,7 @@ assert.deepEqual(plain(test.droppedFile({ name: "a.png" }, "nested/a.png", "file
 assert.equal(test.isSupportedImageFile({ name: "sample.JPEG" }), true); assert.equal(test.isSupportedImageFile({ name: "sample.gif" }), false);
 assert.equal(test.newClientKey(), "key-1");
 test.pruneSourceAccess(); assert.equal(state.sourceAccess.has("gone"), false);
-test.rememberImportedSource({ clientKey: "key-1", entry: { file: { name: "a.png", size: 2, lastModified: 1 }, fileHandle: "handle", parentHandle: "parent" }, data: { imported: [{ clientKey: "key-1", imageId: "image" }] } });
+test.rememberImportedSource({ clientKey: "key-1", sourceId: "source-1", entry: { file: { name: "a.png", size: 2, lastModified: 1 }, fileHandle: "handle", parentHandle: "parent" }, data: { imported: [{ clientKey: "key-1", imageId: "image" }] } }, { sourceKind: "browser-files", sourceId: "source-1" });
 assert.equal(state.sourceAccess.get("image").fileHandle, "handle");
 state.drafts.set("old", 1); state.maskStatus.set("old", true); state.selectedImageIds.add("old"); state.currentId = "old"; state.pendingImageId = "old";
 test.remapImportedImageIds({ old: "image" });

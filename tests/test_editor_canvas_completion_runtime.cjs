@@ -80,7 +80,7 @@ const context = {
   stage: { clientWidth: 80, clientHeight: 60 }, toolRail: { offsetHeight: 10 }, canvas: displayCanvas,
   addCanvas, exclusionCanvas, exclusionEraseCanvas, effectiveExclusionCanvas, combinedCanvas, mosaicCanvas, historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas, originalCanvas, layerCanvas, boundaryOverlayCanvas,
   addCtx: addCanvas.ctx, exclusionCtx: exclusionCanvas.ctx, exclusionEraseCtx: exclusionEraseCanvas.ctx, effectiveExclusionCtx: effectiveExclusionCanvas.ctx, combinedCtx: combinedCanvas.ctx, mosaicCtx: mosaicCanvas.ctx, originalCtx: originalCanvas.ctx, layerCtx, boundaryOverlayCtx, ctx,
-  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`, isBusy: () => false,
+  $: (selector) => element(selector), t: (key, values = {}) => `${key}:${values.count ?? ""}`, isBusy: () => false, isProcessableImage: () => true, hasDurableHistory: () => state.historyDurable === true,
   closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, renderCandidates() {}, updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, updateGalleryCurrent() {},
   currentRecord: () => state.images.find((image) => image.id === state.currentId), calculatedBlockSize: () => 4,
   resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, renderCatalogViews() {},
