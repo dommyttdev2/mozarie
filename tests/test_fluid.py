@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mozarie.fluid import white_fluid_mask  # noqa: E402
+from mozarie.fluid import expand_white_fluid_mask, white_fluid_mask  # noqa: E402
 from mozarie.masks import compose_masks  # noqa: E402
 
 
@@ -45,7 +45,7 @@ class FluidTests(unittest.TestCase):
         self.assertEqual(np.count_nonzero(fluid), 12 * 12)
         self.assertEqual(np.count_nonzero(fluid[12:24, 12:24]) - np.count_nonzero(fluid[16:20, 16:20]), 12 * 12 - 16)
 
-    def test_white_fluid_mask_limits_translucent_expansions_to_four_components(self):
+    def test_white_fluid_mask_does_not_apply_a_fixed_component_count_cap(self):
         rgb = np.zeros((100, 100, 3), dtype=np.uint8)
         penis = np.zeros((100, 100), dtype=np.uint8)
         penis[10:90, 10:90] = 255
@@ -53,9 +53,9 @@ class FluidTests(unittest.TestCase):
             rgb[top:top + 8, left:left + 10] = (210, 205, 200)
             rgb[top + 2:top + 6, left + 3:left + 7] = 255
         fluid = white_fluid_mask(rgb, penis)
-        self.assertEqual(np.count_nonzero(fluid), 5 * 16 + 4 * (8 * 10 - 16))
+        self.assertEqual(np.count_nonzero(fluid), 5 * 8 * 10)
 
-    def test_white_fluid_mask_never_exceeds_twenty_percent_of_final_mask(self):
+    def test_white_fluid_mask_applies_its_semantic_area_budget(self):
         rgb = np.zeros((100, 100, 3), dtype=np.uint8)
         penis = np.zeros((100, 100), dtype=np.uint8)
         penis[10:90, 10:90] = 255
@@ -65,12 +65,11 @@ class FluidTests(unittest.TestCase):
 
         fluid = white_fluid_mask(rgb, penis)
 
-        cap = int(np.count_nonzero(penis) * 0.20)
-        self.assertEqual(np.count_nonzero(fluid), cap)
-        self.assertLessEqual(np.count_nonzero(fluid), cap)
+        self.assertEqual(np.count_nonzero(fluid), 656)
+        self.assertLessEqual(np.count_nonzero(fluid), int(np.count_nonzero(penis) * 0.20))
         self.assertTrue(np.all(fluid[15:35, 20:52] == 255))
-        self.assertTrue(np.all(fluid[50:70, 20:52] == 255))
-        self.assertFalse(np.any(fluid[40:44, 70:74]))
+        self.assertFalse(np.any(fluid[50:70, 20:52]))
+        self.assertTrue(np.all(fluid[40:44, 70:74] == 255))
 
     def test_white_fluid_mask_does_not_expand_when_a_separate_strict_component_uses_the_remaining_cap(self):
         rgb = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -231,7 +230,7 @@ class FluidTests(unittest.TestCase):
         fluid = white_fluid_mask(rgb, penis)
         self.assertFalse(np.any(fluid))
 
-    def test_white_fluid_mask_filters_many_components_without_per_label_equality_scans(self):
+    def test_white_fluid_mask_keeps_all_eligible_components_without_label_scans(self):
         class TrackingLabels(np.ndarray):
             equality_scans = 0
 
@@ -256,9 +255,47 @@ class FluidTests(unittest.TestCase):
         ):
             fluid = white_fluid_mask(rgb, penis)
         self.assertEqual(TrackingLabels.equality_scans, 0)
-        self.assertEqual(np.count_nonzero(fluid), 8 * 16)
-        for top, left in components[:8]:
+        self.assertEqual(np.count_nonzero(fluid), len(components) * 16)
+        for top, left in components:
             self.assertTrue(np.all(fluid[top:top + 4, left:left + 4] == 255))
+
+    def test_expand_white_fluid_mask_uses_default_tolerance_and_four_connected_growth(self):
+        rgb = np.zeros((9, 9, 3), dtype=np.uint8)
+        allowed = np.zeros((9, 9), dtype=np.uint8)
+        seed = np.zeros_like(allowed)
+        allowed[4, 3:5] = 255
+        allowed[5, 5] = 255  # diagonal only: must not join the seed.
+        seed[4, 3] = 255
+        rgb[allowed > 0] = (220, 220, 220)
+        expanded = expand_white_fluid_mask(rgb, seed, allowed, 26)
+        self.assertEqual(np.argwhere(expanded > 0).tolist(), [[4, 3], [4, 4]])
+        self.assertFalse(np.any(expanded[allowed == 0]))
+
+    def test_expand_white_fluid_mask_respects_alpha_and_tolerance_boundaries(self):
+        rgb = np.zeros((5, 7, 3), dtype=np.uint8)
+        allowed = np.ones((5, 7), dtype=np.uint8) * 255
+        seed = np.zeros_like(allowed)
+        alpha = np.ones_like(allowed) * 255
+        seed[2, 1] = 255
+        rgb[:, :] = (200, 200, 200)
+        rgb[2, 1] = (226, 226, 226)
+        alpha[:, 3] = 0
+        grown = expand_white_fluid_mask(rgb, seed, allowed, 26, alpha=alpha)
+        self.assertTrue(np.all(grown[:, :3] == 255))
+        self.assertFalse(np.any(grown[:, 3:]))
+        zero_tolerance = expand_white_fluid_mask(rgb, seed, allowed, 0, alpha=alpha)
+        self.assertEqual(np.argwhere(zero_tolerance > 0).tolist(), [[2, 1]])
+
+    def test_expand_white_fluid_mask_has_no_component_count_limit(self):
+        rgb = np.zeros((20, 40, 3), dtype=np.uint8)
+        allowed = np.zeros((20, 40), dtype=np.uint8)
+        seed = np.zeros_like(allowed)
+        for left in range(1, 40, 4):
+            allowed[5:9, left:left + 2] = 255
+            seed[6, left] = 255
+            rgb[5:9, left:left + 2] = (240, 240, 240)
+        expanded = expand_white_fluid_mask(rgb, seed, allowed, 26)
+        self.assertEqual(np.count_nonzero(expanded), np.count_nonzero(allowed))
 
     def test_fluid_module_has_leaf_dependencies_and_one_public_symbol(self):
         root = Path(__file__).resolve().parents[1] / "mozarie"
@@ -269,8 +306,8 @@ class FluidTests(unittest.TestCase):
             if isinstance(node, ast.Import)
             for alias in node.names
         }
-        self.assertEqual(imported_modules, {"cv2", "heapq", "math", "numpy"})
-        self.assertEqual(__import__("mozarie.fluid", fromlist=["__all__"]).__all__, ["white_fluid_mask"])
+        self.assertEqual(imported_modules, {"cv2", "math", "numpy"})
+        self.assertEqual(__import__("mozarie.fluid", fromlist=["__all__"]).__all__, ["expand_white_fluid_mask", "white_fluid_mask"])
         detection_imports = ast.parse((root / "detection.py").read_text(encoding="utf-8"))
         self.assertTrue(any(
             isinstance(node, ast.ImportFrom)
